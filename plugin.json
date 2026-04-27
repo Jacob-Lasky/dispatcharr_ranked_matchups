@@ -1,0 +1,249 @@
+{
+  "name": "Ranked Matchups (Top Games)",
+  "version": "0.1.0",
+  "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them by rank pair / favorites / spread (and Phase 3+: rivalry, narrative), matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching.",
+  "author": "Jake (with Claude)",
+  "license": "MIT",
+  "repo_url": "https://github.com/jacob-lasky/dispatcharr-ranked-matchups",
+  "help_url": "https://github.com/jacob-lasky/dispatcharr-ranked-matchups#readme",
+  "fields": [
+    {
+      "id": "_section_sources",
+      "type": "info",
+      "label": "Sport Sources",
+      "description": "Toggle which sports/leagues the curator pulls from."
+    },
+    {
+      "id": "enable_ncaaf",
+      "type": "boolean",
+      "label": "NCAA Football (CFBD)",
+      "default": true,
+      "help_text": "AP Top-25 + games + betting lines from CollegeFootballData.com. Offseason → no rows produced."
+    },
+    {
+      "id": "enable_ncaam",
+      "type": "boolean",
+      "label": "NCAA Basketball (CollegeBasketballData)",
+      "default": false,
+      "help_text": "Phase 2. Same API key as CFBD."
+    },
+    {
+      "id": "enable_epl",
+      "type": "boolean",
+      "label": "English Premier League (EPL)",
+      "default": true,
+      "help_text": "Football-Data.org primary, The Odds API for spread signal."
+    },
+    {
+      "id": "enable_championship",
+      "type": "boolean",
+      "label": "EFL Championship",
+      "default": true,
+      "help_text": "Second tier of English football. Wrexham, Hull, etc. Standings position used as the rank slot — top 6 makes playoffs."
+    },
+    {
+      "id": "enable_ucl",
+      "type": "boolean",
+      "label": "UEFA Champions League",
+      "default": false,
+      "help_text": "Knockout/group stage. Position-as-rank doesn't apply cleanly so favorites + odds carry the signal."
+    },
+    {
+      "id": "_section_keys",
+      "type": "info",
+      "label": "API Keys",
+      "description": "Plugin reads keys from <plugin_dir>/cfbd_api_key and <plugin_dir>/anthropic_api_key (chmod 600)."
+    },
+    {
+      "id": "model",
+      "type": "select",
+      "label": "Claude model",
+      "default": "claude-haiku-4-5",
+      "options": [
+        {"value": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (cheap, fast)"},
+        {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
+        {"value": "claude-opus-4-7", "label": "Claude Opus 4.7"}
+      ],
+      "help_text": "Used for EPG-to-channel matching when regex pre-filter is ambiguous."
+    },
+    {
+      "id": "_section_filter",
+      "type": "info",
+      "label": "Curation",
+      "description": "How many games make the cut and which teams always show."
+    },
+    {
+      "id": "favorites",
+      "type": "string",
+      "label": "Favorite teams (comma-separated)",
+      "default": "NC State, UNC, Wrexham, Barcelona, Real Madrid, Manchester City",
+      "help_text": "Substring-matched against home/away team names (with team-qualifier whitelist for soccer suffixes like 'FC', 'AFC', 'City', 'United'). Always shown regardless of rank, with a flat score boost. Note: Hull and other teams in playoff races still get the 'impact-on-favorite' signal automatically when they sit near a favorite's position."
+    },
+    {
+      "id": "max_games",
+      "type": "number",
+      "label": "Max curated games per refresh",
+      "default": 25,
+      "help_text": "Top-N games by score across all enabled sports (20-50 is a sensible range; lower = tighter curation, higher = more coverage). Favorites guaranteed inclusion above this cap."
+    },
+    {
+      "id": "lookahead_days",
+      "type": "number",
+      "label": "Lookahead window (days)",
+      "default": 7,
+      "help_text": "How far ahead to pull games. 7 = next week. Bigger = more games to score."
+    },
+    {
+      "id": "local_timezone",
+      "type": "select",
+      "label": "Local timezone (for 'today' sorting + EPG dates)",
+      "default": "America/Chicago",
+      "options": [
+        {"value": "America/New_York", "label": "America/New_York (Eastern)"},
+        {"value": "America/Chicago", "label": "America/Chicago (Central)"},
+        {"value": "America/Denver", "label": "America/Denver (Mountain)"},
+        {"value": "America/Los_Angeles", "label": "America/Los_Angeles (Pacific)"},
+        {"value": "Europe/London", "label": "Europe/London"},
+        {"value": "UTC", "label": "UTC"}
+      ],
+      "help_text": "Used to determine which games are 'today' (today's games sort to the top of the curated list) and to format kickoff times in the EPG description."
+    },
+    {
+      "id": "_section_scoring",
+      "type": "info",
+      "label": "Interestingness Weights",
+      "description": "Each signal contributes to a 0-10 score. Tweak if a signal feels under/over-weighted. Score breakdown is stored per-game in cache.json so you can inspect."
+    },
+    {
+      "id": "weight_rank",
+      "type": "number",
+      "label": "Rank-pair weight",
+      "default": 1.0,
+      "help_text": "Multiplier on the rank-pair signal (both ranked > one ranked > neither)."
+    },
+    {
+      "id": "weight_spread",
+      "type": "number",
+      "label": "Close-game weight",
+      "default": 0.5,
+      "help_text": "Multiplier on the spread-tightness signal (smaller spread = more interesting)."
+    },
+    {
+      "id": "weight_favorite",
+      "type": "number",
+      "label": "Favorite-team boost",
+      "default": 4.0,
+      "help_text": "Flat points added when one of your favorite teams is involved."
+    },
+    {
+      "id": "weight_rivalry",
+      "type": "number",
+      "label": "Rivalry boost",
+      "default": 2.0,
+      "help_text": "Flat points added for known rivalry games (future: rivalry DB)."
+    },
+    {
+      "id": "weight_stakes",
+      "type": "number",
+      "label": "Standings stakes weight",
+      "default": 2.0,
+      "help_text": "Bonus when teams sit near a meaningful league threshold (playoff cutoff, relegation line, title race, UCL spot). Late-season multiplier (1.5x past 70%, 2x past 85%) amplifies it. This is the 'Wrexham/Hull at 70 pts each fighting for 6th' signal."
+    },
+    {
+      "id": "weight_tournament",
+      "type": "number",
+      "label": "Tournament-stage weight",
+      "default": 1.5,
+      "help_text": "Knockout-stage cup games (R16, QF, SF, Final). UCL etc."
+    },
+    {
+      "id": "weight_impact_favorite",
+      "type": "number",
+      "label": "Impact-on-favorite weight",
+      "default": 1.0,
+      "help_text": "Bonus when a non-favorite game's outcome affects a favorite's table position (e.g., another team chasing the same playoff spot)."
+    },
+    {
+      "id": "weight_narrative",
+      "type": "number",
+      "label": "LLM narrative weight",
+      "default": 0.0,
+      "help_text": "Optional LLM-judged narrative score. Disabled by default — heuristic stakes/tournament/impact signals usually cover it. Set > 0 to enable Claude-based narrative scoring."
+    },
+    {
+      "id": "_section_apply",
+      "type": "info",
+      "label": "Apply Behavior",
+      "description": "How matched channels are surfaced in Dispatcharr."
+    },
+    {
+      "id": "channel_profile_name",
+      "type": "string",
+      "label": "Target group name",
+      "default": "Top Matchups",
+      "help_text": "Apply creates virtual channels in this ChannelGroup, cloning streams from the matched source channels (source channels untouched). A matching dummy EPGSource is created with the same name; each virtual channel gets a ProgramData entry whose description explains WHY the game made the cut. Tip: prefix with '!' (e.g. '!Top Matchups') so it sorts to the top of your group list. If you rename the group, the next apply will detect the old group/source by tvg_id markers and clean them up automatically."
+    },
+    {
+      "id": "placeholder_min_score",
+      "type": "number",
+      "label": "Placeholder threshold (0-10)",
+      "default": 5.0,
+      "help_text": "Games scoring above this get a placeholder channel even if no EPG match exists yet — appears in your guide as 'channel match pending', so big upcoming games (like Wrexham vs Middlesbrough) show up before the provider EPG publishes the broadcast info."
+    },
+    {
+      "id": "dry_run",
+      "type": "boolean",
+      "label": "Dry run on Apply",
+      "default": true,
+      "help_text": "When true, 'Apply' logs intended changes but does not write to the DB."
+    },
+    {
+      "id": "_section_schedule",
+      "type": "info",
+      "label": "Auto-Refresh",
+      "description": "Auto-refresh keeps the curated list fresh as ranks/games/EPG update."
+    },
+    {
+      "id": "auto_refresh_enabled",
+      "type": "boolean",
+      "label": "Auto-refresh + apply on schedule",
+      "default": false,
+      "help_text": "If on, runs refresh + apply at every time listed in 'Scheduled times'."
+    },
+    {
+      "id": "scheduled_times",
+      "type": "string",
+      "label": "Scheduled times (HHMM, comma-separated)",
+      "default": "0400,1000,1600,2200",
+      "help_text": "Comma-separated 4-digit times in your local timezone. e.g. '0400' = 4 AM only; '0000,0600,1200,1800' = every 6 hours. Same format as event_channel_managarr."
+    },
+    {
+      "id": "debug_mode",
+      "type": "boolean",
+      "label": "Debug logging",
+      "default": false
+    }
+  ],
+  "actions": [
+    {
+      "id": "refresh",
+      "label": "Refresh curated list",
+      "description": "Pull games from enabled sport sources, score, EPG-match to Dispatcharr channels, write cache.json. No DB writes to channels."
+    },
+    {
+      "id": "apply",
+      "label": "Apply to Dispatcharr",
+      "description": "Use cache to update target channel profile membership and (if enabled) rename matched channels. Honors dry_run."
+    },
+    {
+      "id": "auto_pipeline",
+      "label": "Refresh + apply now",
+      "description": "Run refresh then apply end-to-end. The daily scheduler invokes this; this button lets you trigger it on demand."
+    },
+    {
+      "id": "show_status",
+      "label": "Show current state",
+      "description": "Print recent cache contents with score breakdown per game. No writes, no API calls."
+    }
+  ]
+}
