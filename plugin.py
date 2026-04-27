@@ -225,7 +225,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # 2. Score (with Phase 3 standings/tournament/impact signals)
     from .scoring import (
         match_favorites, LEAGUE_CONTEXTS, compute_team_stakes,
-        compute_impact_on_favorites,
+        compute_impact_on_favorites, build_impact_narratives,
     )
     scored: List[Tuple[Any, GameSignals, Any]] = []
     for g in all_games:
@@ -241,8 +241,10 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             stakes_b, hits_b = compute_team_stakes(g.rank_away, league_ctx.thresholds)
         thresholds_hit = list(dict.fromkeys(hits_a + hits_b))
 
-        # Impact on favorites: non-favorite games that move a favorite's table
-        favs_in_league: List[Tuple[str, int]] = []
+        # Impact on favorites: non-favorite games that move a favorite's table.
+        # Build the rich version (with points) for narrative rendering, plus
+        # the plain version (name+position) for the score signal.
+        favs_with_standings: List[Dict[str, Any]] = []
         standings_table = extra.get("standings_table") or []
         if standings_table:
             for fav in favorites:
@@ -250,10 +252,24 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 for entry in standings_table:
                     name = entry.get("name", "")
                     if fav_lc in name.lower():
-                        favs_in_league.append((name, entry["position"]))
-                        break  # one match per favorite per competition
+                        favs_with_standings.append({
+                            "name": name,
+                            "position": entry["position"],
+                            "points": entry.get("points"),
+                        })
+                        break
+        favs_in_league: List[Tuple[str, int]] = [
+            (f["name"], f["position"]) for f in favs_with_standings
+        ]
         impact_favs = compute_impact_on_favorites(
             g.rank_home, g.rank_away, g.home, g.away, favs_in_league,
+        )
+        # Pre-render the natural-language impact narrative now and stash on
+        # the row so it survives the post-score cap/resort. Apply reads it
+        # straight from the cache without redoing the standings lookup.
+        g.extra["impact_narratives"] = build_impact_narratives(
+            g.rank_home, g.rank_away, g.home, g.away,
+            favs_with_standings, standings_table,
         )
 
         signals = GameSignals(
@@ -501,6 +517,84 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
     return signals, score
 
 
+def _build_description(
+    g: Dict[str, Any],
+    tagline: str,
+    why: str,
+    placeholder: bool,
+) -> str:
+    """Build the EPG ProgramData description in natural-language form.
+
+    Layout (in order, each block separated by a blank line):
+      1. kickoff line + optional "today" marker, plus a placeholder note
+         if no EPG match was found
+      2. Headline: tagline + spread descriptor in one sentence
+      3. Pre-rendered favorite-impact narrative(s) from the cache
+      4. Optional "favorite is your team" line if the favorite is playing
+      5. Score breakdown one-liner
+      6. Source channel line (only if matched)
+
+    No more `Matchup:` / `Sport:` / `(raw X.X)` lines — they're already in
+    the channel name or are debug noise.
+    """
+    score_final = float(g.get("score", 0.0))
+    extra = g.get("extra") or {}
+    spread = g.get("spread")
+    favorites_matched = g.get("favorites_matched") or []
+    impact_narratives = (
+        extra.get("impact_narratives")
+        or g.get("impact_narratives")  # fallback if older cache shape
+        or []
+    )
+
+    sections: List[str] = []
+
+    # 1. Kickoff line + placeholder note
+    kickoff_line = g.get("kickoff_local") or g.get("start_time_utc", "")
+    today_marker = " 🔴" if g.get("is_today") else ""
+    opener = f"{kickoff_line}{today_marker}"
+    if placeholder:
+        opener += (
+            "\n_Channel match pending: broadcaster's EPG hasn't published "
+            "this fixture yet. Will activate on the next refresh once it "
+            "appears._"
+        )
+    sections.append(opener)
+
+    # 2. Headline sentence: combines tagline + spread descriptor.
+    headline_parts = []
+    if tagline:
+        article = "An" if tagline[:1].lower() in "aeiou" else "A"
+        headline_parts.append(f"{article} {tagline}")
+    if spread is not None and spread <= 3:
+        headline_parts.append(f"toss-up (line {spread:+.1f})")
+    if headline_parts:
+        sections.append(" — ".join(headline_parts) + ".")
+
+    # 3. Pre-rendered impact narratives. One per affected favorite.
+    for narrative in impact_narratives:
+        sections.append(narrative)
+
+    # 4. If the favorite is in the game, call it out (impact-narrative path
+    #    skips this case).
+    if favorites_matched:
+        labels = ", ".join(favorites_matched)
+        if len(favorites_matched) == 1:
+            sections.append(f"{labels} is your favorite.")
+        else:
+            sections.append(f"Your favorites: {labels}.")
+
+    # 5. Score breakdown one-liner.
+    sections.append(f"Score ★{score_final:.1f} — {why}.")
+
+    # 6. Source channel.
+    src_name = g.get("channel_name_current")
+    if src_name:
+        sections.append(f"Source: {src_name}.")
+
+    return "\n\n".join(sections)
+
+
 def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Clone-into-group + dummy-EPG strategy:
 
@@ -689,7 +783,24 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             marker = _build_marker_key(g)
             seen_markers.add(marker)
 
+            from .scoring import pick_tagline
             signals, score = _build_signals_score_from_payload(g)
+            extra = g.get("extra") or {}
+            rank_source = extra.get("rank_source", "poll")
+            tagline = pick_tagline(
+                score_breakdown=g.get("score_breakdown", {}),
+                favorites_matched=g.get("favorites_matched", []),
+                spread=g.get("spread"),
+                stakes_thresholds=g.get("stakes_thresholds_hit") or [],
+                tournament_stage=g.get("tournament_stage"),
+                season_progress=g.get("season_progress"),
+                rank_a=g.get("rank_home"),
+                rank_b=g.get("rank_away"),
+                rank_source=rank_source,
+            )
+            new_name = format_channel_name(
+                g["sport_prefix"], signals, score, g["home"], g["away"], tagline=tagline,
+            )
             why = build_why_text(
                 rank_home=g.get("rank_home"),
                 rank_away=g.get("rank_away"),
@@ -700,39 +811,21 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 tournament_stage=g.get("tournament_stage"),
                 impact_on_favorites=g.get("impact_on_favorites") or [],
                 season_progress=g.get("season_progress"),
-            )
-            new_name = format_channel_name(
-                g["sport_prefix"], signals, score, g["home"], g["away"], why=why,
+                rank_source=rank_source,
             )
 
             start_dt = parse_iso_utc(g.get("start_time_utc"))
             if start_dt is None:
                 logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)
                 continue
-            # ProgramData window matches the EPG-lookup window so the listing
-            # surfaces the game in the same range the matcher would have found.
             prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
             prog_end = start_dt + timedelta(hours=EPG_POST_HOURS)
 
-            # EPG description body — full transparency on why this game made the list
-            score_lines = [f"  {k}: +{v}" for k, v in (g.get("score_breakdown") or {}).items()]
-            kickoff_line = g.get("kickoff_local") or g.get("start_time_utc", "")
-            today_marker = " 🔴 TODAY" if g.get("is_today") else ""
-            placeholder_note = (
-                "\n[NOTE] No EPG match found yet — this is a placeholder channel. "
-                "Provider EPG hasn't published this game's broadcast info; "
-                "channel will activate (streams added) on the next refresh once EPG appears.\n"
-                if placeholder else ""
-            )
-            description = (
-                f"{why}.{placeholder_note}\n"
-                f"Kickoff: {kickoff_line}{today_marker}\n"
-                f"Matchup: {g.get('away')} @ {g.get('home')}\n"
-                f"Sport: {g.get('sport_label', g.get('sport_prefix'))}\n"
-                f"Score: {score.final:.1f}/10  (raw {score.raw:.1f})\n"
-                f"Score breakdown:\n" + "\n".join(score_lines) + "\n\n"
-                f"Source channel: {g.get('channel_name_current') or '(none — placeholder)'}\n"
-                f"EPG title at airtime: {g.get('program_title') or '(none)'}"
+            description = _build_description(
+                g=g,
+                tagline=tagline,
+                why=why,
+                placeholder=placeholder,
             )
 
             source_streams = (

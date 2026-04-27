@@ -7,12 +7,16 @@ from dispatcharr_ranked_matchups.scoring import (
     TEAM_QUALIFIER_TOKENS,
     TEAM_SUFFIX_TOKENS,
     _compress_to_10,
+    build_impact_narratives,
     build_why_text,
     compute_impact_on_favorites,
     compute_team_stakes,
     format_channel_name,
     match_favorites,
+    pick_tagline,
+    render_favorite_impact,
     score_game,
+    strip_team_suffix,
 )
 
 
@@ -213,10 +217,30 @@ class TestFormatChannelName:
     def test_truncates_to_250(self):
         sig = GameSignals(rank_a=1, rank_b=2)
         score = score_game(sig, Weights())
-        long_why = "x" * 500
-        name = format_channel_name("EPL", sig, score, "A" * 30, "B" * 30, why=long_why)
+        long_tag = "x" * 500
+        name = format_channel_name("EPL", sig, score, "A" * 30, "B" * 30, tagline=long_tag)
         assert len(name) <= 250
         assert name.endswith("...")
+
+    def test_strips_team_suffix(self):
+        sig = GameSignals(rank_a=3, rank_b=9)
+        score = score_game(sig, Weights())
+        name = format_channel_name("EPL", sig, score, "Manchester United FC", "Brentford FC")
+        # "FC" must NOT appear in the rendered matchup
+        assert "FC" not in name
+        assert "Brentford at Manchester United" in name
+
+    def test_b_format_separator(self):
+        sig = GameSignals(rank_a=3, rank_b=9)
+        score = score_game(sig, Weights())
+        name = format_channel_name(
+            "EPL", sig, score, "Manchester United FC", "Brentford FC",
+            tagline="title race",
+        )
+        # B-format uses '·' separators between segments
+        assert "·" in name
+        assert "title race" in name
+        assert ":" not in name  # legacy format used ':'
 
     def test_favorite_emoji(self):
         sig = GameSignals(favorite_match=["Wrexham"])
@@ -252,6 +276,201 @@ class TestBuildWhyText:
     def test_toss_up_phrase(self):
         why = build_why_text(None, None, [], {"close_game": 3.0}, spread=0.5)
         assert "toss-up" in why
+
+
+class TestStripTeamSuffix:
+    def test_strips_fc(self):
+        assert strip_team_suffix("Brentford FC") == "Brentford"
+
+    def test_strips_afc(self):
+        assert strip_team_suffix("Wrexham AFC") == "Wrexham"
+
+    def test_idempotent(self):
+        assert strip_team_suffix("Brentford") == "Brentford"
+
+    def test_keeps_compound_when_not_suffix(self):
+        # "City" is a qualifier (Hull City is its own team), not a strippable
+        # club-tag — must NOT be stripped.
+        assert strip_team_suffix("Hull City") == "Hull City"
+
+    def test_strips_only_trailing(self):
+        # Don't strip mid-word matches.
+        assert strip_team_suffix("FC Bayern München") == "FC Bayern München"
+
+
+class TestRenderFavoriteImpact:
+    def test_with_points_and_flip_clause(self):
+        out = render_favorite_impact(
+            "Manchester City FC", 2, 78,
+            "Manchester United FC", 3, 75,
+        )
+        assert "Manchester City sits #2 (78 pts)" in out
+        assert "1 spot and 3 pts ahead of Manchester United" in out
+        # 3-pt lead is win-erasable → flip clause fires
+        assert "Manchester United win flips them" in out
+
+    def test_with_points_no_flip_when_too_far(self):
+        out = render_favorite_impact("City", 2, 78, "Liverpool", 4, 70)
+        assert "2 spots and 8 pts ahead" in out
+        # 8-pt lead is too big for one game → no flip clause
+        assert "flips them" not in out
+
+    def test_fav_chasing(self):
+        out = render_favorite_impact("City", 5, 60, "United", 3, 65)
+        assert "2 spots and 5 pts behind United" in out
+        # No "loss closes gap" because 5 pts is too far
+        assert "loss closes" not in out
+
+    def test_fav_chasing_within_gap(self):
+        out = render_favorite_impact("City", 5, 67, "United", 3, 70)
+        assert "behind United" in out
+        # 3 pts back, win-erasable on a loss
+        assert "United loss closes the gap" in out
+
+    def test_strips_suffixes_in_output(self):
+        out = render_favorite_impact(
+            "Manchester City FC", 2, 78,
+            "Manchester United FC", 3, 75,
+        )
+        # FC should be stripped from BOTH names in the output
+        assert "FC" not in out
+
+    def test_no_points_falls_back_to_spots_only(self):
+        out = render_favorite_impact("City", 2, None, "United", 3, None)
+        assert "1 spot ahead of United" in out
+        assert "pts" not in out
+        # Without points, no flip clause
+        assert "flips" not in out
+
+
+class TestBuildImpactNarratives:
+    def test_skips_when_favorite_is_playing(self):
+        # Wrexham IS in this game → favorite signal handles it, skip impact narrative.
+        narratives = build_impact_narratives(
+            rank_home=4, rank_away=6,
+            home="Middlesbrough FC", away="Wrexham AFC",
+            favorites_with_standings=[
+                {"name": "Wrexham AFC", "position": 6, "points": 70}
+            ],
+            standings_table=[
+                {"name": "Middlesbrough FC", "position": 4, "points": 73},
+                {"name": "Wrexham AFC", "position": 6, "points": 70},
+            ],
+        )
+        assert narratives == []
+
+    def test_picks_closest_team(self):
+        narratives = build_impact_narratives(
+            rank_home=3, rank_away=9,
+            home="Manchester United FC", away="Brentford FC",
+            favorites_with_standings=[
+                {"name": "Manchester City FC", "position": 2, "points": 78}
+            ],
+            standings_table=[
+                {"name": "Manchester City FC", "position": 2, "points": 78},
+                {"name": "Manchester United FC", "position": 3, "points": 75},
+                {"name": "Brentford FC", "position": 9, "points": 50},
+            ],
+        )
+        assert len(narratives) == 1
+        # Man United is closer (1 spot away) — narrative should reference it
+        assert "Manchester United" in narratives[0]
+        assert "Brentford" not in narratives[0]
+
+    def test_skips_when_neither_team_close(self):
+        narratives = build_impact_narratives(
+            rank_home=18, rank_away=19,
+            home="Bottom Team", away="Other Bottom",
+            favorites_with_standings=[
+                {"name": "Top Team", "position": 1, "points": 90}
+            ],
+            standings_table=[],
+        )
+        assert narratives == []
+
+
+class TestPickTagline:
+    def test_tournament_stage_wins(self):
+        tag = pick_tagline(
+            score_breakdown={"tournament_stage": 5.0},
+            favorites_matched=[],
+            spread=None,
+            stakes_thresholds=["title"],
+            tournament_stage="FINAL",
+            season_progress=0.9,
+            rank_a=1, rank_b=2, rank_source="poll",
+        )
+        assert tag == "Final"
+
+    def test_stakes_picks_label(self):
+        tag = pick_tagline(
+            score_breakdown={"stakes": 8.0},
+            favorites_matched=[],
+            spread=None,
+            stakes_thresholds=["title", "UCL"],
+            tournament_stage=None,
+            season_progress=0.9,
+            rank_a=3, rank_b=9, rank_source="standings",
+        )
+        assert tag == "title / UCL race"
+
+    def test_poll_rank_pair(self):
+        tag = pick_tagline(
+            score_breakdown={"rank_pair": 5.0},
+            favorites_matched=[],
+            spread=None,
+            stakes_thresholds=[],
+            tournament_stage=None,
+            season_progress=None,
+            rank_a=2, rank_b=4, rank_source="poll",
+        )
+        assert tag == "top-5 showdown"
+
+    def test_standings_rank_pair_dropped(self):
+        # For league standings (every team is "ranked"), rank-pair tagline
+        # must be dropped — it's noise. Should fall through to other signals.
+        tag = pick_tagline(
+            score_breakdown={"rank_pair": 5.0},
+            favorites_matched=[],
+            spread=None,
+            stakes_thresholds=[],
+            tournament_stage=None,
+            season_progress=None,
+            rank_a=2, rank_b=4, rank_source="standings",
+        )
+        assert tag == ""  # nothing else fired
+
+    def test_falls_back_to_toss_up(self):
+        tag = pick_tagline(
+            score_breakdown={"close_game": 3.0},
+            favorites_matched=[],
+            spread=1.5,
+            stakes_thresholds=[],
+            tournament_stage=None,
+            season_progress=None,
+            rank_a=None, rank_b=None, rank_source="poll",
+        )
+        assert tag == "toss-up"
+
+
+class TestBuildWhyTextRankSource:
+    def test_poll_keeps_top_n_label(self):
+        why = build_why_text(
+            rank_home=2, rank_away=4,
+            favorites_matched=[], score_breakdown={"rank_pair": 5.0},
+            rank_source="poll",
+        )
+        assert "top-5" in why
+
+    def test_standings_drops_top_n_label(self):
+        # For EPL etc, "both top-5" is meaningless when there are 20 teams.
+        why = build_why_text(
+            rank_home=2, rank_away=4,
+            favorites_matched=[], score_breakdown={"rank_pair": 5.0},
+            rank_source="standings",
+        )
+        assert "top-5" not in why
+        assert "both ranked" not in why
 
 
 class TestLeagueContexts:

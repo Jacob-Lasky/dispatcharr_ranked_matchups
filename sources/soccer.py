@@ -143,9 +143,22 @@ class SoccerSource(SportSource):
                     "raw_position_away": ra,
                     "fd_competition_code": self.config.fd_code,
                     "season_progress": season_progress,
-                    # Standings used for impact-on-favorites computation downstream
+                    # Standings is position-based (not poll-based) — the WHY
+                    # renderer uses this to skip "both top-N" framing that's
+                    # meaningless when every team in the league is already
+                    # "ranked" (e.g. all 20 EPL teams are top-25).
+                    "rank_source": "standings",
+                    # Standings used for impact-on-favorites computation
+                    # downstream. Points + played are used to build natural-
+                    # language narrative ("City sits #2, 1 spot and 3 pts
+                    # ahead of Man United").
                     "standings_table": [
-                        {"name": e["name"], "position": e["position"]}
+                        {
+                            "name": e["name"],
+                            "position": e["position"],
+                            "points": e.get("points"),
+                            "played": e.get("playedGames"),
+                        }
                         for e in table_full
                     ],
                 },

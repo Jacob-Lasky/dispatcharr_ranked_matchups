@@ -324,24 +324,93 @@ def compute_impact_on_favorites(
     return affected
 
 
+def strip_team_suffix(name: str) -> str:
+    """Drop trailing club-tag suffixes ('FC', 'AFC', 'CF', 'SC') from a team
+    name. 'Manchester United FC' → 'Manchester United'. Idempotent. Used in
+    channel names + descriptions to keep the visible string scannable."""
+    if not name:
+        return name
+    parts = name.rsplit(" ", 1)
+    if len(parts) == 2 and parts[1].lower() in TEAM_SUFFIX_TOKENS:
+        return parts[0]
+    return name
+
+
+def pick_tagline(
+    score_breakdown: Dict[str, float],
+    favorites_matched: List[str],
+    spread: Optional[float],
+    stakes_thresholds: Optional[List[str]],
+    tournament_stage: Optional[str],
+    season_progress: Optional[float],
+    rank_a: Optional[int],
+    rank_b: Optional[int],
+    rank_source: str = "poll",
+) -> str:
+    """Pick a single dominant tagline for the channel name. Priority:
+       tournament-stage → stakes → poll-rank-pair → toss-up → favorite.
+
+    `rank_source` distinguishes poll-based ranks (NCAAF / NCAAM AP Top 25)
+    where 'top-N' framing is meaningful, from standings-position ranks
+    (EPL / EFL where every team in the league is automatically 'top-N').
+    Stakes covers the league-position case with proper labels (title race,
+    relegation, etc.) so we drop the rank-pair tagline for standings.
+    """
+    if tournament_stage:
+        ts = tournament_stage.upper()
+        stage_labels = {
+            "FINAL": "Final",
+            "SEMI_FINALS": "Semifinal", "SEMI_FINAL": "Semifinal",
+            "QUARTER_FINALS": "Quarterfinal", "QUARTER_FINAL": "Quarterfinal",
+            "ROUND_OF_16": "Round of 16", "LAST_16": "Round of 16",
+            "ROUND_OF_32": "Round of 32", "LAST_32": "Round of 32",
+            "PLAYOFF_ROUND": "Playoff", "PLAYOFFS": "Playoff",
+        }
+        if ts in stage_labels:
+            return stage_labels[ts]
+
+    if "stakes" in score_breakdown and stakes_thresholds:
+        labels = list(dict.fromkeys(stakes_thresholds))[:2]
+        if labels:
+            return " / ".join(labels) + " race"
+
+    if rank_source == "poll" and rank_a is not None and rank_b is not None:
+        lo, hi = sorted([rank_a, rank_b])
+        if hi <= 5:
+            return "top-5 showdown"
+        if hi <= 10:
+            return "top-10 matchup"
+        if lo <= 5:
+            return f"#{lo} ranked"
+
+    if "close_game" in score_breakdown and spread is not None and spread <= 3:
+        return "toss-up"
+
+    if favorites_matched:
+        return "favorite"
+
+    return ""
+
+
 def format_channel_name(
     sport_prefix: str,
     signals: GameSignals,
     score: GameScore,
     home: str,
     away: str,
-    why: str = "",
+    tagline: str = "",
 ) -> str:
-    """Build the Dispatcharr channel name. Format puts the most-load-bearing
-    info first so it's visible in tight UIs.
+    """Build the Dispatcharr channel name in the "B" format:
+
+        EPL 3v9 ★10.0 · Brentford at Manchester United · title race
+        CFB 1v5 ★8.5 · Ohio State at Penn State · top-5 showdown
+        EFL 4v6 ⭐ ★10.0 · Middlesbrough at Wrexham · playoff race
 
     The rank pair is normalized so the better (lower-number) rank always
-    appears first — "1v5" not "5v1" — so the user can scan a list and see
-    matchup quality at a glance regardless of home/away.
+    appears first — "1v5" not "5v1" — for at-a-glance scanning.
 
-      CFB 1v5 ★8.5: Ohio State at Penn State — both ranked top-5, close spread
-      CFB ⭐ ★6.1: NC State at UNC — favorite involved
-      EPL ★5.2: Hull v Wrexham — playoff race
+    Team-name suffixes (FC / AFC / CF / SC) are stripped: 'Manchester
+    United FC' renders as 'Manchester United'.
     """
     parts = [sport_prefix]
     a, b = signals.rank_a, signals.rank_b
@@ -358,14 +427,108 @@ def format_channel_name(
     parts.append(f"★{score.final:.1f}")
     head = " ".join(parts)
 
-    matchup = f"{away} at {home}"
-    name = f"{head}: {matchup}"
-    if why:
-        name = f"{name} — {why}"
-    # Channel.name is varchar(255). Truncate defensively.
+    matchup = f"{strip_team_suffix(away)} at {strip_team_suffix(home)}"
+    name = f"{head} · {matchup}"
+    if tagline:
+        name = f"{name} · {tagline}"
     if len(name) > 250:
         name = name[:247] + "..."
     return name
+
+
+def render_favorite_impact(
+    fav_name: str, fav_pos: int, fav_points: Optional[int],
+    nearby_team: str, nearby_pos: int, nearby_points: Optional[int],
+) -> str:
+    """One-sentence narrative describing how `nearby_team`'s game outcome
+    could affect `fav_name`'s standings. Uses position deltas always, point
+    deltas when available, and a flip clause when the gap is win-erasable
+    (≤ 3 pts, the most a single result can move).
+
+    Examples (fav playing nobody — these are watching another match):
+      Manchester City sits #2 (78 pts), 1 spot and 3 pts ahead of
+        Manchester United (#3, 75 pts). A Manchester United win flips them.
+      Manchester City sits #5 (60 pts), 2 spots and 5 pts behind
+        Manchester United (#3, 65 pts).
+    """
+    fav_short = strip_team_suffix(fav_name)
+    nearby_short = strip_team_suffix(nearby_team)
+    spot_diff = nearby_pos - fav_pos                   # >0 → nearby is below fav
+    fav_str = f"#{fav_pos}" + (f" ({fav_points} pts)" if fav_points is not None else "")
+    nearby_str = f"#{nearby_pos}" + (f", {nearby_points} pts" if nearby_points is not None else "")
+
+    spots = abs(spot_diff)
+    spots_word = f"{spots} spot{'' if spots == 1 else 's'}"
+    rel_word = "ahead of" if spot_diff > 0 else "behind"
+
+    if fav_points is not None and nearby_points is not None:
+        pt_diff_abs = abs(fav_points - nearby_points)
+        pts_word = f"{pt_diff_abs} pt{'' if pt_diff_abs == 1 else 's'}"
+        relation = f"{spots_word} and {pts_word} {rel_word}"
+    else:
+        relation = f"{spots_word} {rel_word}"
+
+    sentence = f"{fav_short} sits {fav_str}, {relation} {nearby_short} ({nearby_str})."
+
+    # Flip clause: when fav leads by a margin a single result can erase.
+    # A nearby-team win is +3 pts; flip is plausible if 0 < pt_diff ≤ 3 AND
+    # fav is the one currently ahead. Symmetric "loss closes gap" if fav is
+    # behind by ≤ 3.
+    if fav_points is not None and nearby_points is not None:
+        pt_diff = fav_points - nearby_points
+        if spot_diff > 0 and 0 < pt_diff <= 3:
+            sentence += f" A {nearby_short} win flips them."
+        elif spot_diff < 0 and -3 <= pt_diff < 0:
+            sentence += f" A {nearby_short} loss closes the gap."
+
+    return sentence
+
+
+def build_impact_narratives(
+    rank_home: Optional[int], rank_away: Optional[int],
+    home: str, away: str,
+    favorites_with_standings: List[Dict],
+    standings_table: List[Dict],
+    proximity: int = 3,
+) -> List[str]:
+    """For each favorite within proximity of either game team, build one
+    natural-language sentence (via render_favorite_impact). Skips favorites
+    that are themselves playing in this game (handled by the 'favorite'
+    signal already).
+
+    `favorites_with_standings`: [{"name": str, "position": int, "points": int|None}, ...]
+    `standings_table`: same shape, the full league.
+    """
+    out: List[str] = []
+    home_lc, away_lc = home.lower(), away.lower()
+    pts_lookup = {e.get("name"): e.get("points") for e in standings_table}
+
+    for fav in favorites_with_standings:
+        fav_name = fav["name"]
+        fav_lc = fav_name.lower()
+        if fav_lc in home_lc or fav_lc in away_lc:
+            continue  # favorite is playing — skip impact narrative
+        fav_pos = fav.get("position")
+        if fav_pos is None:
+            continue
+        # Find which game team is closest (by spots) to the favorite within proximity.
+        candidates = []
+        for game_name, game_rank in [(home, rank_home), (away, rank_away)]:
+            if game_rank is None:
+                continue
+            d = abs(game_rank - fav_pos)
+            if d <= proximity:
+                candidates.append((game_name, game_rank, d))
+        if not candidates:
+            continue
+        # Closest first; tie-break = home team (gives a stable order).
+        candidates.sort(key=lambda c: (c[2], 0 if c[0] == home else 1))
+        team_name, team_pos, _ = candidates[0]
+        out.append(render_favorite_impact(
+            fav_name, fav_pos, fav.get("points"),
+            team_name, team_pos, pts_lookup.get(team_name),
+        ))
+    return out
 
 
 def build_why_text(
@@ -378,31 +541,34 @@ def build_why_text(
     tournament_stage: Optional[str] = None,
     impact_on_favorites: Optional[List[str]] = None,
     season_progress: Optional[float] = None,
+    rank_source: str = "poll",
 ) -> str:
-    """Human-readable explanation of why this game made the cut.
+    """Human-readable explanation of why this game made the cut. Used for
+    the score-breakdown one-liner at the bottom of the EPG description.
 
-    Walks the score breakdown and emits a comma-separated list of reasons,
-    most-impactful first. Designed to be appended to the channel name so
-    the user can see WHY at a glance in their guide.
+    For poll-based sports (rank_source='poll', e.g. NCAAF AP Top 25), rank
+    pair gets a 'top-N' label. For standings-based sports
+    (rank_source='standings', e.g. EPL where every team is ranked), the
+    rank-pair label is dropped — the stakes signal carries league-aware
+    semantics ('title race', 'playoff race', 'relegation battle') and is
+    what users actually care about.
     """
     parts: List[str] = []
 
-    if "rank_pair" in score_breakdown and rank_home is not None and rank_away is not None:
-        lo, hi = sorted([rank_home, rank_away])
-        if hi <= 5:
-            parts.append(f"both top-5 (#{lo} vs #{hi})")
-        elif hi <= 10:
-            parts.append(f"both top-10 (#{lo} vs #{hi})")
-        elif lo <= 5:
-            parts.append(f"top-5 ranked (#{lo} vs #{hi})")
-        else:
-            parts.append(f"both ranked (#{lo} vs #{hi})")
-    elif "one_ranked" in score_breakdown:
-        rank = rank_home if rank_home is not None else rank_away
-        if rank is not None:
-            if rank <= 5:
-                parts.append(f"#{rank} ranked vs unranked")
+    if rank_source == "poll":
+        if "rank_pair" in score_breakdown and rank_home is not None and rank_away is not None:
+            lo, hi = sorted([rank_home, rank_away])
+            if hi <= 5:
+                parts.append(f"both top-5 (#{lo} vs #{hi})")
+            elif hi <= 10:
+                parts.append(f"both top-10 (#{lo} vs #{hi})")
+            elif lo <= 5:
+                parts.append(f"top-5 ranked (#{lo} vs #{hi})")
             else:
+                parts.append(f"both ranked (#{lo} vs #{hi})")
+        elif "one_ranked" in score_breakdown:
+            rank = rank_home if rank_home is not None else rank_away
+            if rank is not None:
                 parts.append(f"#{rank} ranked")
 
     if favorites_matched:
@@ -411,26 +577,25 @@ def build_why_text(
         else:
             parts.append(f"favorites ({', '.join(favorites_matched)})")
 
-    # Phase 3 — standings/stakes signal first, since it's most actionable
     if "stakes" in score_breakdown and stakes_thresholds:
-        # Render top-2 thresholds + late-season cue
-        labels = list(dict.fromkeys(stakes_thresholds))[:2]  # dedupe, keep order
+        labels = list(dict.fromkeys(stakes_thresholds))[:2]
         if labels:
-            stakes_str = " / ".join(labels) + " race"
+            stakes_str = " / ".join(labels) + " stakes"
             if season_progress is not None and season_progress >= 0.85:
-                stakes_str += " (final stretch)"
+                stakes_str += " (final stretch ×2)"
             elif season_progress is not None and season_progress >= 0.70:
-                stakes_str += " (late season)"
+                stakes_str += " (late season ×1.5)"
             parts.append(stakes_str)
 
     if "tournament_stage" in score_breakdown and tournament_stage:
         parts.append(f"{tournament_stage.lower().replace('_', ' ')}")
 
     if "impact_on_favorite" in score_breakdown and impact_on_favorites:
-        if len(impact_on_favorites) == 1:
-            parts.append(f"affects {impact_on_favorites[0]}")
+        names = [strip_team_suffix(n) for n in impact_on_favorites]
+        if len(names) == 1:
+            parts.append(f"impact on {names[0]}")
         else:
-            parts.append(f"affects {', '.join(impact_on_favorites)}")
+            parts.append(f"impact on {', '.join(names)}")
 
     if "close_game" in score_breakdown and spread is not None:
         if spread <= 3:

@@ -65,7 +65,10 @@ descriptions) is sport-agnostic.
 
 ## Roadmap
 
-Sports / leagues on the to-do list (PRs welcome):
+Sports / leagues on the to-do list (PRs welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for a step-by-step guide; for
+requests, [open an issue](../../issues/new/choose) and the form will
+collect everything needed to scope it):
 
 - **NCAA Baseball** — no clean public API yet; options being evaluated:
   D1Baseball.com scrape, ESPN's hidden API, or a future

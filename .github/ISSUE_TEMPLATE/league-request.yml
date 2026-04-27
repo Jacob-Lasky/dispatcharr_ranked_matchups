@@ -1,0 +1,95 @@
+name: Add a league or sport
+description: Request that a new soccer league or sport be added to Ranked Matchups
+title: "[league] Add <league name>"
+labels: [enhancement, league-request]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for asking! Most soccer leagues are a 5-line config addition;
+        a brand-new sport is bigger work but the data here lets us scope it.
+        See [CONTRIBUTING.md](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/blob/main/CONTRIBUTING.md)
+        if you want to submit a PR yourself.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of source is this?
+      options:
+        - Soccer league (uses Football-Data.org, ~10 lines of config)
+        - New sport (needs its own data adapter)
+    validations:
+      required: true
+
+  - type: input
+    id: league_name
+    attributes:
+      label: League / sport name
+      placeholder: e.g. La Liga, Bundesliga, NHL, MLB
+    validations:
+      required: true
+
+  - type: input
+    id: country
+    attributes:
+      label: Country / region
+      placeholder: e.g. Spain, Germany, USA, global
+    validations:
+      required: true
+
+  - type: input
+    id: fd_code
+    attributes:
+      label: Football-Data.org competition code (soccer only)
+      description: |
+        Look up at https://www.football-data.org/coverage. Free-tier codes
+        include PD (La Liga), BL1 (Bundesliga), SA (Serie A), FL1 (Ligue
+        1), DED (Eredivisie), PPL (Primeira Liga), BSA (Brasileirão),
+        CLI (Copa Libertadores).
+      placeholder: e.g. PD
+
+  - type: textarea
+    id: api
+    attributes:
+      label: Data source API (new sport only)
+      description: |
+        URL of the API, auth model, and a one-line description of free-tier
+        limits. Bonus: links to docs for /games and /rankings (or
+        equivalent) endpoints.
+      placeholder: |
+        https://api.nhle.com (free, no auth)
+        Has /standings, /schedule, no betting lines on this API
+        Standings model: regular-season points
+
+  - type: textarea
+    id: thresholds
+    attributes:
+      label: Meaningful league positions (the "stakes" signal)
+      description: |
+        Which standings positions matter to fans? Title, Champions League,
+        Europa/Conference, playoff, relegation, auto-promotion, etc. List
+        each with the position number(s).
+      placeholder: |
+        Title: 1
+        UCL: top 4
+        Europa/Conference: 5-7
+        Relegation: bottom 3 (positions 18-20)
+
+  - type: input
+    id: odds_key
+    attributes:
+      label: The Odds API sport key (optional, enables the spread signal)
+      description: |
+        Look up at https://the-odds-api.com/sports-odds-data/sports-apis.html.
+        Skip if you don't care about the close-game / toss-up bonus.
+      placeholder: e.g. soccer_spain_la_liga
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this league matters
+      description: One paragraph. Helps prioritize and is good context for the README.
+      placeholder: |
+        La Liga is the second-most-watched club competition globally. Real
+        Madrid, Barcelona, Atlético — title race + UCL + relegation are
+        all high-stakes for English-speaking audiences too.
