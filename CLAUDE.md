@@ -1,21 +1,20 @@
-# Claude session handoff — dispatcharr-ranked-matchups
+# Contributor / AI session onboarding — dispatcharr_ranked_matchups
 
-If you're a Claude session opening this repo cold, read this first. It tells
-you what the plugin does, how it's structured, how to extend it for new
-sports, how to test changes, and the design decisions worth respecting.
+If you're an LLM or new contributor opening this repo cold, read this
+first. It tells you what the plugin does, how it's structured, how to
+extend it for new sports, and the design decisions worth respecting.
 
 ## What this is
 
-A [Dispatcharr](https://github.com/dispatcharr/dispatcharr) plugin that pulls
-upcoming sports games from per-sport APIs, scores each by **interestingness**
-(transparent per-signal breakdown), matches them to user's Dispatcharr
-channels via EPG, and clones into a "Top Matchups" group. Each virtual
-channel's EPG description shows WHY the game made the cut — TiviMate / Plex /
-Jellyfin display this natively.
+A [Dispatcharr](https://github.com/dispatcharr/dispatcharr) plugin that
+pulls upcoming sports games from per-sport APIs, scores each by
+**interestingness** (transparent per-signal breakdown), matches them to
+the user's Dispatcharr channels via EPG, and clones into a "Top Matchups"
+group. Each virtual channel's EPG description shows WHY the game made
+the cut — TiviMate / Plex / Jellyfin display this natively.
 
-The user (Jake) runs Dispatcharr in a Docker container on his UnRAID server
-("tower"). This plugin lives at
-`/data/plugins/dispatcharr_ranked_matchups/` inside that container.
+Inside a Dispatcharr container the plugin lives at
+`/data/plugins/dispatcharr_ranked_matchups/`.
 
 ## Architecture (sport-agnostic by design)
 
@@ -53,7 +52,7 @@ downstream is sport-agnostic.
 | `sources/ncaaf.py` | CFBD `/rankings`, `/games`, `/lines` calls. CFBD uses **camelCase** (homeTeam, awayTeam) — easy gotcha. |
 | `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. UCL doesn't use position-as-rank (knockout) — handled via tournament_stage signal. |
 
-State (gitignored, lives in `<plugin_dir>/` on tower):
+State (gitignored, lives in `<plugin_dir>/`):
 - `cache.json` — last refresh result (curated game list with score breakdowns)
 - `cfbd_api_key`, `football_data_api_key`, `odds_api_key`, `anthropic_api_key` — file fallback when settings field is blank.
 
@@ -149,60 +148,59 @@ implicitly handles "near the top."
   whitelist (FC, AFC, City, United, etc.) so the bare name "Hull" matches
   "Hull City AFC" but **doesn't** match "UNC Pembroke" (Pembroke isn't a
   qualifier).
-- **Postgres connection limit**: tower's Dispatcharr has `max_connections=200`
-  (bumped from 100 on 2026-04-26 due to plugin-pool exhaustion). If you add
-  worker-heavy code, monitor with `SELECT count(*) FROM pg_stat_activity` in
-  the Dispatcharr container.
+- **Postgres connection pool**: long-running plugin code can exhaust the
+  default Postgres connection pool. Monitor with `SELECT count(*) FROM
+  pg_stat_activity` in the Dispatcharr container if you add worker-heavy
+  code.
 
-## Development loop (Jake's tower)
+## Development loop
+
+Inside the Dispatcharr container:
 
 ```bash
-# Sync source → tower
-rsync -avz /home/jlasky/Code/dispatcharr_ranked_matchups/ \
-    tower:/tmp/dispatcharr_ranked_matchups/
-
-# Copy into Dispatcharr container
-ssh tower 'docker cp /tmp/dispatcharr_ranked_matchups Dispatcharr:/data/plugins/'
+docker exec dispatcharr git -C /data/plugins/dispatcharr_ranked_matchups pull
+# or rsync from your dev box → /data/plugins/ in the container
 ```
 
 Smoke-test refresh:
 
 ```bash
-ssh tower 'docker exec Dispatcharr python -c "
+docker exec dispatcharr python -c "
 import django, os, sys
-sys.path.insert(0, \"/app\")
-os.environ.setdefault(\"DJANGO_SETTINGS_MODULE\", \"dispatcharr.settings\")
+sys.path.insert(0, '/app')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dispatcharr.settings')
 django.setup()
 from apps.plugins.loader import PluginManager
 pm = PluginManager.get()
 pm.discover_plugins(sync_db=False, force_reload=True, use_cache=False)
-r = pm.run_action(\"dispatcharr_ranked_matchups\", \"refresh\", {
-    \"enable_epl\": True, \"enable_championship\": True,
-    \"favorites\": \"Wrexham, Manchester City\", \"max_games\": 10,
+r = pm.run_action('dispatcharr_ranked_matchups', 'refresh', {
+    'enable_epl': True, 'max_games': 10,
 })
-print(r.get(\"message\", r))
-"'
+print(r.get('message', r))
+"
 ```
 
 Inspect what the cache contains:
 
 ```bash
-ssh tower 'docker exec Dispatcharr cat /data/plugins/dispatcharr_ranked_matchups/cache.json | head -80'
+docker exec dispatcharr cat /data/plugins/dispatcharr_ranked_matchups/cache.json | head -80
 ```
 
 Read live container logs:
 
 ```bash
-ssh tower 'docker logs --since 5m Dispatcharr 2>&1 | grep ranked_matchups | tail -30'
+docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
 ```
 
-## Current state (v0.1.0, 2026-04-27)
+## Current state
 
 **Working:**
-- NCAAF source (CFBD) — offseason today; tested against 2025 historical week 10
+- NCAAF source (CFBD) and NCAAM source (CollegeBasketballData) — both via
+  the same Bearer token, both auto-skip during their respective offseason
 - EPL + EFL Championship + UCL source (Football-Data.org + Odds API)
-- All Phase 3 signals (stakes, tournament, impact-on-favorite)
-- Today-first sort + channel renumbering
+- All scoring signals (rank, favorite, spread, stakes, tournament-stage,
+  impact-on-favorite, optional LLM narrative)
+- Today-first sort + channel renumbering, with auto / fixed virtual base
 - Placeholder channels for unmatched-high-scoring games
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
@@ -210,12 +208,10 @@ ssh tower 'docker logs --since 5m Dispatcharr 2>&1 | grep ranked_matchups | tail
 - Description includes kickoff time + WHY breakdown
 
 **Known limitations:**
-- **EPG match rate is low for soccer** (1/24 in tests) — UK providers publish
-  game broadcast EPG only 24-48 hrs ahead. Matcher v2 (team aliases, time
-  window tightening, broader fuzzy match) is the obvious next sprint.
-- **NCAAM, NCAA Baseball, NCAA Soccer not yet implemented** — only NCAAF
-  among college sports. NCAAM has API ready (CollegeBasketballData, same key).
-  Baseball needs scraping or a different API.
+- **EPG match rate is low for soccer** — UK providers publish broadcast
+  EPG only 24-48 hrs ahead. Matcher v2 (team aliases, time window
+  tightening, broader fuzzy match) is the obvious next sprint.
+- **NCAA Baseball, NCAA Soccer not yet implemented** — see Roadmap in README.
 - **Excitement saturation** — late-season most games hit ★10 because stakes
   signal × 2× late-season multiplier × weight 2 = up to +16 raw. Fine for
   end-of-season; worth retuning when it's only week 5 of EPL.
@@ -232,10 +228,7 @@ ssh tower 'docker logs --since 5m Dispatcharr 2>&1 | grep ranked_matchups | tail
    the team name without being the actual broadcast),
    (c) extend the LLM matcher prompt to handle non-English EPG titles
    ("EFL Highlights XXL: 45. Spieltag" is German for "matchday 45").
-2. **Phase 2: NCAAM source** — `sources/ncaam.py` using
-   api.collegebasketballdata.com (same Bearer token as CFBD). Same shape as
-   `ncaaf.py`. Use AP Top 25 poll. Skip during offseason (Apr-Oct).
-3. **Phase 2: NCAA Baseball** — no clean API. Options: scrape D1Baseball.com
+2. **NCAA Baseball** — no clean API. Options: scrape D1Baseball.com
    (rankings + schedule), use ESPN's hidden API (`site.api.espn.com/.../baseball-college`),
    or try `api.collegebaseballdata.com` (DNS didn't resolve in our test —
    maybe re-check; the author runs CFBD + CBB Data, so CBB Baseball might be
@@ -259,27 +252,16 @@ ssh tower 'docker logs --since 5m Dispatcharr 2>&1 | grep ranked_matchups | tail
    has a logo field, swap it for a special "Top Matchups" emblem so users
    visually distinguish virtual channels from real ones.
 
-## User context (Jake)
+## Design principles worth respecting
 
-- Senior at Deepgram (Python proficient)
-- Trusts Claude to ship full features when given the lean — but always wants
-  the WHY visible (transparency over magic)
-- Tower runs Dispatcharr 0.23.0 (latest as of late April 2026)
-- M3U provider is AliceXC (XC type, account id=4)
-- Channel profile id=2 is "Sports"
-- Postgres `max_connections=200` (bumped from default 100 on 2026-04-26)
-- Server local timezone: America/Chicago
-- Favorites: NC State, UNC, Wrexham, Barcelona, Real Madrid, Manchester City
-- Wants this plugin published publicly eventually — keep code clean
-
-## Companion plugin
-
-`dispatcharr_sports_filter` is the user's other plugin (also at
-`/home/jlasky/Code/dispatcharr_sports_filter/`). It curates the user's
-**channels** by classifying M3U groups; this plugin curates the user's
-**guide entries** by curating upcoming games. They're orthogonal but both
-target the same user's same Dispatcharr install.
-
-If you're working on cross-plugin functionality, the sports filter's
-`anthropic_api_key` file at `/data/plugins/dispatcharr_sports_filter/`
-serves as a fallback for this plugin (last-resort key resolution).
+- **Transparency over magic**: the score breakdown is always shown, in
+  cache.json AND in the EPG description. If a user disagrees with how a
+  game ranked, they should be able to see exactly which signal to tune.
+- **Source channels are never modified**: the apply pipeline only creates
+  virtual channels in the target group; the user's real channels and
+  groups are untouched. Stale virtuals are detected by the `tvg_id`
+  marker prefix and cleaned up automatically.
+- **Sport-agnostic core**: `scoring.py` and `matcher.py` know nothing
+  about specific sports. Adding a sport is a new file in `sources/`,
+  full stop. If you find yourself adding a sport-specific branch outside
+  `sources/`, push it back into the adapter.

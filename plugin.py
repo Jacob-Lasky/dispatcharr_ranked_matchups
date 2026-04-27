@@ -12,10 +12,12 @@ Pipeline:
   4) show_status    -> print cache contents with score breakdown.
 
 Files:
-  - cache.json:        last refresh result with per-game score breakdowns
-  - cfbd_api_key:      CFBD bearer token (chmod 600)
-  - anthropic_api_key: Claude key (chmod 600). Falls back to the sports-filter
-                       plugin's anthropic_api_key file if absent.
+  - cache.json:           last refresh result with per-game score breakdowns
+  - cfbd_api_key:         CFBD/CBB-Data bearer token (chmod 600)
+  - football_data_api_key: Football-Data.org token (chmod 600)
+  - odds_api_key:         The Odds API token (chmod 600)
+  - anthropic_api_key:    Claude key (chmod 600), only needed for LLM EPG
+                          matching or the optional narrative signal.
 """
 
 from __future__ import annotations
@@ -56,9 +58,16 @@ EPG_POST_HOURS = 4    # 4 hours after game starts (covers OT)
 # without needing a custom_properties field on the Channel model.
 TVG_ID_PREFIX = "ranked_matchups:"
 
-# Channel-number range for our virtual channels. Picked high so we don't collide
-# with real auto-channel-sync numbers.
-VIRTUAL_CHANNEL_BASE = 9000
+# Default starting channel number when the user hasn't configured one. Sentinel
+# 0 means "auto" — pick the first channel number after the highest existing
+# non-virtual channel, so we slot in cleanly without colliding with real
+# channels.
+DEFAULT_VIRTUAL_CHANNEL_BASE = 0
+
+# Default fallback when DEFAULT_VIRTUAL_CHANNEL_BASE is sentinel-0 AND there
+# are zero existing channels (fresh install) — picked high enough not to
+# collide with auto-channel-sync ranges.
+_AUTO_BASE_FALLBACK = 9000
 
 
 # ---------- timezone helpers ----------
@@ -107,8 +116,7 @@ def _read_key(path: str) -> str:
 def _resolve_key(settings: Dict[str, Any], setting_id: str, *fallback_paths: str) -> str:
     """Look up an API key. Setting value (from plugin UI) wins; falls back to
     on-disk file(s) (chmod 600) in order. Returns "" if nothing is present.
-    Variadic fallbacks let the anthropic key chain through this plugin's file
-    AND the sports-filter plugin's file in one call.
+    Variadic fallbacks so callers can chain multiple file paths in one call.
     """
     val = settings.get(setting_id) or ""
     if isinstance(val, str) and val.strip():
@@ -158,20 +166,22 @@ def _build_weights(settings: Dict[str, Any]):
 
 
 def _build_sources(settings: Dict[str, Any]):
-    from .sources import NcaafSource, SoccerSource
+    from .sources import NcaafSource, NcaamSource, SoccerSource
     sources = []
     cfbd_key = _resolve_key(settings, "cfbd_api_key", CFBD_KEY_PATH)
     fd_key = _resolve_key(settings, "football_data_api_key", FD_KEY_PATH)
     odds_key = _resolve_key(settings, "odds_api_key", ODDS_KEY_PATH)
-    if settings.get("enable_ncaaf", True):
+    if settings.get("enable_ncaaf", False) and cfbd_key:
         sources.append(NcaafSource(api_key=cfbd_key))
+    # NCAAM uses the same CFBD/CBB-Data Bearer token as NCAAF.
+    if settings.get("enable_ncaam", False) and cfbd_key:
+        sources.append(NcaamSource(api_key=cfbd_key))
     if settings.get("enable_epl", False) and fd_key:
         sources.append(SoccerSource("epl", fd_api_key=fd_key, odds_api_key=odds_key))
     if settings.get("enable_championship", False) and fd_key:
         sources.append(SoccerSource("championship", fd_api_key=fd_key, odds_api_key=odds_key))
     if settings.get("enable_ucl", False) and fd_key:
         sources.append(SoccerSource("ucl", fd_api_key=fd_key, odds_api_key=odds_key))
-    # Phase 2: NCAAM, baseball
     return sources
 
 
@@ -266,7 +276,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # Sort: today's games first (0 before 1), then 0-10 score desc, then raw as
     # tiebreak, then start_time ascending. So a game today with ★7 outranks a
     # game next week with ★9.5.
-    tz_local = _resolve_tz(settings.get("local_timezone", "America/Chicago"))
+    tz_local = _resolve_tz(settings.get("local_timezone", "UTC"))
 
     def _sort_key(item):
         game, _signals, score = item
@@ -293,11 +303,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # _build_epg_lookup excludes ALL our virtual channels by tvg_id prefix —
     # covers both the current target group and any orphans from a renamed group.
     epg_lookup = _build_epg_lookup()
-    api_key = _resolve_key(
-        settings, "anthropic_api_key",
-        ANTHROPIC_KEY_PATH,
-        os.path.join(os.path.dirname(PLUGIN_DIR), "dispatcharr_sports_filter", "anthropic_api_key"),
-    )
+    api_key = _resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH)
     model = settings.get("model", "claude-haiku-4-5")
     matches = match_games_to_channels(scored, epg_lookup, api_key, model)
 
@@ -429,9 +435,39 @@ def _build_marker_key(game: Dict[str, Any]) -> str:
     return f"{TVG_ID_PREFIX}{sport}:{stable_hash_int(fallback)}"
 
 
-# When we need to renumber existing channels to match cache order, shift them
-# into this temporary range first to avoid colliding with the target numbers.
-_RENUMBER_PARK_BASE = 19000
+def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) -> int:
+    """Resolve the starting channel number for our virtual channels.
+
+    `virtual_channel_base` setting:
+      - Positive int → use that as the base (legacy: 9000)
+      - 0 (sentinel) → auto: pick (highest existing non-virtual channel) + 1,
+        so virtuals slot in just after the user's real channels.
+      - Anything unparseable → treat as auto.
+
+    `highest_non_virtual` is the max channel_number across all channels that
+    are NOT ours (excluding tvg_id__startswith=TVG_ID_PREFIX). Caller passes 0
+    if there are no other channels.
+
+    The auto path falls back to _AUTO_BASE_FALLBACK on a fresh install (no
+    other channels exist) so we don't return 1 and squat on prime real estate.
+    """
+    raw = settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE)
+    try:
+        base = int(float(raw))
+    except (TypeError, ValueError):
+        base = 0
+    if base > 0:
+        return base
+    candidate = int(highest_non_virtual) + 1
+    return candidate if candidate > 1 else _AUTO_BASE_FALLBACK
+
+
+def _resolve_park_base(target_base: int, num_games: int) -> int:
+    """Pick a parking range that's guaranteed past every target number we'll
+    write. Parking + writing happens in one transaction within our own group,
+    so we only need to clear our own target range — +1000 slack is safety
+    margin against future-us reusing the parking range for something else."""
+    return target_base + max(num_games, 0) + 1000
 
 
 def _build_signals_score_from_payload(g: Dict[str, Any]):
@@ -593,6 +629,23 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         )
     }
 
+    # Resolve the virtual channel base. In auto mode we slot in just after
+    # the user's highest real channel (excluding our own virtuals) so we
+    # don't squat on prime numbers like 1-100.
+    from django.db.models import Max as _Max
+    highest_other = (
+        Channel.objects.exclude(tvg_id__startswith=TVG_ID_PREFIX)
+        .aggregate(m=_Max("channel_number"))["m"] or 0
+    )
+    virtual_base = _resolve_virtual_base(settings, highest_other)
+    park_base = _resolve_park_base(virtual_base, len(games))
+    logger.info(
+        "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r), park_base=%d",
+        virtual_base, highest_other,
+        settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE),
+        park_base,
+    )
+
     created = 0
     updated = 0
     deleted_stale = 0
@@ -605,12 +658,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     with transaction.atomic():
         # Phase 0: park existing virtual channels in a high temporary number
         # range so we can renumber based on cache order without colliding with
-        # the unique (channel_group, channel_number) constraint. After parking,
-        # we'll assign each surviving channel a target number 9000+idx based on
-        # its position in the (today-first, score-desc) cache.
+        # the unique (channel_group, channel_number) constraint. park_base is
+        # guaranteed to be past every target number we're about to write.
         if not dry_run and existing_virtuals:
             for i, ch in enumerate(existing_virtuals.values()):
-                ch.channel_number = float(_RENUMBER_PARK_BASE + i)
+                ch.channel_number = float(park_base + i)
             for ch in existing_virtuals.values():
                 ch.save(update_fields=["channel_number"])
 
@@ -632,7 +684,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # the front of the cache, so they get the lowest numbers (TiviMate
             # and other IPTV clients sort by channel number → today's games
             # appear first in the user's Top Matchups group).
-            target_chnum = float(VIRTUAL_CHANNEL_BASE + cache_idx)
+            target_chnum = float(virtual_base + cache_idx)
 
             marker = _build_marker_key(g)
             seen_markers.add(marker)
@@ -912,7 +964,7 @@ def _scheduler_loop(plugin_ref):
             if not settings.get("auto_refresh_enabled", False):
                 _scheduler_stop.wait(timeout=300)
                 continue
-            tz = _resolve_tz(settings.get("local_timezone", "America/Chicago"))
+            tz = _resolve_tz(settings.get("local_timezone", "UTC"))
             times = _parse_scheduled_times(settings.get("scheduled_times", "0400"))
             if not times:
                 logger.warning("[ranked_matchups] no valid scheduled_times; idling 5m")

@@ -55,21 +55,45 @@ first in any IPTV client.
 | Sport | Source | Free tier? |
 |---|---|---|
 | NCAA Football | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (1k req/day) |
+| NCAA Men's Basketball | [CollegeBasketballData.com](https://collegebasketballdata.com/) (same key as CFBD) | Yes |
 | EPL / EFL Championship / UCL | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, 12 free comps) |
 | Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |
-| NCAAM (planned) | [CollegeBasketballData.com](https://collegebasketballdata.com/) (same key as CFBD) | Yes |
-| NCAA Baseball (planned) | TBD — likely D1Baseball scrape | — |
 
 Adding a sport is a new file in `sources/` implementing the `SportSource`
 interface; everything else (scoring, matching, channel cloning, EPG
 descriptions) is sport-agnostic.
+
+## Roadmap
+
+Sports / leagues on the to-do list (PRs welcome):
+
+- **NCAA Baseball** — no clean public API yet; options being evaluated:
+  D1Baseball.com scrape, ESPN's hidden API, or a future
+  CollegeBaseballData.com from the same author as CFBD/CBB.
+- **NCAA Soccer** — same author publishes CollegeSoccerData; needs an
+  adapter file + AP poll mapping.
+- **MLB / NBA / NFL** — would use The Odds API for spreads + a
+  rankings/standings source (TBD per sport).
+- **More European football leagues** — La Liga, Serie A, Bundesliga,
+  Ligue 1 are all on Football-Data.org's free tier. Each needs a
+  `LEAGUE_CONTEXTS` entry in `scoring.py` with the right thresholds
+  (UCL/Europa cutoff, relegation line) plus a one-line addition to the
+  `COMPETITIONS` dict in `sources/soccer.py`.
+- **Rivalry signal** — a `rivalries.json` shipped with the plugin (NCAA
+  rivalries are well-known) and/or an LLM "is this a rivalry?" call
+  cached per team-pair.
+- **Matcher v2** — soccer EPG match rate is currently low because UK
+  providers publish broadcast EPG only 24-48h ahead and team-name
+  variants ("Wrexham" / "Wrexham AFC" / "AFC Wrexham") trip the regex
+  pre-filter. Plan: team-alias dictionary, tighter time window, broader
+  fuzzy match.
 
 ## Install
 
 1. Clone the repo into your Dispatcharr plugins directory:
 
    ```bash
-   docker exec dispatcharr git clone https://github.com/jacob-lasky/dispatcharr-ranked-matchups.git \
+   docker exec dispatcharr git clone https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups.git \
        /data/plugins/dispatcharr_ranked_matchups
    ```
 

@@ -191,3 +191,87 @@ class TestBuildSignalsScoreFromPayload:
         signals, score = plugin._build_signals_score_from_payload(g)
         assert score.raw == 9.0  # 5 + 4, NOT 7.6
         assert score.final == 7.6
+
+
+class TestResolveVirtualBase:
+    def test_explicit_positive_value_wins(self, plugin):
+        assert plugin._resolve_virtual_base({"virtual_channel_base": 9000}, 999) == 9000
+
+    def test_string_input_coerced(self, plugin):
+        assert plugin._resolve_virtual_base({"virtual_channel_base": "5000"}, 0) == 5000
+
+    def test_zero_means_auto(self, plugin):
+        # Auto = highest_other + 1
+        assert plugin._resolve_virtual_base({"virtual_channel_base": 0}, 1234) == 1235
+
+    def test_missing_key_means_auto(self, plugin):
+        assert plugin._resolve_virtual_base({}, 50) == 51
+
+    def test_garbage_means_auto(self, plugin):
+        assert plugin._resolve_virtual_base({"virtual_channel_base": "abc"}, 50) == 51
+
+    def test_fresh_install_uses_fallback(self, plugin):
+        # No existing channels → highest_other=0 → +1=1, but we don't want to
+        # return 1 (squats on prime real estate). Should bump to fallback.
+        result = plugin._resolve_virtual_base({"virtual_channel_base": 0}, 0)
+        assert result == plugin._AUTO_BASE_FALLBACK
+
+    def test_negative_value_means_auto(self, plugin):
+        # Negative is unparseable as a "fixed base" → auto.
+        assert plugin._resolve_virtual_base({"virtual_channel_base": -5}, 100) == 101
+
+
+class TestResolvParkBase:
+    def test_park_above_target_range(self, plugin):
+        # park must be past base + N (the highest target we'll write).
+        base = 9000
+        n_games = 25
+        park = plugin._resolve_park_base(base, n_games)
+        assert park > base + n_games
+
+    def test_dynamic_with_huge_n(self, plugin):
+        # Even with a giant cache, park stays past targets.
+        assert plugin._resolve_park_base(100, 5000) > 100 + 5000
+
+    def test_zero_games(self, plugin):
+        # Empty cache shouldn't crash; we still want a sane park base.
+        park = plugin._resolve_park_base(9000, 0)
+        assert park > 9000
+
+    def test_negative_games_clamped(self, plugin):
+        # Defensive: never compute a park base below the target base.
+        park = plugin._resolve_park_base(9000, -10)
+        assert park > 9000
+
+
+class TestBuildSourcesToggles:
+    """Make sure each enable_* toggle actually wires its source AND that
+    keys-required sources are skipped when the key is absent."""
+
+    def test_no_key_skips_ncaaf(self, plugin, tmp_path, monkeypatch):
+        # Force the on-disk fallback to also miss
+        monkeypatch.setattr(plugin, "CFBD_KEY_PATH", str(tmp_path / "missing"))
+        sources = plugin._build_sources({"enable_ncaaf": True})
+        assert sources == []
+
+    def test_ncaam_wired_up(self, plugin, tmp_path, monkeypatch):
+        # Same Bearer token as NCAAF.
+        keyfile = tmp_path / "cfbd_api_key"
+        keyfile.write_text("fake-key")
+        monkeypatch.setattr(plugin, "CFBD_KEY_PATH", str(keyfile))
+        sources = plugin._build_sources({"enable_ncaam": True})
+        assert len(sources) == 1
+        assert sources[0].sport_prefix == "CBB"
+
+    def test_both_ncaa_share_one_key(self, plugin, tmp_path, monkeypatch):
+        keyfile = tmp_path / "cfbd_api_key"
+        keyfile.write_text("fake-key")
+        monkeypatch.setattr(plugin, "CFBD_KEY_PATH", str(keyfile))
+        sources = plugin._build_sources({"enable_ncaaf": True, "enable_ncaam": True})
+        prefixes = sorted(s.sport_prefix for s in sources)
+        assert prefixes == ["CBB", "CFB"]
+
+    def test_all_off_by_default(self, plugin):
+        # Public-release defaults: nothing enabled until the user opts in.
+        sources = plugin._build_sources({})
+        assert sources == []

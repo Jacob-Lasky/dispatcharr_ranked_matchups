@@ -4,8 +4,8 @@
   "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them by rank pair / favorites / spread (and Phase 3+: rivalry, narrative), matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching.",
   "author": "Jake (with Claude)",
   "license": "MIT",
-  "repo_url": "https://github.com/jacob-lasky/dispatcharr-ranked-matchups",
-  "help_url": "https://github.com/jacob-lasky/dispatcharr-ranked-matchups#readme",
+  "repo_url": "https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups",
+  "help_url": "https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups#readme",
   "fields": [
     {
       "id": "_section_sources",
@@ -17,29 +17,29 @@
       "id": "enable_ncaaf",
       "type": "boolean",
       "label": "NCAA Football (CFBD)",
-      "default": true,
-      "help_text": "AP Top-25 + games + betting lines from CollegeFootballData.com. Offseason → no rows produced."
+      "default": false,
+      "help_text": "AP Top-25 + games + betting lines from CollegeFootballData.com. Offseason → no rows produced. Requires the CFBD API key below."
     },
     {
       "id": "enable_ncaam",
       "type": "boolean",
-      "label": "NCAA Basketball (CollegeBasketballData)",
+      "label": "NCAA Men's Basketball (CollegeBasketballData)",
       "default": false,
-      "help_text": "Phase 2. Same API key as CFBD."
+      "help_text": "AP Top-25 + games + betting lines from CollegeBasketballData.com. Same Bearer token as CFBD — flip both on with one key. Season runs Nov-Apr; offseason returns no rows."
     },
     {
       "id": "enable_epl",
       "type": "boolean",
       "label": "English Premier League (EPL)",
-      "default": true,
-      "help_text": "Football-Data.org primary, The Odds API for spread signal."
+      "default": false,
+      "help_text": "Football-Data.org primary, The Odds API for spread signal. Requires the Football-Data.org API key below."
     },
     {
       "id": "enable_championship",
       "type": "boolean",
       "label": "EFL Championship",
-      "default": true,
-      "help_text": "Second tier of English football. Wrexham, Hull, etc. Standings position used as the rank slot — top 6 makes playoffs."
+      "default": false,
+      "help_text": "Second tier of English football. Standings position used as the rank slot — top 6 makes playoffs. Requires the Football-Data.org API key below."
     },
     {
       "id": "enable_ucl",
@@ -108,8 +108,8 @@
       "id": "favorites",
       "type": "string",
       "label": "Favorite teams (comma-separated)",
-      "default": "NC State, UNC, Wrexham, Barcelona, Real Madrid, Manchester City",
-      "help_text": "Substring-matched against home/away team names (with team-qualifier whitelist for soccer suffixes like 'FC', 'AFC', 'City', 'United'). Always shown regardless of rank, with a flat score boost. Note: Hull and other teams in playoff races still get the 'impact-on-favorite' signal automatically when they sit near a favorite's position."
+      "default": "",
+      "help_text": "Substring-matched against home/away team names (with team-qualifier whitelist for soccer suffixes like 'FC', 'AFC', 'City', 'United'). Always shown regardless of rank, with a flat score boost. Teams in playoff races still get the 'impact-on-favorite' signal automatically when they sit near a favorite's position."
     },
     {
       "id": "max_games",
@@ -127,18 +127,10 @@
     },
     {
       "id": "local_timezone",
-      "type": "select",
-      "label": "Local timezone (for 'today' sorting + EPG dates)",
-      "default": "America/Chicago",
-      "options": [
-        {"value": "America/New_York", "label": "America/New_York (Eastern)"},
-        {"value": "America/Chicago", "label": "America/Chicago (Central)"},
-        {"value": "America/Denver", "label": "America/Denver (Mountain)"},
-        {"value": "America/Los_Angeles", "label": "America/Los_Angeles (Pacific)"},
-        {"value": "Europe/London", "label": "Europe/London"},
-        {"value": "UTC", "label": "UTC"}
-      ],
-      "help_text": "Used to determine which games are 'today' (today's games sort to the top of the curated list) and to format kickoff times in the EPG description."
+      "type": "string",
+      "label": "Local timezone (IANA name)",
+      "default": "UTC",
+      "help_text": "IANA tz name like 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'Australia/Sydney'. Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones. Falls back to UTC if the name isn't recognized. Used to determine which games are 'today' and to format kickoff times in the EPG description."
     },
     {
       "id": "_section_scoring",
@@ -214,6 +206,13 @@
       "label": "Target group name",
       "default": "Top Matchups",
       "help_text": "Apply creates virtual channels in this ChannelGroup, cloning streams from the matched source channels (source channels untouched). A matching dummy EPGSource is created with the same name; each virtual channel gets a ProgramData entry whose description explains WHY the game made the cut. Tip: prefix with '!' (e.g. '!Top Matchups') so it sorts to the top of your group list. If you rename the group, the next apply will detect the old group/source by tvg_id markers and clean them up automatically."
+    },
+    {
+      "id": "virtual_channel_base",
+      "type": "number",
+      "label": "Starting channel number (0 = auto)",
+      "default": 0,
+      "help_text": "First channel number assigned to virtual channels. Set to 0 to auto-pick (start at the highest existing non-virtual channel + 1) so the plugin slots in cleanly without colliding with your real channels. Or pin a fixed number — e.g. 9000 — if you want them at a known location. Today's games occupy the lowest numbers in this range so they appear first in any IPTV client."
     },
     {
       "id": "placeholder_min_score",
