@@ -299,48 +299,69 @@ class TestStripTeamSuffix:
 
 
 class TestRenderFavoriteImpact:
-    def test_with_points_and_flip_clause(self):
+    """New format is action-oriented:
+        '{Fav} fans: rooting against {Nearby} ({spots} and {pts} {dir}).
+         [outcome clause when gap is interesting].'
+    """
+
+    def test_flip_clause_when_win_erasable(self):
         out = render_favorite_impact(
             "Manchester City FC", 2, 78,
             "Manchester United FC", 3, 75,
         )
-        assert "Manchester City sits #2 (78 pts)" in out
-        assert "1 spot and 3 pts ahead of Manchester United" in out
+        assert out.startswith("Manchester City fans: rooting against Manchester United")
+        assert "1 spot and 3 pts back" in out
         # 3-pt lead is win-erasable → flip clause fires
-        assert "Manchester United win flips them" in out
+        assert "Manchester United win flips them past you" in out
 
-    def test_with_points_no_flip_when_too_far(self):
-        out = render_favorite_impact("City", 2, 78, "Liverpool", 4, 70)
-        assert "2 spots and 8 pts ahead" in out
-        # 8-pt lead is too big for one game → no flip clause
-        assert "flips them" not in out
+    def test_narrows_clause_for_medium_gap(self):
+        out = render_favorite_impact("City", 2, 78, "United", 3, 72)
+        assert "1 spot and 6 pts back" in out
+        # 6-pt lead, win narrows to 3
+        assert "narrows the gap to 3 pts" in out
 
-    def test_fav_chasing(self):
-        out = render_favorite_impact("City", 5, 60, "United", 3, 65)
-        assert "2 spots and 5 pts behind United" in out
-        # No "loss closes gap" because 5 pts is too far
-        assert "loss closes" not in out
+    def test_no_outcome_clause_when_huge_gap(self):
+        out = render_favorite_impact("City", 2, 78, "Liverpool", 4, 60)
+        assert "2 spots and 18 pts back" in out
+        # 18-pt lead is too far to narrate the outcome
+        assert "narrows" not in out
+        assert "flips" not in out
 
-    def test_fav_chasing_within_gap(self):
+    def test_fav_chasing_narrate_loss(self):
+        out = render_favorite_impact("City", 5, 60, "United", 3, 66)
+        assert "2 spots and 6 pts ahead" in out
+        # 6 pts behind → loss could close to 3
+        assert "United loss could narrow the gap to 3 pts" in out
+
+    def test_fav_chasing_could_put_level(self):
         out = render_favorite_impact("City", 5, 67, "United", 3, 70)
-        assert "behind United" in out
-        # 3 pts back, win-erasable on a loss
-        assert "United loss closes the gap" in out
+        # 3 pts back, "could put you level"
+        assert "United loss could put you level" in out
+
+    def test_fav_chasing_no_outcome_when_far(self):
+        out = render_favorite_impact("City", 5, 50, "United", 3, 70)
+        assert "behind" not in out  # spelled as "ahead" since United is above
+        assert "2 spots and 20 pts ahead" in out
+        # 20 pts back, no outcome narration
+        assert "could" not in out
 
     def test_strips_suffixes_in_output(self):
         out = render_favorite_impact(
             "Manchester City FC", 2, 78,
             "Manchester United FC", 3, 75,
         )
-        # FC should be stripped from BOTH names in the output
         assert "FC" not in out
+
+    def test_uses_rooting_against_framing(self):
+        out = render_favorite_impact("City", 2, 78, "United", 3, 75)
+        assert "rooting against" in out
 
     def test_no_points_falls_back_to_spots_only(self):
         out = render_favorite_impact("City", 2, None, "United", 3, None)
-        assert "1 spot ahead of United" in out
+        assert "(1 spot back)" in out
         assert "pts" not in out
-        # Without points, no flip clause
         assert "flips" not in out
+        assert "narrows" not in out
 
 
 class TestBuildImpactNarratives:

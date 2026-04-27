@@ -440,46 +440,65 @@ def render_favorite_impact(
     fav_name: str, fav_pos: int, fav_points: Optional[int],
     nearby_team: str, nearby_pos: int, nearby_points: Optional[int],
 ) -> str:
-    """One-sentence narrative describing how `nearby_team`'s game outcome
-    could affect `fav_name`'s standings. Uses position deltas always, point
-    deltas when available, and a flip clause when the gap is win-erasable
-    (≤ 3 pts, the most a single result can move).
+    """Action-oriented narrative: name the favorite's rooting interest in
+    THIS game, with both spot-delta and point-delta in the gap.
 
-    Examples (fav playing nobody — these are watching another match):
-      Manchester City sits #2 (78 pts), 1 spot and 3 pts ahead of
-        Manchester United (#3, 75 pts). A Manchester United win flips them.
-      Manchester City sits #5 (60 pts), 2 spots and 5 pts behind
-        Manchester United (#3, 65 pts).
+    Pattern:
+      <Favorite> fans: rooting against <Nearby> (<spots> and <pts> <dir>).
+      [Optional outcome clause when the gap is interesting, ≤ 9 pts.]
+
+    Examples (the favorite isn't playing — these games are between OTHER
+    teams whose result moves the favorite's standings):
+
+      Manchester City fans: rooting against Manchester United (1 spot and
+        12 pts back).
+        # No outcome clause — 12 pts is too large for a single result.
+
+      Manchester City fans: rooting against Manchester United (1 spot and
+        3 pts back). A Manchester United win flips them past you.
+        # Win-erasable gap → flip clause.
+
+      Wrexham fans: rooting against Southampton (1 spot and 6 pts ahead).
+        A Southampton loss could narrow the gap to 3 pts.
+        # Catchable gap → conditional outcome clause.
     """
     fav_short = strip_team_suffix(fav_name)
     nearby_short = strip_team_suffix(nearby_team)
-    spot_diff = nearby_pos - fav_pos                   # >0 → nearby is below fav
-    fav_str = f"#{fav_pos}" + (f" ({fav_points} pts)" if fav_points is not None else "")
-    nearby_str = f"#{nearby_pos}" + (f", {nearby_points} pts" if nearby_points is not None else "")
+    spot_diff = nearby_pos - fav_pos  # >0 = nearby is below fav (chasing)
 
     spots = abs(spot_diff)
     spots_word = f"{spots} spot{'' if spots == 1 else 's'}"
-    rel_word = "ahead of" if spot_diff > 0 else "behind"
+    direction = "back" if spot_diff > 0 else "ahead"
 
     if fav_points is not None and nearby_points is not None:
         pt_diff_abs = abs(fav_points - nearby_points)
         pts_word = f"{pt_diff_abs} pt{'' if pt_diff_abs == 1 else 's'}"
-        relation = f"{spots_word} and {pts_word} {rel_word}"
+        gap_str = f"{spots_word} and {pts_word} {direction}"
     else:
-        relation = f"{spots_word} {rel_word}"
+        gap_str = f"{spots_word} {direction}"
 
-    sentence = f"{fav_short} sits {fav_str}, {relation} {nearby_short} ({nearby_str})."
+    sentence = f"{fav_short} fans: rooting against {nearby_short} ({gap_str})."
 
-    # Flip clause: when fav leads by a margin a single result can erase.
-    # A nearby-team win is +3 pts; flip is plausible if 0 < pt_diff ≤ 3 AND
-    # fav is the one currently ahead. Symmetric "loss closes gap" if fav is
-    # behind by ≤ 3.
+    # Outcome clause: only fires when the gap is interesting enough to
+    # narrate (≤ 9 pts in either direction). For huge gaps the rooting
+    # framing alone carries the message; saying "narrows to 9 pts" of a
+    # 12-pt gap is still huge and clutters the description.
     if fav_points is not None and nearby_points is not None:
-        pt_diff = fav_points - nearby_points
-        if spot_diff > 0 and 0 < pt_diff <= 3:
-            sentence += f" A {nearby_short} win flips them."
-        elif spot_diff < 0 and -3 <= pt_diff < 0:
-            sentence += f" A {nearby_short} loss closes the gap."
+        pt_diff = fav_points - nearby_points  # >0 = fav has more pts
+        if spot_diff > 0:  # fav leading
+            new_gap = pt_diff - 3
+            if pt_diff <= 3:
+                sentence += f" A {nearby_short} win flips them past you."
+            elif pt_diff <= 9:
+                sentence += f" A {nearby_short} win narrows the gap to {new_gap} pts."
+        elif spot_diff < 0:  # fav chasing
+            current_gap = abs(pt_diff)
+            if 0 < current_gap <= 9:
+                potential_gap = current_gap - 3
+                if potential_gap <= 0:
+                    sentence += f" A {nearby_short} loss could put you level."
+                else:
+                    sentence += f" A {nearby_short} loss could narrow the gap to {potential_gap} pts."
 
     return sentence
 

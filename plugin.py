@@ -520,63 +520,61 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
 def _build_description(
     g: Dict[str, Any],
     tagline: str,
-    why: str,
     placeholder: bool,
 ) -> str:
     """Build the EPG ProgramData description in natural-language form.
 
-    Layout (in order, each block separated by a blank line):
-      1. kickoff line + optional "today" marker, plus a placeholder note
-         if no EPG match was found
-      2. Headline: tagline + spread descriptor in one sentence
-      3. Pre-rendered favorite-impact narrative(s) from the cache
-      4. Optional "favorite is your team" line if the favorite is playing
-      5. Score breakdown one-liner
-      6. Source channel line (only if matched)
+    Layout (each block separated by a blank line):
+      1. Placeholder note (only if EPG hasn't matched a source yet)
+      2. Headline: tagline + spread descriptor ("A title race — toss-up.")
+      3. Favorite-impact narratives (rooting framing, both deltas)
+      4. "Favorite is your team" line if the favorite is playing this game
+      5. Source channel line (only if matched)
 
-    No more `Matchup:` / `Sport:` / `(raw X.X)` lines — they're already in
-    the channel name or are debug noise.
+    Deliberately dropped: kickoff time (already shown by EPG client time
+    blocks), score breakdown (already in channel name as ★X.X), spread's
+    raw line value (just say "toss-up"), late-season multiplier
+    annotation (uniform across all current league games — adds no signal).
     """
-    score_final = float(g.get("score", 0.0))
     extra = g.get("extra") or {}
     spread = g.get("spread")
     favorites_matched = g.get("favorites_matched") or []
     impact_narratives = (
         extra.get("impact_narratives")
-        or g.get("impact_narratives")  # fallback if older cache shape
+        or g.get("impact_narratives")
         or []
     )
 
     sections: List[str] = []
 
-    # 1. Kickoff line + placeholder note
-    kickoff_line = g.get("kickoff_local") or g.get("start_time_utc", "")
-    today_marker = " 🔴" if g.get("is_today") else ""
-    opener = f"{kickoff_line}{today_marker}"
+    # 1. Placeholder note.
     if placeholder:
-        opener += (
-            "\n_Channel match pending: broadcaster's EPG hasn't published "
+        sections.append(
+            "_Channel match pending: broadcaster's EPG hasn't published "
             "this fixture yet. Will activate on the next refresh once it "
             "appears._"
         )
-    sections.append(opener)
 
-    # 2. Headline sentence: combines tagline + spread descriptor.
+    # 2. Headline: tagline + spread descriptor.
     headline_parts = []
     if tagline:
         article = "An" if tagline[:1].lower() in "aeiou" else "A"
         headline_parts.append(f"{article} {tagline}")
     if spread is not None and spread <= 3:
-        headline_parts.append(f"toss-up (line {spread:+.1f})")
+        headline_parts.append("toss-up")
+    elif spread is not None and spread <= 6:
+        headline_parts.append("close spread")
     if headline_parts:
         sections.append(" — ".join(headline_parts) + ".")
 
-    # 3. Pre-rendered impact narratives. One per affected favorite.
+    # 3. Favorite-impact narratives. Already pre-rendered in the cache by
+    # build_impact_narratives at refresh time.
     for narrative in impact_narratives:
         sections.append(narrative)
 
-    # 4. If the favorite is in the game, call it out (impact-narrative path
-    #    skips this case).
+    # 4. Favorite is playing in this game. (Impact-narrative path is
+    # mutually exclusive — it skips the case where the favorite is one
+    # of the playing teams.)
     if favorites_matched:
         labels = ", ".join(favorites_matched)
         if len(favorites_matched) == 1:
@@ -584,10 +582,7 @@ def _build_description(
         else:
             sections.append(f"Your favorites: {labels}.")
 
-    # 5. Score breakdown one-liner.
-    sections.append(f"Score ★{score_final:.1f} — {why}.")
-
-    # 6. Source channel.
+    # 5. Source channel.
     src_name = g.get("channel_name_current")
     if src_name:
         sections.append(f"Source: {src_name}.")
@@ -613,7 +608,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from apps.epg.models import EPGSource, EPGData, ProgramData
     from django.db import transaction
 
-    from .scoring import format_channel_name, build_why_text
+    from .scoring import format_channel_name, strip_team_suffix
 
     cache = _read_cache()
     games = cache.get("games", [])
@@ -801,18 +796,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             new_name = format_channel_name(
                 g["sport_prefix"], signals, score, g["home"], g["away"], tagline=tagline,
             )
-            why = build_why_text(
-                rank_home=g.get("rank_home"),
-                rank_away=g.get("rank_away"),
-                favorites_matched=g.get("favorites_matched", []),
-                score_breakdown=g.get("score_breakdown", {}),
-                spread=g.get("spread"),
-                stakes_thresholds=g.get("stakes_thresholds_hit") or [],
-                tournament_stage=g.get("tournament_stage"),
-                impact_on_favorites=g.get("impact_on_favorites") or [],
-                season_progress=g.get("season_progress"),
-                rank_source=rank_source,
-            )
 
             start_dt = parse_iso_utc(g.get("start_time_utc"))
             if start_dt is None:
@@ -824,7 +807,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             description = _build_description(
                 g=g,
                 tagline=tagline,
-                why=why,
                 placeholder=placeholder,
             )
 
@@ -877,7 +859,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         )
                     created += 1
 
-            # 4. EPG: get-or-create EPGData + replace ProgramData
+            # 4. EPG: get-or-create EPGData + replace ProgramData. Two
+            # programs per channel:
+            #   (a) pre-game filler: now → kickoff-30min, "Up next: ..."
+            #       so the EPG always shows the description even when
+            #       looking days ahead of kickoff.
+            #   (b) game window: kickoff-30min → kickoff+4h, full title.
+            # Skip (a) if kickoff is imminent (<5 min lead time) or past.
             if not dry_run and epg_source is not None and vc is not None:
                 epg_data, _ = EPGData.objects.get_or_create(
                     epg_source=epg_source,
@@ -887,18 +875,33 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 if epg_data.name != new_name:
                     epg_data.name = new_name
                     epg_data.save(update_fields=["name"])
-                # Link the virtual channel to this EPGData
                 if vc.epg_data_id != epg_data.id:
                     vc.epg_data_id = epg_data.id
                     vc.save(update_fields=["epg_data"])
-                # Replace ProgramData for this game (delete old, insert new)
                 ProgramData.objects.filter(epg=epg_data).delete()
+
+                now = datetime.now(timezone.utc)
+                pregame_lead = (prog_start - now).total_seconds()
+                upnext_label = (
+                    f"Up next: {strip_team_suffix(g['away'])} at "
+                    f"{strip_team_suffix(g['home'])}"
+                )
+                if pregame_lead > 5 * 60:  # ≥ 5 min until kickoff window
+                    ProgramData.objects.create(
+                        epg=epg_data,
+                        start_time=now,
+                        end_time=prog_start,
+                        title=upnext_label,
+                        sub_title=g['sport_label'],
+                        description=description,
+                        tvg_id=marker,
+                    )
                 ProgramData.objects.create(
                     epg=epg_data,
                     start_time=prog_start,
                     end_time=prog_end,
                     title=new_name,
-                    sub_title=f"{g['sport_label']} — score {score.raw:.1f}/10",
+                    sub_title=g['sport_label'],
                     description=description,
                     tvg_id=marker,
                 )
