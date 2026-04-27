@@ -1,6 +1,8 @@
 """Sanity tests for the sport adapters. Network isn't called — we just check
-class-level constants are wired up correctly so a typo in the sport_prefix
-or api_base doesn't ship silently."""
+class-level constants and the shape-handling logic so a typo or refactor
+doesn't ship silently."""
+
+from datetime import datetime, timezone
 
 from dispatcharr_ranked_matchups.sources import (
     NcaafSource,
@@ -8,61 +10,245 @@ from dispatcharr_ranked_matchups.sources import (
     SoccerSource,
     SOCCER_COMPETITIONS,
 )
-from dispatcharr_ranked_matchups.sources._collegedata import CollegeDataSource
 from dispatcharr_ranked_matchups.sources.base import SportSource
 
 
-class TestCollegeDataInheritance:
-    def test_ncaaf_inherits_collegedata(self):
-        assert issubclass(NcaafSource, CollegeDataSource)
+class TestNcaafConstants:
+    def test_implements_interface(self):
         assert issubclass(NcaafSource, SportSource)
 
-    def test_ncaam_inherits_collegedata(self):
-        assert issubclass(NcaamSource, CollegeDataSource)
-        assert issubclass(NcaamSource, SportSource)
-
-
-class TestNcaafConstants:
     def test_constants(self):
         assert NcaafSource.sport_prefix == "CFB"
         assert NcaafSource.sport_label == "NCAA Football"
-        assert NcaafSource.api_base == "https://api.collegefootballdata.com"
-        assert NcaafSource.season_pivot_month == 8
+
+    def test_no_key_returns_empty(self):
+        assert NcaafSource(api_key="").fetch_upcoming() == []
+
+    def test_default_poll(self):
+        assert NcaafSource(api_key="x").poll_name == "AP Top 25"
+
+    def test_custom_poll(self):
+        assert NcaafSource(api_key="x", poll_name="Coaches Poll").poll_name == "Coaches Poll"
+
+
+class TestNcaafSeasonYear:
+    """CFBD ?year= is the season's START year (NCAAF runs Aug-Jan).
+    Pivot at month 8."""
+
+    def test_september_uses_current_year(self):
+        # Current = Sep 2026 → NCAAF 2026 season started → year=2026
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+
+        class FakeDt:
+            @staticmethod
+            def now(tz=None):
+                return datetime(2026, 9, 5, tzinfo=timezone.utc)
+
+        original = ncaaf_mod.datetime
+        ncaaf_mod.datetime = FakeDt
+        try:
+            assert NcaafSource._current_season_year() == 2026
+        finally:
+            ncaaf_mod.datetime = original
+
+    def test_january_uses_prior_year(self):
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+
+        class FakeDt:
+            @staticmethod
+            def now(tz=None):
+                return datetime(2027, 1, 5, tzinfo=timezone.utc)
+
+        original = ncaaf_mod.datetime
+        ncaaf_mod.datetime = FakeDt
+        try:
+            # Jan 2027 → still in the 2026-27 season → year=2026
+            assert NcaafSource._current_season_year() == 2026
+        finally:
+            ncaaf_mod.datetime = original
 
 
 class TestNcaamConstants:
+    def test_implements_interface(self):
+        assert issubclass(NcaamSource, SportSource)
+
     def test_constants(self):
         assert NcaamSource.sport_prefix == "CBB"
         assert NcaamSource.sport_label == "NCAA Men's Basketball"
-        assert NcaamSource.api_base == "https://api.collegebasketballdata.com"
-        assert NcaamSource.season_pivot_month == 11
-
-
-class TestCollegeDataInstantiation:
-    def test_init_without_key(self):
-        # Empty key is allowed at construction; fetch_upcoming guards.
-        s = NcaamSource(api_key="")
-        assert s.poll_name == "AP Top 25"
 
     def test_no_key_returns_empty(self):
-        s = NcaamSource(api_key="")
-        assert s.fetch_upcoming() == []
+        assert NcaamSource(api_key="").fetch_upcoming() == []
 
-    def test_custom_poll_name(self):
-        s = NcaafSource(api_key="abc", poll_name="Coaches Poll")
-        assert s.poll_name == "Coaches Poll"
 
-    def test_subclass_without_api_base_rejects(self):
-        # Catch the "forgot to set api_base" mistake at construction time
-        # rather than 400ing inside fetch_upcoming.
-        class Broken(CollegeDataSource):
-            pass
+class TestNcaamSeasonYear:
+    """CBB ?season= is the season's END year (NCAAM runs Nov-Apr).
+    Pivot at month 11. season=2025 means 2024-25 season."""
+
+    def test_january_uses_current_year(self):
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+
+        class FakeDt:
+            @staticmethod
+            def now(tz=None):
+                return datetime(2027, 1, 5, tzinfo=timezone.utc)
+
+        original = ncaam_mod.datetime
+        ncaam_mod.datetime = FakeDt
         try:
-            Broken(api_key="x")
-        except NotImplementedError:
-            pass
-        else:
-            raise AssertionError("expected NotImplementedError")
+            # Jan 2027 in the 2026-27 season → end-year = 2027
+            assert NcaamSource._current_season_year() == 2027
+        finally:
+            ncaam_mod.datetime = original
+
+    def test_november_uses_next_year(self):
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+
+        class FakeDt:
+            @staticmethod
+            def now(tz=None):
+                return datetime(2026, 11, 5, tzinfo=timezone.utc)
+
+        original = ncaam_mod.datetime
+        ncaam_mod.datetime = FakeDt
+        try:
+            # Nov 5 2026 = 2026-27 season starting → end-year = 2027
+            assert NcaamSource._current_season_year() == 2027
+        finally:
+            ncaam_mod.datetime = original
+
+    def test_offseason_uses_current_year(self):
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+
+        class FakeDt:
+            @staticmethod
+            def now(tz=None):
+                return datetime(2026, 7, 5, tzinfo=timezone.utc)
+
+        original = ncaam_mod.datetime
+        ncaam_mod.datetime = FakeDt
+        try:
+            # Jul 2026 (offseason) → returns 2026, gets last season's data,
+            # date filter drops everything since all games are in the past.
+            assert NcaamSource._current_season_year() == 2026
+        finally:
+            ncaam_mod.datetime = original
+
+
+class TestNcaamRankingsShape:
+    """CBB /rankings is a flat list. Make sure we parse the latest week's
+    AP poll out correctly without falling back to early-season weeks."""
+
+    def test_latest_week_wins(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+
+        class FakeResp:
+            status_code = 200
+            def __init__(self, payload):
+                self._p = payload
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return self._p
+
+        # Mix of week=1 and week=15 entries — we want only week 15.
+        payload = [
+            {"week": 1,  "pollType": "AP Top 25", "team": "Old #1", "ranking": 1},
+            {"week": 1,  "pollType": "AP Top 25", "team": "Old #2", "ranking": 2},
+            {"week": 15, "pollType": "AP Top 25", "team": "Latest #1", "ranking": 1},
+            {"week": 15, "pollType": "AP Top 25", "team": "Latest #2", "ranking": 2},
+            # Different poll type — should be ignored
+            {"week": 15, "pollType": "Coaches Poll", "team": "Other", "ranking": 1},
+        ]
+        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp(payload))
+
+        src = NcaamSource(api_key="x")
+        ranks = src._fetch_rankings(2026)
+        assert ranks == {"Latest #1": 1, "Latest #2": 2}
+
+    def test_empty_response_returns_none(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+
+        class FakeResp:
+            def raise_for_status(self): pass
+            def json(self): return []
+
+        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp())
+        assert NcaamSource(api_key="x")._fetch_rankings(2026) is None
+
+    def test_unknown_poll_type_returns_none(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+
+        class FakeResp:
+            def raise_for_status(self): pass
+            def json(self):
+                return [{"week": 1, "pollType": "Coaches Poll", "team": "X", "ranking": 1}]
+
+        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp())
+        # We default to AP Top 25 — Coaches Poll doesn't match.
+        assert NcaamSource(api_key="x")._fetch_rankings(2026) is None
+
+
+class TestNcaamGamesShape:
+    """CBB /games has no `week` field, uses startDateRange/endDateRange."""
+
+    def test_uses_date_range_params(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+
+        captured = {}
+
+        class FakeResp:
+            def raise_for_status(self): pass
+            def json(self): return []
+
+        def fake_get(url, headers=None, params=None, timeout=None):
+            captured["url"] = url
+            captured["params"] = params
+            return FakeResp()
+
+        monkeypatch.setattr(ncaam_mod.requests, "get", fake_get)
+
+        src = NcaamSource(api_key="x")
+        start = datetime(2025, 2, 1, tzinfo=timezone.utc)
+        end = datetime(2025, 2, 8, tzinfo=timezone.utc)
+        src._fetch_games(start, end)
+
+        # /games endpoint is hard-capped at 3000 without offset; date-range
+        # is the only correct way to query a specific window.
+        assert captured["url"].endswith("/games")
+        assert captured["params"]["startDateRange"] == "2025-02-01"
+        assert captured["params"]["endDateRange"] == "2025-02-08"
+        # Critically: we are NOT using ?season= or ?year= which would pull
+        # the first 3000 games of the season and silently miss late ones.
+        assert "season" not in captured["params"]
+        assert "year" not in captured["params"]
+
+
+class TestNcaamSpreadsShape:
+    """CBB /lines is keyed by gameId, not id. Use date-range, not week."""
+
+    def test_keyed_by_game_id(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+
+        payload = [
+            {"gameId": 100, "lines": [{"provider": "ESPN BET", "spread": 3.5}]},
+            {"gameId": 101, "lines": [{"provider": "FanDuel", "spread": -7.0}]},
+            {"gameId": 102, "lines": []},  # no lines available
+            {"gameId": 103, "lines": [{"provider": "X", "spread": None},
+                                       {"provider": "Y", "spread": 2.0}]},
+        ]
+
+        class FakeResp:
+            def raise_for_status(self): pass
+            def json(self): return payload
+
+        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp())
+
+        src = NcaamSource(api_key="x")
+        start = datetime(2025, 2, 1, tzinfo=timezone.utc)
+        end = datetime(2025, 2, 8, tzinfo=timezone.utc)
+        spreads = src._fetch_spreads(start, end)
+        # Always absolute values
+        assert spreads == {100: 3.5, 101: 7.0, 103: 2.0}
 
 
 class TestSoccerCompetitions:
@@ -78,7 +264,6 @@ class TestSoccerCompetitions:
         assert cfg.rank_cap == 20
 
     def test_ucl_does_not_use_position_as_rank(self):
-        # Knockout standings don't map to a single position.
         assert SOCCER_COMPETITIONS["ucl"].use_position_as_rank is False
 
     def test_unknown_competition_rejected(self):
@@ -88,36 +273,3 @@ class TestSoccerCompetitions:
             pass
         else:
             raise AssertionError("expected ValueError")
-
-
-class TestCollegeDataSeasonPivot:
-    """Pivot logic: if current month < pivot, we're in the prior year's season."""
-
-    def test_basketball_in_january_uses_prior_year(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import _collegedata as cd
-        from datetime import datetime as real_dt, timezone as real_tz
-
-        class FakeDateTime:
-            @staticmethod
-            def now(tz=None):
-                return real_dt(2027, 1, 15, tzinfo=real_tz.utc)
-
-        monkeypatch.setattr(cd, "datetime", FakeDateTime)
-        s = NcaamSource(api_key="x")
-        # Jan 2027 with pivot=11 → pivot not yet reached this calendar year, so
-        # we're in the 2026-27 season → "year=2026".
-        assert s._current_season_year() == 2026
-
-    def test_basketball_in_november_uses_current_year(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import _collegedata as cd
-        from datetime import datetime as real_dt, timezone as real_tz
-
-        class FakeDateTime:
-            @staticmethod
-            def now(tz=None):
-                return real_dt(2026, 11, 5, tzinfo=real_tz.utc)
-
-        monkeypatch.setattr(cd, "datetime", FakeDateTime)
-        s = NcaamSource(api_key="x")
-        # Nov 5 2026, pivot=11 → at/after pivot → 2026-27 season → "year=2026"
-        assert s._current_season_year() == 2026
