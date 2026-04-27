@@ -20,7 +20,7 @@ import re
 import time
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.matcher")
@@ -43,16 +43,6 @@ class MatchResult:
     program_title: Optional[str] = None
     method: str = "unmatched"  # 'regex_unique', 'llm', 'unmatched'
     note: str = ""
-
-
-# Tokens stripped before fuzzy team-name matching in EPG titles.
-_NOISE_RE = re.compile(
-    r"\b(university|college|state|of|the|tigers|bulldogs|wolfpack|tar\s*heels|"
-    r"hurricanes|seminoles|gators|wildcats|crimson\s*tide|jayhawks|"
-    r"longhorns|sooners|cornhuskers|nittany\s*lions|fighting\s*irish|"
-    r"vs\.?|at|@|live|college\s*football|cfb)\b",
-    re.IGNORECASE,
-)
 
 
 def _team_keywords(team_name: str) -> List[str]:

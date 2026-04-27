@@ -116,23 +116,30 @@ _FINAL_KNEE = 8.0
 def _compress_to_10(raw: float) -> float:
     """Smooth 0-10 normalization. Preserves ordering, asymptotes at 10.
 
-    raw=2  → 2.4
-    raw=4  → 4.6
-    raw=8  → 7.6
-    raw=12 → 8.8
-    raw=16 → 9.5
-    raw=24 → 9.96
+    Anchor values (knee = 8.0):
+      raw=2  → 2.45
+      raw=4  → 4.62
+      raw=8  → 7.62
+      raw=12 → 9.05
+      raw=16 → 9.64
+      raw=24 → 9.96
     """
     if raw <= 0:
         return 0.0
     return 10.0 * math.tanh(raw / _FINAL_KNEE)
 
 
+# Trailing club-tag tokens that are purely structural — stripping them yields
+# the "bare" team name. Used by the soccer adapter to fuzzy-match between
+# Football-Data ("Wrexham AFC") and Odds API ("Wrexham") naming.
+TEAM_SUFFIX_TOKENS = ("afc", "fc", "cf", "sc")
+
 # Trailing tokens that mean "same team" (typically the team-type / club suffix).
 # When these follow a favorite name, we allow the match.
-# Not exhaustive but covers EPL/EFL + most UCL teams + some general qualifiers.
+# Superset of TEAM_SUFFIX_TOKENS — adds the second-word qualifiers that don't
+# strip cleanly ("Hull City" is its own team, not a renaming of "Hull").
 TEAM_QUALIFIER_TOKENS = {
-    "fc", "afc", "cf", "sc", "f.c.", "a.f.c.",
+    *TEAM_SUFFIX_TOKENS, "f.c.", "a.f.c.",
     # English football suffixes / second-words
     "city", "united", "town", "county", "athletic", "albion", "rovers",
     "forest", "wanderers", "rangers", "palace", "hotspur", "villa",
@@ -317,13 +324,6 @@ def compute_impact_on_favorites(
     return affected
 
 
-def _score_for_display(score: GameScore) -> float:
-    """Backwards-compatible helper: returns the user-facing 0-10 score.
-    Older callers might construct a GameScore directly with `raw=...` only;
-    in that case we surface raw as the display value."""
-    return getattr(score, "final", None) or score.raw
-
-
 def format_channel_name(
     sport_prefix: str,
     signals: GameSignals,
@@ -355,7 +355,7 @@ def format_channel_name(
     if signals.favorite_match:
         parts.append("⭐")
 
-    parts.append(f"★{_score_for_display(score):.1f}")
+    parts.append(f"★{score.final:.1f}")
     head = " ".join(parts)
 
     matchup = f"{away} at {home}"

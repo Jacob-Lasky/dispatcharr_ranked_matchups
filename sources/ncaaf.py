@@ -12,13 +12,13 @@ returns []. Caller logs and skips.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 import requests
 
 from .base import GameRow, SportSource
+from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaaf")
 
@@ -63,9 +63,8 @@ class NcaafSource(SportSource):
             away = g.get("awayTeam") or g.get("away_team")
             if not home or not away:
                 continue
-            try:
-                start = datetime.fromisoformat(g["startDate"].replace("Z", "+00:00"))
-            except Exception:
+            start = parse_iso_utc(g.get("startDate"))
+            if start is None:
                 continue
             rows.append(
                 GameRow(
@@ -145,12 +144,8 @@ class NcaafSource(SportSource):
 
         upcoming: List[Dict] = []
         for g in data:
-            sd = g.get("startDate")
-            if not sd:
-                continue
-            try:
-                start = datetime.fromisoformat(sd.replace("Z", "+00:00"))
-            except Exception:
+            start = parse_iso_utc(g.get("startDate"))
+            if start is None:
                 continue
             if now <= start <= cutoff:
                 upcoming.append(g)

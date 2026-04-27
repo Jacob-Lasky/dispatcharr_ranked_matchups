@@ -16,6 +16,7 @@ __pycache__/
 *$py.class
 *.egg-info/
 .pytest_cache/
+.venv/
 
 # Editor
 .vscode/

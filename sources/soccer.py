@@ -25,6 +25,8 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 from .base import GameRow, SportSource
+from .._util import parse_iso_utc
+from ..scoring import TEAM_SUFFIX_TOKENS
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.soccer")
 
@@ -115,9 +117,8 @@ class SoccerSource(SportSource):
             away = (f.get("awayTeam") or {}).get("name")
             if not home or not away:
                 continue
-            try:
-                start = datetime.fromisoformat(f["utcDate"].replace("Z", "+00:00"))
-            except Exception:
+            start = parse_iso_utc(f.get("utcDate"))
+            if start is None:
                 continue
             rh = position_by_team.get(home)
             ra = position_by_team.get(away)
@@ -164,10 +165,7 @@ class SoccerSource(SportSource):
         played = [t.get("playedGames") for t in table if t.get("playedGames") is not None]
         if not played:
             return 0.0
-        # total matchdays = league size × 2 - 2 (round-robin home/away). Use the
-        # max of any team's played as a sanity floor; cap at 1.0.
-        from . import soccer as _self_mod  # avoid circular
-        # Compute teams in table, infer total matchdays = (n-1)*2
+        # Round-robin home/away → total_md = (n - 1) * 2 for n teams in the table.
         n = len(table)
         total_md = max(1, (n - 1) * 2)
         avg_played = sum(played) / len(played)
@@ -299,12 +297,17 @@ class SoccerSource(SportSource):
         a_lc = away.lower()
         if (h_lc, a_lc) in spread_map:
             return spread_map[(h_lc, a_lc)]
-        # Strip "FC" / "AFC" / "City" / "United" suffixes for fuzzy match
+        # Strip the structural club-tag suffixes (FC / AFC / CF / SC) so
+        # Football-Data ("Wrexham AFC") and Odds API ("Wrexham") align. Tokens
+        # are the shared TEAM_SUFFIX_TOKENS so this stays in sync with the
+        # favorite-matcher's notion of "same team after suffix strip".
         def normalize(n: str) -> str:
-            n = n.lower()
-            for s in [" afc", " fc", " cf"]:
-                if n.endswith(s):
-                    n = n[: -len(s)]
+            n = n.lower().strip()
+            for s in TEAM_SUFFIX_TOKENS:
+                tag = " " + s
+                if n.endswith(tag):
+                    n = n[: -len(tag)]
+                    break
             return n.strip()
         h_n = normalize(home)
         a_n = normalize(away)

@@ -14,8 +14,8 @@ Pipeline:
 Files:
   - cache.json:        last refresh result with per-game score breakdowns
   - cfbd_api_key:      CFBD bearer token (chmod 600)
-  - anthropic_api_key: Claude key (chmod 600). Falls back to symlinking the sports
-                       filter's key if not present.
+  - anthropic_api_key: Claude key (chmod 600). Falls back to the sports-filter
+                       plugin's anthropic_api_key file if absent.
 """
 
 from __future__ import annotations
@@ -33,7 +33,13 @@ try:
 except ImportError:  # py < 3.9 fallback (won't hit on Dispatcharr's Python 3.13)
     ZoneInfo = None  # type: ignore
 
-logger = logging.getLogger("plugins.dispatcharr_ranked_matchups")
+from ._util import parse_iso_utc, stable_hash_int
+
+# Derived from the package directory so the loader, logger, and PluginConfig
+# row all stay in sync if the directory is ever renamed.
+PLUGIN_KEY = __package__ or "dispatcharr_ranked_matchups"
+
+logger = logging.getLogger(f"plugins.{PLUGIN_KEY}")
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
@@ -98,15 +104,20 @@ def _read_key(path: str) -> str:
         return ""
 
 
-def _resolve_key(settings: Dict[str, Any], setting_id: str, fallback_path: str) -> str:
+def _resolve_key(settings: Dict[str, Any], setting_id: str, *fallback_paths: str) -> str:
     """Look up an API key. Setting value (from plugin UI) wins; falls back to
-    on-disk file (chmod 600) for users who'd rather not paste keys into the DB.
-    Returns "" if neither is present.
+    on-disk file(s) (chmod 600) in order. Returns "" if nothing is present.
+    Variadic fallbacks let the anthropic key chain through this plugin's file
+    AND the sports-filter plugin's file in one call.
     """
     val = settings.get(setting_id) or ""
     if isinstance(val, str) and val.strip():
         return val.strip()
-    return _read_key(fallback_path)
+    for path in fallback_paths:
+        v = _read_key(path)
+        if v:
+            return v
+    return ""
 
 
 def _read_cache() -> Dict[str, Any]:
@@ -256,27 +267,36 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # tiebreak, then start_time ascending. So a game today with ★7 outranks a
     # game next week with ★9.5.
     tz_local = _resolve_tz(settings.get("local_timezone", "America/Chicago"))
-    scored.sort(key=lambda x: (
-        0 if _is_today_local(x[0].start_time, tz_local) else 1,
-        -x[2].final,
-        -x[2].raw,
-        x[0].start_time,
-    ))
 
-    # 3. Cap to max_games but always include favorites
+    def _sort_key(item):
+        game, _signals, score = item
+        return (
+            0 if _is_today_local(game.start_time, tz_local) else 1,
+            -score.final,
+            -score.raw,
+            game.start_time,
+        )
+
+    scored.sort(key=_sort_key)
+
+    # 3. Cap to max_games but always include favorites. Re-sort using the same
+    # key so today-first + final + raw tiebreak survive the cap (otherwise the
+    # whole "today's games occupy lowest channel numbers" guarantee breaks
+    # whenever the cap kicks in).
     if len(scored) > max_games:
         favs = [s for s in scored if s[1].favorite_match]
         non_favs = [s for s in scored if not s[1].favorite_match]
         keep_non_favs = non_favs[: max(0, max_games - len(favs))]
-        # Re-sort the kept set by score
-        scored = sorted(favs + keep_non_favs, key=lambda x: (-x[2].raw, x[0].start_time))
+        scored = sorted(favs + keep_non_favs, key=_sort_key)
 
     # 4. EPG match each game to a Dispatcharr channel.
     # _build_epg_lookup excludes ALL our virtual channels by tvg_id prefix —
     # covers both the current target group and any orphans from a renamed group.
     epg_lookup = _build_epg_lookup()
-    api_key = _resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH) or _read_key(
-        os.path.join(os.path.dirname(PLUGIN_DIR), "dispatcharr_sports_filter", "anthropic_api_key")
+    api_key = _resolve_key(
+        settings, "anthropic_api_key",
+        ANTHROPIC_KEY_PATH,
+        os.path.join(os.path.dirname(PLUGIN_DIR), "dispatcharr_sports_filter", "anthropic_api_key"),
     )
     model = settings.get("model", "claude-haiku-4-5")
     matches = match_games_to_channels(scored, epg_lookup, api_key, model)
@@ -390,24 +410,23 @@ def _build_marker_key(game: Dict[str, Any]) -> str:
     """Stable identifier per game so reruns find existing virtual channels.
 
     Format: ranked_matchups:<sport>:<source-id-or-fallback>
+
+    The fallback hash MUST be process-stable: Python's builtin hash() is
+    salted by PYTHONHASHSEED so it changes between restarts. That would
+    cause every soccer match (no cfbd_id) to look like a different game on
+    each refresh, which spuriously deletes-and-recreates the virtual
+    channel every run. Use stable_hash_int instead.
     """
     sport = game.get("sport_prefix", "?")
     extra = game.get("extra") or {}
     cfbd_id = extra.get("cfbd_id")
     if cfbd_id:
         return f"{TVG_ID_PREFIX}{sport}:{cfbd_id}"
-    # Fallback: hash of teams + start time
+    fd_id = extra.get("fd_id")
+    if fd_id:
+        return f"{TVG_ID_PREFIX}{sport}:fd_{fd_id}"
     fallback = f"{game.get('away','')}|{game.get('home','')}|{game.get('start_time_utc','')}"
-    return f"{TVG_ID_PREFIX}{sport}:{abs(hash(fallback))}"
-
-
-def _next_virtual_channel_number(used: set) -> float:
-    """Pick the next available number in our virtual range."""
-    n = float(VIRTUAL_CHANNEL_BASE)
-    while n in used:
-        n += 1
-    used.add(n)
-    return n
+    return f"{TVG_ID_PREFIX}{sport}:{stable_hash_int(fallback)}"
 
 
 # When we need to renumber existing channels to match cache order, shift them
@@ -430,10 +449,17 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         tournament_stage=g.get("tournament_stage"),
         impact_on_favorites=g.get("impact_on_favorites") or [],
     )
+    # `score_raw` is the unbounded sum, `score` is the 0-10 compressed value.
+    # If the cache predates `score_raw`, fall back to the breakdown sum (still
+    # raw-scale) rather than to `score` (which would mix the two scales).
+    breakdown = g.get("score_breakdown") or {}
+    raw = g.get("score_raw")
+    if raw is None:
+        raw = sum(v for v in breakdown.values() if isinstance(v, (int, float)))
     score = GameScore(
-        raw=g.get("score_raw", g.get("score", 0.0)),
-        final=g.get("score", 0.0),
-        breakdown=g.get("score_breakdown", {}),
+        raw=float(raw),
+        final=float(g.get("score", 0.0)),
+        breakdown=breakdown,
         notes=g.get("score_notes", []),
     )
     return signals, score
@@ -456,7 +482,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from apps.channels.models import Channel, ChannelGroup, ChannelStream
     from apps.epg.models import EPGSource, EPGData, ProgramData
     from django.db import transaction
-    from datetime import datetime, timedelta, timezone as _tz
 
     from .scoring import format_channel_name, build_why_text
 
@@ -567,10 +592,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             channel_group=target_group, tvg_id__startswith=TVG_ID_PREFIX,
         )
     }
-    used_numbers = set(
-        Channel.objects.filter(channel_number__gte=VIRTUAL_CHANNEL_BASE)
-        .values_list("channel_number", flat=True)
-    )
 
     created = 0
     updated = 0
@@ -632,17 +653,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 g["sport_prefix"], signals, score, g["home"], g["away"], why=why,
             )
 
-            # Parse start time for EPG window
-            try:
-                start_dt = datetime.fromisoformat(g["start_time_utc"])
-            except Exception:
+            start_dt = parse_iso_utc(g.get("start_time_utc"))
+            if start_dt is None:
                 logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)
                 continue
-            if start_dt.tzinfo is None:
-                start_dt = start_dt.replace(tzinfo=_tz.utc)
-            # Pad: program shown 30min before kickoff, runs 4h
-            prog_start = start_dt - timedelta(minutes=30)
-            prog_end = start_dt + timedelta(hours=4)
+            # ProgramData window matches the EPG-lookup window so the listing
+            # surfaces the game in the same range the matcher would have found.
+            prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
+            prog_end = start_dt + timedelta(hours=EPG_POST_HOURS)
 
             # EPG description body — full transparency on why this game made the list
             score_lines = [f"  {k}: +{v}" for k, v in (g.get("score_breakdown") or {}).items()]
@@ -777,9 +795,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             f"removed from {deleted_old_groups} old group(s), {deleted_old_sources} "
             f"old EPGSource(s) deleted."
         )
+    # `placeholders` is a *subset* of (created + updated) — placeholder games
+    # go through the same upsert path as matched ones, so they're already
+    # counted there. Report as "(placeholders=N included)" to avoid the
+    # "10 created + 3 placeholders == 13?" misread.
     msg = (
-        f"{prefix}Group {group_name!r}: created={created}, updated={updated}, "
-        f"placeholders={placeholder_channels_created}, stale_deleted={deleted_stale}, "
+        f"{prefix}Group {group_name!r}: created={created}, updated={updated} "
+        f"(placeholders={placeholder_channels_created} included), "
+        f"stale_deleted={deleted_stale}, "
         f"orphan_epg_deleted={orphan_epg_deleted if 'orphan_epg_deleted' in locals() else 0}, "
         f"unmatched_skipped={skipped_unmatched}.{rename_msg} "
         f"WHY descriptions written to dummy EPG source."
@@ -920,12 +943,15 @@ def _scheduler_loop(plugin_ref):
             _scheduler_stop.wait(timeout=600)
 
 
+_SCHEDULER_LOCK_KEY = f"plugins:{PLUGIN_KEY}:scheduler:lock"
+
+
 def _try_acquire_scheduler_lock() -> bool:
     """Cross-worker mutex via Redis. ttl 30 min so a crashed run releases."""
     try:
         from core.utils import RedisClient
         r = RedisClient.get_client()
-        return bool(r.set("plugins:ranked_matchups:scheduler:lock", "1", nx=True, ex=1800))
+        return bool(r.set(_SCHEDULER_LOCK_KEY, "1", nx=True, ex=1800))
     except Exception as e:
         logger.warning("[ranked_matchups] redis lock failed (%s); proceeding without lock", e)
         return True
@@ -934,7 +960,7 @@ def _try_acquire_scheduler_lock() -> bool:
 def _release_scheduler_lock() -> None:
     try:
         from core.utils import RedisClient
-        RedisClient.get_client().delete("plugins:ranked_matchups:scheduler:lock")
+        RedisClient.get_client().delete(_SCHEDULER_LOCK_KEY)
     except Exception:
         pass
 
@@ -960,7 +986,7 @@ class Plugin:
     def get_current_settings(self) -> Dict[str, Any]:
         try:
             from apps.plugins.models import PluginConfig
-            pc = PluginConfig.objects.filter(key="dispatcharr_ranked_matchups").first()
+            pc = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
             if pc and pc.settings:
                 return dict(pc.settings)
         except Exception as e:
