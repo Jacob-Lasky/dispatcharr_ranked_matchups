@@ -270,7 +270,6 @@ ssh tower 'docker logs --since 5m Dispatcharr 2>&1 | grep ranked_matchups | tail
 - Postgres `max_connections=200` (bumped from default 100 on 2026-04-26)
 - Server local timezone: America/Chicago
 - Favorites: NC State, UNC, Wrexham, Barcelona, Real Madrid, Manchester City
-  (NOT Hull — Hull was an example of a team in playoff race, not a favorite)
 - Wants this plugin published publicly eventually — keep code clean
 
 ## Companion plugin
