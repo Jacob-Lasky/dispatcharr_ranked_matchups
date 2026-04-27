@@ -265,3 +265,52 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   about specific sports. Adding a sport is a new file in `sources/`,
   full stop. If you find yourself adding a sport-specific branch outside
   `sources/`, push it back into the adapter.
+
+## Publishing to the official Dispatcharr Plugin Repository
+
+Dispatcharr maintains a central plugin repo that auto-packages,
+versions, and distributes community plugins. Per the announcement in
+the Dispatcharr Discord plugins channel
+(https://discord.com/channels/1340492560220684331/1483922477611614208):
+
+- **Repo**: https://github.com/Dispatcharr/Plugins
+- **Listing**: https://dispatcharr.github.io/Dispatcharr-Docs/plugin-listing/
+- **Releases branch**: https://github.com/Dispatcharr/Plugins/tree/releases
+- **Contributing guide**:
+  https://github.com/Dispatcharr/Plugins/blob/main/CONTRIBUTING.md
+
+### Submission checklist
+
+1. Develop and test in this repo (the canonical upstream).
+2. Fork `Dispatcharr/Plugins` and add the plugin under
+   `plugins/dispatcharr_ranked_matchups/`.
+3. Confirm `plugin.json` has all required fields: `name`, `version`,
+   `description`, `author`, `license`, `repo_url`, `help_url`. (Already
+   present.)
+4. Open a PR against `Dispatcharr/Plugins`.
+5. Merge triggers automated packaging + versioning into the releases
+   branch — no manual release step.
+
+### Constraints worth knowing
+
+- **Open-source license required**. We ship MIT (`LICENSE`), already
+  satisfied. Submission grants Dispatcharr a license to redistribute.
+- **The Dispatcharr team can decline or remove low-quality, abandoned,
+  or otherwise unsuitable submissions** — keep code clean, respond to
+  issues, cut releases when bugs are reported.
+- **Manifests will be GPG-signed** in the near future; the bundled
+  public key lets Dispatcharr verify integrity before install.
+
+### When the upstream version bumps
+
+- Bump `version` in `plugin.json` AND `__version__` in `__init__.py`
+  (must stay in sync).
+- Tag the release in this repo (`git tag v0.2.0 && git push --tags`).
+- Open a PR against the upstream `Plugins` repo bumping the version
+  reference for our plugin.
+
+### Future: built-in plugin hub
+
+Dispatcharr is shipping an in-app plugin browser. Once that lands,
+users will install/update without leaving the app — the listing page
+and CONTRIBUTING.md are the source of truth.
