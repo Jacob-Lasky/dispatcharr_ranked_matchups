@@ -275,3 +275,142 @@ class TestBuildSourcesToggles:
         # Public-release defaults: nothing enabled until the user opts in.
         sources = plugin._build_sources({})
         assert sources == []
+
+
+class TestStreamQualityRank:
+    """Stacked streams on a virtual channel render in rank order, so UHD/4K
+    must sort before FHD which must sort before HD, etc. The helper uses
+    whitespace-padded substring matching to avoid false matches like 'CHD'
+    matching 'HD'."""
+
+    def test_uhd_beats_fhd(self, plugin):
+        assert plugin._stream_quality_rank("Sky UHD") < plugin._stream_quality_rank("Sky FHD")
+
+    def test_4k_treated_as_uhd(self, plugin):
+        assert plugin._stream_quality_rank("Astro Sports 4K") == plugin._stream_quality_rank("Astro Sports UHD")
+
+    def test_fhd_beats_hd(self, plugin):
+        assert plugin._stream_quality_rank("ESPN FHD") < plugin._stream_quality_rank("ESPN HD")
+
+    def test_hd_beats_sd(self, plugin):
+        assert plugin._stream_quality_rank("Channel HD") < plugin._stream_quality_rank("Channel SD")
+
+    def test_substring_protection(self):
+        # 'CHD' must NOT trigger HD bucket. Same for any word containing 'HD'
+        # or 'SD' as a substring without word boundaries.
+        from dispatcharr_ranked_matchups import plugin as plugin_mod
+        rank_chd = plugin_mod._stream_quality_rank("CHANNELCHD")
+        rank_explicit_hd = plugin_mod._stream_quality_rank("Sport HD")
+        assert rank_chd != rank_explicit_hd
+        assert rank_chd == plugin_mod._QUALITY_RANK_UNKNOWN
+
+    def test_unknown_sorts_between_hd_and_sd(self, plugin):
+        # No quality marker → unknown bucket. We don't want unknowns sorting
+        # last (they may actually be high-quality), so they sit between HD
+        # and SD.
+        assert plugin._stream_quality_rank("Sport HD") < plugin._stream_quality_rank("Sport")
+        assert plugin._stream_quality_rank("Sport") < plugin._stream_quality_rank("Sport SD")
+
+    def test_empty_string(self, plugin):
+        assert plugin._stream_quality_rank("") == plugin._QUALITY_RANK_UNKNOWN
+
+
+class TestStreamSortKey:
+    """Composite sort key trusts ffprobe data over name keywords. A stream
+    that the prober has confirmed is 1080p must beat one that's only
+    self-described as UHD in its name (since names lie). A stream with a
+    failed probe (0x0 resolution) must sort last regardless of name."""
+
+    def test_valid_probe_beats_name_keyword(self, plugin):
+        # Probed 720p vs name-only "Sport UHD" — probed wins.
+        probed_720 = plugin._stream_sort_key(
+            {"width": 1280, "height": 720, "resolution": "1280x720"},
+            "ESPN",
+        )
+        name_uhd = plugin._stream_sort_key({}, "Sport UHD")
+        assert probed_720 < name_uhd
+
+    def test_higher_resolution_sorts_first(self, plugin):
+        a = plugin._stream_sort_key({"width": 1920, "height": 1080}, "")
+        b = plugin._stream_sort_key({"width": 1280, "height": 720}, "")
+        assert a < b
+
+    def test_higher_bitrate_breaks_ties(self, plugin):
+        # Same height, different bitrate → higher bitrate wins.
+        a = plugin._stream_sort_key(
+            {"width": 1920, "height": 1080, "ffmpeg_output_bitrate": 8000.0}, "",
+        )
+        b = plugin._stream_sort_key(
+            {"width": 1920, "height": 1080, "ffmpeg_output_bitrate": 3000.0}, "",
+        )
+        assert a < b
+
+    def test_failed_probe_sorts_last(self, plugin):
+        # 0x0 resolution → tier 2 (last).
+        failed = plugin._stream_sort_key(
+            {"width": 0, "height": 0, "resolution": "0x0"}, "Sport UHD",
+        )
+        valid = plugin._stream_sort_key({"width": 1920, "height": 1080}, "ESPN")
+        no_probe = plugin._stream_sort_key({}, "ESPN")
+        assert failed > valid
+        assert failed > no_probe
+
+    def test_no_probe_uses_name_keyword(self, plugin):
+        # Without probe data, falls back to keyword bucket.
+        a = plugin._stream_sort_key({}, "Sport FHD")
+        b = plugin._stream_sort_key({}, "Sport HD")
+        assert a < b
+
+    def test_no_probe_unknown_keyword(self, plugin):
+        no_probe_unknown = plugin._stream_sort_key({}, "Random Channel")
+        valid = plugin._stream_sort_key({"width": 1280, "height": 720}, "")
+        # Probed beats unknown-keyword no-probe.
+        assert valid < no_probe_unknown
+
+    def test_realistic_5_stream_ordering(self, plugin):
+        # Reproduces the live ch 5906 inventory:
+        #   EPL 07ⓧ probed 720p 4698kbps
+        #   EPL01 probed 1080p 4891kbps
+        #   USA Soccer01 never probed
+        #   AU STAN 01 / 02 probed 0x0 (dead)
+        epl07 = plugin._stream_sort_key(
+            {"width": 1280, "height": 720, "ffmpeg_output_bitrate": 4698.3},
+            "EPL 07ⓧ",
+        )
+        epl01 = plugin._stream_sort_key(
+            {"width": 1920, "height": 1080, "ffmpeg_output_bitrate": 4891.1},
+            "EPL01",
+        )
+        usa = plugin._stream_sort_key({}, "USA Soccer01")
+        au_stan = plugin._stream_sort_key(
+            {"width": 0, "height": 0, "resolution": "0x0"}, "AU (STAN 01)",
+        )
+        ordering = sorted([
+            ("EPL 07ⓧ", epl07),
+            ("EPL01", epl01),
+            ("USA Soccer01", usa),
+            ("AU STAN", au_stan),
+        ], key=lambda x: x[1])
+        # EPL01 (1080p) beats EPL 07ⓧ (720p) beats unprobed beats failed.
+        assert [n for n, _ in ordering] == ["EPL01", "EPL 07ⓧ", "USA Soccer01", "AU STAN"]
+
+
+class TestEpgSourceConfig:
+    """Regression: source_type='dummy' triggers Dispatcharr's joke-filler EPG
+    overlay (Rush Hour, What's For Dinner?, etc.) on top of our real
+    ProgramData. The constants must NEVER drift back to dummy. See
+    EPGGridAPIView in apps/epg/api_views.py — it filters on
+    epg_data__epg_source__source_type='dummy' to decide which channels need
+    on-the-fly placeholder text generation."""
+
+    def test_source_type_is_not_dummy(self, plugin):
+        assert plugin.EPG_SOURCE_TYPE != "dummy"
+
+    def test_source_type_is_xmltv(self, plugin):
+        # We're producing XMLTV-equivalent program data directly via ORM.
+        assert plugin.EPG_SOURCE_TYPE == "xmltv"
+
+    def test_source_is_inactive(self, plugin):
+        # is_active=False so the EPG refresh task skips us — we have no URL
+        # to fetch, and we write ProgramData ourselves on apply.
+        assert plugin.EPG_SOURCE_IS_ACTIVE is False

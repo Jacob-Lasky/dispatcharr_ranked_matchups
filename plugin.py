@@ -69,6 +69,85 @@ DEFAULT_VIRTUAL_CHANNEL_BASE = 0
 # collide with auto-channel-sync ranges.
 _AUTO_BASE_FALLBACK = 9000
 
+# EPGSource fields. DO NOT use source_type="dummy" — Dispatcharr's
+# EPGGridAPIView treats every channel attached to a dummy source as needing
+# joke filler ("Rush Hour - X's alternative to traffic", "What's For Dinner?
+# Debate", etc.) and overlays it in the web UI on top of our real ProgramData.
+# We're producing real EPG content, so we mark the source as xmltv. is_active
+# is False so the EPG refresh task doesn't try to fetch our (None) URL.
+EPG_SOURCE_TYPE = "xmltv"
+EPG_SOURCE_IS_ACTIVE = False
+
+
+# Quality-ordering for stacked streams. Lower rank = better quality, listed
+# first. We stack multiple provider streams onto a virtual channel as
+# fallbacks, so the order matters: clients tend to try in listed order.
+_QUALITY_RANK_UHD = 0
+_QUALITY_RANK_FHD = 1
+_QUALITY_RANK_HD = 2
+_QUALITY_RANK_UNKNOWN = 3
+_QUALITY_RANK_SD = 4
+
+# Probe-data tiers for the composite sort key. Lower = better.
+_PROBE_TIER_VALID = 0      # ffprobe ran and got a real resolution
+_PROBE_TIER_NO_PROBE = 1   # ffprobe never ran for this stream
+_PROBE_TIER_FAILED = 2     # ffprobe ran but resolution came back 0x0 (likely dead)
+
+
+def _stream_quality_rank(name: str) -> int:
+    """Heuristic quality bucket from a stream/channel name. Whitespace-padded
+    so we don't mistake substrings (e.g. 'CHD' won't match 'HD'). Best (UHD/4K)
+    sorts smallest so it comes first."""
+    if not name:
+        return _QUALITY_RANK_UNKNOWN
+    n = f" {name.upper()} "
+    if " UHD " in n or " 4K " in n or "/UHD" in n or "/4K" in n:
+        return _QUALITY_RANK_UHD
+    if " FHD " in n or " 1080P " in n or " 1080 " in n:
+        return _QUALITY_RANK_FHD
+    if " HD " in n or " 720P " in n or " 720 " in n:
+        return _QUALITY_RANK_HD
+    if " SD " in n or " 480P " in n or " 360P " in n:
+        return _QUALITY_RANK_SD
+    return _QUALITY_RANK_UNKNOWN
+
+
+def _stream_sort_key(stream_stats, name):
+    """Composite sort key for a stream. Lower tuple = sorted earlier.
+
+    Tiers (most authoritative first):
+      0. Valid ffprobe data: real height ≥ 240 and width ≥ 320.
+         Sub-sort by -height (1080p before 720p) then -bitrate.
+      1. No probe data at all (Dispatcharr never crawled this stream).
+         Sub-sort by name-keyword bucket (UHD > FHD > HD > unknown > SD).
+      2. Probe ran and got 0x0 — typically a dead/broken stream. Sort last
+         even if the name claims UHD, because the probe data overrides
+         marketing.
+    """
+    stats = stream_stats or {}
+    if stats:
+        height = int(stats.get("height") or 0)
+        width = int(stats.get("width") or 0)
+        resolution = stats.get("resolution") or ""
+        # Some prober runs only populate `resolution` (e.g. '1920x1080')
+        # without separate width/height keys. Backfill from the string so
+        # those streams don't get misclassified as probe-failed.
+        if (not height or not width) and isinstance(resolution, str) and "x" in resolution:
+            try:
+                w_str, h_str = resolution.split("x", 1)
+                if not width:
+                    width = int(w_str)
+                if not height:
+                    height = int(h_str)
+            except (TypeError, ValueError):
+                pass
+        if height >= 240 and width >= 320:
+            bitrate = float(stats.get("ffmpeg_output_bitrate") or 0)
+            return (_PROBE_TIER_VALID, -height, -bitrate)
+        if height == 0 or width == 0 or resolution == "0x0":
+            return (_PROBE_TIER_FAILED, 0, 0)
+    return (_PROBE_TIER_NO_PROBE, _stream_quality_rank(name), 0)
+
 
 # ---------- timezone helpers ----------
 
@@ -347,7 +426,8 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "season_progress": signals.season_progress,
             "tournament_stage": signals.tournament_stage,
             "impact_on_favorites": signals.impact_on_favorites,
-            "channel_id": match.channel_id,
+            "channel_id": match.channel_id,           # primary, kept for backward-compat
+            "channel_ids": list(match.channel_ids),   # all matched, primary first
             "channel_name_current": match.channel_name,
             "program_title": match.program_title,
             "match_method": match.method,
@@ -384,43 +464,96 @@ def _build_epg_lookup(exclude_group_name: Optional[str] = None):
     over from a prior target_group_name. Without this, the matcher self-matches
     against our prior-run channels because their EPG titles literally contain
     the team names.
+
+    Pre-filters at the DB level: only fetches programs that are TEAM-relevant
+    (program title contains a team keyword OR program's channel has a team
+    keyword in its name). Prime-time windows can carry 4000+ programs across
+    a Dispatcharr instance — fetching all of them and filtering in Python had
+    a 2000-row hard cap that silently dropped real matches (regression
+    against the old uncapped path was ch_id=111919 'EPL 07ⓧ: ... vs Brentford
+    FC' getting omitted from the candidate list for the live game window).
     """
-    from .matcher import ChannelCandidate
+    from .matcher import ChannelCandidate, _team_keywords
     from apps.channels.models import Channel
     from apps.epg.models import ProgramData
+    from django.db.models import Q
 
     def lookup(game) -> List[ChannelCandidate]:
         window_start = game.start_time - timedelta(minutes=EPG_PRE_MIN)
         window_end = game.start_time + timedelta(hours=EPG_POST_HOURS)
-        progs = (
+
+        all_kws = _team_keywords(game.home) + _team_keywords(game.away)
+        if not all_kws:
+            return []
+
+        # Path A: programs in window whose TITLE mentions any team keyword.
+        title_q = Q()
+        for kw in all_kws:
+            title_q |= Q(title__icontains=kw)
+        title_progs = list(
             ProgramData.objects
             .filter(start_time__lt=window_end, end_time__gt=window_start)
-            .select_related("epg")
-            .only("id", "title", "start_time", "end_time", "epg_id", "epg__tvg_id")[:2000]
+            .filter(title_q)
+            .only("id", "title", "start_time", "end_time", "epg_id")
         )
-        if not progs:
-            return []
-        epg_ids = {p.epg_id for p in progs if p.epg_id}
-        if not epg_ids:
-            return []
-        # Exclude all our virtual channels (current target + any orphans)
-        chan_qs = Channel.objects.filter(epg_data_id__in=epg_ids).exclude(
-            tvg_id__startswith=TVG_ID_PREFIX,
+
+        # Path B: channels whose NAME mentions any team keyword. Include
+        # them even without EPG entries in window — provider channels often
+        # advertise the match in the channel NAME but have no program data
+        # (e.g. 'AU (STAN 01) | Manchester United v Brentford ...'). Tier-1
+        # strict still discriminates by 'both teams in channel name', so
+        # noise channels with only one team mentioned won't pass through.
+        name_q = Q()
+        for kw in all_kws:
+            name_q |= Q(name__icontains=kw)
+        name_match_chans = list(
+            Channel.objects
+            .filter(name_q)
+            .exclude(tvg_id__startswith=TVG_ID_PREFIX)
+            .only("id", "name", "epg_data_id")
         )
-        chans = chan_qs.only("id", "name", "epg_data_id")
-        chan_by_epg = {}
-        for c in chans:
-            chan_by_epg.setdefault(c.epg_data_id, []).append(c)
+
+        # Merge: programs (Path A) → resolved channels, plus name-matched
+        # channels (Path B) which contribute one synthetic candidate each
+        # using the game's broadcast slot when they have no real EPG entry.
         out: List[ChannelCandidate] = []
-        for p in progs:
-            for c in chan_by_epg.get(p.epg_id, []):
-                out.append(ChannelCandidate(
-                    channel_id=c.id,
-                    channel_name=c.name,
-                    program_title=p.title or "",
-                    program_start=p.start_time,
-                    program_end=p.end_time,
-                ))
+        seen_channel_ids = set()
+
+        if title_progs:
+            epg_ids = {p.epg_id for p in title_progs if p.epg_id}
+            chan_qs = (
+                Channel.objects
+                .filter(epg_data_id__in=epg_ids)
+                .exclude(tvg_id__startswith=TVG_ID_PREFIX)
+                .only("id", "name", "epg_data_id")
+            )
+            chan_by_epg = {}
+            for c in chan_qs:
+                chan_by_epg.setdefault(c.epg_data_id, []).append(c)
+            for p in title_progs:
+                for c in chan_by_epg.get(p.epg_id, []):
+                    if c.id in seen_channel_ids:
+                        continue
+                    seen_channel_ids.add(c.id)
+                    out.append(ChannelCandidate(
+                        channel_id=c.id,
+                        channel_name=c.name,
+                        program_title=p.title or "",
+                        program_start=p.start_time,
+                        program_end=p.end_time,
+                    ))
+
+        for c in name_match_chans:
+            if c.id in seen_channel_ids:
+                continue
+            seen_channel_ids.add(c.id)
+            out.append(ChannelCandidate(
+                channel_id=c.id,
+                channel_name=c.name,
+                program_title="",  # no real program; tier-1 matches via channel name
+                program_start=game.start_time,
+                program_end=window_end,
+            ))
         return out
 
     return lookup
@@ -638,13 +771,16 @@ def _build_description(
 
 
 def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
-    """Clone-into-group + dummy-EPG strategy:
+    """Clone-into-group + EPG-overlay strategy:
 
     For each scored+matched game we:
       1. Get-or-create a virtual Channel in 'Top Matchups' ChannelGroup,
          linked to the same streams as the source channel (so playback works).
-      2. Get-or-create an EPGData entry on our dummy 'Top Matchups' EPGSource,
-         and replace its ProgramData for the game's airtime with title=matchup
+      2. Get-or-create an EPGData entry on our 'Top Matchups' EPGSource
+         (source_type=xmltv, is_active=False — we write programs directly,
+         and we mustn't be source_type=dummy or Dispatcharr's UI overlays
+         joke-filler descriptions on top of ours).
+         Then replace its ProgramData for the game's airtime with title=matchup
          and description=WHY breakdown.
 
     The description shows up natively in TiviMate/Plex/Jellyfin guides.
@@ -687,7 +823,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "status": "ok",
                 "message": (
-                    f"[dry] Would create ChannelGroup {group_name!r} + dummy EPGSource and clone "
+                    f"[dry] Would create ChannelGroup {group_name!r} + EPGSource and clone "
                     f"{sum(1 for g in games if g.get('channel_id'))} matched games into it. "
                     f"Would also clean up {len(foreign_owned_groups)} stale group(s) and "
                     f"{len(foreign_epg_sources)} stale EPGSource(s) from prior target names."
@@ -742,21 +878,40 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     epg_source=old_src, tvg_id__startswith=TVG_ID_PREFIX,
                 ).delete()
 
-    # 2. Ensure our dummy EPGSource (same pattern as event_channel_managarr's)
+    # 2. Ensure our EPGSource exists and is configured to sit out of
+    # Dispatcharr's joke-filler path (see EPG_SOURCE_TYPE comment above).
     epg_source = EPGSource.objects.filter(name=group_name).first()
     if not epg_source:
         if dry_run:
-            logger.info("[ranked_matchups] [dry] would create EPGSource name=%r type=dummy",
-                        group_name)
+            logger.info("[ranked_matchups] [dry] would create EPGSource name=%r type=%s",
+                        group_name, EPG_SOURCE_TYPE)
         else:
             epg_source = EPGSource.objects.create(
                 name=group_name,
-                source_type="dummy",
-                is_active=True,
+                source_type=EPG_SOURCE_TYPE,
+                is_active=EPG_SOURCE_IS_ACTIVE,
                 refresh_interval=0,
             )
             logger.info("[ranked_matchups] created EPGSource id=%s name=%r",
                         epg_source.id, group_name)
+    else:
+        # Existing source: upgrade away from any prior source_type="dummy" /
+        # is_active=True we may have written. Idempotent for already-correct rows.
+        upgrade_fields = []
+        if epg_source.source_type != EPG_SOURCE_TYPE:
+            upgrade_fields.append("source_type")
+            epg_source.source_type = EPG_SOURCE_TYPE
+        if epg_source.is_active != EPG_SOURCE_IS_ACTIVE:
+            upgrade_fields.append("is_active")
+            epg_source.is_active = EPG_SOURCE_IS_ACTIVE
+        if upgrade_fields:
+            if dry_run:
+                logger.info("[ranked_matchups] [dry] would upgrade EPGSource id=%s fields=%s",
+                            epg_source.id, upgrade_fields)
+            else:
+                epg_source.save(update_fields=upgrade_fields)
+                logger.info("[ranked_matchups] upgraded EPGSource id=%s fields=%s",
+                            epg_source.id, upgrade_fields)
 
     # 3. Existing virtual channels we'll update or delete
     existing_virtuals = {
@@ -803,8 +958,21 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 ch.save(update_fields=["channel_number"])
 
         for cache_idx, g in enumerate(games):
-            source_id = g.get("channel_id")
-            source = Channel.objects.filter(id=source_id).first() if source_id else None
+            # channel_ids is the full list of matched provider channels (e.g.
+            # multiple regional/quality variants of the same fixture). Falls
+            # back to legacy single channel_id for cache entries written by
+            # an older plugin version. Primary (first) drives the channel
+            # logo and EPG context.
+            source_ids = list(g.get("channel_ids") or [])
+            if not source_ids:
+                primary_id = g.get("channel_id")
+                if primary_id:
+                    source_ids = [primary_id]
+            sources = list(Channel.objects.filter(id__in=source_ids))
+            # Preserve the matcher-given order (channel_ids is primary-first).
+            sources_by_id = {c.id: c for c in sources}
+            sources = [sources_by_id[sid] for sid in source_ids if sid in sources_by_id]
+            source = sources[0] if sources else None
 
             placeholder = False
             if not source:
@@ -857,10 +1025,23 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 placeholder=placeholder,
             )
 
-            source_streams = (
-                list(source.streams.all().values_list("id", flat=True))
-                if source else []
-            )
+            # Gather streams from EVERY matched source channel and rank by
+            # composite quality key: valid ffprobe data (height/bitrate)
+            # ranks first, then name-keyword fallback, then probe-failed
+            # streams last. Stable secondary sort by source-channel order
+            # so equal-quality streams preserve the matcher's primary-first
+            # ordering.
+            stream_pool = []  # list of (quality_key, src_order, stream_id)
+            seen_stream_ids = set()
+            for src_order, src in enumerate(sources):
+                for s in src.streams.all().only("id", "name", "stream_stats"):
+                    if s.id in seen_stream_ids:
+                        continue
+                    seen_stream_ids.add(s.id)
+                    key = _stream_sort_key(s.stream_stats, s.name or src.name or "")
+                    stream_pool.append((key, src_order, s.id))
+            stream_pool.sort()
+            source_streams = [sid for _, _, sid in stream_pool]
             existing = existing_virtuals.get(marker)
 
             if existing:
@@ -878,8 +1059,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 if changed and not dry_run:
                     existing.save(update_fields=["name", "logo", "channel_number"])
                 if not dry_run:
-                    current = set(existing.streams.values_list("id", flat=True))
-                    if current != set(source_streams):
+                    # Compare by ORDERED list, not set — when our sort key
+                    # changes (e.g. probe-aware quality re-ranks an existing
+                    # set of streams) we need to rewrite the ChannelStream
+                    # rows to flip their order, even if the membership is
+                    # unchanged.
+                    current_ordered = list(
+                        ChannelStream.objects
+                        .filter(channel=existing)
+                        .order_by("order")
+                        .values_list("stream_id", flat=True)
+                    )
+                    if current_ordered != source_streams:
                         ChannelStream.objects.filter(channel=existing).delete()
                         for order, sid in enumerate(source_streams):
                             ChannelStream.objects.create(
@@ -936,6 +1127,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 upnext_title = f"Up next: {new_name}"
                 if len(upnext_title) > 255:
                     upnext_title = upnext_title[:252] + "..."
+                # Live-game title gets a LIVE NOW: prefix. Safe to bake in
+                # statically because this ProgramData only shows during
+                # [prog_start, prog_end], and during that window the game is
+                # by definition in progress (kickoff already happened).
+                live_title = f"LIVE NOW: {new_name}"
+                if len(live_title) > 255:
+                    live_title = live_title[:252] + "..."
                 # Sub-title is the condensed informative one-liner: tagline,
                 # matchday, toss-up. Replaces the previous "English Premier
                 # League" sport-label which carried no information beyond
@@ -955,7 +1153,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     epg=epg_data,
                     start_time=prog_start,
                     end_time=prog_end,
-                    title=new_name,
+                    title=live_title,
                     sub_title=subtitle,
                     description=description,
                     tvg_id=marker,
@@ -1008,7 +1206,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         f"stale_deleted={deleted_stale}, "
         f"orphan_epg_deleted={orphan_epg_deleted if 'orphan_epg_deleted' in locals() else 0}, "
         f"unmatched_skipped={skipped_unmatched}.{rename_msg} "
-        f"WHY descriptions written to dummy EPG source."
+        f"WHY descriptions written to EPG source."
     )
     return {"status": "ok", "message": msg}
 

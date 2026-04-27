@@ -32,3 +32,22 @@ def stable_hash_int(s: str) -> int:
     uniqueness and is identical across processes / restarts."""
     digest = hashlib.md5(s.encode("utf-8")).hexdigest()
     return int(digest[:16], 16)
+
+
+# Soccer-style trailing club tags. football-data.org canonical names end in
+# 'FC' / 'AFC' (e.g. 'Brentford FC', 'Wrexham AFC') but provider channel and
+# program titles usually drop the tag. Both scoring.format_channel_name and
+# matcher._team_keywords need to know these to match against shortened forms.
+TEAM_SUFFIX_TOKENS = ("afc", "fc", "cf", "sc")
+
+# Common second-word soccer suffixes that look distinctive but aren't —
+# 'United' alone false-matches Manchester/West Ham/Newcastle/Leeds/Sheffield;
+# 'City' alone false-matches Manchester/Leicester/Hull/Cardiff/Swansea/etc.
+# matcher._team_keywords excludes these from the last-word fallback so
+# 'Manchester United' never gets reduced to 'United' as a match key (which
+# would collide with channels like 'Brentford v West Ham United').
+GENERIC_TEAM_SECOND_WORDS = (
+    "united", "city", "town", "county", "athletic", "albion", "rovers",
+    "forest", "wanderers", "rangers", "palace", "hotspur", "villa",
+    "wednesday", "real",
+)

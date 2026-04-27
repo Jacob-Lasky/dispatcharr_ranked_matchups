@@ -23,7 +23,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS
+
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.matcher")
+
+# Last-word tokens we never use as a standalone keyword fallback. 'state' /
+# 'college' / 'university' are college-football generic; the soccer
+# second-words ('united', 'city', etc.) collide across many EPL/EFL clubs.
+_GENERIC_LAST_WORDS = frozenset(
+    {"state", "college", "university"} | set(GENERIC_TEAM_SECOND_WORDS)
+)
 
 
 @dataclass
@@ -38,29 +47,52 @@ class ChannelCandidate:
 @dataclass
 class MatchResult:
     game_index: int           # index back into the scored games list
-    channel_id: Optional[int] = None
+    channel_id: Optional[int] = None       # primary (first) match
     channel_name: Optional[str] = None
     program_title: Optional[str] = None
-    method: str = "unmatched"  # 'regex_unique', 'llm', 'unmatched'
+    # All matched channels for this game, primary first. Allows the caller
+    # to stack multiple provider variants (different qualities/regions) onto
+    # the virtual channel as fallback streams. Empty list means no match.
+    channel_ids: List[int] = None  # type: ignore[assignment]
+    # 'regex_strict' (channel name had both teams), 'regex_unique' (program
+    # title regex matched exactly one non-preview), 'llm' (Claude picked from
+    # multiple), 'fallback_first' (no API key, used first candidate),
+    # 'unmatched'.
+    method: str = "unmatched"
     note: str = ""
+
+    def __post_init__(self):
+        if self.channel_ids is None:
+            self.channel_ids = []
 
 
 def _team_keywords(team_name: str) -> List[str]:
     """Build keyword variants for a team name to use in EPG title regex pre-filter.
 
-    Returns ordered list of progressively-relaxed keywords.
+    Returns ordered list of progressively-relaxed keywords. Always deduped.
+    Drops the last-word fallback for generic-suffix names so 'Manchester
+    United' never reduces to just 'United' (which would false-match
+    'Brentford v West Ham United').
     """
     name = team_name.strip()
     keywords = [name]
-    # last word (often distinctive: "Penn State" → "State", "Ohio State" → "State"
-    # is too generic; we'll handle that in matching by requiring BOTH teams' keywords)
     parts = name.split()
-    if len(parts) > 1 and parts[-1].lower() not in ("state", "college", "university"):
+
+    # Strip trailing club tag for soccer-style names so 'Brentford FC' also
+    # matches 'Brentford' in a channel/program title.
+    if len(parts) >= 2 and parts[-1].lower() in TEAM_SUFFIX_TOKENS:
+        stripped = " ".join(parts[:-1])
+        keywords.append(stripped)
+        # Re-derive parts so subsequent rules see the canonical form.
+        parts = stripped.split()
+
+    if len(parts) > 1 and parts[-1].lower() not in _GENERIC_LAST_WORDS:
         keywords.append(parts[-1])
     if len(parts) >= 2:
-        # First two words
+        # First two words (only meaningful for 3+ word names; for 2-word names
+        # this duplicates the full name and gets deduped below).
         keywords.append(" ".join(parts[:2]))
-    return keywords
+    return list(dict.fromkeys(keywords))
 
 
 def _regex_filter(
@@ -79,6 +111,67 @@ def _regex_filter(
         if a_hit and b_hit:
             out.append(c)
     return out
+
+
+def _regex_filter_channel_name(
+    candidates: List[ChannelCandidate],
+    team_a: str,
+    team_b: str,
+) -> List[ChannelCandidate]:
+    """Stricter filter: channels whose CHANNEL NAME contains both teams.
+
+    This is how we identify true match-broadcast channels (e.g.
+    'EPL01: Manchester United 20:00 Brentford 27/04') versus team-branded
+    home channels (e.g. 'Manchester United') that happen to carry a
+    'Next Game: ...' preview EPG entry naming both teams. The team-branded
+    channels are NEVER the live broadcast and must not be matched.
+
+    Providers typically carry the same fixture across multiple branded
+    channels (US/AU/EU regional variants, different bitrates), all of which
+    name both teams in the channel name. Returning the full set lets the
+    caller stack them as fallback streams on the virtual channel.
+    """
+    a_kws = _team_keywords(team_a)
+    b_kws = _team_keywords(team_b)
+    out = []
+    for c in candidates:
+        name = (c.channel_name or "").lower()
+        a_hit = any(kw.lower() in name for kw in a_kws)
+        b_hit = any(kw.lower() in name for kw in b_kws)
+        if a_hit and b_hit:
+            out.append(c)
+    return out
+
+
+# Keywords that mark a program as a preview/highlight wrapper rather than the
+# live broadcast. Team-branded home channels frequently emit "Next Game:"
+# preview cards in their EPG that name both teams, which would otherwise pass
+# the program-title regex filter and get picked by the LLM.
+_PREVIEW_TITLE_PATTERNS = (
+    "next game:",
+    "coming up:",
+    "coming up next",
+    "preview:",
+    "pregame ",
+    "pre-game ",
+    "post-game",
+    "postgame",
+    "highlights:",
+    "highlights ",
+)
+
+
+def _is_preview_title(program_title: str) -> bool:
+    if not program_title:
+        return False
+    t = program_title.lower()
+    return any(pat in t for pat in _PREVIEW_TITLE_PATTERNS)
+
+
+def _strip_preview_titles(
+    candidates: List[ChannelCandidate],
+) -> List[ChannelCandidate]:
+    return [c for c in candidates if not _is_preview_title(c.program_title)]
 
 
 def _post_claude(
@@ -171,18 +264,49 @@ def match_games_to_channels(
         if not candidates:
             results[i].note = "no EPG candidates in time window"
             continue
-        filtered = _regex_filter(candidates, game.home, game.away)
+
+        # Tier 1 (strongest signal): channels whose NAME contains both teams.
+        # These are dedicated match channels — typically multiple regional /
+        # quality variants of the same fixture. Stack all of them.
+        strict = _regex_filter_channel_name(candidates, game.home, game.away)
+        if strict:
+            primary = strict[0]
+            results[i].channel_id = primary.channel_id
+            results[i].channel_name = primary.channel_name
+            results[i].program_title = primary.program_title
+            # De-dupe channel_ids while preserving order (a single channel
+            # can have multiple ProgramData rows that pass the filter).
+            seen_ids = set()
+            for c in strict:
+                if c.channel_id not in seen_ids:
+                    results[i].channel_ids.append(c.channel_id)
+                    seen_ids.add(c.channel_id)
+            results[i].method = "regex_strict"
+            continue
+
+        # Tier 2: program-title regex, with previews ('Next Game:', 'Preview:',
+        # 'Pre-game ...') stripped — those mark team-branded home channels
+        # that surface upcoming-game EPG cards but don't broadcast the match.
+        filtered = _strip_preview_titles(
+            _regex_filter(candidates, game.home, game.away)
+        )
         if len(filtered) == 1:
             c = filtered[0]
             results[i].channel_id = c.channel_id
             results[i].channel_name = c.channel_name
             results[i].program_title = c.program_title
+            results[i].channel_ids = [c.channel_id]
             results[i].method = "regex_unique"
         elif len(filtered) == 0:
-            # Try LLM with a wider net (all candidates in the time window).
-            ambiguous.append((i, game, candidates[:30]))
+            # Tier 3: LLM with a wider net (all non-preview candidates in
+            # the time window). Candidates are already pre-filtered upstream
+            # by epg_lookup to only programs whose title or channel name
+            # mentions a team keyword, so the count is naturally small.
+            wider = _strip_preview_titles(candidates)
+            if wider:
+                ambiguous.append((i, game, wider))
         else:
-            # Multiple regex matches — Claude resolves.
+            # Multiple regex matches survived preview stripping — Claude resolves.
             ambiguous.append((i, game, filtered))
 
     if ambiguous and api_key:
@@ -223,6 +347,7 @@ def match_games_to_channels(
             results[idx].channel_id = chosen.channel_id
             results[idx].channel_name = chosen.channel_name
             results[idx].program_title = chosen.program_title
+            results[idx].channel_ids = [chosen.channel_id]
             results[idx].method = "llm"
     elif ambiguous:
         # No API key — best-effort: pick first candidate to surface SOMETHING.
@@ -232,6 +357,7 @@ def match_games_to_channels(
                 results[idx].channel_id = c.channel_id
                 results[idx].channel_name = c.channel_name
                 results[idx].program_title = c.program_title
+                results[idx].channel_ids = [c.channel_id]
                 results[idx].method = "fallback_first"
                 results[idx].note = "no api key; first candidate"
 

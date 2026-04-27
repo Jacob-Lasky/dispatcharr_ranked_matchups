@@ -23,6 +23,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+# Trailing club-tag tokens (FC/AFC/etc) and generic second-words (United/City/
+# etc) live in _util so matcher.py can use them without importing scoring.
+from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS
+
 # Sentinel rank for unranked teams. Picked so that "unranked vs unranked" sums
 # to a clearly worst value but doesn't dominate finite scoring.
 UNRANKED = 26
@@ -138,24 +142,15 @@ def _compress_to_10(raw: float) -> float:
     return 10.0 * math.tanh(raw / _FINAL_KNEE)
 
 
-# Trailing club-tag tokens that are purely structural — stripping them yields
-# the "bare" team name. Used by the soccer adapter to fuzzy-match between
-# Football-Data ("Wrexham AFC") and Odds API ("Wrexham") naming.
-TEAM_SUFFIX_TOKENS = ("afc", "fc", "cf", "sc")
-
 # Trailing tokens that mean "same team" (typically the team-type / club suffix).
-# When these follow a favorite name, we allow the match.
-# Superset of TEAM_SUFFIX_TOKENS — adds the second-word qualifiers that don't
-# strip cleanly ("Hull City" is its own team, not a renaming of "Hull").
+# When these follow a favorite name, we allow the match. Superset of the
+# matcher's GENERIC_TEAM_SECOND_WORDS — adds the dotted club-tag variants and
+# a few extras that show up in compound club names ("Brighton & Hove Albion").
 TEAM_QUALIFIER_TOKENS = {
     *TEAM_SUFFIX_TOKENS, "f.c.", "a.f.c.",
-    # English football suffixes / second-words
-    "city", "united", "town", "county", "athletic", "albion", "rovers",
-    "forest", "wanderers", "rangers", "palace", "hotspur", "villa",
-    "wednesday", "hove", "end", "north", "olympic", "olympique", "real",
-    "&",
-    # Common stadium/branding tokens
-    "stadium",
+    *GENERIC_TEAM_SECOND_WORDS,
+    "hove", "end", "north", "olympic", "olympique",
+    "&", "stadium",
 }
 
 
