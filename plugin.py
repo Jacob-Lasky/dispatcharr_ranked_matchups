@@ -517,6 +517,39 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
     return signals, score
 
 
+def _spread_descriptor(spread: Optional[float]) -> Optional[str]:
+    """Map a betting spread to a human-readable closeness label."""
+    if spread is None:
+        return None
+    if spread <= 3:
+        return "toss-up"
+    if spread <= 6:
+        return "close spread"
+    return None
+
+
+def _build_subtitle(g: Dict[str, Any], tagline: str) -> str:
+    """Compressed one-line summary for the EPG sub-title field. Three pieces
+    joined by ' · ': tagline, matchday/week, spread descriptor. Falls back
+    to the sport label when nothing else fires."""
+    parts: List[str] = []
+    if tagline:
+        parts.append(tagline)
+    extra = g.get("extra") or {}
+    matchday = extra.get("matchday")
+    matchdays_total = extra.get("matchdays_total")
+    if matchday and matchdays_total:
+        parts.append(f"matchday {matchday}/{matchdays_total}")
+    elif extra.get("week"):  # NCAAF / NCAAM week-based sports
+        parts.append(f"week {extra['week']}")
+    spread_desc = _spread_descriptor(g.get("spread"))
+    if spread_desc:
+        parts.append(spread_desc)
+    if not parts:
+        return g.get("sport_label", "")
+    return " · ".join(parts)
+
+
 def _build_description(
     g: Dict[str, Any],
     tagline: str,
@@ -527,17 +560,18 @@ def _build_description(
     Layout (each block separated by a blank line):
       1. Placeholder note (only if EPG hasn't matched a source yet)
       2. Headline: tagline + spread descriptor ("A title race — toss-up.")
-      3. Favorite-impact narratives (rooting framing, both deltas)
-      4. "Favorite is your team" line if the favorite is playing this game
-      5. Source channel line (only if matched)
+      3. Matchday + league boundary summary (where applicable)
+      4. Favorite-impact narratives (rooting framing, both deltas)
+      5. "Favorite is your team" line if the favorite is playing this game
+      6. Source channel line (only if matched)
 
     Deliberately dropped: kickoff time (already shown by EPG client time
     blocks), score breakdown (already in channel name as ★X.X), spread's
     raw line value (just say "toss-up"), late-season multiplier
     annotation (uniform across all current league games — adds no signal).
     """
+    from .scoring import LEAGUE_CONTEXTS
     extra = g.get("extra") or {}
-    spread = g.get("spread")
     favorites_matched = g.get("favorites_matched") or []
     impact_narratives = (
         extra.get("impact_narratives")
@@ -560,21 +594,34 @@ def _build_description(
     if tagline:
         article = "An" if tagline[:1].lower() in "aeiou" else "A"
         headline_parts.append(f"{article} {tagline}")
-    if spread is not None and spread <= 3:
-        headline_parts.append("toss-up")
-    elif spread is not None and spread <= 6:
-        headline_parts.append("close spread")
+    spread_desc = _spread_descriptor(g.get("spread"))
+    if spread_desc:
+        headline_parts.append(spread_desc)
     if headline_parts:
         sections.append(" — ".join(headline_parts) + ".")
 
-    # 3. Favorite-impact narratives. Already pre-rendered in the cache by
-    # build_impact_narratives at refresh time.
+    # 3. Matchday line + league boundary reminder. Both are league-based
+    # ("why is this a race"). Matchday tells you where in the season we
+    # are; boundary_summary explains what positions get what.
+    fd_code = extra.get("fd_competition_code")
+    league_ctx = LEAGUE_CONTEXTS.get(fd_code) if fd_code else None
+    matchday = extra.get("matchday")
+    matchdays_total = extra.get("matchdays_total") or (
+        league_ctx.matchdays_total if league_ctx else None
+    )
+    matchday_line_parts: List[str] = []
+    if matchday and matchdays_total:
+        matchday_line_parts.append(f"Matchday {matchday} of {matchdays_total}.")
+    if league_ctx and league_ctx.boundary_summary:
+        matchday_line_parts.append(league_ctx.boundary_summary + ".")
+    if matchday_line_parts:
+        sections.append(" ".join(matchday_line_parts))
+
+    # 4. Favorite-impact narratives.
     for narrative in impact_narratives:
         sections.append(narrative)
 
-    # 4. Favorite is playing in this game. (Impact-narrative path is
-    # mutually exclusive — it skips the case where the favorite is one
-    # of the playing teams.)
+    # 5. Favorite is playing in this game.
     if favorites_matched:
         labels = ", ".join(favorites_matched)
         if len(favorites_matched) == 1:
@@ -582,7 +629,7 @@ def _build_description(
         else:
             sections.append(f"Your favorites: {labels}.")
 
-    # 5. Source channel.
+    # 6. Source channel.
     src_name = g.get("channel_name_current")
     if src_name:
         sections.append(f"Source: {src_name}.")
@@ -882,17 +929,25 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
                 now = datetime.now(timezone.utc)
                 pregame_lead = (prog_start - now).total_seconds()
-                upnext_label = (
-                    f"Up next: {strip_team_suffix(g['away'])} at "
-                    f"{strip_team_suffix(g['home'])}"
-                )
+                # Pre-game title carries the full channel name so the EPG
+                # entry communicates the same at-a-glance summary as the
+                # channel itself. "Up next: " prefix differentiates from the
+                # live game program block.
+                upnext_title = f"Up next: {new_name}"
+                if len(upnext_title) > 255:
+                    upnext_title = upnext_title[:252] + "..."
+                # Sub-title is the condensed informative one-liner: tagline,
+                # matchday, toss-up. Replaces the previous "English Premier
+                # League" sport-label which carried no information beyond
+                # what was already in the channel-name prefix.
+                subtitle = _build_subtitle(g, tagline)
                 if pregame_lead > 5 * 60:  # ≥ 5 min until kickoff window
                     ProgramData.objects.create(
                         epg=epg_data,
                         start_time=now,
                         end_time=prog_start,
-                        title=upnext_label,
-                        sub_title=g['sport_label'],
+                        title=upnext_title,
+                        sub_title=subtitle,
                         description=description,
                         tvg_id=marker,
                     )
@@ -901,7 +956,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     start_time=prog_start,
                     end_time=prog_end,
                     title=new_name,
-                    sub_title=g['sport_label'],
+                    sub_title=subtitle,
                     description=description,
                     tvg_id=marker,
                 )

@@ -43,6 +43,8 @@ class SoccerCompetitionConfig:
     use_position_as_rank: bool = True     # League position → rank slot
     rank_cap: int = 25  # Treat positions > rank_cap as unranked (None) so they
                         # don't dominate the rank-pair signal
+    total_matchdays: int = 0  # Season length for "Matchday X of Y" display.
+                              # 0 = N/A (knockouts).
 
 
 # Built-in catalog. Extend as the user opts into more leagues.
@@ -53,6 +55,7 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         sport_label="English Premier League",
         odds_sport_key="soccer_epl",
         rank_cap=20,
+        total_matchdays=38,
     ),
     "championship": SoccerCompetitionConfig(
         fd_code="ELC",
@@ -60,6 +63,7 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         sport_label="EFL Championship",
         odds_sport_key="soccer_efl_champ",
         rank_cap=24,
+        total_matchdays=46,
     ),
     "ucl": SoccerCompetitionConfig(
         fd_code="CL",
@@ -67,6 +71,7 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         sport_label="UEFA Champions League",
         odds_sport_key="soccer_uefa_champs_league",
         use_position_as_rank=False,  # group/knockout standings don't map cleanly
+        # total_matchdays=0 — knockout, not a fixed-length season
     ),
 }
 
@@ -137,6 +142,7 @@ class SoccerSource(SportSource):
                 extra={
                     "fd_id": f.get("id"),
                     "matchday": f.get("matchday"),
+                    "matchdays_total": self.config.total_matchdays or None,
                     "stage": f.get("stage"),
                     "status": f.get("status"),
                     "raw_position_home": rh,

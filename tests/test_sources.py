@@ -262,6 +262,18 @@ class TestSoccerCompetitions:
         assert cfg.sport_prefix == "EPL"
         assert cfg.use_position_as_rank is True
         assert cfg.rank_cap == 20
+        # 20 teams × 2 (home + away) - 2 (each side plays itself once) = 38
+        assert cfg.total_matchdays == 38
+
+    def test_championship_total_matchdays(self):
+        # 24 teams → 46 matchdays. Drives the "Matchday X of 46" line in
+        # descriptions; off-by-one would silently mislead users.
+        assert SOCCER_COMPETITIONS["championship"].total_matchdays == 46
+
+    def test_ucl_no_total_matchdays(self):
+        # Knockout/group format has no fixed-length season; total stays 0
+        # so the matchday line is suppressed for UCL fixtures.
+        assert SOCCER_COMPETITIONS["ucl"].total_matchdays == 0
 
     def test_ucl_does_not_use_position_as_rank(self):
         assert SOCCER_COMPETITIONS["ucl"].use_position_as_rank is False

@@ -513,3 +513,14 @@ class TestLeagueContexts:
         assert 2 in positions       # auto-promotion
         assert 6 in positions       # playoff
         assert 21 in positions      # relegation
+
+    def test_pl_has_boundary_summary(self):
+        # The boundary_summary is rendered in the EPG description, so a
+        # missing/typo'd value would silently degrade UX.
+        assert "UCL" in LEAGUE_CONTEXTS["PL"].boundary_summary
+        assert "relegation" in LEAGUE_CONTEXTS["PL"].boundary_summary
+
+    def test_elc_has_boundary_summary(self):
+        assert "auto-promotion" in LEAGUE_CONTEXTS["ELC"].boundary_summary
+        assert "playoff" in LEAGUE_CONTEXTS["ELC"].boundary_summary
+        assert "relegation" in LEAGUE_CONTEXTS["ELC"].boundary_summary

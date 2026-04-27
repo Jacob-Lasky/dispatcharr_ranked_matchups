@@ -35,24 +35,27 @@ COMPETITIONS["la_liga"] = SoccerCompetitionConfig(
     sport_label="La Liga",                 # appears in EPG description
     odds_sport_key="soccer_spain_la_liga", # optional, enables spread signal
     rank_cap=20,                           # league size (matters for the WHY)
+    total_matchdays=38,                    # round-robin home + away
 )
 ```
 
 ### Step 2: register the stakes thresholds (`scoring.py`)
 
 Add a `LEAGUE_CONTEXTS` entry. This is what powers the "title race",
-"playoff race", "relegation battle" labels:
+"playoff race", "relegation battle" labels and the EPG description's
+"why is this a race?" reminder:
 
 ```python
 LEAGUE_CONTEXTS["PD"] = LeagueContext(
     code="PD",
-    matchdays_total=38,  # round-robin home + away → (n_teams - 1) × 2
+    matchdays_total=38,  # same value as SoccerCompetitionConfig.total_matchdays
     thresholds=[
         (1,  "title"),
         (4,  "UCL"),
         (7,  "Europa"),
         (18, "relegation"),
     ],
+    boundary_summary="Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation",
 )
 ```
 
@@ -60,6 +63,10 @@ The `thresholds` list is `(position, label)` tuples. The plugin's stakes
 signal fires for any team within ±2 positions of any threshold. Late in
 the season the contribution doubles, so a relegation-line game in
 matchday 36 outranks a relegation-line game in matchday 5.
+
+`boundary_summary` is rendered verbatim in the EPG description as a
+one-line reminder of what each standings position translates to. Use
+the `→` arrow notation and `·` separator to match the existing style.
 
 ### Step 3: add the user-facing toggle (`plugin.json`)
 

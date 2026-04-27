@@ -73,21 +73,30 @@ class GameSignals:
 
 @dataclass
 class LeagueContext:
-    """Per-league data the plugin uses to compute stakes signals."""
+    """Per-league data the plugin uses to compute stakes signals.
+
+    `boundary_summary` is a one-line human description of how
+    standings translate to outcomes (UCL spots, relegation, playoff
+    qualification). Rendered in the EPG description as a reminder of
+    WHY a position-based race matters.
+    """
     code: str                    # 'PL', 'ELC', 'CL', etc.
     matchdays_total: int         # season length (38 for EPL, 46 for ELC, etc.)
     thresholds: List[Tuple[int, str]] = field(default_factory=list)
     # List of (position, label) — e.g., [(1,'title'),(4,'UCL'),(17,'relegation')]
+    boundary_summary: str = ""   # e.g. "Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation"
 
 
 LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     "PL": LeagueContext(
         code="PL", matchdays_total=38,
         thresholds=[(1, "title"), (4, "UCL"), (7, "Europa/Conference"), (17, "relegation")],
+        boundary_summary="Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation",
     ),
     "ELC": LeagueContext(
         code="ELC", matchdays_total=46,
         thresholds=[(2, "auto-promotion"), (6, "playoff"), (21, "relegation")],
+        boundary_summary="Top 2 → auto-promotion · 3-6 → promotion playoff · bottom 3 → relegation",
     ),
     # UCL handled via tournament_stage signal, not league position
 }
