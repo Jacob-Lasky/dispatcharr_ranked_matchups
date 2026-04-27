@@ -98,6 +98,17 @@ def _read_key(path: str) -> str:
         return ""
 
 
+def _resolve_key(settings: Dict[str, Any], setting_id: str, fallback_path: str) -> str:
+    """Look up an API key. Setting value (from plugin UI) wins; falls back to
+    on-disk file (chmod 600) for users who'd rather not paste keys into the DB.
+    Returns "" if neither is present.
+    """
+    val = settings.get(setting_id) or ""
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return _read_key(fallback_path)
+
+
 def _read_cache() -> Dict[str, Any]:
     try:
         with open(CACHE_PATH, "r", encoding="utf-8") as f:
@@ -138,11 +149,11 @@ def _build_weights(settings: Dict[str, Any]):
 def _build_sources(settings: Dict[str, Any]):
     from .sources import NcaafSource, SoccerSource
     sources = []
+    cfbd_key = _resolve_key(settings, "cfbd_api_key", CFBD_KEY_PATH)
+    fd_key = _resolve_key(settings, "football_data_api_key", FD_KEY_PATH)
+    odds_key = _resolve_key(settings, "odds_api_key", ODDS_KEY_PATH)
     if settings.get("enable_ncaaf", True):
-        cfbd_key = _read_key(CFBD_KEY_PATH)
         sources.append(NcaafSource(api_key=cfbd_key))
-    fd_key = _read_key(FD_KEY_PATH)
-    odds_key = _read_key(ODDS_KEY_PATH)
     if settings.get("enable_epl", False) and fd_key:
         sources.append(SoccerSource("epl", fd_api_key=fd_key, odds_api_key=odds_key))
     if settings.get("enable_championship", False) and fd_key:
@@ -264,7 +275,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # _build_epg_lookup excludes ALL our virtual channels by tvg_id prefix —
     # covers both the current target group and any orphans from a renamed group.
     epg_lookup = _build_epg_lookup()
-    api_key = _read_key(ANTHROPIC_KEY_PATH) or _read_key(
+    api_key = _resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH) or _read_key(
         os.path.join(os.path.dirname(PLUGIN_DIR), "dispatcharr_sports_filter", "anthropic_api_key")
     )
     model = settings.get("model", "claude-haiku-4-5")

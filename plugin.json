@@ -52,7 +52,39 @@
       "id": "_section_keys",
       "type": "info",
       "label": "API Keys",
-      "description": "Plugin reads keys from <plugin_dir>/cfbd_api_key and <plugin_dir>/anthropic_api_key (chmod 600)."
+      "description": "Paste your keys below (masked in the UI). Settings take precedence; if blank, the plugin falls back to <plugin_dir>/<keyname>_api_key on disk (chmod 600)."
+    },
+    {
+      "id": "cfbd_api_key",
+      "type": "string",
+      "input_type": "password",
+      "label": "CollegeFootballData.com API key",
+      "default": "",
+      "help_text": "Free at collegefootballdata.com/key. Same key works for collegebasketballdata.com (Phase 2)."
+    },
+    {
+      "id": "football_data_api_key",
+      "type": "string",
+      "input_type": "password",
+      "label": "Football-Data.org API key",
+      "default": "",
+      "help_text": "Free at football-data.org/client/register. Covers EPL, EFL Championship, UCL, and 9 others on the free tier."
+    },
+    {
+      "id": "odds_api_key",
+      "type": "string",
+      "input_type": "password",
+      "label": "The Odds API key (optional)",
+      "default": "",
+      "help_text": "Free at the-odds-api.com (500 req/mo). Powers the close-game / spread signal across all enabled sports. If blank, that signal is skipped."
+    },
+    {
+      "id": "anthropic_api_key",
+      "type": "string",
+      "input_type": "password",
+      "label": "Anthropic API key (optional)",
+      "default": "",
+      "help_text": "Used for EPG-to-channel matching when regex pre-filter is ambiguous, and for the LLM narrative signal (off by default). Only required if either of those is engaged."
     },
     {
       "id": "model",
@@ -64,7 +96,7 @@
         {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
         {"value": "claude-opus-4-7", "label": "Claude Opus 4.7"}
       ],
-      "help_text": "Used for EPG-to-channel matching when regex pre-filter is ambiguous."
+      "help_text": "Model used for ambiguous EPG matching and (if enabled) narrative scoring."
     },
     {
       "id": "_section_filter",
