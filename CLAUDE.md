@@ -207,6 +207,31 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
 - Both file-based and settings-based API keys (settings preferred, masked UI)
 - Description includes kickoff time + WHY breakdown
 
+**Known limitations & open work:** tracked as GitHub issues so they don't
+drift. Quick map (most user-facing first):
+
+- [#4 — Matcher v2: team aliases, time-window tightening, non-English
+  titles](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/4)
+- [#7 — Season-aware score normalization (★10 inflation +
+  early-season flatness)](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/7)
+- [#8 — Rivalry signal (`weight_rivalry` is wired but no source populates
+  `is_rivalry`)](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/8)
+- [#9 — Curation presets (high-curation / high-coverage instead of 9
+  weight knobs)](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/9)
+- [#10 — Standings deltas in EPG description (data is in
+  `cache.json`, just not surfaced)](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/10)
+- [#1 — Per-channel matchup JPG as virtual channel
+  logo](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/1)
+- [#3 — Label catch-up matchdays (40-of-46 rendering on a backlog
+  fixture)](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/3)
+
+Sport adapters not yet implemented:
+
+- [#5 — NCAA Baseball
+  adapter](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/5)
+- [#6 — NCAA Soccer
+  adapter](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/6)
+
 ## Design principles worth respecting
 
 - **Transparency over magic**: the score breakdown is always shown, in
