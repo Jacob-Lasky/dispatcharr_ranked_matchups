@@ -285,3 +285,130 @@ class TestSoccerCompetitions:
             pass
         else:
             raise AssertionError("expected ValueError")
+
+
+class TestPreviousSeasonStartYear:
+    """B.2 / TUNING_REPORT finding #2: the seed-year derivation must pin
+    to the right calendar pivot. Soccer seasons run Aug-May. Pre-August →
+    current season started last year → previous-season is two years ago.
+    August onward → current season started this year → previous is last
+    year. Off-by-one would query the wrong FD.org season."""
+
+    def test_august_returns_previous_year(self):
+        from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
+        # Aug 2026 → 2026-27 season is current → previous is 2025-26 (start=2025).
+        assert soccer_mod._previous_season_start_year(
+            datetime(2026, 8, 15, tzinfo=timezone.utc)
+        ) == 2025
+
+    def test_january_returns_two_years_ago(self):
+        from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
+        # Jan 2026 → still in 2025-26 season → previous is 2024-25 (start=2024).
+        assert soccer_mod._previous_season_start_year(
+            datetime(2026, 1, 15, tzinfo=timezone.utc)
+        ) == 2024
+
+    def test_may_end_of_season_returns_two_years_ago(self):
+        from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
+        # May 2026 → 2025-26 season ending → previous is still 2024-25.
+        assert soccer_mod._previous_season_start_year(
+            datetime(2026, 5, 24, tzinfo=timezone.utc)
+        ) == 2024
+
+    def test_july_returns_two_years_ago(self):
+        from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
+        # July (preseason) → current season hasn't started yet → previous
+        # is the one that just ENDED (2024-25), not the upcoming one.
+        assert soccer_mod._previous_season_start_year(
+            datetime(2026, 7, 31, tzinfo=timezone.utc)
+        ) == 2024
+
+
+class TestSoccerSeedFromPreviousSeason:
+    """B.2: when current standings show too few games played, the seed
+    function swaps to the previous season's final table so MD1-3 isn't
+    the all-tied cold-start mess."""
+
+    def _make_source(self):
+        return SoccerSource("epl", fd_api_key="fake")
+
+    def test_seed_skipped_when_median_played_at_threshold(self):
+        # Median played >= threshold → keep current. Single FD.org call.
+        src = self._make_source()
+        current_table = [
+            {"name": f"Team {i}", "position": i, "points": 50 - i, "playedGames": 5}
+            for i in range(1, 21)
+        ]
+        calls = []
+        def fake_fetch(season=None):
+            calls.append(season)
+            return ({r["name"]: r["position"] for r in current_table}, current_table)
+        src._fetch_standings = fake_fetch
+        by_team, table = src._fetch_standings_with_seed()
+        assert table == current_table
+        assert calls == [None]  # only the current-season call; no seed fetch
+
+    def test_seed_used_when_median_played_below_threshold(self):
+        # Median played < threshold → fetch previous and use it.
+        src = self._make_source()
+        current_table = [
+            {"name": f"Team {i}", "position": i, "points": 0, "playedGames": 0}
+            for i in range(1, 21)
+        ]
+        seed_table = [
+            {"name": f"Veteran {i}", "position": i, "points": 90 - i * 4, "playedGames": 38}
+            for i in range(1, 21)
+        ]
+        calls = []
+        def fake_fetch(season=None):
+            calls.append(season)
+            if season is None:
+                return ({r["name"]: r["position"] for r in current_table}, current_table)
+            return ({r["name"]: r["position"] for r in seed_table}, seed_table)
+        src._fetch_standings = fake_fetch
+        by_team, table = src._fetch_standings_with_seed()
+        assert len(calls) == 2
+        assert calls[0] is None
+        assert calls[1] is not None  # previous-season year passed
+        # Returned table came from the seed, not the current sparse table.
+        assert all(r["name"].startswith("Veteran") for r in table)
+        # playedGames reset to 0 — the seed represents a fresh-season prior,
+        # not last year's residual (matches_remaining must be the full new season).
+        assert all(r["playedGames"] == 0 for r in table)
+        # Positions preserved from the seed table.
+        assert table[0]["position"] == 1
+        # Points carried through so impact-narrative can render "X pts ahead".
+        assert table[0]["points"] == seed_table[0]["points"]
+
+    def test_seed_falls_through_when_previous_season_empty(self):
+        # If the previous-season fetch returns nothing (API failure or
+        # this is a brand-new competition with no history), keep the
+        # current sparse table rather than producing empty rows.
+        src = self._make_source()
+        current_table = [
+            {"name": "Team 1", "position": 1, "points": 0, "playedGames": 0},
+        ]
+        def fake_fetch(season=None):
+            if season is None:
+                return ({"Team 1": 1}, current_table)
+            return ({}, [])
+        src._fetch_standings = fake_fetch
+        by_team, table = src._fetch_standings_with_seed()
+        assert table == current_table
+
+    def test_seed_skipped_when_current_table_empty(self):
+        # Empty current table (median computes to 0) — by the rules above,
+        # 0 < threshold → seed should fire. Verify it does.
+        src = self._make_source()
+        seed_table = [
+            {"name": "Veteran 1", "position": 1, "points": 90, "playedGames": 38},
+        ]
+        def fake_fetch(season=None):
+            if season is None:
+                return ({}, [])
+            return ({"Veteran 1": 1}, seed_table)
+        src._fetch_standings = fake_fetch
+        by_team, table = src._fetch_standings_with_seed()
+        # Note: empty current → median is 0 (the `or [0]` fallback inside),
+        # so the seed fires and we get the previous-season table.
+        assert any(r["name"] == "Veteran 1" for r in table)

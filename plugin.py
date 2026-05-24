@@ -349,28 +349,29 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         comp_code = extra.get("fd_competition_code")
         league_ctx = LEAGUE_CONTEXTS.get(comp_code) if comp_code else None
 
+        # Build standings-points-by-position from the source's table so
+        # compute_team_stakes can drop thresholds the team is locked out
+        # of (Blackburn-Leicester MD46 type dead rubbers). Knockout comps
+        # with no standings_table → empty dict → gating disabled, function
+        # falls back to pure proximity.
+        standings_table = extra.get("standings_table") or []
+        standings_pts_by_pos: Dict[int, int] = {
+            e["position"]: int(e["points"])
+            for e in standings_table
+            if e.get("position") is not None and e.get("points") is not None
+        }
+        played_by_pos: Dict[int, int] = {
+            e["position"]: int(e["played"])
+            for e in standings_table
+            if e.get("position") is not None and e.get("played") is not None
+        }
+        mds_total = league_ctx.matchdays_total if league_ctx else 0
+
         # Stakes per team (proximity to a meaningful league threshold,
         # weighted by consequence, gated by mathematical reachability).
         stakes_a, hits_a = (0.0, [])
         stakes_b, hits_b = (0.0, [])
         if league_ctx:
-            # Build standings-points-by-position from the source's table
-            # so compute_team_stakes can drop thresholds the team is
-            # locked out of (Blackburn-Leicester MD46 type dead rubbers).
-            # Knockout comps with no standings_table → empty dict →
-            # gating disabled, function falls back to pure proximity.
-            standings_table = extra.get("standings_table") or []
-            standings_pts_by_pos: Dict[int, int] = {
-                e["position"]: int(e["points"])
-                for e in standings_table
-                if e.get("position") is not None and e.get("points") is not None
-            }
-            played_by_pos: Dict[int, int] = {
-                e["position"]: int(e["played"])
-                for e in standings_table
-                if e.get("position") is not None and e.get("played") is not None
-            }
-            mds_total = league_ctx.matchdays_total or 0
             home_played = played_by_pos.get(g.rank_home or -1, 0)
             away_played = played_by_pos.get(g.rank_away or -1, 0)
             home_pts = standings_pts_by_pos.get(g.rank_home or -1, 0)
@@ -393,9 +394,8 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
 
         # Impact on favorites: non-favorite games that move a favorite's table.
         # Build the rich version (with points) for narrative rendering, plus
-        # the plain version (name+position) for the score signal.
+        # the plain version (name+position+own_stakes) for the score signal.
         favs_with_standings: List[Dict[str, Any]] = []
-        standings_table = extra.get("standings_table") or []
         if standings_table:
             for fav in favorites:
                 fav_lc = fav.lower()

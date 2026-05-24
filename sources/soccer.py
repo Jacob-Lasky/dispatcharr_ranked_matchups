@@ -33,6 +33,33 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.soccer")
 FD_BASE = "https://api.football-data.org/v4"
 ODDS_BASE = "https://api.the-odds-api.com/v4"
 
+# When the current season's median playedGames falls below this number,
+# replace the current standings with the previous season's final table as
+# a "position prior." Without the seed, MD1-3 produces tied scores (no
+# rank_pair signal, no stakes signal) and the algorithm has nothing but
+# favorites + spread to work with. See TUNING_REPORT.md finding #2.
+# DO NOT raise this above ~5 — by MD5 enough matches have played that
+# the current-season position is a stronger signal than the prior year's.
+# Public (no underscore) because the sim harness imports it to mirror
+# this exact cutoff in its standings_as_of replay; a divergence would
+# desync the sim's MD1-3 output from production.
+SEED_PLAYED_THRESHOLD = 5
+
+
+def _previous_season_start_year(now: Optional[datetime] = None) -> int:
+    """Return the FD.org season-start year for the season BEFORE the
+    current one. FD.org's `season` parameter is the start-year:
+    `season=2024` is the 2024-25 season.
+
+    Soccer seasons start in August. Aug-Dec → current season started
+    this calendar year; Jan-Jul → current season started last year.
+    Previous-season is whichever current-minus-one resolves to.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    current_start = now.year if now.month >= 8 else now.year - 1
+    return current_start - 1
+
 
 @dataclass
 class SoccerCompetitionConfig:
@@ -102,7 +129,7 @@ class SoccerSource(SportSource):
             return []
 
         position_by_team, table_full = (
-            self._fetch_standings() if self.config.use_position_as_rank else ({}, [])
+            self._fetch_standings_with_seed() if self.config.use_position_as_rank else ({}, [])
         )
         fixtures = self._fetch_fixtures(days_ahead)
         if not fixtures:
@@ -114,7 +141,7 @@ class SoccerSource(SportSource):
         spread_by_pair = self._fetch_spreads()
 
         # Compute season_progress from standings: avg of (playedGames / total).
-        season_progress = self._estimate_season_progress(table_full, fixtures)
+        season_progress = self._estimate_season_progress(table_full)
 
         rows: List[GameRow] = []
         for f in fixtures:
@@ -172,7 +199,7 @@ class SoccerSource(SportSource):
         return rows
 
     @staticmethod
-    def _estimate_season_progress(table: List[Dict], fixtures: List[Dict]) -> float:
+    def _estimate_season_progress(table: List[Dict]) -> float:
         """Approximate fraction of season completed.
 
         Uses average of (playedGames / total_matchdays). For knockout comps with
@@ -181,7 +208,9 @@ class SoccerSource(SportSource):
         """
         if not table:
             return 0.0
-        played = [t.get("playedGames") for t in table if t.get("playedGames") is not None]
+        played: List[int] = [
+            int(t["playedGames"]) for t in table if t.get("playedGames") is not None
+        ]
         if not played:
             return 0.0
         # Round-robin home/away → total_md = (n - 1) * 2 for n teams in the table.
@@ -192,19 +221,25 @@ class SoccerSource(SportSource):
 
     # ---------- standings ----------
 
-    def _fetch_standings(self) -> Tuple[Dict[str, int], List[Dict]]:
-        """Returns (team_name → position, full_table_with_extra_fields)."""
+    def _fetch_standings(self, season: Optional[int] = None) -> Tuple[Dict[str, int], List[Dict]]:
+        """Returns (team_name → position, full_table_with_extra_fields).
+
+        `season` is the start-year (e.g. 2024 = 2024-25 season). None →
+        FD.org's default (current season). Pass an explicit year to fetch
+        a historical final table (B.2 cold-start seed).
+        """
         try:
             r = requests.get(
                 f"{FD_BASE}/competitions/{self.config.fd_code}/standings",
                 headers={"X-Auth-Token": self.fd_api_key},
+                params={"season": season} if season is not None else None,
                 timeout=15,
             )
             r.raise_for_status()
             data = r.json()
         except Exception as e:
-            logger.error("[soccer:%s] standings fetch failed: %s",
-                         self.config.fd_code, e)
+            logger.error("[soccer:%s] standings fetch failed (season=%s): %s",
+                         self.config.fd_code, season, e)
             return {}, []
         standings = data.get("standings") or []
         if not standings:
@@ -212,18 +247,62 @@ class SoccerSource(SportSource):
         table = standings[0].get("table", [])
         out: Dict[str, int] = {}
         rich: List[Dict] = []
-        for r in table:
-            team = (r.get("team") or {}).get("name")
-            pos = r.get("position")
+        for row in table:
+            team = (row.get("team") or {}).get("name")
+            pos = row.get("position")
             if team and pos:
                 out[team] = pos
                 rich.append({
                     "name": team,
                     "position": pos,
-                    "points": r.get("points"),
-                    "playedGames": r.get("playedGames"),
+                    "points": row.get("points"),
+                    "playedGames": row.get("playedGames"),
                 })
         return out, rich
+
+    def _fetch_standings_with_seed(self) -> Tuple[Dict[str, int], List[Dict]]:
+        """Current season's table if it has matchdays played; otherwise
+        replace it entirely with the previous season's final standings as
+        a "position prior." Produces sane MD1-3 ranks instead of the
+        all-3.99-tie cold start. See TUNING_REPORT.md finding #2.
+
+        Trade-off: teams promoted INTO this league won't appear in the
+        seed (they were in a different competition last year) and stay
+        unranked through the seed window. That's correct — they have no
+        positional signal anyway. The 17 carry-over teams get realistic
+        ranks; the 3 promoted teams fall back to the existing
+        one-ranked-one-unranked rank-pair path.
+        """
+        current_by_team, current_table = self._fetch_standings()
+        plays = [e.get("playedGames") or 0 for e in current_table]
+        median_played = sorted(plays)[len(plays) // 2] if plays else 0
+        if median_played >= SEED_PLAYED_THRESHOLD:
+            return current_by_team, current_table
+        prev_year = _previous_season_start_year()
+        seed_by_team, seed_table = self._fetch_standings(season=prev_year)
+        if not seed_table:
+            return current_by_team, current_table
+        # Reset playedGames to 0 — the seed represents a fresh season's
+        # prior, not last year's residual. compute_team_stakes uses
+        # matches_remaining = total_md - playedGames; we want the full
+        # new season ahead, so no race is mathematically locked at MD0.
+        # Keep last year's points so the impact-narrative still renders
+        # "1 spot and 3 points away" with realistic numbers — gating
+        # math is dominated by matches_remaining*3 at this stage anyway.
+        fresh_table = [
+            {
+                "name": r["name"],
+                "position": r["position"],
+                "points": r.get("points"),
+                "playedGames": 0,
+            }
+            for r in seed_table
+        ]
+        logger.info(
+            "[soccer:%s] using previous-season seed (median_played=%d, season=%s)",
+            self.config.fd_code, median_played, prev_year,
+        )
+        return seed_by_team, fresh_table
 
     # ---------- fixtures ----------
 
