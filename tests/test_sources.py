@@ -324,6 +324,85 @@ class TestPreviousSeasonStartYear:
         ) == 2024
 
 
+class TestH2HToCloseness:
+    """B.3: bookmaker h2h odds → devigged probabilities → coinflip-ness.
+    The math is small; the tests pin it so a future refactor (e.g.,
+    different sportsbook market format) doesn't silently change the
+    close-game signal magnitude across the user's whole season."""
+
+    def _call(self, *args, **kwargs):
+        from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
+        return soccer_mod._h2h_to_closeness(*args, **kwargs)
+
+    def test_perfect_coinflip(self):
+        # 3-way: home 2.0, draw 4.0, away 2.0 (vig-free).
+        # raw_implied: 0.5, 0.25, 0.5 → total 1.25.
+        # devigged: 0.4, 0.2, 0.4 → 2 * min(0.4, 0.4) = 0.8.
+        outcomes = [
+            {"name": "home_team", "price": 2.0},
+            {"name": "draw",      "price": 4.0},
+            {"name": "away_team", "price": 2.0},
+        ]
+        c = self._call(outcomes, "home_team", "away_team")
+        assert c is not None
+        assert abs(c - 0.8) < 0.01
+
+    def test_blowout_low_closeness(self):
+        # 1.20 / 6.0 / 12.0: heavy home favorite.
+        # raw: 0.833, 0.167, 0.083 → total 1.083.
+        # devigged: 0.769, 0.154, 0.077 → 2 * min = 0.154.
+        outcomes = [
+            {"name": "home_team", "price": 1.20},
+            {"name": "draw",      "price": 6.0},
+            {"name": "away_team", "price": 12.0},
+        ]
+        c = self._call(outcomes, "home_team", "away_team")
+        assert c is not None
+        assert c < 0.20
+
+    def test_two_way_market_no_draw(self):
+        # NCAAF / NCAAM h2h is 2-way (no draw). Same math.
+        # 1.91 / 1.91 → raw 0.524, 0.524 → total 1.047.
+        # devigged 0.5, 0.5 → 2 * min = 1.0 (true coinflip).
+        outcomes = [
+            {"name": "ohio_state", "price": 1.91},
+            {"name": "penn_state", "price": 1.91},
+        ]
+        c = self._call(outcomes, "ohio_state", "penn_state")
+        assert c is not None
+        assert abs(c - 1.0) < 0.01
+
+    def test_missing_home_returns_none(self):
+        # If the bookmaker doesn't list the home team's outcome, we
+        # can't compute closeness — return None instead of guessing.
+        outcomes = [
+            {"name": "draw",      "price": 4.0},
+            {"name": "away_team", "price": 2.0},
+        ]
+        c = self._call(outcomes, "home_team", "away_team")
+        assert c is None
+
+    def test_invalid_price_skipped(self):
+        # A 1.0 or non-numeric price is malformed; skipping it leaves
+        # one outcome valid → home_team's data missing → None.
+        outcomes = [
+            {"name": "home_team", "price": 1.0},
+            {"name": "away_team", "price": 2.0},
+        ]
+        c = self._call(outcomes, "home_team", "away_team")
+        assert c is None
+
+    def test_clamps_to_unit_interval(self):
+        # Defensive: a degenerate input shouldn't push closeness outside [0, 1].
+        outcomes = [
+            {"name": "home_team", "price": 1.01},
+            {"name": "away_team", "price": 100.0},
+        ]
+        c = self._call(outcomes, "home_team", "away_team")
+        assert c is not None
+        assert 0.0 <= c <= 1.0
+
+
 class TestSoccerSeedFromPreviousSeason:
     """B.2: when current standings show too few games played, the seed
     function swaps to the previous season's final table so MD1-3 isn't

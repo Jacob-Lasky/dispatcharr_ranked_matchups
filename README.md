@@ -11,11 +11,11 @@ you can tune:
 | Signal | Fires when | Default weight |
 |---|---|---|
 | `rank_pair` | Both teams ranked / one ranked | 1.0 |
-| `favorite` | One of YOUR favorite teams is playing | 4.0 (flat) |
-| `close_game` | Tight betting spread (smaller = tighter) | 0.5 |
-| `stakes` | Either team near a meaningful league cutoff (playoff, relegation, title, UCL) — multiplied 1.5–2× late in the season | 2.0 |
+| `favorite` | One of YOUR favorite teams is playing | 6.0 (flat) |
+| `close_game` | Coinflip-ness in [0, 1] — soccer uses devigged h2h moneylines, NCAAF/NCAAM normalize point spread | 3.0 |
+| `stakes` | Either team near a meaningful league cutoff (playoff, relegation, title, UCL), proximity × consequence weight, gated by mathematical reachability; 1.5–2× late-season multiplier | 0.5 |
 | `tournament_stage` | Knockout cup game (R16, QF, SF, F) | 1.5 |
-| `impact_on_favorite` | Non-favorite game whose outcome shifts a favorite's table position | 1.0 |
+| `impact_on_favorite` | Non-favorite game whose outcome shifts a favorite's table position; inherits the favorite's own stakes magnitude scaled by proximity | 1.0 |
 | `rivalry` | Known rivalry game (rivalry DB pending) | 2.0 (flat) |
 | `narrative` | LLM-judged narrative bonus (off by default) | 0.0 |
 
@@ -198,13 +198,13 @@ Every game's per-signal breakdown is in `cache.json`:
   "score_raw": 28.3,
   "score_breakdown": {
     "rank_pair": 7.92,
-    "close_game": 3.38,
-    "stakes": 16.0,
-    "impact_on_favorite": 1.0
+    "close_game": 2.89,
+    "stakes": 4.0,
+    "impact_on_favorite": 5.0
   },
   "score_notes": [
     "both ranked: #3 vs #9 (sum=12)",
-    "betting spread: +0.5 pts",
+    "implied coinflip-ness: 0.96",
     "standings stakes: thresholds=['title', 'UCL'], season_progress=98%, late_mult=2.0x",
     "affects favorite: Manchester City FC"
   ]

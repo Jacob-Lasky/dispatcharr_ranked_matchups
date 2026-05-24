@@ -90,7 +90,7 @@ class TestMatchFavorites:
 class TestSuffixTokens:
     def test_suffix_tokens_subset_of_qualifier_tokens(self):
         # The strip-set must be a subset of the qualifier set; otherwise
-        # soccer's _lookup_spread can strip a suffix that the favorite-matcher
+        # soccer's _lookup_odds can strip a suffix that the favorite-matcher
         # would have kept and trusted as a real second word.
         for tok in TEAM_SUFFIX_TOKENS:
             assert tok in TEAM_QUALIFIER_TOKENS, f"{tok!r} drifted"
@@ -557,6 +557,88 @@ class TestScoreGameImpactInheritance:
         assert len(impact_notes) == 1
         assert "Tottenham Hotspur FC" in impact_notes[0]
         assert "(" not in impact_notes[0]  # no raw tuple repr
+
+
+class TestEffectiveCloseness:
+    """B.3: the score_game helper that unifies the closeness (B.3 soccer
+    path) and spread (NCAAF/NCAAM legacy path) signals into a single
+    [0, 1] coinflip-ness measure."""
+
+    def test_closeness_preferred_when_present(self):
+        from dispatcharr_ranked_matchups.scoring import _effective_closeness
+        # closeness=0.85 takes precedence over a contradicting spread.
+        assert _effective_closeness(0.85, 10.0) == 0.85
+
+    def test_closeness_clamped_to_one(self):
+        from dispatcharr_ranked_matchups.scoring import _effective_closeness
+        # Defensive: a bookmaker oddity producing closeness > 1 must clamp.
+        assert _effective_closeness(1.5, None) == 1.0
+
+    def test_closeness_clamped_to_zero(self):
+        from dispatcharr_ranked_matchups.scoring import _effective_closeness
+        assert _effective_closeness(-0.2, None) == 0.0
+
+    def test_spread_fallback_when_closeness_none(self):
+        from dispatcharr_ranked_matchups.scoring import _effective_closeness
+        # spread=0 (perfect coinflip) → closeness 1.0; spread=14 → 0.0.
+        assert _effective_closeness(None, 0.0) == 1.0
+        assert _effective_closeness(None, 14.0) == 0.0
+        # spread=7 (NFL "strong favorite") → 0.5.
+        assert _effective_closeness(None, 7.0) == 0.5
+
+    def test_negative_spread_returns_none(self):
+        from dispatcharr_ranked_matchups.scoring import _effective_closeness
+        # A negative spread is upstream-malformed; treat as no signal.
+        assert _effective_closeness(None, -1.0) is None
+
+    def test_both_none_returns_none(self):
+        from dispatcharr_ranked_matchups.scoring import _effective_closeness
+        assert _effective_closeness(None, None) is None
+
+
+class TestScoreGameCloseness:
+    """B.3: the close_game contribution from the closeness signal."""
+
+    def test_closeness_one_gives_full_weight(self):
+        # Perfect coinflip → closeness*weight = 1 * 3.0 = 3.0 raw.
+        sig = GameSignals(closeness=1.0)
+        s = score_game(sig, Weights())
+        assert s.breakdown["close_game"] == 3.0
+
+    def test_closeness_zero_silent(self):
+        # Blowout → 0 contribution → not in breakdown (silent signal).
+        sig = GameSignals(closeness=0.0)
+        s = score_game(sig, Weights())
+        assert "close_game" not in s.breakdown
+
+    def test_closeness_midrange(self):
+        # 0.5 coinflip-ness × 3.0 weight = 1.5.
+        sig = GameSignals(closeness=0.5)
+        s = score_game(sig, Weights())
+        assert s.breakdown["close_game"] == 1.5
+
+    def test_closeness_note_distinguishes_from_spread_path(self):
+        # The note format reveals which path fired — closeness path says
+        # "implied coinflip-ness", spread path says "betting spread".
+        sig = GameSignals(closeness=0.8)
+        s = score_game(sig, Weights())
+        close_notes = [n for n in s.notes if "coinflip" in n.lower()]
+        assert len(close_notes) == 1
+        assert "0.80" in close_notes[0]
+
+    def test_spread_fallback_still_works(self):
+        # Pre-B.3 path: closeness=None, spread=2.0 (NCAAF tight game).
+        # Normalized closeness = (14-2)/14 = 0.857; × 3.0 = 2.57.
+        sig = GameSignals(spread=2.0)
+        s = score_game(sig, Weights())
+        assert round(s.breakdown["close_game"], 2) == 2.57
+
+    def test_closeness_wins_over_spread(self):
+        # Both populated (shouldn't happen in production but test defensively):
+        # closeness wins. closeness=0.2 × 3.0 = 0.6, ignoring spread=0.
+        sig = GameSignals(closeness=0.2, spread=0.0)
+        s = score_game(sig, Weights())
+        assert round(s.breakdown["close_game"], 2) == 0.6
 
 
 class TestFormatChannelName:

@@ -46,6 +46,48 @@ ODDS_BASE = "https://api.the-odds-api.com/v4"
 SEED_PLAYED_THRESHOLD = 5
 
 
+def _h2h_to_closeness(
+    outcomes: List[Dict], home_lc: str, away_lc: str
+) -> Optional[float]:
+    """Convert a bookmaker's h2h outcomes (3-way: home/draw/away decimal
+    odds) into a coinflip-ness measure in [0, 1]. Returns None if the
+    outcomes don't yield clean numbers.
+
+    Math:
+      raw_implied_i = 1 / decimal_odds_i  (per outcome)
+      vig           = sum(raw_implied) - 1  (overround)
+      p_i           = raw_implied_i / sum(raw_implied)  (devigged)
+      closeness     = 2 * min(p_home, p_away)
+
+    The draw probability is intentionally not part of the closeness
+    formula — "either team could win" is what we care about, and the
+    draw outcome is its own state. A 33/34/33 split → closeness 0.66,
+    not 1.0; that's correct (a draw-heavy market isn't a coinflip).
+    """
+    p_home_raw: Optional[float] = None
+    p_away_raw: Optional[float] = None
+    total_raw = 0.0
+    for o in outcomes:
+        try:
+            price = float(o.get("price", 0))
+        except (TypeError, ValueError):
+            continue
+        if price <= 1.0:
+            continue
+        implied = 1.0 / price
+        total_raw += implied
+        name = (o.get("name") or "").strip().lower()
+        if name == home_lc:
+            p_home_raw = implied
+        elif name == away_lc:
+            p_away_raw = implied
+    if p_home_raw is None or p_away_raw is None or total_raw <= 0:
+        return None
+    p_home = p_home_raw / total_raw
+    p_away = p_away_raw / total_raw
+    return max(0.0, min(1.0, 2.0 * min(p_home, p_away)))
+
+
 def _previous_season_start_year(now: Optional[datetime] = None) -> int:
     """Return the FD.org season-start year for the season BEFORE the
     current one. FD.org's `season` parameter is the start-year:
@@ -137,8 +179,11 @@ class SoccerSource(SportSource):
                         self.config.fd_code, days_ahead)
             return []
 
-        # Build team-name → spread lookup (best-effort)
-        spread_by_pair = self._fetch_spreads()
+        # Build team-name → closeness lookup (best-effort). B.3
+        # replaced the old Asian-handicap "spreads" market with the
+        # devigged h2h moneyline market; downstream we populate
+        # GameRow.closeness (not GameRow.spread).
+        closeness_by_pair = self._fetch_closeness()
 
         # Compute season_progress from standings: avg of (playedGames / total).
         season_progress = self._estimate_season_progress(table_full)
@@ -157,7 +202,7 @@ class SoccerSource(SportSource):
             cap = self.config.rank_cap
             rh_capped = rh if (rh is not None and rh <= cap) else None
             ra_capped = ra if (ra is not None and ra <= cap) else None
-            spread = self._lookup_spread(spread_by_pair, home, away)
+            closeness = self._lookup_odds(closeness_by_pair, home, away)
             rows.append(GameRow(
                 sport_prefix=self.config.sport_prefix,
                 sport_label=self.config.sport_label,
@@ -165,7 +210,11 @@ class SoccerSource(SportSource):
                 rank_home=rh_capped, rank_away=ra_capped,
                 start_time=start,
                 venue=(f.get("venue") if isinstance(f.get("venue"), str) else None),
-                spread=spread,
+                # B.3: soccer populates `closeness` (probability-based);
+                # `spread` stays None so the GameRow contract
+                # "exactly one of spread/closeness" holds.
+                spread=None,
+                closeness=closeness,
                 extra={
                     "fd_id": f.get("id"),
                     "matchday": f.get("matchday"),
@@ -327,12 +376,24 @@ class SoccerSource(SportSource):
 
     # ---------- odds ----------
 
-    def _fetch_spreads(self) -> Dict[Tuple[str, str], float]:
-        """Return {(home, away) lower-cased: abs(spread)}.
+    def _fetch_closeness(self) -> Dict[Tuple[str, str], float]:
+        """Return {(home, away) lower-cased: closeness_in_[0,1]}.
 
-        The Odds API returns soccer odds with "spreads" market = Asian handicap.
-        We pick the consensus or first available bookmaker, take the home team's
-        point handicap, and use its absolute value as the closeness signal.
+        B.3 / TUNING_REPORT finding #6: replaces the spreads-based
+        signal with a principled coinflip-ness measure derived from the
+        bookmaker's h2h (moneyline) market. The pipeline:
+
+          decimal_odds → 1/odds (raw implied prob) → devig by dividing
+          by total_implied → 2 * min(P_home, P_away) → closeness in [0, 1].
+
+        For soccer's 3-way market (home / draw / away), we use only the
+        home and away win probabilities; the draw outcome doesn't change
+        the "either team could win" intuition. A perfect coinflip
+        (45/10/45) → closeness 0.90. A blowout (80/15/5) → closeness 0.10.
+
+        Pre-B.3 used the "spreads" market (Asian handicap). That signal
+        had ~3 raw points of contribution flat across the season; nearly
+        zero differentiation. Moneyline-derived closeness restores it.
         """
         if not self.odds_api_key or not self.config.odds_sport_key:
             return {}
@@ -341,7 +402,7 @@ class SoccerSource(SportSource):
                 f"{ODDS_BASE}/sports/{self.config.odds_sport_key}/odds/",
                 params={
                     "regions": "uk,us,eu",
-                    "markets": "spreads",
+                    "markets": "h2h",
                     "apiKey": self.odds_api_key,
                     "oddsFormat": "decimal",
                 },
@@ -363,38 +424,32 @@ class SoccerSource(SportSource):
             books = ev.get("bookmakers") or []
             if not books:
                 continue
-            spread_val: Optional[float] = None
+            closeness_val: Optional[float] = None
             for bk in books:
                 for mk in bk.get("markets", []):
-                    if mk.get("key") != "spreads":
+                    if mk.get("key") != "h2h":
                         continue
-                    for outcome in mk.get("outcomes", []):
-                        # Outcome name is one of the team names; we want the
-                        # home team's point handicap.
-                        if outcome.get("name", "").strip().lower() == home:
-                            try:
-                                spread_val = abs(float(outcome.get("point", 0.0)))
-                                break
-                            except (TypeError, ValueError):
-                                continue
-                    if spread_val is not None:
+                    closeness_val = _h2h_to_closeness(mk.get("outcomes") or [], home, away)
+                    if closeness_val is not None:
                         break
-                if spread_val is not None:
+                if closeness_val is not None:
                     break
-            if spread_val is not None:
-                out[(home, away)] = spread_val
+            if closeness_val is not None:
+                out[(home, away)] = closeness_val
         return out
 
     @staticmethod
-    def _lookup_spread(spread_map: Dict[Tuple[str, str], float],
-                       home: str, away: str) -> Optional[float]:
+    def _lookup_odds(odds_map: Dict[Tuple[str, str], float],
+                     home: str, away: str) -> Optional[float]:
         """Match Football-Data.org team names to The Odds API team names with
         a fuzzy fallback. Football-Data uses 'Wrexham AFC', Odds API uses
-        'Wrexham' — strip common suffixes and try lowercase substring."""
+        'Wrexham' — strip common suffixes and try lowercase substring.
+        Generic over whatever value the odds_map carries — pre-B.3 was
+        spread floats, post-B.3 is closeness floats."""
         h_lc = home.lower()
         a_lc = away.lower()
-        if (h_lc, a_lc) in spread_map:
-            return spread_map[(h_lc, a_lc)]
+        if (h_lc, a_lc) in odds_map:
+            return odds_map[(h_lc, a_lc)]
         # Strip the structural club-tag suffixes (FC / AFC / CF / SC) so
         # Football-Data ("Wrexham AFC") and Odds API ("Wrexham") align. Tokens
         # are the shared TEAM_SUFFIX_TOKENS so this stays in sync with the
@@ -409,7 +464,7 @@ class SoccerSource(SportSource):
             return n.strip()
         h_n = normalize(home)
         a_n = normalize(away)
-        for (hk, ak), v in spread_map.items():
+        for (hk, ak), v in odds_map.items():
             if (h_n in hk or hk in h_n) and (a_n in ak or ak in a_n):
                 return v
         return None

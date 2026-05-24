@@ -84,11 +84,11 @@ differentiation in the typical 4-15 range.
 | Signal | Triggered when | Default weight |
 |---|---|---|
 | `rank_pair` | Both teams ranked / one ranked | 1.0 |
-| `favorite` | One of user's favorite teams plays | 4.0 (flat) |
-| `close_game` | Tight betting spread | 0.5 |
-| **`stakes`** | Team near a league cutoff (playoff/relegation/title/UCL); 1.5–2× late-season multiplier | **2.0** |
+| `favorite` | One of user's favorite teams plays | 6.0 (flat, Phase A) |
+| `close_game` | Coinflip-ness in [0, 1]: devigged h2h moneyline probabilities for soccer, normalized point spread for NCAAF / NCAAM | 3.0 (Phase B.3) |
+| **`stakes`** | Team near a league cutoff (playoff/relegation/title/UCL), proximity × consequence weight, gated by mathematical reachability; 1.5–2× late-season multiplier | **0.5 (Phase A.5/A.6)** |
 | `tournament_stage` | Knockout cup game | 1.5 |
-| `impact_on_favorite` | Non-favorite game whose outcome shifts a favorite's table position | 1.0 |
+| `impact_on_favorite` | Non-favorite game whose outcome shifts a favorite's table position; inherits the favorite's own stakes magnitude scaled by proximity (Phase B.1) | 1.0 |
 | `narrative` | LLM-judged narrative score | 0.0 (off by default) |
 
 Late-season multiplier kicks in past 70% of season, doubles past 85%. EPL +

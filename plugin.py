@@ -447,6 +447,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             team_b=g.away,
             favorite_match=match_favorites(g.home, g.away, favorites),
             spread=g.spread,
+            closeness=g.closeness,
             stakes_a=stakes_a,
             stakes_b=stakes_b,
             stakes_thresholds_hit=thresholds_hit,
@@ -514,6 +515,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "is_today": _is_today_local(game.start_time, tz_local),
             "venue": game.venue,
             "spread": game.spread,
+            "closeness": game.closeness,
             "score": score.final,           # 0-10 (display-facing)
             "score_raw": score.raw,         # unbounded sum (sort tiebreak)
             "score_breakdown": score.breakdown,
@@ -739,6 +741,7 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         team_b=g.get("away", ""),
         favorite_match=g.get("favorites_matched", []),
         spread=g.get("spread"),
+        closeness=g.get("closeness"),
         stakes_thresholds_hit=g.get("stakes_thresholds_hit") or [],
         season_progress=g.get("season_progress") or 0.0,
         tournament_stage=g.get("tournament_stage"),
@@ -760,8 +763,24 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
     return signals, score
 
 
-def _spread_descriptor(spread: Optional[float]) -> Optional[str]:
-    """Map a betting spread to a human-readable closeness label."""
+def _close_game_descriptor(
+    closeness: Optional[float], spread: Optional[float]
+) -> Optional[str]:
+    """Map the close-game signal to a human-readable label. Prefers the
+    B.3 closeness measure (devigged probabilities, [0,1]) when present;
+    falls back to the legacy point-spread thresholds otherwise.
+
+    Soccer's `closeness >= 0.7` (each side ≥35% of a 3-way market) is the
+    coinflip-magnitude analog of NCAAF's `spread <= 3`. The two bands
+    were calibrated so that a Phase-A EPL toss-up and a Phase-A NCAAF
+    toss-up produce the same label.
+    """
+    if closeness is not None:
+        if closeness >= 0.7:
+            return "toss-up"
+        if closeness >= 0.45:
+            return "close spread"
+        return None
     if spread is None:
         return None
     if spread <= 3:
@@ -785,7 +804,7 @@ def _build_subtitle(g: Dict[str, Any], tagline: str) -> str:
         parts.append(f"matchday {matchday}/{matchdays_total}")
     elif extra.get("week"):  # NCAAF / NCAAM week-based sports
         parts.append(f"week {extra['week']}")
-    spread_desc = _spread_descriptor(g.get("spread"))
+    spread_desc = _close_game_descriptor(g.get("closeness"), g.get("spread"))
     if spread_desc:
         parts.append(spread_desc)
     if not parts:
@@ -837,7 +856,7 @@ def _build_description(
     if tagline:
         article = "An" if tagline[:1].lower() in "aeiou" else "A"
         headline_parts.append(f"{article} {tagline}")
-    spread_desc = _spread_descriptor(g.get("spread"))
+    spread_desc = _close_game_descriptor(g.get("closeness"), g.get("spread"))
     if spread_desc:
         headline_parts.append(spread_desc)
     if headline_parts:
@@ -1107,6 +1126,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 score_breakdown=g.get("score_breakdown", {}),
                 favorites_matched=g.get("favorites_matched", []),
                 spread=g.get("spread"),
+                closeness=g.get("closeness"),
                 stakes_thresholds=g.get("stakes_thresholds_hit") or [],
                 tournament_stage=g.get("tournament_stage"),
                 rank_a=g.get("rank_home"),

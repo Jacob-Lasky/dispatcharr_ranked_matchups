@@ -41,7 +41,14 @@ class Weights:
     cover what LLM narrative scoring would surface. Enable by setting weight > 0.
     """
     rank: float = 1.0
-    spread: float = 0.1
+    # spread/closeness signal: applied to a [0, 1] coinflip-ness measure.
+    # 1.0 = pick'em → full contribution; 0.0 = blowout → no contribution.
+    # B.3 reformulated the underlying signal from raw spread to devigged
+    # bookmaker probabilities (for soccer; NCAAF / NCAAM still convert
+    # spread to coinflip-ness via score_game's fallback). Default bumped
+    # from 0.1 to 3.0 because the underlying range is now [0, 1] instead
+    # of [0, 7] — same per-game magnitude (~3 raw for a pick'em).
+    spread: float = 3.0
     favorite: float = 6.0
     rivalry: float = 2.0
     # stakes was 2.0 in the pre-Phase-A.5 era when compute_team_stakes
@@ -66,7 +73,13 @@ class GameSignals:
     team_a: str = ""
     team_b: str = ""
     favorite_match: List[str] = field(default_factory=list)  # which favorites match
-    spread: Optional[float] = None    # absolute betting spread
+    spread: Optional[float] = None    # absolute betting spread (NCAAF / NCAAM path)
+    # B.3 coinflip-ness signal in [0, 1]. Soccer populates this from
+    # devigged moneyline probabilities; NCAAF / NCAAM still populate
+    # `spread`. score_game prefers closeness when present, falls back
+    # to a normalized spread otherwise. DO NOT populate BOTH on the
+    # same signal — pick the right path per source. See sources/base.py.
+    closeness: Optional[float] = None
 
     # Phase 3 — standings + stage signals (sport-aware, computed by plugin from
     # source-provided context).
@@ -185,6 +198,33 @@ def _compress_to_10(raw: float) -> float:
     return 10.0 * math.tanh(raw / _FINAL_KNEE)
 
 
+# Spread (point-spread sports) fallback: scale where 0 = full
+# closeness, _SPREAD_BLOWOUT = zero closeness. Anchored to 14 because
+# the pre-B.3 formula maxed at spread=14 too — keeps NCAAF / NCAAM
+# magnitudes continuous through the B.3 weight bump.
+_SPREAD_BLOWOUT = 14.0
+
+
+def _effective_closeness(closeness: Optional[float], spread: Optional[float]) -> Optional[float]:
+    """Unify the two close-game signals into a single [0, 1] coinflip-ness
+    measure that score_game multiplies by weights.spread.
+
+    Precedence: closeness (probability-based, B.3 soccer path) wins
+    when populated. Spread (point-based, NCAAF / NCAAM path) is the
+    fallback for sources that haven't migrated to moneylines. Returns
+    None when neither is available — score_game then skips the signal.
+    """
+    if closeness is not None:
+        if closeness < 0:
+            return 0.0
+        if closeness > 1:
+            return 1.0
+        return closeness
+    if spread is not None and spread >= 0:
+        return max(0.0, (_SPREAD_BLOWOUT - spread) / _SPREAD_BLOWOUT)
+    return None
+
+
 def _late_season_multiplier(season_progress: float) -> float:
     """Boost on stakes/impact signals as the season runs out.
 
@@ -272,11 +312,19 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
         breakdown["favorite"] = round(fav_pts, 2)
         notes.append(f"favorite involved: {', '.join(signals.favorite_match)}")
 
-    if signals.spread is not None and signals.spread >= 0:
-        # Close game bonus. Spread 0 → max, spread 14+ → 0.
-        spread_pts = max(0.0, (14 - signals.spread) / 2.0) * weights.spread
-        breakdown["close_game"] = round(spread_pts, 2)
-        notes.append(f"betting spread: {signals.spread:+.1f} pts")
+    # Close-game signal: prefer B.3 closeness (devigged bookmaker
+    # probabilities, [0,1]) when present; fall back to a spread-derived
+    # normalization for sources that still emit raw point spreads.
+    # Both paths produce a [0, 1] effective closeness so the weight
+    # multiplies into the same magnitude range across sports.
+    effective_closeness = _effective_closeness(signals.closeness, signals.spread)
+    if effective_closeness is not None and effective_closeness > 0:
+        close_pts = effective_closeness * weights.spread
+        breakdown["close_game"] = round(close_pts, 2)
+        if signals.closeness is not None:
+            notes.append(f"implied coinflip-ness: {effective_closeness:.2f}")
+        else:
+            notes.append(f"betting spread: {signals.spread:+.1f} pts")
 
     # Phase 3 — stakes (proximity to meaningful league threshold), with
     # late-season multiplier so games matter more when season is winding down.
@@ -501,6 +549,7 @@ def pick_tagline(
     rank_a: Optional[int],
     rank_b: Optional[int],
     rank_source: str = "poll",
+    closeness: Optional[float] = None,
 ) -> str:
     """Pick a single dominant tagline for the channel name. Priority:
        tournament-stage → stakes → poll-rank-pair → toss-up → favorite.
@@ -538,8 +587,13 @@ def pick_tagline(
         if lo <= 5:
             return f"#{lo} ranked"
 
-    if "close_game" in score_breakdown and spread is not None and spread <= 3:
-        return "toss-up"
+    if "close_game" in score_breakdown:
+        # closeness >= 0.7 (each team ≥35% to win in a 3-way) is the
+        # B.3 equivalent of the old spread <= 3 threshold for "toss-up".
+        if closeness is not None and closeness >= 0.7:
+            return "toss-up"
+        if spread is not None and 0 <= spread <= 3:
+            return "toss-up"
 
     if favorites_matched:
         return "favorite"

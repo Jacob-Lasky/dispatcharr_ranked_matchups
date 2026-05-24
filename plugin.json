@@ -149,8 +149,8 @@
       "id": "weight_spread",
       "type": "number",
       "label": "Close-game weight",
-      "default": 0.1,
-      "help_text": "Multiplier on the spread-tightness signal (smaller spread = more interesting). Kept low until close_game reformulates around implied win probability; raw-spread is noisy. Keep in sync with scoring.Weights.spread."
+      "default": 3.0,
+      "help_text": "Multiplier on the close-game signal. For soccer (h2h moneyline path) this is devigged bookmaker probabilities × 2 × min(P_home, P_away), in [0, 1] where 1 = perfect coinflip. For NCAAF / NCAAM (point-spread path) the raw spread normalizes into the same [0, 1] range. Default 3.0 calibrated against the B.3 coinflip-ness formula; pre-B.3 was 0.1 against the old (14-spread)/2 formula. Keep in sync with scoring.Weights.spread."
     },
     {
       "id": "weight_favorite",

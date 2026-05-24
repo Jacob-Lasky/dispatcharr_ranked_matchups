@@ -131,10 +131,13 @@ class TestBuildWeights:
     def test_defaults(self, plugin):
         w = plugin._build_weights({})
         assert w.rank == 1.0
-        # spread is intentionally low (0.1) because the close_game signal
-        # currently fires off raw spread which is noisy. A future revision
-        # will reformulate around implied win probability.
-        assert w.spread == 0.1
+        # B.3 reformulated the close-game signal from raw spread to a
+        # [0, 1] coinflip-ness measure (devigged bookmaker probabilities
+        # for soccer; spread normalized for NCAAF / NCAAM). Default
+        # bumped 0.1 → 3.0 because the underlying range shrank from
+        # [0, 7] to [0, 1] — same per-game magnitude (~3 raw for a
+        # pick'em) preserved across the formula change.
+        assert w.spread == 3.0
         # favorite is bumped to 6.0 to push favorite-involved games up
         # against title-race / playoff contenders.
         assert w.favorite == 6.0

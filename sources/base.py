@@ -25,6 +25,15 @@ class GameRow:
     start_time: datetime        # when the game starts (UTC)
     venue: Optional[str] = None
     spread: Optional[float] = None      # absolute pre-game spread (Phase 3+)
+    # B.3 close-game signal: bookmaker-implied coinflip-ness in [0, 1].
+    # 1.0 = pick'em (both teams equally likely to win); 0.0 = blowout.
+    # Soccer populates this from the h2h moneyline market (devigged
+    # probabilities, then 2 * min(p_home, p_away)). NCAAF / NCAAM still
+    # populate `spread` instead — score_game normalizes either path into
+    # the same [0, 1] effective closeness, but ONE of these two fields
+    # is None on every GameRow. DO NOT set both — keeps the contract
+    # "closeness wins if present, fall back to spread otherwise" honest.
+    closeness: Optional[float] = None
     is_rivalry: bool = False             # known rivalry (Phase 3+)
     extra: dict = field(default_factory=dict)  # source-specific metadata
 
