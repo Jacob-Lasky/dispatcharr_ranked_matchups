@@ -261,6 +261,56 @@ class TestBuildSignalsScoreFromPayload:
         assert score.raw == 9.0  # 5 + 4, NOT 7.6
         assert score.final == 7.6
 
+    def test_pre_b1_impact_legacy_list_of_strings_normalized(self, plugin):
+        # Pre-B.1 cache had impact_on_favorites: List[str]. Apply step
+        # must accept it without crashing — gracefully degrades to
+        # stakes=0/distance=0 (zero contribution) until next refresh
+        # writes the new shape.
+        g = {
+            "score": 5.0,
+            "score_breakdown": {},
+            "impact_on_favorites": ["Tottenham Hotspur FC", "Wrexham AFC"],
+        }
+        signals, _ = plugin._build_signals_score_from_payload(g)
+        assert signals.impact_on_favorites == [
+            ("Tottenham Hotspur FC", 0.0, 0),
+            ("Wrexham AFC", 0.0, 0),
+        ]
+
+    def test_b1_impact_rich_tuples_round_trip(self, plugin):
+        # B.1+ cache has impact_on_favorites: List[List[name, stakes, distance]]
+        # (JSON-serialized tuples). Reader must rebuild as tuples with
+        # correct types so downstream destructuring works.
+        g = {
+            "score": 5.0,
+            "score_breakdown": {},
+            "impact_on_favorites": [
+                ["Tottenham Hotspur FC", 5.0, 1],
+                ["Wrexham AFC", 3.75, 0],
+            ],
+        }
+        signals, _ = plugin._build_signals_score_from_payload(g)
+        assert signals.impact_on_favorites == [
+            ("Tottenham Hotspur FC", 5.0, 1),
+            ("Wrexham AFC", 3.75, 0),
+        ]
+
+    def test_malformed_impact_entries_dropped(self, plugin):
+        # Defensive: a hand-edited or corrupt cache shouldn't crash
+        # apply. Unknown shapes are skipped, valid entries preserved.
+        g = {
+            "score": 5.0,
+            "score_breakdown": {},
+            "impact_on_favorites": [
+                ["Tottenham", 5.0, 1],
+                {"unexpected": "dict"},
+                ["TooShort"],
+                ["TooLong", 1.0, 2, 3],
+            ],
+        }
+        signals, _ = plugin._build_signals_score_from_payload(g)
+        assert signals.impact_on_favorites == [("Tottenham", 5.0, 1)]
+
 
 class TestResolveVirtualBase:
     def test_explicit_positive_value_wins(self, plugin):

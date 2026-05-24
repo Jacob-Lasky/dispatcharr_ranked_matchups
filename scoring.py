@@ -75,7 +75,16 @@ class GameSignals:
     stakes_thresholds_hit: List[str] = field(default_factory=list)  # ['playoff','relegation']
     season_progress: float = 0.0      # 0.0-1.0 — late-season amplifies stakes
     tournament_stage: Optional[str] = None  # 'FINAL', 'SEMI_FINALS', 'QUARTER_FINALS', etc.
-    impact_on_favorites: List[str] = field(default_factory=list)  # favorites this game affects
+    # Rich impact-on-favorite tuples: (favorite_name, inherited_stakes_raw,
+    # distance). `inherited_stakes_raw` is the favorite's own
+    # compute_team_stakes result (pre-late_mult, pre-weights.stakes) — so a
+    # non-favorite game that pivots a relegation-threshold favorite inherits
+    # the same magnitude that the favorite gets in their own game, scaled by
+    # how close the game's teams sit to the favorite's slot. See issue #11.
+    # DO NOT collapse to List[str]; the names-only shape lost the magnitude
+    # signal and made West Ham vs Leeds (Tottenham relegation-pivot) score
+    # identically to a Bournemouth-Forest dead-rubber.
+    impact_on_favorites: List[Tuple[str, float, int]] = field(default_factory=list)
 
     is_rivalry: bool = False
     narrative_score: Optional[float] = None  # 0-10 from LLM (last)
@@ -176,6 +185,25 @@ def _compress_to_10(raw: float) -> float:
     return 10.0 * math.tanh(raw / _FINAL_KNEE)
 
 
+def _late_season_multiplier(season_progress: float) -> float:
+    """Boost on stakes/impact signals as the season runs out.
+
+    1.0x normally; 1.5x past 70% of matchdays; 2.0x past 85%. Shared
+    by the stakes block AND the impact-on-favorites block in
+    score_game so they amplify identically when both fire late.
+
+    DO NOT inline this back into score_game. Two call sites need
+    identical thresholds; an inline copy will silently drift and
+    break the "impact magnitude tracks own-game magnitude" invariant
+    that issue #11 fixed.
+    """
+    if season_progress >= 0.85:
+        return 2.0
+    if season_progress >= 0.70:
+        return 1.5
+    return 1.0
+
+
 # Trailing tokens that mean "same team" (typically the team-type / club suffix).
 # When these follow a favorite name, we allow the match. Superset of the
 # matcher's GENERIC_TEAM_SECOND_WORDS — adds the dotted club-tag variants and
@@ -252,13 +280,9 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
 
     # Phase 3 — stakes (proximity to meaningful league threshold), with
     # late-season multiplier so games matter more when season is winding down.
+    late_mult = _late_season_multiplier(signals.season_progress)
     stakes_total = signals.stakes_a + signals.stakes_b
     if stakes_total > 0:
-        late_mult = 1.0
-        if signals.season_progress >= 0.85:
-            late_mult = 2.0
-        elif signals.season_progress >= 0.70:
-            late_mult = 1.5
         stakes_pts = stakes_total * late_mult * weights.stakes
         breakdown["stakes"] = round(stakes_pts, 2)
         notes.append(
@@ -282,13 +306,25 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             notes.append(f"tournament stage: {ts.lower().replace('_', ' ')}")
 
     if signals.impact_on_favorites:
-        # Each affected favorite contributes (more affected favorites = bigger
-        # downstream impact, but capped to avoid double-counting).
-        impact_pts = min(3.0, len(signals.impact_on_favorites)) * weights.impact_favorite
+        # Inherit the affected favorite's own stakes contribution, scaled
+        # by how close the game's teams sit to the favorite's slot
+        # (distance=0 → full inheritance, distance=cap → 1/(cap+1)).
+        # Late-season multiplier amplifies impact the same way it
+        # amplifies the favorite's own stakes block, so an impact game
+        # at MD37 tracks the urgency of the favorite's own MD37 game.
+        # See issue #11 for the West Ham vs Leeds (Tottenham relegation)
+        # worked example; flat +1 per favorite buried it at #8.
+        leverage_denom = float(_IMPACT_PROXIMITY_CAP + 1)
+        inherited_raw = 0.0
+        for _, fav_stakes_raw, d in signals.impact_on_favorites:
+            leverage = (_IMPACT_PROXIMITY_CAP + 1 - d) / leverage_denom
+            inherited_raw += fav_stakes_raw * leverage
+        impact_pts = inherited_raw * late_mult * weights.impact_favorite
         breakdown["impact_on_favorite"] = round(impact_pts, 2)
+        names = [t[0] for t in signals.impact_on_favorites]
         notes.append(
-            f"affects favorite{'s' if len(signals.impact_on_favorites) > 1 else ''}: "
-            f"{', '.join(signals.impact_on_favorites)}"
+            f"affects favorite{'s' if len(names) > 1 else ''}: "
+            f"{', '.join(names)}"
         )
 
     if signals.is_rivalry:
@@ -398,30 +434,49 @@ def compute_team_stakes(
     return pts, hit
 
 
+# Max distance (in standings positions) between a game's team and a
+# favorite's position for the game to count as "impacting" the favorite.
+# Used by both compute_impact_on_favorites (to filter) AND score_game's
+# impact block (to compute leverage decay). Keep in sync — divergence
+# would mean the function emits tuples score_game can't normalize.
+_IMPACT_PROXIMITY_CAP = 3
+
+
 def compute_impact_on_favorites(
     rank_a: Optional[int], rank_b: Optional[int],
     team_a: str, team_b: str,
-    favorites_in_league: List[Tuple[str, int]],  # [(name, position), ...]
-    proximity: int = 3,
-) -> List[str]:
-    """List favorites whose table position would be affected by this game's outcome.
+    favorites_in_league: List[Tuple[str, int, float]],  # [(name, position, own_stakes_raw), ...]
+    proximity: int = _IMPACT_PROXIMITY_CAP,
+) -> List[Tuple[str, float, int]]:
+    """Favorites whose table position this game's outcome would move,
+    paired with the stakes the favorite would earn in their own game.
 
-    A game has 'impact on favorite' when one of its teams is within `proximity`
-    positions of a favorite's spot — a win/loss can swap them.
+    Returns [(fav_name, fav_own_stakes_raw, distance), ...] where
+    distance is `min(|game_team_rank - fav_pos|)` across both game
+    teams. distance=0 means a game team sits exactly in the favorite's
+    slot — maximal swap risk.
+
+    `fav_own_stakes_raw` is the favorite's compute_team_stakes result
+    BEFORE late_mult and weights.stakes (so score_game can apply
+    late_mult uniformly across stakes + impact). The caller pre-computes
+    it; this function just carries it through.
     """
-    affected: List[str] = []
+    affected: List[Tuple[str, float, int]] = []
     a_lc, b_lc = team_a.lower(), team_b.lower()
-    for fav_name, fav_pos in favorites_in_league:
+    for fav_name, fav_pos, fav_stakes_raw in favorites_in_league:
         fav_lc = fav_name.lower()
         # Skip games where the favorite IS playing (already covered by 'favorite' signal)
         if fav_lc in a_lc or fav_lc in b_lc:
             continue
+        best_d: Optional[int] = None
         for r in [rank_a, rank_b]:
             if r is None:
                 continue
-            if abs(r - fav_pos) <= proximity:
-                affected.append(fav_name)
-                break
+            d = abs(r - fav_pos)
+            if d <= proximity and (best_d is None or d < best_d):
+                best_d = d
+        if best_d is not None:
+            affected.append((fav_name, fav_stakes_raw, best_d))
     return affected
 
 
@@ -443,7 +498,6 @@ def pick_tagline(
     spread: Optional[float],
     stakes_thresholds: Optional[List[str]],
     tournament_stage: Optional[str],
-    season_progress: Optional[float],
     rank_a: Optional[int],
     rank_b: Optional[int],
     rank_source: str = "poll",

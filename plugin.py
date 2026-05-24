@@ -408,9 +408,27 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                             "points": entry.get("points"),
                         })
                         break
-        favs_in_league: List[Tuple[str, int]] = [
-            (f["name"], f["position"]) for f in favs_with_standings
-        ]
+        # Per-favorite stakes: what each favorite would earn from
+        # compute_team_stakes in their own game (gated by the same
+        # mathematical elimination as the playing teams above). This is
+        # the raw magnitude impact-on-favorite games inherit, scaled by
+        # proximity decay inside score_game. Fix for issue #11 — flat +1
+        # per favorite buried West Ham vs Leeds (Tottenham relegation
+        # pivot) at #8 on EPL MD38.
+        favs_in_league: List[Tuple[str, int, float]] = []
+        if league_ctx:
+            for f in favs_with_standings:
+                fav_pos = f["position"]
+                fav_pts_raw = f.get("points") or 0
+                fav_played = played_by_pos.get(fav_pos, 0)
+                fav_remaining = max(0, mds_total - fav_played) if mds_total else 0
+                fav_stakes_raw, _ = compute_team_stakes(
+                    fav_pos, league_ctx.thresholds,
+                    team_points=int(fav_pts_raw),
+                    matches_remaining=fav_remaining,
+                    standings_points_by_position=standings_pts_by_pos or None,
+                )
+                favs_in_league.append((f["name"], fav_pos, fav_stakes_raw))
         impact_favs = compute_impact_on_favorites(
             g.rank_home, g.rank_away, g.home, g.away, favs_in_league,
         )
@@ -701,6 +719,19 @@ def _resolve_park_base(target_base: int, num_games: int) -> int:
 def _build_signals_score_from_payload(g: Dict[str, Any]):
     """Reconstruct GameSignals + GameScore from cache.json payload."""
     from .scoring import GameSignals, GameScore
+    # Normalize impact_on_favorites across cache-format generations:
+    # pre-B.1 caches stored List[str] (names only); B.1+ stores
+    # List[List[name, stakes_raw, distance]] (JSON-encoded tuples).
+    # Legacy entries get stakes_raw=0.0 / distance=0 so score_game's
+    # inheritance contributes 0 — graceful degradation for one apply
+    # cycle until the next refresh writes the new shape.
+    impact_raw = g.get("impact_on_favorites") or []
+    impact_normalized: List[Tuple[str, float, int]] = []
+    for item in impact_raw:
+        if isinstance(item, str):
+            impact_normalized.append((item, 0.0, 0))
+        elif isinstance(item, (list, tuple)) and len(item) == 3:
+            impact_normalized.append((str(item[0]), float(item[1]), int(item[2])))
     signals = GameSignals(
         rank_a=g.get("rank_home"),
         rank_b=g.get("rank_away"),
@@ -711,7 +742,7 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         stakes_thresholds_hit=g.get("stakes_thresholds_hit") or [],
         season_progress=g.get("season_progress") or 0.0,
         tournament_stage=g.get("tournament_stage"),
-        impact_on_favorites=g.get("impact_on_favorites") or [],
+        impact_on_favorites=impact_normalized,
     )
     # `score_raw` is the unbounded sum, `score` is the 0-10 compressed value.
     # If the cache predates `score_raw`, fall back to the breakdown sum (still
@@ -1078,7 +1109,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 spread=g.get("spread"),
                 stakes_thresholds=g.get("stakes_thresholds_hit") or [],
                 tournament_stage=g.get("tournament_stage"),
-                season_progress=g.get("season_progress"),
                 rank_a=g.get("rank_home"),
                 rank_b=g.get("rank_away"),
                 rank_source=rank_source,
