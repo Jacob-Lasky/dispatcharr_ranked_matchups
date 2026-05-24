@@ -58,6 +58,31 @@ EPG_POST_HOURS = 4    # 4 hours after game starts (covers OT)
 # without needing a custom_properties field on the Channel model.
 TVG_ID_PREFIX = "ranked_matchups:"
 
+# Legacy tvg_id values earlier versions of this plugin wrote. The rename
+# cleanup pass needs these to recognize leftover EPGData rows on a renamed-from
+# EPGSource — a TVG_ID_PREFIX-only check misses sources whose only remaining
+# rows are legacy-shaped, leaving the orphan visible in the UI with
+# status='error' forever after a target-group rename.
+# Add to this tuple when the tvg_id scheme changes; never remove an entry.
+_OWNED_TVG_ID_LEGACY_MARKERS: tuple = ("dummy_top_matchups",)
+
+
+def _owned_tvg_id_q(field_prefix: str = ""):
+    """Q matching every tvg_id this plugin has ever written. Used to identify
+    rows we own across both the current TVG_ID_PREFIX scheme and any legacy
+    markers from earlier plugin versions, so cleanup on group rename is
+    complete instead of partial.
+
+    field_prefix: Django ORM lookup path prefix for joined queries. Empty
+    when filtering EPGData/Channel directly. Use 'epgs__' from EPGSource,
+    'channels__' from ChannelGroup, etc.
+    """
+    from django.db.models import Q
+    return (
+        Q(**{f"{field_prefix}tvg_id__startswith": TVG_ID_PREFIX})
+        | Q(**{f"{field_prefix}tvg_id__in": _OWNED_TVG_ID_LEGACY_MARKERS})
+    )
+
 # Default starting channel number when the user hasn't configured one. Sentinel
 # 0 means "auto" — pick the first channel number after the highest existing
 # non-virtual channel, so we slot in cleanly without colliding with real
@@ -459,11 +484,11 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
 def _build_epg_lookup(exclude_group_name: Optional[str] = None):
     """Return a callable: GameRow -> List[ChannelCandidate]. Closure over ORM.
 
-    Excludes any channel that is one of OUR virtual channels (tvg_id starts with
-    TVG_ID_PREFIX) — covers the configured target group AND any old groups left
-    over from a prior target_group_name. Without this, the matcher self-matches
-    against our prior-run channels because their EPG titles literally contain
-    the team names.
+    Excludes any channel that is one of OUR virtual channels (see
+    _owned_tvg_id_q) — covers the configured target group AND any old groups
+    left over from a prior target_group_name. Without this, the matcher
+    self-matches against our prior-run channels because their EPG titles
+    literally contain the team names.
 
     Pre-filters at the DB level: only fetches programs that are TEAM-relevant
     (program title contains a team keyword OR program's channel has a team
@@ -509,7 +534,7 @@ def _build_epg_lookup(exclude_group_name: Optional[str] = None):
         name_match_chans = list(
             Channel.objects
             .filter(name_q)
-            .exclude(tvg_id__startswith=TVG_ID_PREFIX)
+            .exclude(_owned_tvg_id_q())
             .only("id", "name", "epg_data_id")
         )
 
@@ -524,7 +549,7 @@ def _build_epg_lookup(exclude_group_name: Optional[str] = None):
             chan_qs = (
                 Channel.objects
                 .filter(epg_data_id__in=epg_ids)
-                .exclude(tvg_id__startswith=TVG_ID_PREFIX)
+                .exclude(_owned_tvg_id_q())
                 .only("id", "name", "epg_data_id")
             )
             chan_by_epg = {}
@@ -594,8 +619,8 @@ def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) 
       - Anything unparseable → treat as auto.
 
     `highest_non_virtual` is the max channel_number across all channels that
-    are NOT ours (excluding tvg_id__startswith=TVG_ID_PREFIX). Caller passes 0
-    if there are no other channels.
+    are NOT ours (see _owned_tvg_id_q for the ownership predicate). Caller
+    passes 0 if there are no other channels.
 
     The auto path falls back to _AUTO_BASE_FALLBACK on a fresh install (no
     other channels exist) so we don't return 1 and squat on prime real estate.
@@ -806,15 +831,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # where the user renames "Top Matchups" → "!Top Matchups" between runs.
     target_group = ChannelGroup.objects.filter(name=group_name).first()
 
-    # Find any other groups containing channels we own (tvg_id starts with our prefix)
+    # Find any other groups containing channels we own. Helper covers both the
+    # current TVG_ID_PREFIX scheme and any legacy markers from earlier plugin
+    # versions (a prefix-only check would miss leftovers on rename).
     foreign_owned_groups = list(
         ChannelGroup.objects.exclude(name=group_name)
-        .filter(channels__tvg_id__startswith=TVG_ID_PREFIX)
+        .filter(_owned_tvg_id_q("channels__"))
         .distinct()
     )
     foreign_epg_sources = list(
         EPGSource.objects.exclude(name=group_name)
-        .filter(epgs__tvg_id__startswith=TVG_ID_PREFIX)
+        .filter(_owned_tvg_id_q("epgs__"))
         .distinct()
     )
 
@@ -838,9 +865,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     deleted_old_groups = 0
     if not dry_run and foreign_owned_groups:
         for old_g in foreign_owned_groups:
-            old_chans = Channel.objects.filter(
-                channel_group=old_g, tvg_id__startswith=TVG_ID_PREFIX,
-            )
+            old_chans = Channel.objects.filter(_owned_tvg_id_q(), channel_group=old_g)
             n = old_chans.count()
             # We re-create everything fresh anyway (cache index drives target chnum),
             # so just delete the old virtual channels here. Their stream + EPG
@@ -864,9 +889,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         for old_src in foreign_epg_sources:
             # Only auto-delete if all its EPGData entries are ours (no other plugin owns it)
             total = EPGData.objects.filter(epg_source=old_src).count()
-            ours = EPGData.objects.filter(
-                epg_source=old_src, tvg_id__startswith=TVG_ID_PREFIX,
-            ).count()
+            ours = EPGData.objects.filter(_owned_tvg_id_q(), epg_source=old_src).count()
             if total > 0 and total == ours:
                 old_src.delete()  # cascades EPGData + ProgramData
                 deleted_old_sources += 1
@@ -874,9 +897,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                             old_src.name, total)
             else:
                 # Mixed: just nuke our entries, leave the source alone
-                EPGData.objects.filter(
-                    epg_source=old_src, tvg_id__startswith=TVG_ID_PREFIX,
-                ).delete()
+                EPGData.objects.filter(_owned_tvg_id_q(), epg_source=old_src).delete()
 
     # 2. Ensure our EPGSource exists and is configured to sit out of
     # Dispatcharr's joke-filler path (see EPG_SOURCE_TYPE comment above).
@@ -916,7 +937,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # 3. Existing virtual channels we'll update or delete
     existing_virtuals = {
         ch.tvg_id: ch for ch in Channel.objects.filter(
-            channel_group=target_group, tvg_id__startswith=TVG_ID_PREFIX,
+            _owned_tvg_id_q(), channel_group=target_group,
         )
     }
 
@@ -925,7 +946,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # don't squat on prime numbers like 1-100.
     from django.db.models import Max as _Max
     highest_other = (
-        Channel.objects.exclude(tvg_id__startswith=TVG_ID_PREFIX)
+        Channel.objects.exclude(_owned_tvg_id_q())
         .aggregate(m=_Max("channel_number"))["m"] or 0
     )
     virtual_base = _resolve_virtual_base(settings, highest_other)
@@ -1180,11 +1201,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         if not dry_run and epg_source is not None:
             kept_markers = seen_markers | {
                 ch.tvg_id for ch in Channel.objects.filter(
-                    channel_group=target_group, tvg_id__startswith=TVG_ID_PREFIX,
+                    _owned_tvg_id_q(), channel_group=target_group,
                 )
             }
             orphans = EPGData.objects.filter(
-                epg_source=epg_source, tvg_id__startswith=TVG_ID_PREFIX,
+                _owned_tvg_id_q(), epg_source=epg_source,
             ).exclude(tvg_id__in=kept_markers)
             orphan_epg_deleted, _ = orphans.delete()
 
