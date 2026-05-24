@@ -116,22 +116,40 @@ class LeagueContext:
     qualification). Rendered in the EPG description as a reminder of
     WHY a position-based race matters.
 
-    `thresholds` is a list of (position, label, weight) triples. The
+    `thresholds` is a list of (cutoff, label, weight) triples. The
     weight is the cross-sport consequence weight from the
     leverage-times-consequence calibration: relegation = 5, UCL = 4,
-    Europa = 2, etc. See TUNING_REPORT.md's cross-sport calibration
-    section in /coding/dispatcharr_ranked_matchups_sim/ for the
-    rationale; the numbers encode Jake's intuition that "relegation
-    matters more than Europa" within a single league and that the
-    same outcome band can weigh differently across leagues (top-25
-    means more in CFB than mid-table in EPL).
+    Europa = 2, knockout final = 5, UCL winner = 10, etc. See
+    TUNING_REPORT.md's cross-sport calibration section in
+    /coding/dispatcharr_ranked_matchups_sim/ for the rationale.
+
+    `cutoff` is polymorphic by `format`:
+      - format="league": int league position (e.g., 4 = top-4 UCL spot)
+      - format="knockout": str round identifier matching the bracket
+        source's stage labels (e.g., "QUARTER_FINALS"). A team is
+        considered "in" the band if their `round_reached` equals or
+        exceeds this round. The knockout source ranks rounds by depth.
     """
     code: str                    # 'PL', 'ELC', 'CL', etc.
-    matchdays_total: int         # season length (38 for EPL, 46 for ELC, etc.)
-    thresholds: List[Tuple[int, str, float]] = field(default_factory=list)
-    # List of (position, label, weight)
-    # e.g., [(1,'title',5.0),(4,'UCL',4.0),(17,'relegation',5.0)]
+    matchdays_total: int         # season length (38 for EPL, 46 for ELC). 0 = N/A (knockouts).
+    thresholds: List[Tuple[Any, str, float]] = field(default_factory=list)
     boundary_summary: str = ""   # e.g. "Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation"
+    format: str = "league"       # "league" | "knockout"
+
+
+# Knockout-round depth ordering. Higher = deeper. The bracket source's
+# `terminal_outcomes` uses this to assign every band a team has reached
+# (a finalist reached the final AND the semis AND the quarters etc.).
+# DO NOT use stage names not present here as knockout thresholds — the
+# round-rank lookup would silently return -1 and no team would qualify.
+KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
+    "PLAYOFFS":        0,  # UCL play-off round (pos 9-24 entrants)
+    "LAST_16":         1,
+    "QUARTER_FINALS":  2,
+    "SEMI_FINALS":     3,
+    "FINAL":           4,
+    "WINNER":          5,  # synthetic: only the cup winner reaches this
+}
 
 
 LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
@@ -154,7 +172,17 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="Top 2 → auto-promotion · 3-6 → promotion playoff · bottom 3 → relegation",
     ),
-    # UCL handled via tournament_stage signal, not league position
+    "CL": LeagueContext(
+        code="CL", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("LAST_16",        "round_of_16",   1.0),
+            ("QUARTER_FINALS", "quarterfinal",  2.0),
+            ("SEMI_FINALS",    "semifinal",     3.0),
+            ("FINAL",          "final",         5.0),
+            ("WINNER",         "winner",       10.0),
+        ],
+        boundary_summary="R16 → QF → SF → Final → Champion",
+    ),
 }
 
 

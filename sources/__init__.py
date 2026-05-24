@@ -2,10 +2,14 @@
 from .base import GameRow, SportSource
 from .ncaaf import NcaafSource
 from .ncaam import NcaamSource
-from .soccer import SoccerSource, COMPETITIONS as SOCCER_COMPETITIONS
+from .soccer import (
+    COMPETITIONS as SOCCER_COMPETITIONS,
+    KnockoutSoccerSource,
+    SoccerSource,
+)
 
 __all__ = [
     "GameRow", "SportSource",
     "NcaafSource", "NcaamSource",
-    "SoccerSource", "SOCCER_COMPETITIONS",
+    "SoccerSource", "KnockoutSoccerSource", "SOCCER_COMPETITIONS",
 ]

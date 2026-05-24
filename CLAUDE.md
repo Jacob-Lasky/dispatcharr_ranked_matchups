@@ -51,7 +51,7 @@ downstream is sport-agnostic.
 | `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` → Dispatcharr channel via EPG `ProgramData`. Two-stage: regex (both team keywords in EPG title) → Claude batched fallback. |
 | `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Phase C importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. |
 | `sources/ncaaf.py` | CFBD `/rankings`, `/games`, `/lines` calls. CFBD uses **camelCase** (homeTeam, awayTeam) — easy gotcha. |
-| `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. UCL doesn't use position-as-rank (knockout) — handled via tournament_stage signal. |
+| `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. `SoccerSource` is league-shaped (PL, ELC); `KnockoutSoccerSource` (Phase D.1) is bracket-shaped (UCL) with two-leg aggregates, ET/penalty sampling, and feeds_from-via-participant inference so the simulator can substitute different bracket paths. Routed by `LEAGUE_CONTEXTS[fd_code].format`. |
 
 State (gitignored, lives in `<plugin_dir>/`):
 - `cache.json` — last refresh result (curated game list with score breakdowns)
@@ -87,18 +87,19 @@ differentiation in the typical 4-15 range.
 | `rank_pair` | Both teams ranked / one ranked | 1.0 |
 | `favorite` | One of user's favorite teams plays | 6.0 (flat, Phase A) |
 | `close_game` | Coinflip-ness in [0, 1]: devigged h2h moneyline probabilities for soccer, normalized point spread for NCAAF / NCAAM | 3.0 (Phase B.3) |
-| **`stakes`** | Team near a league cutoff (playoff/relegation/title/UCL), proximity × consequence weight, gated by mathematical reachability; 1.5–2× late-season multiplier | **0.5 (Phase A.5/A.6)** |
-| `tournament_stage` | Knockout cup game | 1.5 |
-| `impact_on_favorite` | Non-favorite game whose outcome shifts a favorite's table position; inherits the favorite's own stakes magnitude scaled by proximity (Phase B.1) | 1.0 |
+| **`importance`** | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands (title / UCL / Europa / relegation / promotion for leagues; round_of_16 / quarterfinal / semifinal / final / winner for UCL knockouts). Locked-in outcomes contribute 0 (mathematical elimination respected). | **3.0 (Phase C.3 / D.1)** |
+| `tournament_stage` | Knockout cup game flat boost (R16 / QF / SF / FINAL). For UCL the importance signal already encodes round depth via consequence weights, so this is mostly redundant; kept for non-UCL cups not in LEAGUE_CONTEXTS yet. | 1.5 |
 | `narrative` | LLM-judged narrative score | 0.0 (off by default) |
 
-Late-season multiplier kicks in past 70% of season, doubles past 85%. EPL +
-EFL Championship are 38 / 46 matchdays. The multiplier is a major reason
-top games saturate at ★10 in late April / early May.
+The legacy `stakes`, `impact_on_favorite`, and `_late_season_multiplier`
+signals were retired in Phase C.4 — the structural Monte Carlo importance
+signal subsumes all three (mathematical elimination, cross-team impact via
+the favorites-extended query path, and natural end-of-season leverage rise
+from tau-c growing as outcomes lock in).
 
-User asked us to default narrative weight to 0 because heuristic stakes /
-tournament / impact-on-favorite cover what LLM narrative would surface
-anyway. Don't enable narrative without explicit user buy-in.
+User asked us to default narrative weight to 0 because the structural
+`importance` signal covers what LLM narrative would surface anyway. Don't
+enable narrative without explicit user buy-in.
 
 ## Sport adapter extension contract
 
@@ -126,8 +127,8 @@ Shared CFBD key already covers basketball (same Bearer token).
 
 For league-based sports (where standings position is the "rank"), populate
 `extra["fd_competition_code"]` to a code in `scoring.LEAGUE_CONTEXTS` so the
-stakes signal knows your thresholds. NCAAF doesn't need this — AP Top-25
-implicitly handles "near the top."
+`importance` signal knows your thresholds and consequence weights. NCAAF
+doesn't need this yet — Phase D.2 will add it.
 
 ## Known gotchas / lessons learned
 
@@ -198,9 +199,11 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
 **Working:**
 - NCAAF source (CFBD) and NCAAM source (CollegeBasketballData) — both via
   the same Bearer token, both auto-skip during their respective offseason
-- EPL + EFL Championship + UCL source (Football-Data.org + Odds API)
-- All scoring signals (rank, favorite, spread, stakes, tournament-stage,
-  impact-on-favorite, optional LLM narrative)
+- EPL + EFL Championship sources (Football-Data.org + Odds API, league-shaped)
+- UCL source (Phase D.1: `KnockoutSoccerSource`, bracket-shaped with ET +
+  penalty sampling and feeds_from-via-participant bracket inference)
+- All scoring signals (rank, favorite, close_game, importance,
+  tournament-stage, optional LLM narrative)
 - Today-first sort + channel renumbering, with auto / fixed virtual base
 - Placeholder channels for unmatched-high-scoring games
 - Group-rename auto-cleanup

@@ -30,7 +30,7 @@ caller skips this module entirely.
 from __future__ import annotations
 
 import random
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
     from .sources.base import GameRow, MatchResult, SportSource
@@ -153,13 +153,22 @@ def monte_carlo_importance(
         target_result = source.sample_result(base_state, target_match, strengths, rng)
         row = _RESULT_ROW[_classify_target_result(target_result, target_team, home, away)]
 
-        # 2) Apply the target result, then sample every other remaining match.
+        # 2) Apply the target result, then drain remaining matches until none
+        #    are eligible. Re-asking `remaining_matches` per pass (instead of
+        #    snapshotting once) is identical behavior for league sources (the
+        #    snapshot shrinks by one per apply and is empty after one pass)
+        #    AND essential for knockout sources, where bracket downstream
+        #    matches (QF → SF → Final) only become eligible as their feeder
+        #    ties resolve.
         state = source.apply_result(base_state, target_match, target_result)
-        for m in source.remaining_matches(state):
-            if _same_match(m, target_match):
-                continue
-            r = source.sample_result(state, m, strengths, rng)
-            state = source.apply_result(state, m, r)
+        while True:
+            rem = [m for m in source.remaining_matches(state)
+                   if not _same_match(m, target_match)]
+            if not rem:
+                break
+            for m in rem:
+                r = source.sample_result(state, m, strengths, rng)
+                state = source.apply_result(state, m, r)
 
         # 3) Bucket the team's final outcomes; record whether target_outcome fired.
         outcomes = source.terminal_outcomes(state)
@@ -228,11 +237,18 @@ def monte_carlo_importance_batch(
     for _ in range(n_sims):
         target_result = source.sample_result(base_state, target_match, strengths, rng)
         state = source.apply_result(base_state, target_match, target_result)
-        for m in source.remaining_matches(state):
-            if _same_match(m, target_match):
-                continue
-            r = source.sample_result(state, m, strengths, rng)
-            state = source.apply_result(state, m, r)
+        # Same drain-until-empty loop as monte_carlo_importance — see there
+        # for the reasoning. Identical behavior for league sources;
+        # essential for knockout sources where downstream bracket matches
+        # only become eligible after their feeder ties resolve.
+        while True:
+            rem = [m for m in source.remaining_matches(state)
+                   if not _same_match(m, target_match)]
+            if not rem:
+                break
+            for m in rem:
+                r = source.sample_result(state, m, strengths, rng)
+                state = source.apply_result(state, m, r)
         outcomes = source.terminal_outcomes(state)
 
         for team, outcome in queries:

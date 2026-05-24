@@ -39,34 +39,58 @@ COMPETITIONS["la_liga"] = SoccerCompetitionConfig(
 )
 ```
 
-### Step 2: register the stakes thresholds (`scoring.py`)
+### Step 2: register the importance thresholds (`scoring.py`)
 
-Add a `LEAGUE_CONTEXTS` entry. This is what powers the "title race",
-"playoff race", "relegation battle" labels and the EPG description's
-"why is this a race?" reminder:
+Add a `LEAGUE_CONTEXTS` entry. This is what powers the Monte Carlo
+`importance` signal — Lahvička 2012 |Kendall tau-c| × consequence weight,
+summed over the playing teams + in-league favorites for each outcome band.
 
 ```python
 LEAGUE_CONTEXTS["PD"] = LeagueContext(
     code="PD",
     matchdays_total=38,  # same value as SoccerCompetitionConfig.total_matchdays
     thresholds=[
-        (1,  "title"),
-        (4,  "UCL"),
-        (7,  "Europa"),
-        (18, "relegation"),
+        (1,  "title",            5.0),
+        (4,  "UCL",              4.0),
+        (7,  "Europa",           2.0),
+        (18, "relegation",       5.0),
     ],
     boundary_summary="Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation",
 )
 ```
 
-The `thresholds` list is `(position, label)` tuples. The plugin's stakes
-signal fires for any team within ±2 positions of any threshold. Late in
-the season the contribution doubles, so a relegation-line game in
-matchday 36 outranks a relegation-line game in matchday 5.
+The `thresholds` list is `(cutoff, label, weight)` triples. For league-
+format contexts (the default), `cutoff` is an integer position (top-side
+labels fire on `pos <= cutoff`; bottom-side labels containing "relegat",
+"demot", or "drop" fire on `pos > cutoff`). `weight` is the cross-sport
+consequence weight from the leverage × consequence calibration
+(relegation/title = 5, UCL = 4, Europa = 2). See TUNING_REPORT.md.
+
+For knockout-format contexts (UCL, Europa League knockouts), set
+`format="knockout"` and use FD.org stage strings as cutoffs:
+
+```python
+LEAGUE_CONTEXTS["CL"] = LeagueContext(
+    code="CL", matchdays_total=0, format="knockout",
+    thresholds=[
+        ("LAST_16",        "round_of_16",   1.0),
+        ("QUARTER_FINALS", "quarterfinal",  2.0),
+        ("SEMI_FINALS",    "semifinal",     3.0),
+        ("FINAL",          "final",         5.0),
+        ("WINNER",         "winner",       10.0),
+    ],
+    boundary_summary="R16 → QF → SF → Final → Champion",
+)
+```
+
+Each label fires for every team whose `round_reached` matches or exceeds
+the corresponding `KNOCKOUT_ROUND_DEPTH`. Source routing in `plugin.py`
+picks `KnockoutSoccerSource` over `SoccerSource` based on `format`.
 
 `boundary_summary` is rendered verbatim in the EPG description as a
-one-line reminder of what each standings position translates to. Use
-the `→` arrow notation and `·` separator to match the existing style.
+one-line reminder of what each standings position (or bracket round)
+translates to. Use the `→` arrow notation and `·` separator to match
+the existing style.
 
 ### Step 3: add the user-facing toggle (`plugin.json`)
 
@@ -97,7 +121,7 @@ if settings.get("enable_la_liga", False) and fd_key:
    Football-Data.org key.
 2. Run `Refresh curated list`.
 3. Open `cache.json` (in the plugin dir) and confirm games come back
-   with proper ranks + stakes labels.
+   with proper ranks + importance thresholds_hit labels.
 4. Run `Apply to Dispatcharr` (with `Dry run on Apply` enabled first).
 
 If the score breakdown for a known marquee fixture (a top-of-table
@@ -144,8 +168,9 @@ optional spread, and an `extra` dict for sport-specific metadata.
 - **Standings-position-based** (soccer-style): every team in the
   competition has a position. Set
   `extra["rank_source"] = "standings"`. The "top-N" WHY labels are
-  suppressed (everyone is "top-20"); the `stakes` signal carries
-  league-aware semantics instead.
+  suppressed (everyone is "top-20"); the `importance` signal carries
+  league-aware semantics instead (Monte Carlo Kendall tau-c against
+  the LEAGUE_CONTEXTS threshold bands).
 
 ### Required `extra` fields
 

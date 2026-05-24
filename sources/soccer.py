@@ -10,9 +10,12 @@ Free tier coverage on Football-Data.org includes:
 Soccer rank: there's no AP poll, so we use **league position** as the rank.
 Wrexham 6th, Hull 7th → "6v7" matchup, both fighting for the playoff spot.
 
-For UCL (knockout / group stage), there's no single league position — instead
-we'd use group standings. For v1 we leave UCL ranks unset (None) and let the
-favorites + odds signals carry it.
+UCL (and other knockout competitions) ship as `KnockoutSoccerSource`, a
+subclass that swaps the standings-shaped importance state machine for a
+bracket-shaped one. The base SoccerSource class assumes league shape
+(points table, integer position thresholds); the knockout subclass tracks
+tie aggregates and propagates winners through bracket feeds. Pick the
+right class by `LEAGUE_CONTEXTS[fd_code].format`.
 """
 
 from __future__ import annotations
@@ -28,7 +31,7 @@ import requests
 
 from .base import GameRow, MatchResult, SportSource
 from .._util import parse_iso_utc
-from ..scoring import LEAGUE_CONTEXTS, TEAM_SUFFIX_TOKENS
+from ..scoring import KNOCKOUT_ROUND_DEPTH, LEAGUE_CONTEXTS, TEAM_SUFFIX_TOKENS
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.soccer")
 
@@ -708,7 +711,14 @@ class SoccerSource(SportSource):
         average rates per Lahvička. The lambda for home goals is the
         average of home team's home-attack rate and away team's away-defense
         rate; mirror for away goals.
+
+        `state` is part of the SportSource ABC signature but unused by the
+        league-shape Poisson model — team strengths fully determine the
+        rates. KnockoutSoccerSource overrides this and DOES read state
+        (to look up leg 1's result when sampling leg 2). Reference the
+        param explicitly to silence "unused parameter" hints.
         """
+        del state  # interface-required, not used by league shape
         h = self._strength_for(strengths, match.home)
         a = self._strength_for(strengths, match.away)
         lam_home = max(0.05, (h["sh"] + a["ca"]) / 2.0)
@@ -755,6 +765,21 @@ class SoccerSource(SportSource):
         ctx = LEAGUE_CONTEXTS.get(self.config.fd_code)
         if ctx is None:
             return {team: [] for team in state if team != "_applied"}
+        # DO NOT use this method for knockout-format contexts (UCL, etc.).
+        # The cutoff in knockout thresholds is a stage string ("LAST_16"),
+        # not an int position — the `pos > cutoff` comparison below would
+        # TypeError. The factory in plugin.py routes knockout configs to
+        # KnockoutSoccerSource; falling here means a misroute. Return empty
+        # so importance silently produces 0 (consistent with "no league
+        # context" branch above) rather than crashing the refresh.
+        if ctx.format != "league":
+            logger.warning(
+                "[soccer:%s] SoccerSource.terminal_outcomes called on a non-league "
+                "context (format=%s); returning empty. This is a wiring bug — the "
+                "factory should route this competition to KnockoutSoccerSource.",
+                self.config.fd_code, ctx.format,
+            )
+            return {team: [] for team in state if team != "_applied"}
         teams = [(name, row) for name, row in state.items() if name != "_applied"]
         teams.sort(
             key=lambda kv: (
@@ -765,7 +790,7 @@ class SoccerSource(SportSource):
         )
         positions = {name: i + 1 for i, (name, _) in enumerate(teams)}
         outcomes: Dict[str, List[str]] = {name: [] for name, _ in teams}
-        for cutoff, label, _w in ctx.thresholds:
+        for cutoff, label, _weight in ctx.thresholds:
             bottom = self._is_bottom_outcome(label)
             for name, pos in positions.items():
                 if bottom:
@@ -775,6 +800,661 @@ class SoccerSource(SportSource):
                     if pos <= cutoff:
                         outcomes[name].append(label)
         return outcomes
+
+
+class KnockoutSoccerSource(SoccerSource):
+    """Knockout-bracket adapter for cup competitions (UCL, UEL, etc.).
+
+    Inherits fixtures, standings (best-effort, often empty for cups),
+    odds-derived closeness, and per-team strength estimation from
+    SoccerSource. Overrides the importance state machine for bracket
+    shape: state tracks tie aggregates, propagates winners through
+    bracket feeds, and resolves ET/penalty shootouts in `sample_result`.
+
+    State model:
+      {
+        "_applied":       frozenset of fd_ids whose results are in state,
+        "_tie_results":   {tie_key: tie_dict},
+        "_bracket":       {stage: [tie_meta, ...]},   # static, built once
+        "_round_reached": {team: max KNOCKOUT_ROUND_DEPTH advanced INTO},
+      }
+
+    `tie_key` = (stage, frozenset({team_a, team_b})). The frozenset is
+    order-independent so leg 1 and leg 2 of the same tie key into the
+    same dict entry regardless of which side is home on which leg.
+
+    `_bracket` is built once at `initial_state` time from the FD.org
+    fixture list. For each tie in stage S > LAST_16, the participants'
+    prior-stage tie winners are recorded as `feeds_from`. The simulator
+    uses `feeds_from` to substitute simulated winners in place of
+    FD.org's published downstream participants when an upstream
+    counterfactual changes the bracket path.
+
+    For 2-leg ties, `sample_result` for leg 1 returns regulation goals
+    only. For the decisive leg (leg 2 of a 2-leg tie, or the single
+    FINAL), `sample_result` returns goals including ET and a +1 pen-
+    shootout-winner boost so the W/L classification is captured in
+    `MatchResult.home_goals/away_goals` — never D for decisive legs.
+    """
+
+    # FD.org knockout stage enum, in increasing depth order.
+    KO_STAGES = ("PLAYOFFS", "LAST_16", "QUARTER_FINALS", "SEMI_FINALS", "FINAL")
+
+    def initial_state(self) -> Dict[str, Any]:
+        """Build the bracket structure and per-team round_reached snapshot
+        from the FD.org match list. Cached on the instance so repeat
+        importance queries within one refresh share the same baseline.
+        """
+        if self._initial_state_cache is not None:
+            return self._initial_state_cache
+        matches = self._fetch_all_season_matches()
+        bracket = self._build_bracket(matches)
+        applied: List[Any] = []
+        tie_results: Dict[Any, Dict[str, Any]] = {}
+        round_reached: Dict[str, int] = {}
+
+        # Pre-fill tie_results from FINISHED legs in the FD.org data. A tie
+        # whose all legs are FINISHED has its aggregate winner computed
+        # here and stored — the simulator starts from that ground truth.
+        for stage in self.KO_STAGES:
+            for tie in bracket.get(stage, []):
+                tk = (stage, frozenset(tie["teams"]))
+                tie_results[tk] = self._new_tie_record(tie)
+                for leg in tie["legs"]:
+                    if leg.get("status") == "FINISHED" and leg.get("home_goals") is not None:
+                        # Record this leg's regulation+ET+pen-determined outcome
+                        # straight from FD.org so simulation starts from truth.
+                        self._record_leg_into_tie(
+                            tie_results[tk],
+                            leg["home"], leg["away"],
+                            leg["home_goals"], leg["away_goals"],
+                            leg.get("matchday", 1),
+                        )
+                        applied.append(leg["fd_id"])
+                # If the tie is fully decided, propagate to round_reached.
+                if tie_results[tk]["aggregate_winner"] is not None:
+                    self._advance_round_reached(
+                        round_reached,
+                        tie_results[tk]["aggregate_winner"],
+                        tie_results[tk]["aggregate_loser"],
+                        stage,
+                    )
+
+        state: Dict[str, Any] = {
+            "_applied": frozenset(applied),
+            "_tie_results": tie_results,
+            "_bracket": bracket,
+            "_round_reached": round_reached,
+        }
+        self._initial_state_cache = state
+        return state
+
+    def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
+        """Knockout ties whose participants are CURRENTLY resolvable and
+        whose legs aren't yet applied. A tie is resolvable when:
+          - It has no `feeds_from` (entry-level: LAST_16 ties or seeded
+            top-8 teams entering R16), OR
+          - All its `feeds_from` upstream ties have resolved aggregate winners.
+
+        Within a tie, legs are emitted in matchday order. The first
+        unapplied leg's home/away comes from the resolved participants;
+        the second leg swaps home/away.
+        """
+        applied = state.get("_applied", frozenset())
+        tie_results = state.get("_tie_results", {})
+        bracket = state.get("_bracket", {})
+        out: List[GameRow] = []
+        for stage in self.KO_STAGES:
+            ties = bracket.get(stage, [])
+            for tie in ties:
+                participants = self._resolve_participants(tie, bracket, tie_results)
+                if participants is None:
+                    continue  # upstream not yet settled
+                team_a, team_b = participants
+                # Iterate this tie's legs in matchday order.
+                for leg in tie["legs"]:
+                    if leg["fd_id"] in applied:
+                        continue
+                    # In the FD.org-published data, leg 1 has one team home
+                    # and leg 2 swaps. We mirror that swap using the resolved
+                    # participants from upstream (which may differ from FD's
+                    # published home/away if the simulator changed the path).
+                    if leg["matchday"] == 1:
+                        home, away = team_a, team_b
+                    else:
+                        home, away = team_b, team_a
+                    legs_in_tie = len(tie["legs"])
+                    out.append(GameRow(
+                        sport_prefix=self.config.sport_prefix,
+                        sport_label=self.config.sport_label,
+                        home=home,
+                        away=away,
+                        rank_home=None,
+                        rank_away=None,
+                        start_time=leg["start_time"],
+                        extra={
+                            "fd_id": leg["fd_id"],
+                            "stage": stage,
+                            "matchday": leg["matchday"],
+                            "tie_key": (stage, frozenset({team_a, team_b})),
+                            "leg_index": leg["matchday"],
+                            "legs_in_tie": legs_in_tie,
+                            # is_decisive_leg: leg 2 of a 2-leg tie, or the
+                            # only leg in a 1-leg tie. sample_result fires
+                            # ET/penalty resolution on decisive legs only.
+                            "is_decisive_leg": leg["matchday"] == legs_in_tie,
+                        },
+                    ))
+        return out
+
+    def sample_result(
+        self,
+        state: Dict[str, Any],
+        match: GameRow,
+        strengths: Dict[str, Dict[str, float]],
+        rng: random.Random,
+    ) -> MatchResult:
+        """Sample one leg via Poisson. For decisive legs (leg 2 of a 2-leg
+        tie or the single FINAL) with aggregate tied after regulation,
+        sample ET (30 min at 1/3 the regulation rate). If still tied, run
+        a penalty shootout (5 shots each + sudden death, 70% conversion).
+        Returns MatchResult with `home_goals/away_goals` post-ET and a +1
+        pen-winner boost on shootouts so W/L is encoded for tau-c.
+        """
+        # Regulation goals via inherited Poisson formula.
+        reg = super().sample_result(state, match, strengths, rng)
+        extra = match.extra if isinstance(match.extra, dict) else {}
+        if not extra.get("is_decisive_leg", False):
+            return reg
+
+        legs_in_tie = extra.get("legs_in_tie", 1)
+        tie_key = extra.get("tie_key")
+        home_team, away_team = match.home, match.away
+
+        # Compute aggregate. For 1-leg ties (FINAL), aggregate IS this leg.
+        if legs_in_tie == 1:
+            agg_home = reg.home_goals
+            agg_away = reg.away_goals
+        else:
+            # 2-leg: pull leg 1 from state. Leg 1's home was the team that's
+            # AWAY in this (leg 2) match; so leg1.home_goals counts toward
+            # the team now away, and leg1.away_goals toward the team now home.
+            tie = state.get("_tie_results", {}).get(tie_key, {})
+            leg1 = tie.get("leg1")
+            if leg1 is None:
+                # Defensive: leg 1 should have been applied before leg 2.
+                # If it's missing, treat this leg as standalone (consistent
+                # with the FINAL path).
+                agg_home = reg.home_goals
+                agg_away = reg.away_goals
+            else:
+                # leg1 stores: {home, home_goals, away, away_goals}
+                if leg1["home"] == home_team:
+                    # Unusual: same team home in both legs (shouldn't happen
+                    # in a proper bracket draw). Sum naively as a safety net.
+                    agg_home = reg.home_goals + leg1["home_goals"]
+                    agg_away = reg.away_goals + leg1["away_goals"]
+                else:
+                    # Normal swap: home_team was away in leg 1.
+                    agg_home = reg.home_goals + leg1["away_goals"]
+                    agg_away = reg.away_goals + leg1["home_goals"]
+
+        home_goals = reg.home_goals
+        away_goals = reg.away_goals
+        result_extra: Dict[str, Any] = {"regulation_goals": (reg.home_goals, reg.away_goals)}
+
+        if agg_home != agg_away:
+            return MatchResult(home_goals=home_goals, away_goals=away_goals, extra=result_extra)
+
+        # Tied after regulation: sample ET (1/3 regulation rate, 30 min vs 90 min).
+        h = self._strength_for(strengths, home_team)
+        a = self._strength_for(strengths, away_team)
+        lam_h_et = max(0.02, (h["sh"] + a["ca"]) / 2.0 / 3.0)
+        lam_a_et = max(0.02, (a["sa"] + h["ch"]) / 2.0 / 3.0)
+        et_h = _poisson(lam_h_et, rng)
+        et_a = _poisson(lam_a_et, rng)
+        home_goals += et_h
+        away_goals += et_a
+        agg_home += et_h
+        agg_away += et_a
+        result_extra["et_goals"] = (et_h, et_a)
+
+        if agg_home != agg_away:
+            return MatchResult(home_goals=home_goals, away_goals=away_goals, extra=result_extra)
+
+        # Still tied: penalty shootout. Encode the winner as a +1 goal so
+        # _classify_target_result sees a non-draw — keeps the simulator's
+        # ordinal W/D/L classification honest for tau-c. Symmetric 70%
+        # conversion per shot; pen shootouts are dominated by variance, so
+        # skill bumps don't shift the outcome distribution materially.
+        pen_winner = self._sample_penalty_shootout(rng)
+        if pen_winner == "HOME":
+            home_goals += 1
+        else:
+            away_goals += 1
+        result_extra["pen_winner"] = pen_winner
+        return MatchResult(home_goals=home_goals, away_goals=away_goals, extra=result_extra)
+
+    def apply_result(
+        self,
+        state: Dict[str, Any],
+        match: GameRow,
+        result: MatchResult,
+    ) -> Dict[str, Any]:
+        """Return a NEW state with this leg's result recorded. If the leg
+        completes a tie (i.e., this is the decisive leg), compute the
+        aggregate winner and advance the winning team's round_reached.
+        """
+        new_state = dict(state)
+        # Copy the tie_results dict and the specific tie we're about to mutate.
+        new_tie_results = dict(state.get("_tie_results", {}))
+        extra = match.extra if isinstance(match.extra, dict) else {}
+        tie_key = extra.get("tie_key")
+        leg_index = extra.get("matchday", 1)
+        if tie_key is None or tie_key not in new_tie_results:
+            # Defensive: match without a tie context. Shouldn't happen via
+            # remaining_matches but possible if a caller hand-rolls a match.
+            new_state["_tie_results"] = new_tie_results
+            fd_id = extra.get("fd_id")
+            if fd_id is not None:
+                new_state["_applied"] = state.get("_applied", frozenset()) | {fd_id}
+            return new_state
+
+        prior_tie = new_tie_results[tie_key]
+        new_tie = {
+            "stage": prior_tie["stage"],
+            "teams": prior_tie["teams"],
+            "leg1": dict(prior_tie["leg1"]) if prior_tie.get("leg1") else None,
+            "leg2": dict(prior_tie["leg2"]) if prior_tie.get("leg2") else None,
+            "aggregate_winner": prior_tie["aggregate_winner"],
+            "aggregate_loser": prior_tie["aggregate_loser"],
+        }
+        self._record_leg_into_tie(
+            new_tie,
+            match.home, match.away,
+            result.home_goals, result.away_goals,
+            leg_index,
+        )
+        new_tie_results[tie_key] = new_tie
+        new_state["_tie_results"] = new_tie_results
+
+        # Update _applied.
+        fd_id = extra.get("fd_id")
+        if fd_id is not None:
+            new_state["_applied"] = state.get("_applied", frozenset()) | {fd_id}
+
+        # If the tie just decided, propagate to _round_reached.
+        if new_tie["aggregate_winner"] is not None and prior_tie["aggregate_winner"] is None:
+            new_round = dict(state.get("_round_reached", {}))
+            self._advance_round_reached(
+                new_round,
+                new_tie["aggregate_winner"],
+                new_tie["aggregate_loser"],
+                new_tie["stage"],
+            )
+            new_state["_round_reached"] = new_round
+        return new_state
+
+    def terminal_outcomes(self, state: Dict[str, Any]) -> Dict[str, List[str]]:
+        """{team: [outcome_labels]} based on each team's deepest round
+        reached. A team that won the SF gets ["round_of_16", "quarterfinal",
+        "semifinal", "final"] (made the final); the eventual champion
+        additionally gets "winner".
+
+        The label cascade is automatic: each band whose `cutoff` (a stage
+        identifier) maps to a depth <= the team's reached depth fires.
+        """
+        ctx = LEAGUE_CONTEXTS.get(self.config.fd_code)
+        round_reached = state.get("_round_reached", {})
+        if ctx is None or not round_reached:
+            return {}
+        # Build the team set from _round_reached. Teams that never appeared
+        # in any tracked tie don't show up; that's correct (they didn't reach
+        # any of the cup's outcome bands).
+        outcomes: Dict[str, List[str]] = {team: [] for team in round_reached}
+        for cutoff, label, _ in ctx.thresholds:
+            cutoff_depth = KNOCKOUT_ROUND_DEPTH.get(cutoff, -1)
+            if cutoff_depth < 0:
+                continue
+            for team, depth in round_reached.items():
+                if depth >= cutoff_depth:
+                    outcomes[team].append(label)
+        return outcomes
+
+    # ---------- helpers ----------
+
+    @staticmethod
+    def _new_tie_record(tie_meta: Dict[str, Any]) -> Dict[str, Any]:
+        """Empty tie-result record. Filled in by _record_leg_into_tie."""
+        return {
+            "stage": tie_meta["stage"],
+            "teams": tie_meta["teams"],
+            "leg1": None,
+            "leg2": None,
+            "aggregate_winner": None,
+            "aggregate_loser": None,
+        }
+
+    def _record_leg_into_tie(
+        self,
+        tie: Dict[str, Any],
+        home_team: str,
+        away_team: str,
+        home_goals: int,
+        away_goals: int,
+        leg_index: int,
+    ) -> None:
+        """Record a leg's result into the tie dict in-place. Computes
+        aggregate_winner if all legs are now present.
+
+        Aggregate rule: sum goals across legs from each team's perspective.
+        For decisive legs that include ET + pen-winner boost (added in
+        sample_result), the goal counts encode the tie's winning side —
+        the aggregate computation comes out right.
+        """
+        leg_record = {
+            "home": home_team,
+            "away": away_team,
+            "home_goals": home_goals,
+            "away_goals": away_goals,
+        }
+        if leg_index == 1:
+            tie["leg1"] = leg_record
+        else:
+            tie["leg2"] = leg_record
+
+        # Compute aggregate.
+        legs_present = [tie["leg1"], tie["leg2"]]
+        legs_present = [leg for leg in legs_present if leg is not None]
+        # Tie has 1 leg (FINAL) if leg2 is None and stage is FINAL, OR
+        # 2 legs otherwise. We can't reliably tell from inside the tie
+        # alone; rely on the caller (initial_state / apply_result) to
+        # only call _record_leg_into_tie when the tie's legs are filled.
+        # If only leg1 is set and the stage IS FINAL, treat it as complete.
+        is_final_stage = (tie["stage"] == "FINAL")
+        is_complete = (
+            (is_final_stage and tie["leg1"] is not None)
+            or (tie["leg1"] is not None and tie["leg2"] is not None)
+        )
+        if not is_complete:
+            return
+
+        # Sum goals from each team's perspective.
+        teams = list(tie["teams"])
+        if len(teams) != 2:
+            return
+        team_a, team_b = teams
+        agg = {team_a: 0, team_b: 0}
+        for leg in legs_present:
+            agg[leg["home"]] += leg["home_goals"]
+            agg[leg["away"]] += leg["away_goals"]
+        if agg[team_a] == agg[team_b]:
+            # Should not happen for decisive legs (sample_result resolves
+            # ties via ET+pens), but guard anyway. Defensive default: pick
+            # the home team of the final leg as the winner (arbitrary but
+            # deterministic for replay). Real FD.org data would never end
+            # in a regulation tie at this point — knockout matches that
+            # remained drawn would have ET/pen scores in FD.org's data.
+            decisive_leg = legs_present[-1]
+            tie["aggregate_winner"] = decisive_leg["home"]
+            tie["aggregate_loser"] = decisive_leg["away"]
+            return
+        if agg[team_a] > agg[team_b]:
+            tie["aggregate_winner"] = team_a
+            tie["aggregate_loser"] = team_b
+        else:
+            tie["aggregate_winner"] = team_b
+            tie["aggregate_loser"] = team_a
+
+    @staticmethod
+    def _advance_round_reached(
+        round_reached: Dict[str, int],
+        winner: str,
+        loser: str,
+        stage: str,
+    ) -> None:
+        """When a tie at `stage` resolves: winner advances to stage+1,
+        loser is locked at stage. Records the deeper of the existing
+        round_reached value or the new one for each team.
+        """
+        stage_depth = KNOCKOUT_ROUND_DEPTH.get(stage, -1)
+        if stage_depth < 0:
+            return
+        # Loser reached THIS stage (the stage they lost in).
+        round_reached[loser] = max(round_reached.get(loser, -1), stage_depth)
+        # Winner advances to the next stage's depth (or to WINNER if this
+        # was the FINAL).
+        if stage == "FINAL":
+            winner_depth = KNOCKOUT_ROUND_DEPTH.get("WINNER", stage_depth + 1)
+        else:
+            winner_depth = stage_depth + 1
+        round_reached[winner] = max(round_reached.get(winner, -1), winner_depth)
+
+    def _resolve_participants(
+        self,
+        tie: Dict[str, Any],
+        bracket: Dict[str, List[Dict[str, Any]]],
+        tie_results: Dict[Any, Dict[str, Any]],
+    ) -> Optional[Tuple[str, str]]:
+        """Return (team_a, team_b) for this tie based on simulator state,
+        or None if the tie isn't yet eligible to play.
+
+        Eligibility rules:
+          - Entry-level ties (no fully-tracked upstream): use FD-published
+            participants, substituting any side that DID come from a tracked
+            upstream tie if the simulator produced a different winner.
+          - Downstream ties (all participants come from tracked upstream):
+            require all feeds resolved; return None otherwise.
+
+        `feeds_from` is keyed by FD-published team name, so each leg-1
+        home/away slot resolves independently. This is essential for
+        UCL R16 where one side comes from PLAYOFFS (tracked) and the
+        other enters directly from the league phase (untracked).
+        """
+        legs = tie.get("legs") or []
+        if not legs:
+            return None
+        leg1 = legs[0]
+        fd_home, fd_away = leg1["home"], leg1["away"]
+        feeds_from: Dict[str, Tuple[str, int]] = tie.get("feeds_from") or {}
+        is_entry_tie: bool = tie.get("is_entry_tie", True)
+
+        def resolve_side(fd_team: str) -> Optional[str]:
+            """Resolve a single side. If the FD-published team has a feed,
+            return the simulator's current winner of that upstream tie. If
+            no feed, return the FD-published team (direct entry). Returns
+            None if the feed exists but the upstream isn't yet settled."""
+            feed_ref = feeds_from.get(fd_team)
+            if feed_ref is None:
+                return fd_team
+            return self._winner_of(feed_ref, bracket, tie_results)
+
+        home = resolve_side(fd_home)
+        away = resolve_side(fd_away)
+
+        if home is None or away is None:
+            # An upstream this tie depends on hasn't settled yet.
+            # Entry-level ties with mixed entry can fall back to FD-published
+            # for the unresolved side ONLY when the corresponding feed itself
+            # doesn't exist (we already handled that in resolve_side). If we
+            # got None it means a feed DOES exist but hasn't resolved — block.
+            if is_entry_tie:
+                # For pure entry-level (no feeds at all), home/away from
+                # resolve_side will never be None because feeds_from is
+                # empty. If we land here on an entry tie, it's mixed-entry
+                # with a pending upstream — still block until upstream
+                # settles, so the simulator doesn't sample with wrong teams.
+                return None
+            return None
+        return home, away
+
+    @staticmethod
+    def _winner_of(
+        feed_ref: Tuple[str, int],
+        bracket: Dict[str, List[Dict[str, Any]]],
+        tie_results: Dict[Any, Dict[str, Any]],
+    ) -> Optional[str]:
+        """Look up the aggregate_winner of an upstream tie referenced by
+        (stage, tie_idx). Returns None if unsettled or out-of-range.
+        """
+        stage, tie_idx = feed_ref
+        ties = bracket.get(stage, [])
+        if tie_idx >= len(ties):
+            return None
+        tie_meta = ties[tie_idx]
+        tk = (stage, frozenset(tie_meta["teams"]))
+        return tie_results.get(tk, {}).get("aggregate_winner")
+
+    def _build_bracket(self, matches: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        """Parse FD.org's match list into per-stage tie metadata. For each
+        stage > LAST_16, attach `feeds_from` pointers to the upstream
+        ties whose winners participate in this tie.
+
+        Stage-and-team-pair uniquely identifies a tie. Within a tie, legs
+        are ordered by matchday (1 then 2). For the FINAL there's only one
+        leg.
+
+        Stages we don't model (LEAGUE_STAGE in the new UCL format) are
+        skipped — they're round-robin within the league phase and have no
+        bracket structure to track.
+        """
+        # Group matches by stage and pair.
+        by_stage: Dict[str, Dict[frozenset, List[Dict[str, Any]]]] = {
+            s: {} for s in self.KO_STAGES
+        }
+        for m in matches:
+            stage = m.get("stage")
+            if stage not in by_stage:
+                continue
+            home = (m.get("homeTeam") or {}).get("name")
+            away = (m.get("awayTeam") or {}).get("name")
+            if not home or not away:
+                continue
+            pair = frozenset({home, away})
+            score = m.get("score") or {}
+            full_time = score.get("fullTime") or {}
+            # Use the duration field if present (REGULAR / EXTRA_TIME / PENALTY_SHOOTOUT)
+            # to know whether fullTime.home includes ET or not. FD.org stores
+            # fullTime as the score that decided the leg (so if a penalty shootout
+            # decided it, fullTime is the post-ET score and the shootout outcome
+            # lives in score.penalties). For our state ingestion we record
+            # fullTime + (pen-winner +1) so the aggregate maths come out right.
+            home_goals = full_time.get("home")
+            away_goals = full_time.get("away")
+            duration = score.get("duration")
+            penalties = score.get("penalties") or {}
+            if duration == "PENALTY_SHOOTOUT" and home_goals is not None and away_goals is not None:
+                # Apply the +1 boost to the pen winner so aggregate sum
+                # reflects the tie's actual winner.
+                pen_home = penalties.get("home")
+                pen_away = penalties.get("away")
+                if pen_home is not None and pen_away is not None:
+                    if pen_home > pen_away:
+                        home_goals = (home_goals or 0) + 1
+                    elif pen_away > pen_home:
+                        away_goals = (away_goals or 0) + 1
+            leg = {
+                "fd_id": m.get("id"),
+                "matchday": m.get("matchday") or 1,
+                "home": home,
+                "away": away,
+                "home_goals": home_goals,
+                "away_goals": away_goals,
+                "status": m.get("status"),
+                "start_time": parse_iso_utc(m.get("utcDate")),
+            }
+            by_stage[stage].setdefault(pair, []).append(leg)
+
+        # Sort each tie's legs by matchday and build the tie_meta list.
+        bracket: Dict[str, List[Dict[str, Any]]] = {s: [] for s in self.KO_STAGES}
+        for stage in self.KO_STAGES:
+            stage_ties = by_stage[stage]
+            for pair, legs in stage_ties.items():
+                legs.sort(key=lambda L: L["matchday"])
+                bracket[stage].append({
+                    "stage": stage,
+                    "teams": pair,
+                    "legs": legs,
+                    "feeds_from": {},      # {team_name: (prev_stage, tie_idx)}
+                    "is_entry_tie": True,  # overridden below if any participant
+                                           # came from a tracked upstream tie
+                })
+
+        # Wire feeds_from for downstream stages. For each tie at stage S,
+        # each participant team T is linked to the most recent earlier-
+        # stage tie where T is a participant (NOT necessarily a winner —
+        # this is a structural inference based on the bracket draw, so it
+        # works when upstream results are SCHEDULED as well as FINISHED).
+        # Keyed by team name so each side resolves independently — handles
+        # UCL R16 where one side enters from PLAYOFFS (tracked) and the
+        # other from top-8 direct league-phase entry (untracked, no feed).
+        #
+        # is_entry_tie is True iff at least one participant has no upstream
+        # feed (entry stage or mixed-entry). Downstream-only ties are
+        # blocked until all feeds resolve via aggregate_winner.
+        participants_by_stage: Dict[str, Dict[str, int]] = {
+            stage: {team: idx for idx, tie in enumerate(bracket[stage]) for team in tie["teams"]}
+            for stage in self.KO_STAGES
+        }
+        for i, stage in enumerate(self.KO_STAGES):
+            for tie in bracket[stage]:
+                team_feeds: Dict[str, Tuple[str, int]] = {}
+                for team in tie["teams"]:
+                    # Search earlier tracked stages from nearest to farthest.
+                    for j in range(i - 1, -1, -1):
+                        prev_stage = self.KO_STAGES[j]
+                        prev_idx = participants_by_stage[prev_stage].get(team)
+                        if prev_idx is not None:
+                            team_feeds[team] = (prev_stage, prev_idx)
+                            break
+                tie["feeds_from"] = team_feeds
+                tie["is_entry_tie"] = len(team_feeds) < len(tie["teams"])
+        return bracket
+
+    @staticmethod
+    def _compute_aggregate_from_fd_legs(legs: List[Dict[str, Any]]) -> Optional[str]:
+        """Given the FD.org-published legs of a tie, return the aggregate
+        winner team name. Returns None if any leg is unfinished or the
+        aggregate is somehow tied (shouldn't happen with real FD data
+        because shootouts give a +1 boost in `_build_bracket`).
+        """
+        if not legs:
+            return None
+        if any(L.get("home_goals") is None or L.get("away_goals") is None for L in legs):
+            return None
+        teams: set = set()
+        for L in legs:
+            teams.add(L["home"])
+            teams.add(L["away"])
+        if len(teams) != 2:
+            return None
+        team_a, team_b = list(teams)
+        agg = {team_a: 0, team_b: 0}
+        for L in legs:
+            agg[L["home"]] += L["home_goals"]
+            agg[L["away"]] += L["away_goals"]
+        if agg[team_a] == agg[team_b]:
+            return None
+        return team_a if agg[team_a] > agg[team_b] else team_b
+
+    @staticmethod
+    def _sample_penalty_shootout(rng: random.Random) -> str:
+        """Return 'HOME' or 'AWAY'. Symmetric 70% conversion per kick over
+        5 rounds plus sudden death. Penalty shootouts are dominated by
+        variance — modelling per-team conversion skill barely shifts the
+        outcome distribution at the calibration precision we use.
+        """
+        h = sum(1 for _ in range(5) if rng.random() < 0.70)
+        a = sum(1 for _ in range(5) if rng.random() < 0.70)
+        # Sudden death: each team takes one more shot per round until they differ.
+        # Cap at 30 rounds defensively — a 60-round sudden death has probability
+        # ~3e-15 at p=0.7 and we don't need to model that tail.
+        for _ in range(30):
+            if h != a:
+                break
+            h += int(rng.random() < 0.70)
+            a += int(rng.random() < 0.70)
+        return "HOME" if h > a else "AWAY"
 
 
 def _poisson(lam: float, rng: random.Random) -> int:

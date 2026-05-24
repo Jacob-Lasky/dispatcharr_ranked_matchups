@@ -33,7 +33,7 @@ import os
 import threading
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from zoneinfo import ZoneInfo
@@ -291,7 +291,9 @@ def _build_weights(settings: Dict[str, Any]):
 
 
 def _build_sources(settings: Dict[str, Any]):
-    from .sources import NcaafSource, NcaamSource, SoccerSource
+    from .sources import KnockoutSoccerSource, NcaafSource, NcaamSource, SoccerSource
+    from .sources.soccer import COMPETITIONS
+    from .scoring import LEAGUE_CONTEXTS
     sources = []
     cfbd_key = _resolve_key(settings, "cfbd_api_key", CFBD_KEY_PATH)
     fd_key = _resolve_key(settings, "football_data_api_key", FD_KEY_PATH)
@@ -301,12 +303,24 @@ def _build_sources(settings: Dict[str, Any]):
     # NCAAM uses the same CFBD/CBB-Data Bearer token as NCAAF.
     if settings.get("enable_ncaam", False) and cfbd_key:
         sources.append(NcaamSource(api_key=cfbd_key))
+
+    def _make_soccer(comp_key: str):
+        """Pick the right SoccerSource subclass for a given competition based
+        on its LEAGUE_CONTEXTS format. League-format (PL, ELC, BL1, etc.)
+        uses SoccerSource. Knockout-format (CL, EL, etc.) uses
+        KnockoutSoccerSource — a different state machine for bracket shape.
+        """
+        cfg = COMPETITIONS.get(comp_key)
+        ctx = LEAGUE_CONTEXTS.get(cfg.fd_code) if cfg else None
+        cls = KnockoutSoccerSource if (ctx and ctx.format == "knockout") else SoccerSource
+        return cls(comp_key, fd_api_key=fd_key, odds_api_key=odds_key)
+
     if settings.get("enable_epl", False) and fd_key:
-        sources.append(SoccerSource("epl", fd_api_key=fd_key, odds_api_key=odds_key))
+        sources.append(_make_soccer("epl"))
     if settings.get("enable_championship", False) and fd_key:
-        sources.append(SoccerSource("championship", fd_api_key=fd_key, odds_api_key=odds_key))
+        sources.append(_make_soccer("championship"))
     if settings.get("enable_ucl", False) and fd_key:
-        sources.append(SoccerSource("ucl", fd_api_key=fd_key, odds_api_key=odds_key))
+        sources.append(_make_soccer("ucl"))
     return sources
 
 
@@ -545,7 +559,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- EPG lookup (closure over Django ORM) ----------
 
-def _build_epg_lookup(exclude_group_name: Optional[str] = None):
+def _build_epg_lookup():
     """Return a callable: GameRow -> List[ChannelCandidate]. Closure over ORM.
 
     Excludes any channel that is one of OUR virtual channels (see
@@ -926,7 +940,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from apps.epg.models import EPGSource, EPGData, ProgramData
     from django.db import transaction
 
-    from .scoring import format_channel_name, strip_team_suffix
+    from .scoring import format_channel_name
 
     cache = _read_cache()
     games = cache.get("games", [])
@@ -1428,6 +1442,7 @@ def _action_auto_pipeline(settings: Dict[str, Any]) -> Dict[str, Any]:
 # ---------- show status ----------
 
 def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
+    del settings  # interface-required (Plugin.run dispatch), not read here
     cache = _read_cache()
     games = cache.get("games", [])
     if not games:

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from dispatcharr_ranked_matchups.sources import (
+    KnockoutSoccerSource,
     NcaafSource,
     NcaamSource,
     SoccerSource,
@@ -577,9 +578,30 @@ class TestSoccerImportanceInterface:
         assert "UCL" in labels
         assert "relegation" in labels
 
-    def test_outcome_labels_empty_for_unknown_league(self):
-        src = SoccerSource("ucl", fd_api_key="fake")  # CL not in LEAGUE_CONTEXTS
+    def test_outcome_labels_empty_for_unknown_league(self, monkeypatch):
+        # All COMPETITIONS entries now have LEAGUE_CONTEXTS entries (PL/ELC/CL),
+        # so we synthesize an unknown fd_code on an existing source to exercise
+        # the "ctx is None" branch. The branch must survive so future
+        # competitions added to COMPETITIONS without a matching context don't
+        # crash — they silently produce 0 importance.
+        src = SoccerSource("epl", fd_api_key="fake")
+        monkeypatch.setattr(src.config, "fd_code", "UNKNOWN_COMP")
         assert src.outcome_labels == []
+
+    def test_soccer_source_terminal_outcomes_guards_knockout_context(self, monkeypatch, caplog):
+        # SoccerSource is league-shaped (int-position cutoffs). If a knockout-
+        # format context (str cutoffs) reaches it via a wiring bug, the
+        # int-vs-str comparison in the cutoff loop would TypeError. The guard
+        # in terminal_outcomes returns empty + logs a warning, keeping refresh
+        # alive on a no-op-importance fallback. Verifies the guard fires for CL.
+        src = SoccerSource("ucl", fd_api_key="fake")  # ucl → fd_code="CL", knockout
+        src._all_matches_cache = []  # avoid HTTP
+        # Hand-built minimal state — the guard short-circuits before reading it.
+        state = {"_applied": frozenset(), "Some Team": {"played": 0, "points": 0, "gf": 0, "ga": 0}}
+        with caplog.at_level("WARNING"):
+            out = src.terminal_outcomes(state)
+        assert out == {"Some Team": []}
+        assert any("non-league context" in r.message for r in caplog.records)
 
     # ---------- estimate_strengths ----------
 
@@ -812,3 +834,432 @@ class TestSoccerImportanceInterface:
             n_sims=50, rng=random.Random(7),
         )
         assert 0.0 <= imp <= 1.0
+
+
+class TestKnockoutSoccerSource:
+    """Phase D.1: KnockoutSoccerSource bracket-shaped importance.
+
+    Mini-bracket: 4 teams (A, B, C, D) in SEMI_FINALS (2 ties of 2 legs each),
+    advancing to a single FINAL (1 leg). Uses real UCL stage strings so the
+    KNOCKOUT_ROUND_DEPTH mapping fires naturally; tests mock
+    `_fetch_all_season_matches` so they exercise the state machine without
+    any HTTP.
+
+    Why 4 teams instead of 16: covers every code path (2-leg tie aggregation,
+    single-leg FINAL, feeds_from resolution, ET+pen sampling) with the
+    smallest synthetic dataset. Real 16-team UCL coverage lives in the
+    end-to-end smoke test.
+    """
+
+    BASE_DATE = "2026-05-01T18:00:00Z"
+
+    def _semi_finals_matches(self, sf_finished: bool = False) -> list:
+        """4 SF legs. If `sf_finished`, the legs carry FINISHED scores
+        (A beats B 3-1 aggregate, C beats D 2-0 aggregate). Otherwise
+        SCHEDULED with no scores.
+        """
+        if sf_finished:
+            # Tie 1: A vs B — leg1 A 2-0, leg2 B 1-1 → A wins 3-1 aggregate
+            sf_leg1_ab = {"home": "A", "away": "B", "home_g": 2, "away_g": 0,
+                          "status": "FINISHED", "duration": "REGULAR"}
+            sf_leg2_ab = {"home": "B", "away": "A", "home_g": 1, "away_g": 1,
+                          "status": "FINISHED", "duration": "REGULAR"}
+            # Tie 2: C vs D — leg1 C 2-0, leg2 D 0-0 → C wins 2-0 aggregate
+            sf_leg1_cd = {"home": "C", "away": "D", "home_g": 2, "away_g": 0,
+                          "status": "FINISHED", "duration": "REGULAR"}
+            sf_leg2_cd = {"home": "D", "away": "C", "home_g": 0, "away_g": 0,
+                          "status": "FINISHED", "duration": "REGULAR"}
+        else:
+            sf_leg1_ab = {"home": "A", "away": "B", "home_g": None, "away_g": None,
+                          "status": "SCHEDULED", "duration": None}
+            sf_leg2_ab = {"home": "B", "away": "A", "home_g": None, "away_g": None,
+                          "status": "SCHEDULED", "duration": None}
+            sf_leg1_cd = {"home": "C", "away": "D", "home_g": None, "away_g": None,
+                          "status": "SCHEDULED", "duration": None}
+            sf_leg2_cd = {"home": "D", "away": "C", "home_g": None, "away_g": None,
+                          "status": "SCHEDULED", "duration": None}
+        return [
+            self._fd_match(201, "SEMI_FINALS", 1, sf_leg1_ab),
+            self._fd_match(202, "SEMI_FINALS", 2, sf_leg2_ab),
+            self._fd_match(203, "SEMI_FINALS", 1, sf_leg1_cd),
+            self._fd_match(204, "SEMI_FINALS", 2, sf_leg2_cd),
+        ]
+
+    def _final_match(self, home: str = "A", away: str = "C") -> dict:
+        """Final: single leg. By default A vs C (the SF winners in the
+        finished-SF setup). Always SCHEDULED for the test set — the final
+        is what the simulator should be predicting.
+        """
+        return self._fd_match(301, "FINAL", 1, {
+            "home": home, "away": away, "home_g": None, "away_g": None,
+            "status": "SCHEDULED", "duration": None,
+        })
+
+    @staticmethod
+    def _fd_match(fd_id: int, stage: str, matchday: int, leg: dict) -> dict:
+        """Construct a FD.org-shape match dict from a leg spec."""
+        return {
+            "id": fd_id,
+            "stage": stage,
+            "matchday": matchday,
+            "status": leg["status"],
+            "homeTeam": {"name": leg["home"]},
+            "awayTeam": {"name": leg["away"]},
+            "score": {
+                "fullTime": {"home": leg["home_g"], "away": leg["away_g"]},
+                "duration": leg.get("duration"),
+                "penalties": leg.get("penalties"),
+            },
+            "utcDate": TestKnockoutSoccerSource.BASE_DATE,
+        }
+
+    def _make_source(self, all_matches: list):
+        """Build a KnockoutSoccerSource with pre-loaded match cache."""
+        src = KnockoutSoccerSource("ucl", fd_api_key="fake")
+        src._all_matches_cache = all_matches
+        return src
+
+    # ---------- supports_importance + outcome_labels ----------
+
+    def test_supports_importance_inherits_true(self):
+        src = self._make_source([])
+        assert src.supports_importance is True
+
+    def test_outcome_labels_uses_cl_thresholds(self):
+        src = self._make_source([])
+        labels = src.outcome_labels
+        # CL thresholds: r16, QF, SF, F, winner.
+        assert "round_of_16" in labels
+        assert "quarterfinal" in labels
+        assert "semifinal" in labels
+        assert "final" in labels
+        assert "winner" in labels
+
+    # ---------- _build_bracket ----------
+
+    def test_build_bracket_pairs_legs_into_ties(self):
+        matches = self._semi_finals_matches(sf_finished=True)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        bracket = src._build_bracket(matches)
+        assert len(bracket["SEMI_FINALS"]) == 2  # two ties, two legs each
+        assert len(bracket["FINAL"]) == 1
+        # Each SF tie should have 2 legs ordered by matchday.
+        for tie in bracket["SEMI_FINALS"]:
+            assert len(tie["legs"]) == 2
+            assert tie["legs"][0]["matchday"] == 1
+            assert tie["legs"][1]["matchday"] == 2
+            assert tie["teams"] == frozenset(
+                {leg["home"] for leg in tie["legs"]} | {leg["away"] for leg in tie["legs"]}
+            )
+
+    def test_build_bracket_wires_feeds_from_for_final(self):
+        """The FINAL tie's feeds_from must point to the two SF ties whose
+        winners are A and C (per the finished SF data). The dict is keyed
+        by FD-published team name."""
+        matches = self._semi_finals_matches(sf_finished=True)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        bracket = src._build_bracket(matches)
+        final_tie = bracket["FINAL"][0]
+        feeds_from = final_tie["feeds_from"]
+        assert set(feeds_from.keys()) == {"A", "C"}
+        # Both feeds_from refs must point at SEMI_FINALS ties.
+        for team, (feed_stage, _idx) in feeds_from.items():
+            assert feed_stage == "SEMI_FINALS", f"feeds_from[{team}] should point to SEMI_FINALS"
+        # FINAL is a downstream tie (both participants come from prior stage).
+        assert final_tie["is_entry_tie"] is False
+
+    def test_build_bracket_feeds_inferred_from_participant_membership(self):
+        """feeds_from is built from the bracket's PARTICIPANT structure, not
+        from played results. Even when SF legs are SCHEDULED, the FINAL's
+        feeds_from is fully populated because A appears in SF tie 0 and C
+        in SF tie 1. The simulator uses this to block the FINAL until those
+        SFs resolve (via aggregate_winner lookup in resolve_side)."""
+        matches = self._semi_finals_matches(sf_finished=False)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        bracket = src._build_bracket(matches)
+        # SF ties are entry-level (no PLAYOFFS data in this test bracket).
+        for sf_tie in bracket["SEMI_FINALS"]:
+            assert sf_tie["is_entry_tie"] is True
+            assert sf_tie["feeds_from"] == {}
+        # FINAL: feeds_from for A and C point to their SF ties even though
+        # those SFs are scheduled. is_entry_tie is False — the FINAL is a
+        # downstream tie that blocks until upstream resolves.
+        final_tie = bracket["FINAL"][0]
+        assert set(final_tie["feeds_from"].keys()) == {"A", "C"}
+        for feed_stage, _idx in final_tie["feeds_from"].values():
+            assert feed_stage == "SEMI_FINALS"
+        assert final_tie["is_entry_tie"] is False
+
+    def test_build_bracket_pen_winner_boost(self):
+        """A FD.org match with duration=PENALTY_SHOOTOUT should have +1
+        added to the pen winner's goal count in the parsed leg, so the
+        aggregate sum reflects the tie's winning side.
+        """
+        # 90min 1-1, ET 1-1, pens 4-3 → home wins on pens
+        leg = {"home": "A", "away": "B", "home_g": 1, "away_g": 1,
+               "status": "FINISHED", "duration": "PENALTY_SHOOTOUT",
+               "penalties": {"home": 4, "away": 3}}
+        m = self._fd_match(401, "SEMI_FINALS", 2, leg)
+        # Wrap penalties into the score dict per the FD.org shape.
+        m["score"]["penalties"] = leg["penalties"]
+        src = self._make_source([m])
+        bracket = src._build_bracket([m])
+        # The leg should have home_goals = 1 + 1 (pen boost) = 2; away unchanged.
+        leg_parsed = bracket["SEMI_FINALS"][0]["legs"][0]
+        assert leg_parsed["home_goals"] == 2
+        assert leg_parsed["away_goals"] == 1
+
+    # ---------- _record_leg_into_tie ----------
+
+    def test_record_leg_into_tie_two_leg_aggregate(self):
+        src = self._make_source([])
+        tie = {
+            "stage": "SEMI_FINALS",
+            "teams": frozenset({"A", "B"}),
+            "leg1": None, "leg2": None,
+            "aggregate_winner": None, "aggregate_loser": None,
+        }
+        # Leg 1: A home, A 2-0
+        src._record_leg_into_tie(tie, "A", "B", 2, 0, leg_index=1)
+        # Tie should be incomplete until leg 2 arrives.
+        assert tie["aggregate_winner"] is None
+        # Leg 2: B home, A 1-1 (so B 1, A 1 in this leg)
+        src._record_leg_into_tie(tie, "B", "A", 1, 1, leg_index=2)
+        # A aggregate = 2 (home) + 1 (away leg 2) = 3; B aggregate = 0 + 1 = 1.
+        assert tie["aggregate_winner"] == "A"
+        assert tie["aggregate_loser"] == "B"
+
+    def test_record_leg_into_tie_single_leg_final(self):
+        src = self._make_source([])
+        tie = {
+            "stage": "FINAL",
+            "teams": frozenset({"A", "C"}),
+            "leg1": None, "leg2": None,
+            "aggregate_winner": None, "aggregate_loser": None,
+        }
+        # Single leg FINAL: A wins 2-1.
+        src._record_leg_into_tie(tie, "A", "C", 2, 1, leg_index=1)
+        # Single-leg tie completes after one record.
+        assert tie["aggregate_winner"] == "A"
+        assert tie["aggregate_loser"] == "C"
+
+    # ---------- _advance_round_reached ----------
+
+    def test_advance_round_reached_winner_loser_at_correct_depth(self):
+        # SF winner advances to FINAL depth; loser stays at SEMI_FINALS depth.
+        round_reached: dict = {}
+        KnockoutSoccerSource._advance_round_reached(round_reached, "A", "B", "SEMI_FINALS")
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert round_reached["A"] == KNOCKOUT_ROUND_DEPTH["FINAL"]  # advanced INTO FINAL
+        assert round_reached["B"] == KNOCKOUT_ROUND_DEPTH["SEMI_FINALS"]
+
+    def test_advance_round_reached_final_winner_becomes_winner(self):
+        round_reached: dict = {}
+        KnockoutSoccerSource._advance_round_reached(round_reached, "A", "C", "FINAL")
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert round_reached["A"] == KNOCKOUT_ROUND_DEPTH["WINNER"]
+        assert round_reached["C"] == KNOCKOUT_ROUND_DEPTH["FINAL"]
+
+    # ---------- initial_state ----------
+
+    def test_initial_state_from_finished_semis(self):
+        matches = self._semi_finals_matches(sf_finished=True)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        state = src.initial_state()
+        rr = state["_round_reached"]
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        # A and C won their SF ties → advanced INTO FINAL.
+        assert rr["A"] == KNOCKOUT_ROUND_DEPTH["FINAL"]
+        assert rr["C"] == KNOCKOUT_ROUND_DEPTH["FINAL"]
+        # B and D lost their SF ties → stuck at SEMI_FINALS depth.
+        assert rr["B"] == KNOCKOUT_ROUND_DEPTH["SEMI_FINALS"]
+        assert rr["D"] == KNOCKOUT_ROUND_DEPTH["SEMI_FINALS"]
+        # 4 SF legs are in _applied; the FINAL leg is not.
+        assert state["_applied"] == frozenset({201, 202, 203, 204})
+
+    def test_initial_state_caches(self):
+        matches = self._semi_finals_matches(sf_finished=True)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        first = src.initial_state()
+        first["_round_reached"]["MARKER"] = 999  # mutate to verify cache hit
+        second = src.initial_state()
+        assert second["_round_reached"].get("MARKER") == 999
+
+    # ---------- remaining_matches ----------
+
+    def test_remaining_matches_returns_only_eligible(self):
+        """When SFs are FINISHED, remaining = only the FINAL. Earlier-stage
+        matches are filtered out by `_applied`."""
+        matches = self._semi_finals_matches(sf_finished=True)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        state = src.initial_state()
+        rem = src.remaining_matches(state)
+        assert len(rem) == 1
+        assert rem[0].extra["stage"] == "FINAL"
+        # FINAL's home/away come from the resolved upstream SF winners.
+        assert {rem[0].home, rem[0].away} == {"A", "C"}
+
+    def test_remaining_matches_blocks_downstream_when_feeders_pending(self):
+        """If SFs aren't FINISHED, the FINAL can't be played yet — its
+        feeds_from upstreams haven't resolved. remaining = 4 SF legs only."""
+        matches = self._semi_finals_matches(sf_finished=False)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        state = src.initial_state()
+        rem = src.remaining_matches(state)
+        # All 4 SF legs are eligible (entry-level: no feeds_from).
+        assert len(rem) == 4
+        assert all(m.extra["stage"] == "SEMI_FINALS" for m in rem)
+
+    # ---------- sample_result: ET / penalty resolution ----------
+
+    def test_sample_result_no_et_on_leg_one(self):
+        """Leg 1 of a 2-leg tie should never sample ET, even if regulation
+        is tied — the tie is decided over both legs."""
+        matches = self._semi_finals_matches(sf_finished=False)
+        src = self._make_source(matches)
+        state = src.initial_state()
+        # Construct a leg-1 game row.
+        rem = src.remaining_matches(state)
+        leg1 = next(m for m in rem if m.extra["matchday"] == 1)
+        # Mock strengths so regulation is likely tied at 0-0 (lambdas tiny).
+        strengths = {t: {"sh": 0.05, "ch": 0.05, "sa": 0.05, "ca": 0.05}
+                     for t in ("A", "B", "C", "D")}
+        rng = random.Random(0)
+        result = src.sample_result(state, leg1, strengths, rng)
+        # No ET marker in extra — sample_result returned early for non-decisive leg.
+        assert "et_goals" not in result.extra
+        assert "pen_winner" not in result.extra
+
+    def test_sample_result_resolves_tie_on_decisive_leg(self):
+        """Single-leg FINAL with tied regulation MUST resolve via ET (and
+        possibly pens) so MatchResult.home_goals != MatchResult.away_goals.
+        We force regulation to 0-0 via tiny lambdas, then verify the result
+        is decided one way or the other (no D in W/D/L classification)."""
+        matches = self._semi_finals_matches(sf_finished=True)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        state = src.initial_state()
+        rem = src.remaining_matches(state)
+        final_match = rem[0]
+        # Tiny strengths → very likely 0-0 regulation, forces ET/pen path.
+        strengths = {t: {"sh": 0.01, "ch": 0.01, "sa": 0.01, "ca": 0.01}
+                     for t in ("A", "B", "C", "D")}
+        # Try multiple seeds so we exercise both pen winner outcomes.
+        outcomes = set()
+        for seed in range(40):
+            rng = random.Random(seed)
+            r = src.sample_result(state, final_match, strengths, rng)
+            assert r.home_goals != r.away_goals, "Decisive leg must produce a winner"
+            outcomes.add("HOME" if r.home_goals > r.away_goals else "AWAY")
+        # With 40 trials, almost-certainly we see both pen outcomes appear at
+        # least once (variance dominates a 0-0 regulation at tiny lambdas).
+        assert outcomes == {"HOME", "AWAY"}
+
+    # ---------- apply_result + terminal_outcomes ----------
+
+    def test_apply_result_advances_round_reached_on_tie_completion(self):
+        matches = self._semi_finals_matches(sf_finished=False)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.sources.base import MatchResult
+        rem = src.remaining_matches(state)
+        # Apply leg 1 of A-vs-B: A 2-0 at home. No tie completion yet.
+        leg1 = next(m for m in rem if m.extra["matchday"] == 1 and "A" in (m.home, m.away) and "B" in (m.home, m.away))
+        result1 = MatchResult(home_goals=2, away_goals=0)
+        state1 = src.apply_result(state, leg1, result1)
+        # No advancement until both legs are applied.
+        assert not state1["_round_reached"].get("A")
+        # Apply leg 2 of A-vs-B: B 1-1 at home. Aggregate 3-1 to A; A advances.
+        leg2 = next(m for m in src.remaining_matches(state1)
+                    if m.extra["matchday"] == 2 and "A" in (m.home, m.away) and "B" in (m.home, m.away))
+        result2 = MatchResult(home_goals=1, away_goals=1)
+        state2 = src.apply_result(state1, leg2, result2)
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state2["_round_reached"]["A"] == KNOCKOUT_ROUND_DEPTH["FINAL"]
+        assert state2["_round_reached"]["B"] == KNOCKOUT_ROUND_DEPTH["SEMI_FINALS"]
+
+    def test_terminal_outcomes_label_cascade(self):
+        """A team that reached the FINAL should also be labeled SF/QF/R16 —
+        the deeper round implies all shallower bands."""
+        matches = self._semi_finals_matches(sf_finished=True)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        state = src.initial_state()
+        outcomes = src.terminal_outcomes(state)
+        # A and C are at FINAL depth (won SF). They should have semifinal +
+        # final labels. round_of_16 / quarterfinal also fire (depth <= reached).
+        assert "semifinal" in outcomes["A"]
+        assert "final" in outcomes["A"]
+        assert "winner" not in outcomes["A"]  # FINAL hasn't been played yet
+        # B and D are at SEMI_FINALS depth (lost SF). They should have
+        # semifinal but NOT final.
+        assert "semifinal" in outcomes["B"]
+        assert "final" not in outcomes["B"]
+
+    # ---------- end-to-end Monte Carlo against the mini-bracket ----------
+
+    def test_monte_carlo_winner_importance_is_high_on_final(self, monkeypatch):
+        """The FINAL is the only match between participants and the WINNER
+        outcome — tau-c should be near 1.0 (deterministic association).
+        Sanity-checks the full simulator pipeline against a knockout source.
+
+        Strengths are monkeypatched to identical symmetric values so the
+        marginal W/L distribution is ~50/50 (tau-c is bounded by the
+        marginal balance — extreme W/L imbalance from a 4-finished-match
+        strength estimate would cap tau-c at ~0.5 even with perfect
+        outcome correlation). The algorithm is what's under test, not the
+        strength estimator.
+        """
+        from dispatcharr_ranked_matchups.simulation import monte_carlo_importance
+        matches = self._semi_finals_matches(sf_finished=True)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        # Symmetric strengths: every team has identical home/away scoring rates.
+        symmetric = {t: {"sh": 1.2, "ch": 1.2, "sa": 1.0, "ca": 1.0}
+                     for t in ("A", "B", "C", "D")}
+        monkeypatch.setattr(src, "estimate_strengths", lambda: symmetric)
+        state = src.initial_state()
+        final_match = src.remaining_matches(state)[0]
+        rng = random.Random(13)
+        imp = monte_carlo_importance(src, final_match, "A", "winner",
+                                     n_sims=400, rng=rng)
+        assert imp > 0.85, f"FINAL importance for WINNER should be near-deterministic; got {imp}"
+
+    def test_monte_carlo_already_locked_outcomes_have_zero_importance(self, monkeypatch):
+        """A's 'semifinal' label is already true regardless of the FINAL
+        result (A reached the final). Importance for that pair should be
+        ~0 — the FINAL doesn't change A's semifinal status."""
+        from dispatcharr_ranked_matchups.simulation import monte_carlo_importance
+        matches = self._semi_finals_matches(sf_finished=True)
+        matches.append(self._final_match("A", "C"))
+        src = self._make_source(matches)
+        symmetric = {t: {"sh": 1.2, "ch": 1.2, "sa": 1.0, "ca": 1.0}
+                     for t in ("A", "B", "C", "D")}
+        monkeypatch.setattr(src, "estimate_strengths", lambda: symmetric)
+        state = src.initial_state()
+        final_match = src.remaining_matches(state)[0]
+        rng = random.Random(13)
+        imp = monte_carlo_importance(src, final_match, "A", "semifinal",
+                                     n_sims=200, rng=rng)
+        # Locked-in outcomes degenerate tau-c (column is constant). Expected: 0.
+        assert imp < 0.05, f"Already-reached outcomes should give ~0 importance; got {imp}"
+
+    # ---------- penalty shootout helper ----------
+
+    def test_penalty_shootout_returns_decisive_winner(self):
+        """20 shootouts at the same seed should produce both HOME and AWAY
+        winners — penalty resolution is variance-dominated, never the same
+        outcome every time."""
+        outcomes = set()
+        for seed in range(30):
+            rng = random.Random(seed)
+            outcomes.add(KnockoutSoccerSource._sample_penalty_shootout(rng))
+        assert outcomes == {"HOME", "AWAY"}
