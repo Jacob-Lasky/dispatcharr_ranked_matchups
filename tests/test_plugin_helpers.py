@@ -414,3 +414,126 @@ class TestEpgSourceConfig:
         # is_active=False so the EPG refresh task skips us — we have no URL
         # to fetch, and we write ProgramData ourselves on apply.
         assert plugin.EPG_SOURCE_IS_ACTIVE is False
+
+
+class TestPluginKey:
+    """PLUGIN_KEY must equal the folder name normalized exactly the way
+    Dispatcharr's apps/plugins/loader.py derives keys (lowercase,
+    spaces->underscores). Anything else and PluginConfig DB lookups,
+    REST routes, and the Plugins-page card all miss. The scheduler
+    thread runs but the settings dict is always empty.
+
+    This caught a real regression: PLUGIN_KEY = __package__ resolved to
+    the loader's wrapper namespace (_dispatcharr_plugin_<key>) instead
+    of the folder name, leaving the auto-refresh idle for 18 days."""
+
+    def test_plugin_key_matches_folder_name(self, plugin):
+        # The folder name on disk IS the canonical key Dispatcharr uses.
+        # Read it the same way the loader does, then assert equality.
+        import os
+        expected = os.path.basename(os.path.dirname(os.path.abspath(plugin.__file__))).replace(" ", "_").lower()
+        assert plugin.PLUGIN_KEY == expected
+
+    def test_plugin_key_is_canonical_string(self, plugin):
+        # The package ships under this exact folder name. If anything
+        # renames the folder, the test should fail loudly until both
+        # this assertion and the folder name agree again.
+        assert plugin.PLUGIN_KEY == "dispatcharr_ranked_matchups"
+
+    def test_plugin_key_not_loader_wrapper(self, plugin):
+        # The exact bug the comment in plugin.py warns about: don't
+        # accidentally derive PLUGIN_KEY from __package__, which would
+        # return the loader's internal wrapper namespace.
+        assert not plugin.PLUGIN_KEY.startswith("_dispatcharr_plugin_")
+
+
+class TestOwnedTvgIdQ:
+    """The ownership helper covers both the current TVG_ID_PREFIX scheme
+    AND legacy tvg_id values from earlier plugin versions. A prefix-only
+    check misses legacy-shaped rows on a target-group rename, leaving
+    orphan EPGSources visible in the UI with status='error'.
+
+    The function builds Django Q objects with lazy import (do NOT
+    hoist `from django.db.models import Q` to module level — the test
+    suite relies on plugin.py keeping Django imports inside function
+    bodies; see tests/conftest.py)."""
+
+    def _q_to_dict(self, q):
+        """Walk a Q tree into a comparable dict. Q nodes have .connector
+        ('AND'/'OR') and .children (list of (lookup, value) tuples or
+        nested Q objects)."""
+        from django.db.models import Q
+        if isinstance(q, Q):
+            return {
+                "connector": q.connector,
+                "children": [self._q_to_dict(c) for c in q.children],
+            }
+        return q  # leaf: (lookup, value) tuple
+
+    def test_returns_a_q_object(self, plugin):
+        from django.db.models import Q
+        q = plugin._owned_tvg_id_q()
+        assert isinstance(q, Q)
+
+    def test_or_connector_at_top(self, plugin):
+        # Top-level Q must OR the prefix-startswith branch with the
+        # legacy-marker branch. AND would be a bug (no row could match
+        # both at once).
+        q = plugin._owned_tvg_id_q()
+        assert q.connector == "OR"
+
+    def test_includes_current_prefix_lookup(self, plugin):
+        # The prefix branch must use tvg_id__startswith against
+        # TVG_ID_PREFIX. If the lookup type ever changes (e.g. iexact),
+        # cleanup will silently miss rows.
+        shape = self._q_to_dict(plugin._owned_tvg_id_q())
+        leaves = self._all_leaves(shape)
+        assert ("tvg_id__startswith", plugin.TVG_ID_PREFIX) in leaves
+
+    def test_includes_all_legacy_markers(self, plugin):
+        # The legacy branch must use tvg_id__in against the full marker
+        # tuple. Single-value lookups would only catch one historical
+        # scheme; tuple-in catches every appended marker.
+        shape = self._q_to_dict(plugin._owned_tvg_id_q())
+        leaves = self._all_leaves(shape)
+        assert ("tvg_id__in", plugin._OWNED_TVG_ID_LEGACY_MARKERS) in leaves
+
+    def test_field_prefix_prepends_lookup_path(self, plugin):
+        # For joined queries from EPGSource ('epgs__') or ChannelGroup
+        # ('channels__'), the helper must rewrite both lookups to walk
+        # the relation. If prefix application is incomplete, half the
+        # check looks at the wrong table.
+        shape = self._q_to_dict(plugin._owned_tvg_id_q("epgs__"))
+        leaves = self._all_leaves(shape)
+        assert ("epgs__tvg_id__startswith", plugin.TVG_ID_PREFIX) in leaves
+        assert ("epgs__tvg_id__in", plugin._OWNED_TVG_ID_LEGACY_MARKERS) in leaves
+
+    def test_empty_field_prefix_is_default(self, plugin):
+        # The default empty prefix must not introduce a leading
+        # underscore or other accidental prefix character.
+        shape = self._q_to_dict(plugin._owned_tvg_id_q())
+        leaves = self._all_leaves(shape)
+        for lookup, _ in leaves:
+            assert not lookup.startswith("_")
+            assert lookup.startswith("tvg_id")
+
+    def test_legacy_markers_tuple_is_immutable(self, plugin):
+        # Tuple, not list. A mutable default would let any caller
+        # silently extend the markers list across the whole process.
+        assert isinstance(plugin._OWNED_TVG_ID_LEGACY_MARKERS, tuple)
+
+    def test_legacy_markers_contains_known_history(self, plugin):
+        # 'dummy_top_matchups' is the documented legacy marker from
+        # earlier plugin versions. The comment in plugin.py says
+        # never remove entries from this tuple; this test enforces that.
+        assert "dummy_top_matchups" in plugin._OWNED_TVG_ID_LEGACY_MARKERS
+
+    def _all_leaves(self, shape):
+        """Flatten a nested Q-shape dict into a list of leaf
+        (lookup, value) tuples regardless of OR/AND nesting depth."""
+        if isinstance(shape, dict):
+            out = []
+            for child in shape["children"]:
+                out.extend(self._all_leaves(child))
+            return out
+        return [shape]
