@@ -1135,8 +1135,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     epg_data.name = new_name
                     epg_data.save(update_fields=["name"])
                 if vc.epg_data_id != epg_data.id:
-                    vc.epg_data_id = epg_data.id
-                    vc.save(update_fields=["epg_data"])
+                    # DO NOT use vc.save(update_fields=["epg_data"]) —
+                    # apps/channels/signals.py post_save fires
+                    # parse_programs_for_tvg_id which unconditionally deletes
+                    # ProgramData for the tvg_id (apps/epg/tasks.py:1308) before
+                    # attempting an EPG-source refetch. Our EPGSource has no
+                    # URL/file (we write programs directly), so the refetch
+                    # fails and the rows stay deleted until the next plugin
+                    # tick — wiping the EPG grid for 0–3 minutes per new
+                    # channel attach. .update() bypasses the post_save signal,
+                    # mirroring the pattern at apps/channels/signals.py:60.
+                    Channel.objects.filter(pk=vc.pk).update(epg_data_id=epg_data.id)
+                    vc.epg_data_id = epg_data.id  # keep in-memory mirror in sync
                 ProgramData.objects.filter(epg=epg_data).delete()
 
                 now = datetime.now(timezone.utc)
