@@ -149,15 +149,15 @@
       "id": "weight_spread",
       "type": "number",
       "label": "Close-game weight",
-      "default": 0.5,
-      "help_text": "Multiplier on the spread-tightness signal (smaller spread = more interesting)."
+      "default": 0.1,
+      "help_text": "Multiplier on the spread-tightness signal (smaller spread = more interesting). Kept low until close_game reformulates around implied win probability; raw-spread is noisy. Keep in sync with scoring.Weights.spread."
     },
     {
       "id": "weight_favorite",
       "type": "number",
       "label": "Favorite-team boost",
-      "default": 4.0,
-      "help_text": "Flat points added when one of your favorite teams is involved."
+      "default": 6.0,
+      "help_text": "Flat points added when one of your favorite teams is involved. Keep in sync with scoring.Weights.favorite."
     },
     {
       "id": "weight_rivalry",

@@ -131,8 +131,13 @@ class TestBuildWeights:
     def test_defaults(self, plugin):
         w = plugin._build_weights({})
         assert w.rank == 1.0
-        assert w.spread == 0.5
-        assert w.favorite == 4.0
+        # spread is intentionally low (0.1) because the close_game signal
+        # currently fires off raw spread which is noisy. A future revision
+        # will reformulate around implied win probability.
+        assert w.spread == 0.1
+        # favorite is bumped to 6.0 to push favorite-involved games up
+        # against title-race / playoff contenders.
+        assert w.favorite == 6.0
         assert w.stakes == 2.0
         assert w.tournament == 1.5
         assert w.impact_favorite == 1.0
@@ -147,6 +152,66 @@ class TestBuildWeights:
         # Plugin settings UI sometimes hands us strings.
         w = plugin._build_weights({"weight_rank": "2.5"})
         assert w.rank == 2.5
+
+    def test_empty_settings_equals_dataclass_defaults(self, plugin):
+        # Regression guard against the DRY violation that bit during
+        # Phase A tuning: _build_weights had hardcoded fallback values
+        # that drifted from scoring.Weights's dataclass defaults. When
+        # the dataclass was bumped, runtime kept the old values until a
+        # test caught it. This test pins them together — any future
+        # divergence here will fail loudly on every commit.
+        from dispatcharr_ranked_matchups.scoring import Weights
+        defaults = Weights()
+        built = plugin._build_weights({})
+        assert built.rank == defaults.rank
+        assert built.spread == defaults.spread
+        assert built.favorite == defaults.favorite
+        assert built.rivalry == defaults.rivalry
+        assert built.stakes == defaults.stakes
+        assert built.tournament == defaults.tournament
+        assert built.impact_favorite == defaults.impact_favorite
+        assert built.narrative == defaults.narrative
+
+    def test_plugin_json_defaults_match_dataclass(self, plugin):
+        # The Dispatcharr loader reads plugin.json WITHOUT executing
+        # plugin code, so the manifest's per-field "default" values are
+        # a third source of truth alongside scoring.Weights and
+        # _build_weights. All three must agree, otherwise the UI shows
+        # one number while the runtime computes with another.
+        #
+        # If someone bumps the dataclass without bumping plugin.json,
+        # new installs surface the wrong default in the form. Saved
+        # settings would then override with stale UI defaults the user
+        # didn't change. This test catches the divergence at CI time.
+        import json
+        import os
+        from dispatcharr_ranked_matchups.scoring import Weights
+        defaults = Weights()
+        manifest_path = os.path.join(
+            os.path.dirname(os.path.abspath(plugin.__file__)), "plugin.json"
+        )
+        with open(manifest_path) as fh:
+            manifest = json.load(fh)
+        field_defaults = {
+            f["id"]: f.get("default")
+            for f in manifest.get("fields", [])
+            if f["id"].startswith("weight_")
+        }
+        # weight_<name> in plugin.json must match Weights.<name>.
+        weight_field_names = [
+            "rank", "spread", "favorite", "rivalry", "stakes",
+            "tournament", "impact_favorite", "narrative",
+        ]
+        for name in weight_field_names:
+            assert f"weight_{name}" in field_defaults, (
+                f"plugin.json missing weight_{name} field"
+            )
+            assert field_defaults[f"weight_{name}"] == getattr(defaults, name), (
+                f"plugin.json weight_{name} default "
+                f"({field_defaults[f'weight_{name}']}) disagrees with "
+                f"Weights.{name} default ({getattr(defaults, name)}). "
+                f"Bump both together."
+            )
 
 
 class TestResolveKey:

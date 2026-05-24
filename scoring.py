@@ -41,8 +41,8 @@ class Weights:
     cover what LLM narrative scoring would surface. Enable by setting weight > 0.
     """
     rank: float = 1.0
-    spread: float = 0.5
-    favorite: float = 4.0
+    spread: float = 0.1
+    favorite: float = 6.0
     rivalry: float = 2.0
     stakes: float = 2.0          # standings near meaningful league threshold
     tournament: float = 1.5      # knockout-stage cup games
@@ -121,21 +121,27 @@ class GameScore:
     notes: List[str]
 
 
-# Compression knee: tweak this to slide the asymptote earlier/later. Lower N
-# = scores saturate faster; higher N = more headroom for high-raw games.
-_FINAL_KNEE = 8.0
+# Compression knee. Lower N = scores saturate faster; higher N = more
+# headroom. Set to 16.0 because sim runs across EPL+ELC 2025-26 showed
+# 70% of games ending up at score >= 9.5 with knee=8.0 — the 0-10 scale
+# became indistinguishable noise above 9. With knee=16.0, a typical good
+# game (raw=20-30) lands at 7.7-8.6 and the differentiation comes back.
+# See TUNING_REPORT.md finding #1 (score saturation) in
+# /coding/dispatcharr_ranked_matchups_sim/ for the full distribution.
+_FINAL_KNEE = 16.0
 
 
 def _compress_to_10(raw: float) -> float:
     """Smooth 0-10 normalization. Preserves ordering, asymptotes at 10.
 
-    Anchor values (knee = 8.0):
-      raw=2  → 2.45
-      raw=4  → 4.62
-      raw=8  → 7.62
-      raw=12 → 9.05
-      raw=16 → 9.64
-      raw=24 → 9.96
+    Anchor values (knee = 16.0):
+      raw=2  → 1.24
+      raw=4  → 2.45
+      raw=8  → 4.62
+      raw=16 → 7.62
+      raw=24 → 9.05
+      raw=32 → 9.64
+      raw=48 → 9.96
     """
     if raw <= 0:
         return 0.0
@@ -187,23 +193,20 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
     breakdown: Dict[str, float] = {}
     notes: List[str] = []
 
-    rank_a = signals.rank_a if signals.rank_a is not None else UNRANKED
-    rank_b = signals.rank_b if signals.rank_b is not None else UNRANKED
-    both_ranked = signals.rank_a is not None and signals.rank_b is not None
-    any_ranked = signals.rank_a is not None or signals.rank_b is not None
-
-    if both_ranked:
+    ra, rb = signals.rank_a, signals.rank_b
+    if ra is not None and rb is not None:
         # Both ranked: more points the lower the sum (1+5=6 great, 24+25=49 OK).
         # Map sum [2..50] to score [10..0]. Linear, weighted.
-        sum_ranks = signals.rank_a + signals.rank_b
+        sum_ranks = ra + rb
         # 2 → 10, 26 → 5, 50 → 0
         rank_pts = max(0.0, (50 - sum_ranks) / 4.8) * weights.rank
         breakdown["rank_pair"] = round(rank_pts, 2)
-        notes.append(f"both ranked: #{signals.rank_a} vs #{signals.rank_b} (sum={sum_ranks})")
-    elif any_ranked:
+        notes.append(f"both ranked: #{ra} vs #{rb} (sum={sum_ranks})")
+    elif ra is not None or rb is not None:
         # One ranked, one unranked: scale by the ranked team's rank.
         # rank 1 → 4.0, rank 25 → 0.5
-        rank = signals.rank_a if signals.rank_a is not None else signals.rank_b
+        rank = ra if ra is not None else rb
+        assert rank is not None  # narrowing: at least one is not None by elif
         rank_pts = max(0.0, (26 - rank) / 6.0) * weights.rank
         breakdown["one_ranked"] = round(rank_pts, 2)
         notes.append(f"one ranked: #{rank} vs unranked")

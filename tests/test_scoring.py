@@ -29,13 +29,16 @@ class TestCompressTo10:
         assert _compress_to_10(-5) == 0.0
 
     def test_known_anchors(self):
-        # Knee = 8.0 → 10 * tanh(raw/8). Tight tolerances to catch any silent
-        # change to _FINAL_KNEE.
-        assert round(_compress_to_10(2), 2) == 2.45
-        assert round(_compress_to_10(4), 2) == 4.62
-        assert round(_compress_to_10(8), 2) == 7.62
-        assert round(_compress_to_10(12), 2) == 9.05
-        assert round(_compress_to_10(16), 2) == 9.64
+        # Knee = 16.0 → 10 * tanh(raw/16). Tight tolerances to catch any
+        # silent change to _FINAL_KNEE. Anchors doubled vs the knee=8.0
+        # era so a "typical good game" (raw 20-30) lands at 7.7-8.6
+        # instead of saturating to 9.5+.
+        assert round(_compress_to_10(2), 2) == 1.24
+        assert round(_compress_to_10(4), 2) == 2.45
+        assert round(_compress_to_10(8), 2) == 4.62
+        assert round(_compress_to_10(16), 2) == 7.62
+        assert round(_compress_to_10(24), 2) == 9.05
+        assert round(_compress_to_10(32), 2) == 9.64
 
     def test_asymptotes_at_10_for_large_input(self):
         # tanh saturates to 1.0 in float64 well before raw=1000 — that's
@@ -166,9 +169,12 @@ class TestScoreGame:
         assert s.final > 0
 
     def test_favorite_flat_boost(self):
+        # Track the default Weights.favorite value. Bumped to 6.0 in
+        # the Phase A tuning bundle to surface favorite-involved games
+        # ahead of title-race contenders.
         sig = GameSignals(favorite_match=["Wrexham"])
         s = score_game(sig, Weights())
-        assert s.breakdown["favorite"] == 4.0
+        assert s.breakdown["favorite"] == 6.0
 
     def test_late_season_doubles_stakes(self):
         sig = GameSignals(stakes_a=2.0, season_progress=0.90)

@@ -262,16 +262,22 @@ def _parse_favorites(raw: str) -> List[str]:
 
 
 def _build_weights(settings: Dict[str, Any]):
+    # Source of truth for default values is scoring.Weights's dataclass
+    # declaration. Do NOT duplicate the numbers here — when a default
+    # changes (e.g. Phase A bumped favorite 4.0 -> 6.0), the duplicate
+    # ALWAYS gets missed and the runtime silently uses the old value
+    # until somebody runs the tests.
     from .scoring import Weights
+    d = Weights()
     return Weights(
-        rank=float(settings.get("weight_rank", 1.0)),
-        spread=float(settings.get("weight_spread", 0.5)),
-        favorite=float(settings.get("weight_favorite", 4.0)),
-        rivalry=float(settings.get("weight_rivalry", 2.0)),
-        stakes=float(settings.get("weight_stakes", 2.0)),
-        tournament=float(settings.get("weight_tournament", 1.5)),
-        impact_favorite=float(settings.get("weight_impact_favorite", 1.0)),
-        narrative=float(settings.get("weight_narrative", 0.0)),
+        rank=float(settings.get("weight_rank", d.rank)),
+        spread=float(settings.get("weight_spread", d.spread)),
+        favorite=float(settings.get("weight_favorite", d.favorite)),
+        rivalry=float(settings.get("weight_rivalry", d.rivalry)),
+        stakes=float(settings.get("weight_stakes", d.stakes)),
+        tournament=float(settings.get("weight_tournament", d.tournament)),
+        impact_favorite=float(settings.get("weight_impact_favorite", d.impact_favorite)),
+        narrative=float(settings.get("weight_narrative", d.narrative)),
     )
 
 
@@ -405,9 +411,17 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     tz_local = _resolve_tz(settings.get("local_timezone", "UTC"))
 
     def _sort_key(item):
-        game, _signals, score = item
+        # Favorites-first within today's bucket: even a lukewarm Tottenham
+        # game should beat a 9.5-rated title-race contender for THIS user.
+        # The favorite-weight bump alone wasn't enough — Man City still
+        # dominated the top-5 because their stakes+rank pile was bigger
+        # than weight_favorite=6 could overcome. Adding favorite-match as
+        # a hard sort key guarantees slots 1..N_favorites belong to the
+        # favorite-involved games whenever they exist in the bucket.
+        game, signals, score = item
         return (
             0 if _is_today_local(game.start_time, tz_local) else 1,
+            0 if signals.favorite_match else 1,
             -score.final,
             -score.raw,
             game.start_time,
