@@ -133,6 +133,13 @@
       "help_text": "IANA tz name like 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'Australia/Sydney'. Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones. Falls back to UTC if the name isn't recognized. Used to determine which games are 'today' and to format kickoff times in the EPG description."
     },
     {
+      "id": "llm_descriptions_enabled",
+      "type": "boolean",
+      "label": "LLM-rewritten EPG descriptions",
+      "default": false,
+      "help_text": "When on, Claude rewrites each curated game's EPG description as a 2-3 sentence natural-prose preview instead of the deterministic 'Matchday X. Tagline. Source: ...' layout. Uses the Anthropic key + 'Claude model' setting above; falls back to the deterministic description if the key is missing or the API call fails. Cached per game in llm_descriptions_cache.json so a re-apply doesn't re-bill. Cost: ~$0.001 per game (Haiku 4.5), about $2-3/month at default refresh cadence."
+    },
+    {
       "id": "_section_scoring",
       "type": "info",
       "label": "Interestingness Weights",

@@ -13,11 +13,16 @@ Pipeline:
 
 Files:
   - cache.json:           last refresh result with per-game score breakdowns
+  - llm_descriptions_cache.json: per-game LLM-rewritten prose, keyed by
+                          marker + prompt hash. Only written when
+                          llm_descriptions_enabled is on. Safe to delete to
+                          force regen; structural state is unaffected.
   - cfbd_api_key:         CFBD/CBB-Data bearer token (chmod 600)
   - football_data_api_key: Football-Data.org token (chmod 600)
   - odds_api_key:         The Odds API token (chmod 600)
-  - anthropic_api_key:    Claude key (chmod 600), only needed for LLM EPG
-                          matching or the optional narrative signal.
+  - anthropic_api_key:    Claude key (chmod 600), needed for LLM EPG
+                          matching, the optional narrative signal, OR the
+                          optional LLM-rewritten EPG descriptions.
 """
 
 from __future__ import annotations
@@ -51,6 +56,11 @@ PLUGIN_KEY = os.path.basename(PLUGIN_DIR).replace(" ", "_").lower()
 logger = logging.getLogger(f"plugins.{PLUGIN_KEY}")
 
 CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
+# Sidecar cache for LLM-rewritten descriptions. Separate from cache.json so the
+# main cache file stays purely deterministic (score, breakdown, score_notes
+# unchanged) and the LLM cache can be safely deleted to force regen without
+# losing scoring state.
+LLM_DESCRIPTIONS_CACHE_PATH = os.path.join(PLUGIN_DIR, "llm_descriptions_cache.json")
 CFBD_KEY_PATH = os.path.join(PLUGIN_DIR, "cfbd_api_key")
 FD_KEY_PATH = os.path.join(PLUGIN_DIR, "football_data_api_key")
 ODDS_KEY_PATH = os.path.join(PLUGIN_DIR, "odds_api_key")
@@ -812,6 +822,16 @@ def _build_subtitle(g: Dict[str, Any], tagline: str) -> str:
     return " · ".join(parts)
 
 
+def _league_context_for(g: Dict[str, Any]):
+    """Resolve the LEAGUE_CONTEXTS entry for a cache row. Returns the
+    LeagueContext or None. Single source of truth for both the deterministic
+    description builder and the LLM context builder.
+    """
+    from .scoring import LEAGUE_CONTEXTS
+    fd_code = (g.get("extra") or {}).get("fd_competition_code")
+    return LEAGUE_CONTEXTS.get(fd_code) if fd_code else None
+
+
 def _build_description(
     g: Dict[str, Any],
     tagline: str,
@@ -832,7 +852,6 @@ def _build_description(
     raw line value (just say "toss-up"), late-season multiplier
     annotation (uniform across all current league games — adds no signal).
     """
-    from .scoring import LEAGUE_CONTEXTS
     extra = g.get("extra") or {}
     favorites_matched = g.get("favorites_matched") or []
     impact_narratives = (
@@ -865,8 +884,7 @@ def _build_description(
     # 3. Matchday line + league boundary reminder. Both are league-based
     # ("why is this a race"). Matchday tells you where in the season we
     # are; boundary_summary explains what positions get what.
-    fd_code = extra.get("fd_competition_code")
-    league_ctx = LEAGUE_CONTEXTS.get(fd_code) if fd_code else None
+    league_ctx = _league_context_for(g)
     matchday = extra.get("matchday")
     matchdays_total = extra.get("matchdays_total") or (
         league_ctx.matchdays_total if league_ctx else None
@@ -1071,6 +1089,29 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     placeholder_threshold = float(settings.get("placeholder_min_score", 5.0))
     placeholder_channels_created = 0
 
+    # Optional Claude-rewritten EPG descriptions. Default off; when on, prose
+    # replaces the deterministic `_build_description` output for non-placeholder
+    # games. Failures fall back silently. cache.json (scores, breakdown,
+    # score_notes) is untouched — only ProgramData.description changes.
+    from . import llm_descriptions
+    llm_enabled = bool(settings.get("llm_descriptions_enabled", False))
+    llm_api_key = ""
+    llm_model = ""
+    llm_cache: Dict[str, str] = {}
+    llm_used = 0
+    llm_failed = 0
+    if llm_enabled:
+        llm_api_key = _resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH)
+        llm_model = str(settings.get("model", "claude-haiku-4-5") or "claude-haiku-4-5")
+        if not llm_api_key:
+            logger.warning(
+                "[ranked_matchups] llm_descriptions_enabled=on but no anthropic_api_key resolved; "
+                "falling back to deterministic descriptions."
+            )
+            llm_enabled = False
+        else:
+            llm_cache = llm_descriptions.read_cache(LLM_DESCRIPTIONS_CACHE_PATH)
+
     with transaction.atomic():
         # Phase 0: park existing virtual channels in a high temporary number
         # range so we can renumber based on cache order without colliding with
@@ -1149,6 +1190,29 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 tagline=tagline,
                 placeholder=placeholder,
             )
+
+            # If LLM-rewritten descriptions are enabled and this isn't a
+            # placeholder (placeholders have no EPG match yet, so the "channel
+            # match pending" note matters more than prose), try the call and
+            # fall back to `description` on any failure.
+            if llm_enabled and not placeholder:
+                _ctx = _league_context_for(g)
+                _boundary = _ctx.boundary_summary if _ctx else ""
+                before = description
+                description = llm_descriptions.llm_describe_or_fallback(
+                    g=g,
+                    tagline=tagline,
+                    fallback_description=description,
+                    api_key=llm_api_key,
+                    model=llm_model,
+                    cache=llm_cache,
+                    boundary_summary=_boundary,
+                    marker=marker,
+                )
+                if description is before:
+                    llm_failed += 1
+                else:
+                    llm_used += 1
 
             # Gather streams from EVERY matched source channel and rank by
             # composite quality key: valid ffprobe data (height/bitrate)
@@ -1323,6 +1387,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             ).exclude(tvg_id__in=kept_markers)
             orphan_epg_deleted, _ = orphans.delete()
 
+    # Persist the LLM-description cache (prune entries whose marker is no
+    # longer in this refresh; keep file bounded to live games). Save outside
+    # the atomic block — sidecar JSON file is independent of the DB.
+    if llm_enabled and not dry_run:
+        pruned = llm_descriptions.prune_cache(llm_cache, seen_markers)
+        llm_descriptions.write_cache(LLM_DESCRIPTIONS_CACHE_PATH, pruned)
+
     prefix = "[dry] " if dry_run else ""
     rename_msg = ""
     if migrated_from_old_group or deleted_old_groups or deleted_old_sources:
@@ -1335,12 +1406,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # go through the same upsert path as matched ones, so they're already
     # counted there. Report as "(placeholders=N included)" to avoid the
     # "10 created + 3 placeholders == 13?" misread.
+    llm_msg = ""
+    if llm_enabled:
+        llm_msg = f" LLM descriptions: {llm_used} written, {llm_failed} fell back to deterministic."
     msg = (
         f"{prefix}Group {group_name!r}: created={created}, updated={updated} "
         f"(placeholders={placeholder_channels_created} included), "
         f"stale_deleted={deleted_stale}, "
         f"orphan_epg_deleted={orphan_epg_deleted if 'orphan_epg_deleted' in locals() else 0}, "
-        f"unmatched_skipped={skipped_unmatched}.{rename_msg} "
+        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{llm_msg} "
         f"WHY descriptions written to EPG source."
     )
     return {"status": "ok", "message": msg}

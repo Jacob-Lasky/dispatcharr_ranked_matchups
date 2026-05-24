@@ -8,6 +8,7 @@ odds_api_key
 
 # Plugin runtime state
 cache.json
+llm_descriptions_cache.json
 *.tmp
 
 # Python
