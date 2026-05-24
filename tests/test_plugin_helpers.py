@@ -314,6 +314,38 @@ class TestBuildSignalsScoreFromPayload:
         signals, _ = plugin._build_signals_score_from_payload(g)
         assert signals.impact_on_favorites == [("Tottenham", 5.0, 1)]
 
+    def test_phase_c_importance_round_trip(self, plugin):
+        # Phase C: importance_points + importance_notes survive the
+        # cache write/read cycle. apply needs them on signals so the
+        # narrative-description layer (built from signals) sees the
+        # same numbers refresh produced.
+        g = {
+            "score": 7.0,
+            "score_breakdown": {"importance": 4.5},
+            "importance_points": 4.5,
+            "importance_notes": [
+                "Tottenham relegation: 0.50 leverage × 5.0 = 2.50",
+                "Everton relegation: 0.30 leverage × 5.0 = 1.50",
+            ],
+        }
+        signals, _ = plugin._build_signals_score_from_payload(g)
+        assert signals.importance_points == 4.5
+        assert len(signals.importance_notes) == 2
+        assert "Tottenham" in signals.importance_notes[0]
+
+    def test_pre_c_cache_lacks_importance_fields_no_crash(self, plugin):
+        # Pre-C.3 caches don't have importance_points / importance_notes.
+        # Reader must default cleanly to 0.0 / [] so apply doesn't choke
+        # on the missing keys when reading a cache from before this
+        # phase deployed.
+        g = {
+            "score": 5.0,
+            "score_breakdown": {"rank_pair": 5.0},
+        }
+        signals, _ = plugin._build_signals_score_from_payload(g)
+        assert signals.importance_points == 0.0
+        assert signals.importance_notes == []
+
 
 class TestResolveVirtualBase:
     def test_explicit_positive_value_wins(self, plugin):

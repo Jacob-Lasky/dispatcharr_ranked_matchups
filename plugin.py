@@ -288,6 +288,7 @@ def _build_weights(settings: Dict[str, Any]):
         tournament=float(settings.get("weight_tournament", d.tournament)),
         impact_favorite=float(settings.get("weight_impact_favorite", d.impact_favorite)),
         narrative=float(settings.get("weight_narrative", d.narrative)),
+        importance=float(settings.get("weight_importance", d.importance)),
     )
 
 
@@ -326,8 +327,12 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     if not sources:
         return {"status": "error", "message": "No sport sources enabled."}
 
-    # 1. Fetch
-    all_games = []
+    # 1. Fetch. Keep the (source, game) association — Phase C compute_match_importance
+    # needs the source object per game to run the season-replay simulator. Plain
+    # game rows lose the link to which adapter produced them, and reconstructing
+    # it from extra["fd_competition_code"] only works for soccer.
+    all_games: List[Any] = []
+    game_sources: List[Any] = []  # parallel to all_games; source index matches game index
     src_summary = []
     for src in sources:
         try:
@@ -337,6 +342,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             src_summary.append(f"{src.sport_label}: error ({e})")
             continue
         all_games.extend(games)
+        game_sources.extend([src] * len(games))
         src_summary.append(f"{src.sport_label}: {len(games)} games")
         logger.info("[ranked_matchups] %s: pulled %d games", src.sport_label, len(games))
 
@@ -348,13 +354,15 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         _write_cache(cache)
         return {"status": "ok", "message": msg}
 
-    # 2. Score (with Phase 3 standings/tournament/impact signals)
+    # 2. Score (with Phase 3 standings/tournament/impact signals + Phase C importance)
     from .scoring import (
         match_favorites, LEAGUE_CONTEXTS, compute_team_stakes,
         compute_impact_on_favorites, build_impact_narratives,
+        compute_match_importance,
     )
+    n_importance_sims = int(settings.get("n_importance_sims", 500))
     scored: List[Tuple[Any, GameSignals, Any]] = []
-    for g in all_games:
+    for g, src in zip(all_games, game_sources):
         extra = g.extra or {}
         comp_code = extra.get("fd_competition_code")
         league_ctx = LEAGUE_CONTEXTS.get(comp_code) if comp_code else None
@@ -450,6 +458,31 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             favs_with_standings, standings_table,
         )
 
+        # Phase C: Monte Carlo importance. Only fires when the source
+        # implements the importance interface (currently SoccerSource for
+        # league competitions) AND the league has consequence-weighted
+        # thresholds defined. weight_importance=0 disables the per-game
+        # cost entirely. Catches any exception to fall through to legacy
+        # signals — a bad standings fetch or simulator hiccup must not
+        # take down the entire refresh.
+        importance_pts: float = 0.0
+        importance_notes: List[str] = []
+        if (
+            weights.importance > 0
+            and getattr(src, "supports_importance", False)
+            and league_ctx is not None
+            and league_ctx.thresholds
+        ):
+            try:
+                importance_pts, importance_notes = compute_match_importance(
+                    src, g, league_ctx, n_sims=n_importance_sims,
+                )
+            except Exception as e:
+                logger.warning(
+                    "[ranked_matchups] importance failed for %s vs %s: %s",
+                    g.home, g.away, e,
+                )
+
         signals = GameSignals(
             rank_a=g.rank_home,
             rank_b=g.rank_away,
@@ -464,6 +497,8 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             season_progress=float(extra.get("season_progress") or 0.0),
             tournament_stage=extra.get("stage"),
             impact_on_favorites=impact_favs,
+            importance_points=importance_pts,
+            importance_notes=importance_notes,
         )
         score = score_game(signals, weights)
         scored.append((g, signals, score))
@@ -535,6 +570,8 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "season_progress": signals.season_progress,
             "tournament_stage": signals.tournament_stage,
             "impact_on_favorites": signals.impact_on_favorites,
+            "importance_points": signals.importance_points,
+            "importance_notes": signals.importance_notes,
             "channel_id": match.channel_id,           # primary, kept for backward-compat
             "channel_ids": list(match.channel_ids),   # all matched, primary first
             "channel_name_current": match.channel_name,
@@ -756,6 +793,10 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         season_progress=g.get("season_progress") or 0.0,
         tournament_stage=g.get("tournament_stage"),
         impact_on_favorites=impact_normalized,
+        # Phase C: pre-weight importance roundtrip. Missing from pre-C.3
+        # caches → defaults (0.0 / []) preserve the legacy code path.
+        importance_points=float(g.get("importance_points") or 0.0),
+        importance_notes=list(g.get("importance_notes") or []),
     )
     # `score_raw` is the unbounded sum, `score` is the 0-10 compressed value.
     # If the cache predates `score_raw`, fall back to the breakdown sum (still

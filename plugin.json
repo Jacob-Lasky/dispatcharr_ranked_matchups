@@ -202,6 +202,20 @@
       "help_text": "Optional LLM-judged narrative score. Disabled by default — heuristic stakes/tournament/impact signals usually cover it. Set > 0 to enable Claude-based narrative scoring."
     },
     {
+      "id": "weight_importance",
+      "type": "number",
+      "label": "Monte Carlo importance weight",
+      "default": 1.0,
+      "help_text": "Phase C: multiplier on Lahvička match-importance (Kendall tau-c × consequence weight summed over both teams × all league outcome bands). Only fires for sources that implement simulation (currently soccer). Phase C.3 runs this ALONGSIDE the legacy stakes/impact signals so rankings can be compared; Phase C.4 will replace the legacy signals and likely raise this default. Set to 0 to disable."
+    },
+    {
+      "id": "n_importance_sims",
+      "type": "number",
+      "label": "Importance Monte Carlo iterations",
+      "default": 500,
+      "help_text": "Number of season simulations per match for the importance signal. 500 ≈ 0.5s per match on the test EPL season; total refresh cost stays under 30s for a typical 25-match curated list. 1000 doubles compute time but tightens tau-c convergence (Lahvička 2012 used 10000 for academic-grade stability). Drop to 200 if scheduler runs feel sluggish."
+    },
+    {
       "id": "_section_apply",
       "type": "info",
       "label": "Apply Behavior",

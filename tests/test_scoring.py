@@ -4,6 +4,7 @@ from dispatcharr_ranked_matchups.scoring import (
     GameSignals,
     Weights,
     LEAGUE_CONTEXTS,
+    LeagueContext,
     TEAM_QUALIFIER_TOKENS,
     TEAM_SUFFIX_TOKENS,
     _IMPACT_PROXIMITY_CAP,
@@ -12,6 +13,7 @@ from dispatcharr_ranked_matchups.scoring import (
     build_impact_narratives,
     build_why_text,
     compute_impact_on_favorites,
+    compute_match_importance,
     compute_team_stakes,
     format_channel_name,
     match_favorites,
@@ -973,3 +975,235 @@ class TestLeagueContexts:
         assert "auto-promotion" in LEAGUE_CONTEXTS["ELC"].boundary_summary
         assert "playoff" in LEAGUE_CONTEXTS["ELC"].boundary_summary
         assert "relegation" in LEAGUE_CONTEXTS["ELC"].boundary_summary
+
+
+# ---------- Phase C: compute_match_importance + score_game importance branch ----------
+
+class _FakeMatch:
+    """Minimal GameRow-shaped object for testing compute_match_importance."""
+    def __init__(self, home: str, away: str):
+        self.home = home
+        self.away = away
+        self.extra = {"fd_id": 999}
+
+
+class _FakeImportanceSource:
+    """A SportSource stand-in that returns deterministic per-(team, label)
+    leverages. Lets compute_match_importance be tested without running the
+    actual Monte Carlo simulator — that's tested separately in
+    test_simulation.py.
+    """
+    def __init__(self, leverages):
+        # leverages is {(team, label): float in [0,1]}
+        self.leverages = leverages
+        self.supports_importance = True
+
+    def __getattr__(self, name):
+        # Other SportSource methods are unused on the compute_match_importance
+        # path (which delegates straight to monte_carlo_importance_batch — we
+        # monkeypatch the simulator below for tests).
+        raise AttributeError(name)
+
+
+class TestComputeMatchImportance:
+    def _epl_ctx(self):
+        return LEAGUE_CONTEXTS["PL"]
+
+    def test_unsupported_source_returns_zero(self):
+        # Simulator never gets called when supports_importance is False.
+        class NoImportance:
+            supports_importance = False
+        raw, notes = compute_match_importance(
+            NoImportance(), _FakeMatch("A", "B"), self._epl_ctx(), n_sims=10,
+        )
+        assert raw == 0.0
+        assert notes == []
+
+    def test_empty_thresholds_returns_zero(self):
+        empty_ctx = LeagueContext(code="EMPTY", matchdays_total=10, thresholds=[])
+        class S:
+            supports_importance = True
+        raw, notes = compute_match_importance(
+            S(), _FakeMatch("A", "B"), empty_ctx, n_sims=10,
+        )
+        assert raw == 0.0
+        assert notes == []
+
+    def test_aggregates_leverage_times_weight(self, monkeypatch):
+        """Heart of the function: sum (team, outcome) → leverage × weight."""
+        # Hand-craft leverages: Tottenham strongly leverages relegation;
+        # Everton has zero leverage anywhere.
+        # EPL thresholds: title (5.0), UCL (4.0), Europa/Conference (2.0),
+        # relegation (5.0).
+        leverages = {
+            ("Tottenham", "title"): 0.0,
+            ("Tottenham", "UCL"): 0.0,
+            ("Tottenham", "Europa/Conference"): 0.0,
+            ("Tottenham", "relegation"): 0.5,   # → 0.5 × 5 = 2.5
+            ("Everton", "title"): 0.0,
+            ("Everton", "UCL"): 0.0,
+            ("Everton", "Europa/Conference"): 0.0,
+            ("Everton", "relegation"): 0.0,
+        }
+        # Patch monte_carlo_importance_batch to return our fixed leverages.
+        from dispatcharr_ranked_matchups import simulation
+        monkeypatch.setattr(
+            simulation, "monte_carlo_importance_batch",
+            lambda source, match, queries, n_sims, rng=None: {
+                q: leverages.get(q, 0.0) for q in queries
+            },
+        )
+        class S:
+            supports_importance = True
+        raw, notes = compute_match_importance(
+            S(), _FakeMatch("Tottenham", "Everton"),
+            self._epl_ctx(), n_sims=10,
+        )
+        assert raw == 2.5
+        # Only nonzero contributions appear in notes.
+        assert len(notes) == 1
+        assert "Tottenham" in notes[0]
+        assert "relegation" in notes[0]
+        assert "0.50 leverage" in notes[0]
+        assert "5.0" in notes[0]
+        assert "2.50" in notes[0]
+
+    def test_multiple_bands_per_team_all_contribute(self, monkeypatch):
+        """A team can leverage multiple bands (champion AND UCL); both
+        contribute to the raw total (sum aggregation, per the open-question
+        recommendation in TUNING_REPORT).
+        """
+        leverages = {
+            ("Arsenal", "title"): 0.6,             # 0.6 × 5.0 = 3.0
+            ("Arsenal", "UCL"): 0.4,               # 0.4 × 4.0 = 1.6
+            ("Arsenal", "Europa/Conference"): 0.2, # 0.2 × 2.0 = 0.4
+            ("Arsenal", "relegation"): 0.0,
+            ("Crystal Palace", "title"): 0.0,
+            ("Crystal Palace", "UCL"): 0.0,
+            ("Crystal Palace", "Europa/Conference"): 0.0,
+            ("Crystal Palace", "relegation"): 0.0,
+        }
+        from dispatcharr_ranked_matchups import simulation
+        monkeypatch.setattr(
+            simulation, "monte_carlo_importance_batch",
+            lambda source, match, queries, n_sims, rng=None: {
+                q: leverages.get(q, 0.0) for q in queries
+            },
+        )
+        class S:
+            supports_importance = True
+        raw, notes = compute_match_importance(
+            S(), _FakeMatch("Arsenal", "Crystal Palace"),
+            self._epl_ctx(), n_sims=10,
+        )
+        # 3.0 + 1.6 + 0.4 = 5.0
+        assert raw == 5.0
+        # Three nonzero notes, sorted by descending contribution.
+        assert len(notes) == 3
+        # First note should be the biggest contributor (title at 3.00).
+        assert "title" in notes[0]
+        assert "3.00" in notes[0]
+        # Last note should be the smallest contributor (Europa at 0.40).
+        assert "Europa" in notes[-1]
+        assert "0.40" in notes[-1]
+
+    def test_locked_outcomes_contribute_zero(self, monkeypatch):
+        """When the simulator returns leverage=0 for every (team, outcome)
+        — i.e., locked seasons — the raw points are 0 and there are no notes.
+        This is the structural fix Phase C delivers: mathematically locked
+        teams stop polluting the importance signal.
+        """
+        from dispatcharr_ranked_matchups import simulation
+        monkeypatch.setattr(
+            simulation, "monte_carlo_importance_batch",
+            lambda source, match, queries, n_sims, rng=None: {q: 0.0 for q in queries},
+        )
+        class S:
+            supports_importance = True
+        raw, notes = compute_match_importance(
+            S(), _FakeMatch("Burnley", "Wolves"),
+            self._epl_ctx(), n_sims=10,
+        )
+        assert raw == 0.0
+        assert notes == []
+
+    def test_notes_sorted_by_descending_contribution(self, monkeypatch):
+        """Notes order matters: the top-3 contributors are surfaced to
+        cache.json, and the user reads the BIG signals first."""
+        leverages = {
+            ("Home", "title"): 0.1,                # 0.1 × 5.0 = 0.5
+            ("Home", "UCL"): 0.0,
+            ("Home", "Europa/Conference"): 0.4,    # 0.4 × 2.0 = 0.8
+            ("Home", "relegation"): 0.3,           # 0.3 × 5.0 = 1.5
+            ("Away", "title"): 0.0,
+            ("Away", "UCL"): 0.0,
+            ("Away", "Europa/Conference"): 0.0,
+            ("Away", "relegation"): 0.0,
+        }
+        from dispatcharr_ranked_matchups import simulation
+        monkeypatch.setattr(
+            simulation, "monte_carlo_importance_batch",
+            lambda source, match, queries, n_sims, rng=None: {
+                q: leverages.get(q, 0.0) for q in queries
+            },
+        )
+        class S:
+            supports_importance = True
+        raw, notes = compute_match_importance(
+            S(), _FakeMatch("Home", "Away"),
+            LEAGUE_CONTEXTS["PL"], n_sims=10,
+        )
+        # 0.5 + 0.8 + 1.5 = 2.8
+        assert raw == 2.8
+        # Notes should be sorted highest-first.
+        assert "relegation" in notes[0]   # 1.50
+        assert "Europa" in notes[1]       # 0.80
+        assert "title" in notes[2]        # 0.50
+
+
+class TestScoreGameImportanceBranch:
+    def test_importance_points_zero_no_breakdown_entry(self):
+        s = GameSignals(rank_a=1, rank_b=2, importance_points=0.0)
+        score = score_game(s, Weights())
+        assert "importance" not in score.breakdown
+
+    def test_importance_points_contributes_weighted(self):
+        s = GameSignals(rank_a=1, rank_b=2, importance_points=4.2)
+        score = score_game(s, Weights(importance=2.0))
+        # 4.2 raw × 2.0 weight = 8.4
+        assert score.breakdown["importance"] == 8.4
+
+    def test_importance_notes_surfaced_in_breakdown_notes(self):
+        notes = [
+            "Tottenham relegation: 0.50 leverage × 5.0 = 2.50",
+            "Everton relegation: 0.30 leverage × 5.0 = 1.50",
+        ]
+        s = GameSignals(rank_a=1, rank_b=2,
+                        importance_points=4.0, importance_notes=notes)
+        score = score_game(s, Weights())
+        importance_lines = [n for n in score.notes if n.startswith("importance:")]
+        assert len(importance_lines) == 2
+        assert "Tottenham" in importance_lines[0]
+
+    def test_importance_notes_capped_at_three(self):
+        notes = [
+            "Team A title: 0.50 leverage × 5.0 = 2.50",
+            "Team B UCL: 0.40 leverage × 4.0 = 1.60",
+            "Team C Europa: 0.30 leverage × 2.0 = 0.60",
+            "Team D relegation: 0.20 leverage × 5.0 = 1.00",
+            "Team E something: 0.10 leverage × 1.0 = 0.10",
+        ]
+        s = GameSignals(rank_a=1, rank_b=2,
+                        importance_points=5.8, importance_notes=notes)
+        score = score_game(s, Weights())
+        importance_lines = [n for n in score.notes if n.startswith("importance:")]
+        # Cap = 3 in score_game so cache.json stays readable.
+        assert len(importance_lines) == 3
+
+    def test_zero_weight_disables_branch(self):
+        s = GameSignals(rank_a=1, rank_b=2, importance_points=4.0,
+                        importance_notes=["X: 0.50 leverage × 5.0 = 2.50"])
+        score = score_game(s, Weights(importance=0.0))
+        # weight=0 → zero contribution AND no breakdown entry — same as
+        # importance_points=0. Other signals (rank_pair) still fire.
+        assert "importance" not in score.breakdown

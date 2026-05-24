@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Trailing club-tag tokens (FC/AFC/etc) and generic second-words (United/City/
 # etc) live in _util so matcher.py can use them without importing scoring.
@@ -63,6 +63,15 @@ class Weights:
     tournament: float = 1.5      # knockout-stage cup games
     impact_favorite: float = 1.0  # non-favorite game shifts favorite's table
     narrative: float = 0.0       # LLM narrative score (disabled by default)
+    # Phase C: Lahvička Monte Carlo importance. Per-game raw points are
+    # sum_over_(team,outcome) of leverage × consequence_weight (leverage in
+    # [0,1] from Kendall tau-c, weight from LEAGUE_CONTEXTS thresholds —
+    # relegation=5, UCL=4, title=5, etc.). Default 1.0 is the C.3 starting
+    # value; the structural fix replaces stakes + impact_on_favorites +
+    # late_mult in C.4, so this weight will likely climb to ~3.0-5.0 once
+    # the legacy signals come out. For now, both signals fire alongside
+    # each other so we can compare rankings before flipping the cutover.
+    importance: float = 1.0
 
 
 @dataclass
@@ -101,6 +110,14 @@ class GameSignals:
 
     is_rivalry: bool = False
     narrative_score: Optional[float] = None  # 0-10 from LLM (last)
+
+    # Phase C: Lahvička Monte Carlo importance points (pre-weight). The
+    # plugin's _action_refresh calls compute_match_importance for sources
+    # that support it (currently SoccerSource only) and stashes the
+    # result here. Sources that don't support importance leave this at 0.0
+    # and score_game's importance block falls through without contributing.
+    importance_points: float = 0.0
+    importance_notes: List[str] = field(default_factory=list)
 
 
 # ---------- League-specific thresholds ----------
@@ -384,6 +401,23 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
         breakdown["narrative"] = round(narr_pts, 2)
         notes.append(f"LLM narrative score: {signals.narrative_score:.1f}/10")
 
+    # Phase C: Monte Carlo importance (Lahvička). Already pre-weighted by
+    # consequence inside compute_match_importance; multiply only by the
+    # user's weight_importance tunable here. Sources that don't support
+    # importance (NCAAFSource, NCAAMSource, knockout-only soccer) leave
+    # importance_points at 0.0 and this block falls through. Gating BOTH
+    # the points AND the weight keeps the breakdown clean when the user
+    # disables the signal via weight_importance=0 — no 0.0 stub entries.
+    if signals.importance_points > 0 and weights.importance > 0:
+        imp_pts = signals.importance_points * weights.importance
+        breakdown["importance"] = round(imp_pts, 2)
+        # Add the top-contributor note lines, capped so the cache.json
+        # notes block doesn't bloat. 3 leading lines = the 3 most-leveraging
+        # (team, outcome) tuples; sufficient to explain why a game scored
+        # high without dumping all 8 entries.
+        for line in signals.importance_notes[:3]:
+            notes.append(f"importance: {line}")
+
     raw = sum(breakdown.values())
     return GameScore(
         raw=round(raw, 2),
@@ -526,6 +560,74 @@ def compute_impact_on_favorites(
         if best_d is not None:
             affected.append((fav_name, fav_stakes_raw, best_d))
     return affected
+
+
+def compute_match_importance(
+    source: Any,                 # SportSource; Any-typed to avoid a circular import
+    match: Any,                  # GameRow
+    league_ctx: "LeagueContext",
+    n_sims: int = 500,
+    rng: Optional[Any] = None,   # random.Random; deferred for the same circular reason
+) -> Tuple[float, List[str]]:
+    """Lahvička Monte Carlo match importance, summed across the match's
+    two teams and the league's outcome bands, weighted by consequence.
+
+    Returns `(raw_points, notes)` where `raw_points` is
+    `sum over (team in {home, away}) over band in league_ctx.thresholds of
+    |tau_c(match, team, band.label)| * band.weight`.
+
+    `notes` is a per-(team, label) line like "Tottenham relegation: 0.42
+    × 5.0 = 2.10" — only the nonzero contributions are listed so the
+    breakdown stays readable in cache.json.
+
+    Returns (0.0, []) immediately when the source doesn't support
+    importance simulation (caller should also gate, but defense in depth).
+    Returns (0.0, []) when the league has no outcome bands (e.g., a
+    knockout-only competition routed into this path by mistake).
+    """
+    from .simulation import monte_carlo_importance_batch
+    if not getattr(source, "supports_importance", False):
+        return 0.0, []
+    if not league_ctx.thresholds:
+        return 0.0, []
+
+    # Build the (team, outcome_label) query list — 2 teams × N bands.
+    queries: List[Tuple[str, str]] = []
+    for team in (match.home, match.away):
+        for _, label, _ in league_ctx.thresholds:
+            queries.append((team, label))
+
+    leverages = monte_carlo_importance_batch(
+        source, match, queries, n_sims=n_sims, rng=rng,
+    )
+
+    # Map label → weight once so the contribution loop is single-pass.
+    weight_by_label: Dict[str, float] = {
+        label: weight for _, label, weight in league_ctx.thresholds
+    }
+
+    raw = 0.0
+    notes: List[str] = []
+    for (team, label), leverage in leverages.items():
+        if leverage <= 0:
+            continue
+        weight = weight_by_label.get(label, 0.0)
+        if weight <= 0:
+            continue
+        contrib = leverage * weight
+        raw += contrib
+        # Format: "Tottenham FC relegation: 0.42 leverage × 5.0 = 2.10".
+        # Strip the team suffix for the note so the line stays readable —
+        # the underlying signal still uses the canonical name.
+        notes.append(
+            f"{strip_team_suffix(team)} {label}: "
+            f"{leverage:.2f} leverage × {weight:.1f} = {contrib:.2f}"
+        )
+    # Sort notes by descending contribution so the biggest signals lead.
+    # Parse the trailing "= X.XX" since the contrib isn't in scope here;
+    # cheap enough at 2-8 lines per game.
+    notes.sort(key=lambda s: -float(s.rsplit("= ", 1)[1]))
+    return raw, notes
 
 
 def strip_team_suffix(name: str) -> str:
