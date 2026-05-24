@@ -18,15 +18,17 @@ favorites + odds signals carry it.
 from __future__ import annotations
 
 import logging
+import math
+import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, SportSource
+from .base import GameRow, MatchResult, SportSource
 from .._util import parse_iso_utc
-from ..scoring import TEAM_SUFFIX_TOKENS
+from ..scoring import LEAGUE_CONTEXTS, TEAM_SUFFIX_TOKENS
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.soccer")
 
@@ -148,12 +150,33 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
 class SoccerSource(SportSource):
     """Adapter for one Football-Data.org competition."""
 
+    # Phase C: SoccerSource implements the Monte Carlo importance interface.
+    # Requires a full-season fixtures fetch (done lazily on first call).
+    # UCL etc. set use_position_as_rank=False; they have no league table, so
+    # the importance simulator can't run on them. The lazy cache populates
+    # only for the configs where LEAGUE_CONTEXTS has thresholds defined.
+    supports_importance = True
+
+    # Pre-season fallback per-team strength (rolling-window estimate has no
+    # samples yet). 1.4 goals/match home and 1.1 away approximates the EPL
+    # historical average and is a reasonable prior for an unsampled team.
+    _DEFAULT_STRENGTH_HOME_SCORED = 1.4
+    _DEFAULT_STRENGTH_HOME_CONCEDED = 1.1
+    _DEFAULT_STRENGTH_AWAY_SCORED = 1.1
+    _DEFAULT_STRENGTH_AWAY_CONCEDED = 1.4
+
     def __init__(self, config_key: str, fd_api_key: str, odds_api_key: str = ""):
         if config_key not in COMPETITIONS:
             raise ValueError(f"unknown soccer config: {config_key}")
         self.config = COMPETITIONS[config_key]
         self.fd_api_key = fd_api_key
         self.odds_api_key = odds_api_key
+        # Importance-mode cache (lazy). Populated by _ensure_importance_cache
+        # on first call to any of the Phase C methods. None means uninitialized;
+        # an empty list / dict means we tried and got nothing back.
+        self._all_matches_cache: Optional[List[Dict]] = None
+        self._strengths_cache: Optional[Dict[str, Dict[str, float]]] = None
+        self._initial_state_cache: Optional[Dict[str, Any]] = None
 
     @property
     def sport_prefix(self) -> str:
@@ -468,3 +491,329 @@ class SoccerSource(SportSource):
             if (h_n in hk or hk in h_n) and (a_n in ak or ak in a_n):
                 return v
         return None
+
+    # ---------- Phase C: Monte Carlo importance ----------
+
+    def _fetch_all_season_matches(self) -> List[Dict]:
+        """All matches for the current competition season — finished AND
+        scheduled. One FD.org call per refresh. Cached on the instance so
+        repeat calls within the same refresh don't re-bill.
+        """
+        if self._all_matches_cache is not None:
+            return self._all_matches_cache
+        if not self.fd_api_key:
+            self._all_matches_cache = []
+            return []
+        try:
+            r = requests.get(
+                f"{FD_BASE}/competitions/{self.config.fd_code}/matches",
+                headers={"X-Auth-Token": self.fd_api_key},
+                timeout=15,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            logger.warning("[soccer:%s] all-matches fetch failed: %s",
+                           self.config.fd_code, e)
+            self._all_matches_cache = []
+            return []
+        cache: List[Dict] = data.get("matches", []) or []
+        self._all_matches_cache = cache
+        return cache
+
+    @property
+    def outcome_labels(self) -> List[str]:
+        ctx = LEAGUE_CONTEXTS.get(self.config.fd_code)
+        if ctx is None:
+            return []
+        return [label for _, label, _ in ctx.thresholds]
+
+    @staticmethod
+    def _is_bottom_outcome(label: str) -> bool:
+        """Direction inference for an outcome band. Bottom-side outcomes
+        (relegation, demotion) fire on positions worse than the cutoff;
+        top-side outcomes (title, UCL, Europa, promotion, playoff) fire on
+        positions at or above the cutoff. Detected by label substring.
+        """
+        l = label.lower()
+        return "relegat" in l or "demot" in l or "drop" in l
+
+    def estimate_strengths(self) -> Dict[str, Dict[str, float]]:
+        """Per-team home/away goal averages from finished matches. Lahvička
+        uses a 19-match rolling window; we use all FINISHED matches in the
+        current season for simplicity (the window matters more for handling
+        mid-season form swings; for our per-refresh sim a season-wide avg is
+        close enough).
+
+        Returns `{team: {sh, ch, sa, ca}}` where:
+          sh = avg goals scored at home
+          ch = avg goals conceded at home
+          sa = avg goals scored away
+          ca = avg goals conceded away
+
+        Teams with zero finished matches (newly promoted, pre-season) get
+        league-average defaults via `_DEFAULT_STRENGTH_*`. The pre-season
+        seed already handles position-based ranks (Phase B.2); strengths are
+        the goals-side fallback.
+        """
+        if self._strengths_cache is not None:
+            return self._strengths_cache
+        matches = self._fetch_all_season_matches()
+        # Per-team running sums. Use "h" / "a" prefixed totals so a team can
+        # have asymmetric home/away form (a common real pattern).
+        sums: Dict[str, Dict[str, float]] = {}
+        for m in matches:
+            if m.get("status") != "FINISHED":
+                continue
+            ft = (m.get("score") or {}).get("fullTime") or {}
+            hg = ft.get("home")
+            ag = ft.get("away")
+            if hg is None or ag is None:
+                continue
+            home_name = (m.get("homeTeam") or {}).get("name")
+            away_name = (m.get("awayTeam") or {}).get("name")
+            if not home_name or not away_name:
+                continue
+            for name in (home_name, away_name):
+                if name not in sums:
+                    sums[name] = {
+                        "n_home": 0.0, "sh_total": 0.0, "ch_total": 0.0,
+                        "n_away": 0.0, "sa_total": 0.0, "ca_total": 0.0,
+                    }
+            sums[home_name]["n_home"] += 1
+            sums[home_name]["sh_total"] += float(hg)
+            sums[home_name]["ch_total"] += float(ag)
+            sums[away_name]["n_away"] += 1
+            sums[away_name]["sa_total"] += float(ag)
+            sums[away_name]["ca_total"] += float(hg)
+        out: Dict[str, Dict[str, float]] = {}
+        for team, s in sums.items():
+            # Per-side fallback: a team can have home games but no away
+            # games yet (or vice versa) early in the season. Each side
+            # falls back to its own default independently.
+            if s["n_home"] > 0:
+                sh = s["sh_total"] / s["n_home"]
+                ch = s["ch_total"] / s["n_home"]
+            else:
+                sh = self._DEFAULT_STRENGTH_HOME_SCORED
+                ch = self._DEFAULT_STRENGTH_HOME_CONCEDED
+            if s["n_away"] > 0:
+                sa = s["sa_total"] / s["n_away"]
+                ca = s["ca_total"] / s["n_away"]
+            else:
+                sa = self._DEFAULT_STRENGTH_AWAY_SCORED
+                ca = self._DEFAULT_STRENGTH_AWAY_CONCEDED
+            out[team] = {"sh": sh, "ch": ch, "sa": sa, "ca": ca}
+        self._strengths_cache = out
+        return out
+
+    def _strength_for(self, strengths: Dict[str, Dict[str, float]], team: str) -> Dict[str, float]:
+        """Lookup with fallback. A team in the fixture list but not in
+        `strengths` (newly promoted, no finished matches) gets defaults.
+        """
+        if team in strengths:
+            return strengths[team]
+        return {
+            "sh": self._DEFAULT_STRENGTH_HOME_SCORED,
+            "ch": self._DEFAULT_STRENGTH_HOME_CONCEDED,
+            "sa": self._DEFAULT_STRENGTH_AWAY_SCORED,
+            "ca": self._DEFAULT_STRENGTH_AWAY_CONCEDED,
+        }
+
+    def initial_state(self) -> Dict[str, Any]:
+        """Standings snapshot as of the moment importance is computed. Built
+        from finished matches in the season (NOT from the FD.org standings
+        endpoint — that endpoint can include in-progress results that
+        de-sync from the fixture list, and the simulator needs the two to
+        agree).
+
+        State shape:
+          {
+            "_applied": frozenset of fd_ids already reflected in points/gf/ga,
+            <team_name>: {"played": int, "points": int, "gf": int, "ga": int},
+            ...
+          }
+
+        Teams that appear in the fixture list but haven't played yet still
+        get a zero-row so the simulator can apply their results without a
+        KeyError.
+        """
+        if self._initial_state_cache is not None:
+            return self._initial_state_cache
+        matches = self._fetch_all_season_matches()
+        state: Dict[str, Any] = {"_applied": frozenset()}
+        applied: List[Any] = []
+        teams_seen: set = set()
+        # Seed every team that appears anywhere in the season fixtures with
+        # a zero row, so apply_result doesn't need to defensively create
+        # rows for newly-encountered teams.
+        for m in matches:
+            for side in ("homeTeam", "awayTeam"):
+                name = (m.get(side) or {}).get("name")
+                if name and name not in teams_seen:
+                    teams_seen.add(name)
+                    state[name] = {"played": 0, "points": 0, "gf": 0, "ga": 0}
+        # Apply FINISHED matches to populate the standings snapshot.
+        for m in matches:
+            if m.get("status") != "FINISHED":
+                continue
+            ft = (m.get("score") or {}).get("fullTime") or {}
+            hg = ft.get("home")
+            ag = ft.get("away")
+            if hg is None or ag is None:
+                continue
+            home = (m.get("homeTeam") or {}).get("name")
+            away = (m.get("awayTeam") or {}).get("name")
+            fd_id = m.get("id")
+            if not home or not away or fd_id is None:
+                continue
+            applied.append(fd_id)
+            self._mutate_apply(state, home, away, int(hg), int(ag))
+        state["_applied"] = frozenset(applied)
+        self._initial_state_cache = state
+        return state
+
+    @staticmethod
+    def _mutate_apply(state: Dict[str, Any], home: str, away: str, hg: int, ag: int) -> None:
+        """Apply one finished result to a state dict in place. Used by
+        `initial_state` (where mutation is fine — we own the new state) and
+        `apply_result` (which copies first to preserve immutability)."""
+        h = state[home]
+        a = state[away]
+        h["played"] += 1
+        a["played"] += 1
+        h["gf"] += hg
+        h["ga"] += ag
+        a["gf"] += ag
+        a["ga"] += hg
+        if hg > ag:
+            h["points"] += 3
+        elif hg < ag:
+            a["points"] += 3
+        else:
+            h["points"] += 1
+            a["points"] += 1
+
+    def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
+        """All matches not yet applied. The simulator uses this to know
+        which matches still need sampling after applying the target match.
+        """
+        applied = state.get("_applied", frozenset())
+        matches = self._fetch_all_season_matches()
+        out: List[GameRow] = []
+        for m in matches:
+            fd_id = m.get("id")
+            if fd_id is None or fd_id in applied:
+                continue
+            home = (m.get("homeTeam") or {}).get("name")
+            away = (m.get("awayTeam") or {}).get("name")
+            start = parse_iso_utc(m.get("utcDate"))
+            if not home or not away or start is None:
+                continue
+            out.append(GameRow(
+                sport_prefix=self.config.sport_prefix,
+                sport_label=self.config.sport_label,
+                home=home,
+                away=away,
+                rank_home=None,  # importance doesn't need ranks
+                rank_away=None,
+                start_time=start,
+                extra={"fd_id": fd_id, "matchday": m.get("matchday")},
+            ))
+        return out
+
+    def sample_result(
+        self,
+        state: Dict[str, Any],
+        match: GameRow,
+        strengths: Dict[str, Dict[str, float]],
+        rng: random.Random,
+    ) -> MatchResult:
+        """Sample one (home_goals, away_goals) via Poisson with rolling-
+        average rates per Lahvička. The lambda for home goals is the
+        average of home team's home-attack rate and away team's away-defense
+        rate; mirror for away goals.
+        """
+        h = self._strength_for(strengths, match.home)
+        a = self._strength_for(strengths, match.away)
+        lam_home = max(0.05, (h["sh"] + a["ca"]) / 2.0)
+        lam_away = max(0.05, (a["sa"] + h["ch"]) / 2.0)
+        return MatchResult(
+            home_goals=_poisson(lam_home, rng),
+            away_goals=_poisson(lam_away, rng),
+        )
+
+    def apply_result(
+        self,
+        state: Dict[str, Any],
+        match: GameRow,
+        result: MatchResult,
+    ) -> Dict[str, Any]:
+        """Return a NEW state with `match`'s `result` applied. Pure — the
+        simulator depends on this NOT mutating `state` so one initial_state
+        can seed many sampled seasons.
+        """
+        # Shallow-copy the state dict plus the two team rows we'll mutate.
+        # Other teams are shared by reference; cheap and correct because
+        # we never write back through them in this update.
+        new_state = dict(state)
+        new_state[match.home] = dict(state[match.home])
+        new_state[match.away] = dict(state[match.away])
+        self._mutate_apply(new_state, match.home, match.away,
+                           result.home_goals, result.away_goals)
+        fd_id = match.extra.get("fd_id") if isinstance(match.extra, dict) else None
+        if fd_id is not None:
+            new_state["_applied"] = state.get("_applied", frozenset()) | {fd_id}
+        return new_state
+
+    def terminal_outcomes(self, state: Dict[str, Any]) -> Dict[str, List[str]]:
+        """{team: [outcome_labels]} at the final standings encoded in
+        `state`. Sorts by (points desc, goal_diff desc, gf desc) — the
+        standard soccer tiebreak. Assigns labels based on
+        `LEAGUE_CONTEXTS[fd_code].thresholds`.
+
+        A team can match multiple top-side labels (champion also qualifies
+        for UCL and Europa). Bottom-side labels fire on positions worse
+        than the cutoff. The caller (scoring.compute_match_importance)
+        decides aggregation per the cross-sport sum rule.
+        """
+        ctx = LEAGUE_CONTEXTS.get(self.config.fd_code)
+        if ctx is None:
+            return {team: [] for team in state if team != "_applied"}
+        teams = [(name, row) for name, row in state.items() if name != "_applied"]
+        teams.sort(
+            key=lambda kv: (
+                -kv[1]["points"],
+                -(kv[1]["gf"] - kv[1]["ga"]),
+                -kv[1]["gf"],
+            )
+        )
+        positions = {name: i + 1 for i, (name, _) in enumerate(teams)}
+        outcomes: Dict[str, List[str]] = {name: [] for name, _ in teams}
+        for cutoff, label, _w in ctx.thresholds:
+            bottom = self._is_bottom_outcome(label)
+            for name, pos in positions.items():
+                if bottom:
+                    if pos > cutoff:
+                        outcomes[name].append(label)
+                else:
+                    if pos <= cutoff:
+                        outcomes[name].append(label)
+        return outcomes
+
+
+def _poisson(lam: float, rng: random.Random) -> int:
+    """Draw one Poisson sample via Knuth's algorithm. Pure-Python (no numpy
+    dependency, the plugin runs in Dispatcharr's lean container).
+
+    For lam in [0, 10] this is fast enough — soccer goal counts hover at
+    ~1.4 mean, deepest tail rarely exceeds 7-8 goals/game. For larger lam
+    a normal approximation would be needed; not relevant here.
+    """
+    L = math.exp(-lam)
+    k = 0
+    p = 1.0
+    while p > L:
+        k += 1
+        p *= rng.random()
+    return k - 1
