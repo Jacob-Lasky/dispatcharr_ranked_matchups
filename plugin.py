@@ -37,13 +37,19 @@ except ImportError:  # py < 3.9 fallback (won't hit on Dispatcharr's Python 3.13
 
 from ._util import parse_iso_utc, stable_hash_int
 
-# Derived from the package directory so the loader, logger, and PluginConfig
-# row all stay in sync if the directory is ever renamed.
-PLUGIN_KEY = __package__ or "dispatcharr_ranked_matchups"
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# DO NOT derive PLUGIN_KEY from __package__. Dispatcharr's loader wraps every
+# plugin in an internal namespace (_dispatcharr_plugin_<key>), so __package__
+# resolves to that wrapper, not the folder name. The PluginConfig DB row, the
+# REST URL slug, and the Plugins-page card are all keyed on the folder name
+# (lowercased, spaces->underscores) per apps/plugins/loader.py. Use the same
+# derivation here, or get_current_settings() silently returns {} and the
+# scheduler thread idles forever with no error in the logs.
+PLUGIN_KEY = os.path.basename(PLUGIN_DIR).replace(" ", "_").lower()
 
 logger = logging.getLogger(f"plugins.{PLUGIN_KEY}")
 
-PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
 CFBD_KEY_PATH = os.path.join(PLUGIN_DIR, "cfbd_api_key")
 FD_KEY_PATH = os.path.join(PLUGIN_DIR, "football_data_api_key")
