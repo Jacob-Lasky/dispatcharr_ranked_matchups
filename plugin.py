@@ -349,12 +349,46 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         comp_code = extra.get("fd_competition_code")
         league_ctx = LEAGUE_CONTEXTS.get(comp_code) if comp_code else None
 
-        # Stakes per team (proximity to a meaningful league threshold)
+        # Stakes per team (proximity to a meaningful league threshold,
+        # weighted by consequence, gated by mathematical reachability).
         stakes_a, hits_a = (0.0, [])
         stakes_b, hits_b = (0.0, [])
         if league_ctx:
-            stakes_a, hits_a = compute_team_stakes(g.rank_home, league_ctx.thresholds)
-            stakes_b, hits_b = compute_team_stakes(g.rank_away, league_ctx.thresholds)
+            # Build standings-points-by-position from the source's table
+            # so compute_team_stakes can drop thresholds the team is
+            # locked out of (Blackburn-Leicester MD46 type dead rubbers).
+            # Knockout comps with no standings_table → empty dict →
+            # gating disabled, function falls back to pure proximity.
+            standings_table = extra.get("standings_table") or []
+            standings_pts_by_pos: Dict[int, int] = {
+                e["position"]: int(e["points"])
+                for e in standings_table
+                if e.get("position") is not None and e.get("points") is not None
+            }
+            played_by_pos: Dict[int, int] = {
+                e["position"]: int(e["played"])
+                for e in standings_table
+                if e.get("position") is not None and e.get("played") is not None
+            }
+            mds_total = league_ctx.matchdays_total or 0
+            home_played = played_by_pos.get(g.rank_home or -1, 0)
+            away_played = played_by_pos.get(g.rank_away or -1, 0)
+            home_pts = standings_pts_by_pos.get(g.rank_home or -1, 0)
+            away_pts = standings_pts_by_pos.get(g.rank_away or -1, 0)
+            home_remaining = max(0, mds_total - home_played) if mds_total else 0
+            away_remaining = max(0, mds_total - away_played) if mds_total else 0
+            stakes_a, hits_a = compute_team_stakes(
+                g.rank_home, league_ctx.thresholds,
+                team_points=home_pts,
+                matches_remaining=home_remaining,
+                standings_points_by_position=standings_pts_by_pos or None,
+            )
+            stakes_b, hits_b = compute_team_stakes(
+                g.rank_away, league_ctx.thresholds,
+                team_points=away_pts,
+                matches_remaining=away_remaining,
+                standings_points_by_position=standings_pts_by_pos or None,
+            )
         thresholds_hit = list(dict.fromkeys(hits_a + hits_b))
 
         # Impact on favorites: non-favorite games that move a favorite's table.

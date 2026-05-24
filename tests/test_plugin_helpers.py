@@ -138,7 +138,11 @@ class TestBuildWeights:
         # favorite is bumped to 6.0 to push favorite-involved games up
         # against title-race / playoff contenders.
         assert w.favorite == 6.0
-        assert w.stakes == 2.0
+        # stakes was reduced 2.0 -> 0.5 in Phase A.5/A.6 to compensate
+        # for compute_team_stakes returning leverage_in_[0,1] times
+        # consequence weight (2-5 range) instead of the older 0-3
+        # proximity points.
+        assert w.stakes == 0.5
         assert w.tournament == 1.5
         assert w.impact_favorite == 1.0
         assert w.narrative == 0.0

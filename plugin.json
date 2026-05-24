@@ -170,8 +170,8 @@
       "id": "weight_stakes",
       "type": "number",
       "label": "Standings stakes weight",
-      "default": 2.0,
-      "help_text": "Bonus when teams sit near a meaningful league threshold (playoff cutoff, relegation line, title race, UCL spot). Late-season multiplier (1.5x past 70%, 2x past 85%) amplifies it. This is the 'Wrexham/Hull at 70 pts each fighting for 6th' signal."
+      "default": 0.5,
+      "help_text": "Multiplier on the stakes signal (proximity to a meaningful league threshold, weighted by consequence). Late-season multiplier (1.5x past 70%, 2x past 85%) amplifies it on top. Default 0.5 calibrated against the Phase A normalized leverage formula; if Phase A is reverted, bump this back to 2.0. Keep in sync with scoring.Weights.stakes."
     },
     {
       "id": "weight_tournament",

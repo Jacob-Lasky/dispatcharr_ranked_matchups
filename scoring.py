@@ -44,7 +44,15 @@ class Weights:
     spread: float = 0.1
     favorite: float = 6.0
     rivalry: float = 2.0
-    stakes: float = 2.0          # standings near meaningful league threshold
+    # stakes was 2.0 in the pre-Phase-A.5 era when compute_team_stakes
+    # returned un-weighted proximity points (0-3). After Phase A.5/A.6
+    # the function returns leverage_in_[0,1] times consequence_weight
+    # (2-5 range). To keep the combined stakes contribution from
+    # saturating the score, reduce the user-tunable multiplier here.
+    # Net effect: a relegation six-pointer (both teams at d=0,
+    # weight 5.0, late_mult 2.0) now contributes 1.0*5*2*0.5 = 5 raw
+    # per team = 10 raw total, instead of 60 (pre-fix).
+    stakes: float = 0.5
     tournament: float = 1.5      # knockout-stage cup games
     impact_favorite: float = 1.0  # non-favorite game shifts favorite's table
     narrative: float = 0.0       # LLM narrative score (disabled by default)
@@ -83,23 +91,43 @@ class LeagueContext:
     standings translate to outcomes (UCL spots, relegation, playoff
     qualification). Rendered in the EPG description as a reminder of
     WHY a position-based race matters.
+
+    `thresholds` is a list of (position, label, weight) triples. The
+    weight is the cross-sport consequence weight from the
+    leverage-times-consequence calibration: relegation = 5, UCL = 4,
+    Europa = 2, etc. See TUNING_REPORT.md's cross-sport calibration
+    section in /coding/dispatcharr_ranked_matchups_sim/ for the
+    rationale; the numbers encode Jake's intuition that "relegation
+    matters more than Europa" within a single league and that the
+    same outcome band can weigh differently across leagues (top-25
+    means more in CFB than mid-table in EPL).
     """
     code: str                    # 'PL', 'ELC', 'CL', etc.
     matchdays_total: int         # season length (38 for EPL, 46 for ELC, etc.)
-    thresholds: List[Tuple[int, str]] = field(default_factory=list)
-    # List of (position, label) — e.g., [(1,'title'),(4,'UCL'),(17,'relegation')]
+    thresholds: List[Tuple[int, str, float]] = field(default_factory=list)
+    # List of (position, label, weight)
+    # e.g., [(1,'title',5.0),(4,'UCL',4.0),(17,'relegation',5.0)]
     boundary_summary: str = ""   # e.g. "Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation"
 
 
 LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     "PL": LeagueContext(
         code="PL", matchdays_total=38,
-        thresholds=[(1, "title"), (4, "UCL"), (7, "Europa/Conference"), (17, "relegation")],
+        thresholds=[
+            (1,  "title",             5.0),
+            (4,  "UCL",               4.0),
+            (7,  "Europa/Conference", 2.0),
+            (17, "relegation",        5.0),
+        ],
         boundary_summary="Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation",
     ),
     "ELC": LeagueContext(
         code="ELC", matchdays_total=46,
-        thresholds=[(2, "auto-promotion"), (6, "playoff"), (21, "relegation")],
+        thresholds=[
+            (2,  "auto-promotion", 4.5),
+            (6,  "playoff",        3.0),
+            (21, "relegation",     4.0),
+        ],
         boundary_summary="Top 2 → auto-promotion · 3-6 → promotion playoff · bottom 3 → relegation",
     ),
     # UCL handled via tournament_stage signal, not league position
@@ -283,24 +311,90 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
 
 def compute_team_stakes(
     team_position: Optional[int],
-    league_thresholds: List[Tuple[int, str]],
+    league_thresholds: List[Tuple[int, str, float]],
     proximity: int = 2,
+    *,
+    team_points: int = 0,
+    matches_remaining: int = 0,
+    standings_points_by_position: Optional[Dict[int, int]] = None,
 ) -> Tuple[float, List[str]]:
-    """How close is this team to a meaningful league threshold?
+    """How close is this team to a meaningful league threshold, weighted
+    by the threshold's consequence weight, with mathematical
+    elimination gating.
 
-    Returns (points, hit_labels). Points: 3 if exactly at threshold, 2 if
-    adjacent (±1), 1 if ±2, 0 otherwise. Stacks across multiple thresholds
-    (e.g., a 4th-place EPL side is at the UCL line AND 3 spots from title).
+    Returns (points, hit_labels). Points per threshold:
+      (proximity + 1 - d) * weight
+
+    With weight=1.0 this reproduces the old un-weighted behavior:
+    3 if exactly at threshold, 2 if adjacent (±1), 1 if ±2, 0 otherwise.
+
+    Stacks across thresholds: a 4th-place EPL side is at the UCL line
+    AND within proximity-2 of the title line; both fire.
+
+    Elimination gating (only active when `standings_points_by_position`
+    is provided — the soccer plugin has it; CFB/CBB / knockout comps
+    don't, and pass nothing):
+
+    - If the team is BELOW the threshold position (climbing toward
+      promotion / a title / a higher band), drop the threshold when
+      team_points + matches_remaining * 3 < threshold_team_points.
+      That's "I cannot mathematically catch the team currently at the
+      cutoff" — the band is locked out, no points should fire.
+
+    - If the team is ABOVE the threshold position (defending a higher
+      band against teams below), drop the threshold when
+      threshold_team_points + matches_remaining * 3 < team_points.
+      That's "no team can catch me down to this band" — locked in,
+      the band stops being a live race for me.
+
+    Without standings/remaining info, falls back to pure proximity
+    (matches the pre-Phase-A behavior).
     """
     if team_position is None:
         return 0.0, []
+    # Gate whenever the caller provided standings data. matches_remaining
+    # may legitimately be 0 (final whistle of the season) — in that case
+    # the math below treats current points as final, and locked positions
+    # correctly drop out. Older signature didn't gate without standings;
+    # that path is kept for knockout comps that have no league table.
+    gating = standings_points_by_position is not None
+    # Proximity is in [0, proximity+1]; normalize to [0, 1] before
+    # multiplying by the consequence weight so the contribution stays
+    # in the same magnitude as the report's calibration ("leverage in
+    # [0,1] times weight" — see TUNING_REPORT.md's cross-sport
+    # calibration section). Without this, a relegation match at d=0
+    # would contribute (3 * 5) * late_mult * weights.stakes = 60 raw
+    # which saturates _FINAL_KNEE long before other signals can speak.
+    leverage_denom = float(proximity + 1)
     pts = 0.0
     hit: List[str] = []
-    for cutoff, label in league_thresholds:
+    for cutoff, label, weight in league_thresholds:
         d = abs(team_position - cutoff)
-        if d <= proximity:
-            pts += float(proximity + 1 - d)  # adjacent → proximity, exact → proximity+1
-            hit.append(label)
+        if d > proximity:
+            continue
+        if gating:
+            # standings_points_by_position guaranteed non-None by the
+            # gating bool above; assert reassures the type checker.
+            assert standings_points_by_position is not None
+            if team_position > cutoff:
+                # Climber: below the cutoff (numerically larger
+                # position number = worse standing in soccer tables).
+                # The live opponent is the team currently AT the cutoff.
+                threshold_team_points = standings_points_by_position.get(cutoff, 0)
+                if team_points + matches_remaining * 3 < threshold_team_points:
+                    continue  # locked out from above
+            else:
+                # Defender (team_position <= cutoff): on the winning
+                # side of the cutoff line, including AT the cutoff
+                # (the marginal team). The live opponent is the team
+                # at cutoff+1 — the chaser who would push us over the
+                # line if they catch.
+                chaser_points = standings_points_by_position.get(cutoff + 1, 0)
+                if chaser_points + matches_remaining * 3 < team_points:
+                    continue  # locked in, race is decided
+        leverage = float(proximity + 1 - d) / leverage_denom
+        pts += leverage * weight
+        hit.append(label)
     return pts, hit
 
 
