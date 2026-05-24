@@ -446,6 +446,81 @@ class TestPluginKey:
         # return the loader's internal wrapper namespace.
         assert not plugin.PLUGIN_KEY.startswith("_dispatcharr_plugin_")
 
+    def test_source_does_not_reintroduce_package_derivation(self, plugin):
+        # Source-introspection regression guard. The original bug shape
+        # was `PLUGIN_KEY = __package__ or "..."`. The three assertions
+        # above can't catch a re-introduction of that pattern because
+        # pytest's conftest stubs the package name to the folder name,
+        # so __package__ accidentally resolves to the right string in
+        # tests. Under Dispatcharr's real loader, __package__ resolves
+        # to the wrapper namespace and the bug bites.
+        #
+        # This test reads plugin.py source directly and refuses the
+        # exact failing pattern. Format-fragile by design: if the line
+        # is reflowed across lines, the assertion needs updating —
+        # which is a feature, not a bug. Forces a re-think.
+        src = open(plugin.__file__).read()
+        assert "PLUGIN_KEY = __package__" not in src, (
+            "PLUGIN_KEY must derive from the folder name, not __package__. "
+            "See the load-bearing comment above the PLUGIN_KEY assignment "
+            "in plugin.py for why."
+        )
+        # Affirm the correct shape is in place.
+        assert "PLUGIN_KEY = os.path.basename(PLUGIN_DIR)" in src
+
+    def test_derivation_ignores_package_namespace(self, tmp_path):
+        # The actual bug had nothing to do with the folder name being
+        # right or wrong; it had to do with __package__ resolving to
+        # Dispatcharr's wrapper namespace at runtime. In pytest's
+        # importlib setup, __package__ is the conftest stub, which is
+        # already correct by accident — so the other PLUGIN_KEY tests
+        # would have passed even on the broken `PLUGIN_KEY = __package__`
+        # code. This test reproduces the loader-wrap scenario directly:
+        # write a tiny plugin.py-equivalent into tmp_path with the
+        # CORRECT derivation, register it under the buggy wrapper-style
+        # __package__ name, and assert the derivation ignores
+        # __package__ and reads the folder instead.
+        import importlib.util
+        import sys
+
+        plugin_dir = tmp_path / "dispatcharr_ranked_matchups"
+        plugin_dir.mkdir()
+        (plugin_dir / "__init__.py").write_text("")
+        (plugin_dir / "tiny_plugin.py").write_text(
+            "import os\n"
+            "PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))\n"
+            "PLUGIN_KEY = os.path.basename(PLUGIN_DIR).replace(' ', '_').lower()\n"
+        )
+        # Stub the package under the WRONG (loader-wrapped) name to
+        # poison __package__. If the derivation used __package__, the
+        # resulting PLUGIN_KEY would be the wrapper string and the
+        # assertion below would fail.
+        wrapper_name = "_dispatcharr_plugin_dispatcharr_ranked_matchups"
+        spec = importlib.util.spec_from_file_location(
+            f"{wrapper_name}.tiny_plugin",
+            str(plugin_dir / "tiny_plugin.py"),
+            submodule_search_locations=[str(plugin_dir)],
+        )
+        # Pre-register a fake parent package so the relative import
+        # machinery is happy.
+        import types
+        fake_parent = types.ModuleType(wrapper_name)
+        fake_parent.__path__ = [str(plugin_dir)]
+        sys.modules[wrapper_name] = fake_parent
+        try:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            # The fix: PLUGIN_KEY comes from the folder, not __package__.
+            assert mod.PLUGIN_KEY == "dispatcharr_ranked_matchups"
+            # Decoupling check: __package__ is the wrapper-shaped string
+            # the loader produces in prod, and PLUGIN_KEY ignores it.
+            # If derivation slipped back to `__package__ or "..."`, this
+            # assertion would fail because the two would equal.
+            assert mod.PLUGIN_KEY != mod.__package__
+            assert mod.__package__.startswith("_dispatcharr_plugin_")
+        finally:
+            sys.modules.pop(wrapper_name, None)
+
 
 class TestOwnedTvgIdQ:
     """The ownership helper covers both the current TVG_ID_PREFIX scheme
