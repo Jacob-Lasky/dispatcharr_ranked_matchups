@@ -39,7 +39,7 @@ def _sample_game():
         "spread": None,
         "closeness": 0.82,
         "favorites_matched": ["Tottenham"],
-        "stakes_thresholds_hit": ["relegation"],
+        "importance_thresholds_hit": ["relegation"],
         "extra": {
             "matchday": 38,
             "matchdays_total": 38,
@@ -115,9 +115,11 @@ class TestBuildLlmContext:
         ctx = llm.build_llm_context(_sample_game(), tagline="")
         assert "User's favorite teams playing: Tottenham" in ctx
 
-    def test_stakes_thresholds_surfaced(self):
+    def test_importance_thresholds_surfaced(self):
+        # Phase C.4 renamed the prompt label "Stakes thresholds" →
+        # "Outcome bands" to match the importance-signal vocabulary.
         ctx = llm.build_llm_context(_sample_game(), tagline="")
-        assert "Stakes thresholds in play: relegation" in ctx
+        assert "Outcome bands in play: relegation" in ctx
 
     def test_closeness_high_tags_toss_up(self):
         ctx = llm.build_llm_context(_sample_game(), tagline="")

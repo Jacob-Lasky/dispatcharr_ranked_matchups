@@ -13,9 +13,8 @@ you can tune:
 | `rank_pair` | Both teams ranked / one ranked | 1.0 |
 | `favorite` | One of YOUR favorite teams is playing | 6.0 (flat) |
 | `close_game` | Coinflip-ness in [0, 1] — soccer uses devigged h2h moneylines, NCAAF/NCAAM normalize point spread | 3.0 |
-| `stakes` | Either team near a meaningful league cutoff (playoff, relegation, title, UCL), proximity × consequence weight, gated by mathematical reachability; 1.5–2× late-season multiplier | 0.5 |
+| `importance` | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands (title / UCL / Europa / relegation / promotion). Locked seasons → 0; late-season leverage rises naturally. Soccer only (NCAAF / NCAAM TBD in Phase D). | 3.0 |
 | `tournament_stage` | Knockout cup game (R16, QF, SF, F) | 1.5 |
-| `impact_on_favorite` | Non-favorite game whose outcome shifts a favorite's table position; inherits the favorite's own stakes magnitude scaled by proximity | 1.0 |
 | `rivalry` | Known rivalry game (rivalry DB pending) | 2.0 (flat) |
 | `narrative` | LLM-judged narrative bonus (off by default) | 0.0 |
 
@@ -27,8 +26,7 @@ rest.
 
 ```
 #9000  EPL 3v9 ★10.0: Brentford FC at Manchester United FC
-       — both top-10 (#3 vs #9), title / UCL race (final stretch),
-         affects Manchester City FC, toss-up (line +0.5)
+       — both top-10 (#3 vs #9), title / UCL race, toss-up (line +0.5)
 
        Description (what TiviMate/Plex/Jellyfin show):
          Kickoff: Today 2:00 PM CDT 🔴 TODAY
@@ -38,13 +36,12 @@ rest.
          Score breakdown:
            rank_pair: +7.92
            close_game: +3.38
-           stakes: +16.0
-           impact_on_favorite: +1.0
+           importance: +17.0
          Source channel: Manchester United
 
 #9002  EFL 4v6 ⭐ ★10.0: Middlesbrough FC at Wrexham AFC
        — both top-10 (#4 vs #6), favorite (Wrexham),
-         playoff / auto-promotion race (final stretch), toss-up (line +0.2)
+         playoff / auto-promotion race, toss-up (line +0.2)
 ```
 
 Today's games are sorted to the front (lowest channel numbers) so they appear
@@ -183,8 +180,12 @@ class MyNewSource(SportSource):
 ```
 
 For league-based sports, populate `extra["fd_competition_code"]` to a code
-in `LEAGUE_CONTEXTS` (e.g., `"PL"`, `"ELC"`) so the stakes signal knows your
-thresholds.
+in `LEAGUE_CONTEXTS` (e.g., `"PL"`, `"ELC"`) so the importance signal knows
+your league's outcome thresholds and consequence weights. The simulator
+needs `supports_importance=True` on the `SportSource` plus the 7-method
+Monte Carlo interface (`estimate_strengths`, `initial_state`,
+`remaining_matches`, `sample_result`, `apply_result`, `terminal_outcomes`,
+`outcome_labels`) — see `sources/soccer.py` for the canonical impl.
 
 ## Scoring transparency
 
@@ -199,14 +200,14 @@ Every game's per-signal breakdown is in `cache.json`:
   "score_breakdown": {
     "rank_pair": 7.92,
     "close_game": 2.89,
-    "stakes": 4.0,
-    "impact_on_favorite": 5.0
+    "importance": 17.0
   },
   "score_notes": [
     "both ranked: #3 vs #9 (sum=12)",
     "implied coinflip-ness: 0.96",
-    "standings stakes: thresholds=['title', 'UCL'], season_progress=98%, late_mult=2.0x",
-    "affects favorite: Manchester City FC"
+    "importance: Manchester United UCL: 0.65 leverage × 4.0 = 2.60",
+    "importance: Brentford Europa/Conference: 0.42 leverage × 2.0 = 0.84",
+    "importance: Manchester City title: 0.51 leverage × 5.0 = 2.55"
   ]
 }
 ```

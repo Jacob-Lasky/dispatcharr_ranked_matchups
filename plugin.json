@@ -174,13 +174,6 @@
       "help_text": "Flat points added for known rivalry games (future: rivalry DB)."
     },
     {
-      "id": "weight_stakes",
-      "type": "number",
-      "label": "Standings stakes weight",
-      "default": 0.5,
-      "help_text": "Multiplier on the stakes signal (proximity to a meaningful league threshold, weighted by consequence). Late-season multiplier (1.5x past 70%, 2x past 85%) amplifies it on top. Default 0.5 calibrated against the Phase A normalized leverage formula; if Phase A is reverted, bump this back to 2.0. Keep in sync with scoring.Weights.stakes."
-    },
-    {
       "id": "weight_tournament",
       "type": "number",
       "label": "Tournament-stage weight",
@@ -188,25 +181,18 @@
       "help_text": "Knockout-stage cup games (R16, QF, SF, Final). UCL etc."
     },
     {
-      "id": "weight_impact_favorite",
-      "type": "number",
-      "label": "Impact-on-favorite weight",
-      "default": 1.0,
-      "help_text": "Bonus when a non-favorite game's outcome affects a favorite's table position (e.g., another team chasing the same playoff spot)."
-    },
-    {
       "id": "weight_narrative",
       "type": "number",
       "label": "LLM narrative weight",
       "default": 0.0,
-      "help_text": "Optional LLM-judged narrative score. Disabled by default — heuristic stakes/tournament/impact signals usually cover it. Set > 0 to enable Claude-based narrative scoring."
+      "help_text": "Optional LLM-judged narrative score. Disabled by default — the Monte Carlo importance signal covers structural standings stakes. Set > 0 to enable Claude-based narrative scoring for storyline / form / managerial-drama factors that the structural simulator can't capture."
     },
     {
       "id": "weight_importance",
       "type": "number",
       "label": "Monte Carlo importance weight",
-      "default": 1.0,
-      "help_text": "Phase C: multiplier on Lahvička match-importance (Kendall tau-c × consequence weight summed over both teams × all league outcome bands). Only fires for sources that implement simulation (currently soccer). Phase C.3 runs this ALONGSIDE the legacy stakes/impact signals so rankings can be compared; Phase C.4 will replace the legacy signals and likely raise this default. Set to 0 to disable."
+      "default": 3.0,
+      "help_text": "Multiplier on Lahvička match-importance: |Kendall tau-c| × consequence weight, summed across both playing teams' outcome bands AND any in-league favorites' outcome bands (so a non-favorite game that swings a favorite's relegation chance gets credit structurally). Only fires for sources that implement simulation (currently soccer). Phase C.4 retired the legacy stakes / impact-on-favorite / late-season-multiplier signal family — this signal replaces all three. Set to 0 to disable."
     },
     {
       "id": "n_importance_sims",

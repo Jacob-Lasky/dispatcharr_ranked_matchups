@@ -152,11 +152,10 @@ optional spread, and an `extra` dict for sport-specific metadata.
 For the score signals to work fully:
 
 - `extra["rank_source"]` — `"poll"` or `"standings"`, see above.
-- `extra["fd_competition_code"]` — set if you want the `stakes` signal.
-  Maps to a `LEAGUE_CONTEXTS` entry in `scoring.py` (add one for your
-  sport: matchday count + threshold positions).
-- `extra["season_progress"]` — float 0.0-1.0; powers the late-season
-  multiplier. Skip for sports without a clear season arc (knockouts).
+- `extra["fd_competition_code"]` — set if you want the `importance` signal.
+  Maps to a `LEAGUE_CONTEXTS` entry in `scoring.py` (matchday count +
+  threshold positions + consequence weights). The Monte Carlo simulator
+  uses this to find outcome labels.
 - `extra["stage"]` — `"FINAL"` / `"SEMI_FINALS"` / etc. for knockouts;
   fires the tournament-stage signal.
 - `extra["standings_table"]` — for standings-based sports, full league

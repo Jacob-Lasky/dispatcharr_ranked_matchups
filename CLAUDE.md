@@ -46,9 +46,10 @@ downstream is sport-agnostic.
 |---|---|
 | `plugin.json` | Manifest: settings (sports toggles, weights, favorites, schedule), actions. Read by Dispatcharr loader. |
 | `plugin.py` | Plugin class + 4 actions: `refresh`, `apply`, `auto_pipeline`, `show_status`. Daemon scheduler. EPG lookup closure. Channel cloning + dummy EPGSource management. |
-| `scoring.py` | `GameSignals`, `Weights`, `GameScore`. `score_game()` sums per-signal contributions, `_compress_to_10()` does the tanh squash. Helpers: `match_favorites`, `compute_team_stakes`, `compute_impact_on_favorites`, `build_why_text`, `format_channel_name`. League thresholds in `LEAGUE_CONTEXTS` dict. |
+| `scoring.py` | `GameSignals`, `Weights`, `GameScore`. `score_game()` sums per-signal contributions, `_compress_to_10()` does the tanh squash. Helpers: `match_favorites`, `compute_match_importance` (Lahvička Monte Carlo), `build_why_text`, `format_channel_name`. League thresholds in `LEAGUE_CONTEXTS` dict (position, label, consequence_weight). |
+| `simulation.py` | Sport-agnostic Monte Carlo importance per Lahvička (2012). `monte_carlo_importance()` for single (team, outcome); `monte_carlo_importance_batch()` shares one set of N season simulations across K queries. `kendall_tau_c()` is the ordinal-association measure. |
 | `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` → Dispatcharr channel via EPG `ProgramData`. Two-stage: regex (both team keywords in EPG title) → Claude batched fallback. |
-| `sources/base.py` | `GameRow` dataclass + abstract `SportSource`. |
+| `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Phase C importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. |
 | `sources/ncaaf.py` | CFBD `/rankings`, `/games`, `/lines` calls. CFBD uses **camelCase** (homeTeam, awayTeam) — easy gotcha. |
 | `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. UCL doesn't use position-as-rank (knockout) — handled via tournament_stage signal. |
 

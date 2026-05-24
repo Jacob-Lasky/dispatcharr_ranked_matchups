@@ -141,14 +141,13 @@ class TestBuildWeights:
         # favorite is bumped to 6.0 to push favorite-involved games up
         # against title-race / playoff contenders.
         assert w.favorite == 6.0
-        # stakes was reduced 2.0 -> 0.5 in Phase A.5/A.6 to compensate
-        # for compute_team_stakes returning leverage_in_[0,1] times
-        # consequence weight (2-5 range) instead of the older 0-3
-        # proximity points.
-        assert w.stakes == 0.5
         assert w.tournament == 1.5
-        assert w.impact_favorite == 1.0
         assert w.narrative == 0.0
+        # Phase C.4: weight_importance bumped 1.0 -> 3.0 when legacy
+        # stakes/impact/late_mult signals were retired. The structural
+        # importance signal carries the same magnitude as the legacy
+        # family at this weight.
+        assert w.importance == 3.0
 
     def test_overrides(self, plugin):
         w = plugin._build_weights({"weight_rank": 3.0, "weight_narrative": 1.5})
@@ -174,10 +173,26 @@ class TestBuildWeights:
         assert built.spread == defaults.spread
         assert built.favorite == defaults.favorite
         assert built.rivalry == defaults.rivalry
-        assert built.stakes == defaults.stakes
         assert built.tournament == defaults.tournament
-        assert built.impact_favorite == defaults.impact_favorite
         assert built.narrative == defaults.narrative
+        assert built.importance == defaults.importance
+
+    def test_legacy_settings_ignored(self, plugin):
+        # Phase C.4 removed Weights.stakes and Weights.impact_favorite. A
+        # saved PluginConfig from before C.4 will still have weight_stakes
+        # and weight_impact_favorite in its settings JSON; _build_weights
+        # must ignore them without raising. Drop after the next plugin
+        # bump cycle when no real installs have stale keys.
+        w = plugin._build_weights({
+            "weight_stakes": 7.0,
+            "weight_impact_favorite": 5.0,
+            "weight_rank": 1.0,
+        })
+        assert w.rank == 1.0
+        # Stale keys silently dropped — no AttributeError, no surprise
+        # contribution.
+        assert not hasattr(w, "stakes")
+        assert not hasattr(w, "impact_favorite")
 
     def test_plugin_json_defaults_match_dataclass(self, plugin):
         # The Dispatcharr loader reads plugin.json WITHOUT executing
@@ -206,8 +221,8 @@ class TestBuildWeights:
         }
         # weight_<name> in plugin.json must match Weights.<name>.
         weight_field_names = [
-            "rank", "spread", "favorite", "rivalry", "stakes",
-            "tournament", "impact_favorite", "narrative",
+            "rank", "spread", "favorite", "rivalry",
+            "tournament", "narrative", "importance",
         ]
         for name in weight_field_names:
             assert f"weight_{name}" in field_defaults, (
@@ -264,26 +279,10 @@ class TestBuildSignalsScoreFromPayload:
         assert score.raw == 9.0  # 5 + 4, NOT 7.6
         assert score.final == 7.6
 
-    def test_pre_b1_impact_legacy_list_of_strings_normalized(self, plugin):
-        # Pre-B.1 cache had impact_on_favorites: List[str]. Apply step
-        # must accept it without crashing — gracefully degrades to
-        # stakes=0/distance=0 (zero contribution) until next refresh
-        # writes the new shape.
-        g = {
-            "score": 5.0,
-            "score_breakdown": {},
-            "impact_on_favorites": ["Tottenham Hotspur FC", "Wrexham AFC"],
-        }
-        signals, _ = plugin._build_signals_score_from_payload(g)
-        assert signals.impact_on_favorites == [
-            ("Tottenham Hotspur FC", 0.0, 0),
-            ("Wrexham AFC", 0.0, 0),
-        ]
-
-    def test_b1_impact_rich_tuples_round_trip(self, plugin):
-        # B.1+ cache has impact_on_favorites: List[List[name, stakes, distance]]
-        # (JSON-serialized tuples). Reader must rebuild as tuples with
-        # correct types so downstream destructuring works.
+    def test_pre_c4_cache_with_legacy_impact_field_ignored(self, plugin):
+        # Pre-C.4 cache.json carries `impact_on_favorites` which the new
+        # GameSignals doesn't have. Reader must drop the field silently
+        # so apply doesn't crash reading a cache written by older code.
         g = {
             "score": 5.0,
             "score_breakdown": {},
@@ -293,26 +292,32 @@ class TestBuildSignalsScoreFromPayload:
             ],
         }
         signals, _ = plugin._build_signals_score_from_payload(g)
-        assert signals.impact_on_favorites == [
-            ("Tottenham Hotspur FC", 5.0, 1),
-            ("Wrexham AFC", 3.75, 0),
-        ]
+        # No crash; the field doesn't exist on the new GameSignals.
+        assert not hasattr(signals, "impact_on_favorites")
 
-    def test_malformed_impact_entries_dropped(self, plugin):
-        # Defensive: a hand-edited or corrupt cache shouldn't crash
-        # apply. Unknown shapes are skipped, valid entries preserved.
+    def test_pre_c4_stakes_thresholds_hit_fallback(self, plugin):
+        # Pre-C.4 cache stored thresholds under stakes_thresholds_hit; the
+        # post-C.4 key is importance_thresholds_hit. Reader prefers the new
+        # key but falls back to the old one for one-cycle migration.
         g = {
             "score": 5.0,
             "score_breakdown": {},
-            "impact_on_favorites": [
-                ["Tottenham", 5.0, 1],
-                {"unexpected": "dict"},
-                ["TooShort"],
-                ["TooLong", 1.0, 2, 3],
-            ],
+            "stakes_thresholds_hit": ["title", "UCL"],
         }
         signals, _ = plugin._build_signals_score_from_payload(g)
-        assert signals.impact_on_favorites == [("Tottenham", 5.0, 1)]
+        assert signals.importance_thresholds_hit == ["title", "UCL"]
+
+    def test_post_c4_importance_thresholds_hit_preferred(self, plugin):
+        # When both keys are present (a cache rewritten mid-migration),
+        # the new key wins.
+        g = {
+            "score": 5.0,
+            "score_breakdown": {},
+            "stakes_thresholds_hit": ["LEGACY"],
+            "importance_thresholds_hit": ["NEW"],
+        }
+        signals, _ = plugin._build_signals_score_from_payload(g)
+        assert signals.importance_thresholds_hit == ["NEW"]
 
     def test_phase_c_importance_round_trip(self, plugin):
         # Phase C: importance_points + importance_notes survive the

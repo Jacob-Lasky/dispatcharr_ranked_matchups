@@ -284,9 +284,7 @@ def _build_weights(settings: Dict[str, Any]):
         spread=float(settings.get("weight_spread", d.spread)),
         favorite=float(settings.get("weight_favorite", d.favorite)),
         rivalry=float(settings.get("weight_rivalry", d.rivalry)),
-        stakes=float(settings.get("weight_stakes", d.stakes)),
         tournament=float(settings.get("weight_tournament", d.tournament)),
-        impact_favorite=float(settings.get("weight_impact_favorite", d.impact_favorite)),
         narrative=float(settings.get("weight_narrative", d.narrative)),
         importance=float(settings.get("weight_importance", d.importance)),
     )
@@ -354,10 +352,18 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         _write_cache(cache)
         return {"status": "ok", "message": msg}
 
-    # 2. Score (with Phase 3 standings/tournament/impact signals + Phase C importance)
+    # 2. Score. The Lahvička Monte Carlo importance signal (Phase C)
+    # replaced the legacy stakes / impact_on_favorites / late_mult signal
+    # family in C.4 — the structural importance value covers all three:
+    #   - stakes for the playing teams → home + away queries in the batch
+    #   - impact_on_favorites for non-playing favorites → favorite queries
+    #     in the same batch (one season replay per match shared across all
+    #     queries via monte_carlo_importance_batch)
+    #   - late-season amplification → emerges naturally from the
+    #     contingency table getting sharper as elimination drops more
+    #     outcomes out of contention. No multiplier hack needed.
     from .scoring import (
-        match_favorites, LEAGUE_CONTEXTS, compute_team_stakes,
-        compute_impact_on_favorites, build_impact_narratives,
+        match_favorites, LEAGUE_CONTEXTS, build_impact_narratives,
         compute_match_importance,
     )
     n_importance_sims = int(settings.get("n_importance_sims", 500))
@@ -367,52 +373,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         comp_code = extra.get("fd_competition_code")
         league_ctx = LEAGUE_CONTEXTS.get(comp_code) if comp_code else None
 
-        # Build standings-points-by-position from the source's table so
-        # compute_team_stakes can drop thresholds the team is locked out
-        # of (Blackburn-Leicester MD46 type dead rubbers). Knockout comps
-        # with no standings_table → empty dict → gating disabled, function
-        # falls back to pure proximity.
+        # Standings table is still consumed downstream by
+        # build_impact_narratives (which writes the natural-language
+        # "rooting against X" prose for the EPG description). The
+        # importance signal pulls its standings from the simulator's
+        # initial_state, not this table — they're built from the same
+        # FD.org payload so they agree.
         standings_table = extra.get("standings_table") or []
-        standings_pts_by_pos: Dict[int, int] = {
-            e["position"]: int(e["points"])
-            for e in standings_table
-            if e.get("position") is not None and e.get("points") is not None
-        }
-        played_by_pos: Dict[int, int] = {
-            e["position"]: int(e["played"])
-            for e in standings_table
-            if e.get("position") is not None and e.get("played") is not None
-        }
-        mds_total = league_ctx.matchdays_total if league_ctx else 0
-
-        # Stakes per team (proximity to a meaningful league threshold,
-        # weighted by consequence, gated by mathematical reachability).
-        stakes_a, hits_a = (0.0, [])
-        stakes_b, hits_b = (0.0, [])
-        if league_ctx:
-            home_played = played_by_pos.get(g.rank_home or -1, 0)
-            away_played = played_by_pos.get(g.rank_away or -1, 0)
-            home_pts = standings_pts_by_pos.get(g.rank_home or -1, 0)
-            away_pts = standings_pts_by_pos.get(g.rank_away or -1, 0)
-            home_remaining = max(0, mds_total - home_played) if mds_total else 0
-            away_remaining = max(0, mds_total - away_played) if mds_total else 0
-            stakes_a, hits_a = compute_team_stakes(
-                g.rank_home, league_ctx.thresholds,
-                team_points=home_pts,
-                matches_remaining=home_remaining,
-                standings_points_by_position=standings_pts_by_pos or None,
-            )
-            stakes_b, hits_b = compute_team_stakes(
-                g.rank_away, league_ctx.thresholds,
-                team_points=away_pts,
-                matches_remaining=away_remaining,
-                standings_points_by_position=standings_pts_by_pos or None,
-            )
-        thresholds_hit = list(dict.fromkeys(hits_a + hits_b))
-
-        # Impact on favorites: non-favorite games that move a favorite's table.
-        # Build the rich version (with points) for narrative rendering, plus
-        # the plain version (name+position+own_stakes) for the score signal.
         favs_with_standings: List[Dict[str, Any]] = []
         if standings_table:
             for fav in favorites:
@@ -426,47 +393,26 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                             "points": entry.get("points"),
                         })
                         break
-        # Per-favorite stakes: what each favorite would earn from
-        # compute_team_stakes in their own game (gated by the same
-        # mathematical elimination as the playing teams above). This is
-        # the raw magnitude impact-on-favorite games inherit, scaled by
-        # proximity decay inside score_game. Fix for issue #11 — flat +1
-        # per favorite buried West Ham vs Leeds (Tottenham relegation
-        # pivot) at #8 on EPL MD38.
-        favs_in_league: List[Tuple[str, int, float]] = []
-        if league_ctx:
-            for f in favs_with_standings:
-                fav_pos = f["position"]
-                fav_pts_raw = f.get("points") or 0
-                fav_played = played_by_pos.get(fav_pos, 0)
-                fav_remaining = max(0, mds_total - fav_played) if mds_total else 0
-                fav_stakes_raw, _ = compute_team_stakes(
-                    fav_pos, league_ctx.thresholds,
-                    team_points=int(fav_pts_raw),
-                    matches_remaining=fav_remaining,
-                    standings_points_by_position=standings_pts_by_pos or None,
-                )
-                favs_in_league.append((f["name"], fav_pos, fav_stakes_raw))
-        impact_favs = compute_impact_on_favorites(
-            g.rank_home, g.rank_away, g.home, g.away, favs_in_league,
-        )
-        # Pre-render the natural-language impact narrative now and stash on
-        # the row so it survives the post-score cap/resort. Apply reads it
-        # straight from the cache without redoing the standings lookup.
+        # Pre-render the natural-language impact narrative now and stash
+        # on the row so it survives the post-score cap/resort. Apply
+        # reads it straight from the cache without redoing the standings
+        # lookup. Narrative is editorial output (separate from scoring);
+        # the importance signal handles scoring directly.
         g.extra["impact_narratives"] = build_impact_narratives(
             g.rank_home, g.rank_away, g.home, g.away,
             favs_with_standings, standings_table,
         )
 
-        # Phase C: Monte Carlo importance. Only fires when the source
-        # implements the importance interface (currently SoccerSource for
-        # league competitions) AND the league has consequence-weighted
-        # thresholds defined. weight_importance=0 disables the per-game
-        # cost entirely. Catches any exception to fall through to legacy
-        # signals — a bad standings fetch or simulator hiccup must not
-        # take down the entire refresh.
+        # Phase C Monte Carlo importance. Queries cover the two playing
+        # teams' outcome bands AND any in-league favorites' outcome
+        # bands (so a non-favorite game that swings a favorite's
+        # relegation chance gets credit structurally — the impact_on_
+        # favorites case from issue #11). weight_importance=0 disables
+        # the per-game cost entirely. Catches any exception so a flaky
+        # source can't take down the entire refresh.
         importance_pts: float = 0.0
         importance_notes: List[str] = []
+        importance_thresholds_hit: List[str] = []
         if (
             weights.importance > 0
             and getattr(src, "supports_importance", False)
@@ -474,8 +420,11 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             and league_ctx.thresholds
         ):
             try:
-                importance_pts, importance_notes = compute_match_importance(
-                    src, g, league_ctx, n_sims=n_importance_sims,
+                importance_pts, importance_notes, importance_thresholds_hit = (
+                    compute_match_importance(
+                        src, g, league_ctx, n_sims=n_importance_sims,
+                        favorites_in_league=[f["name"] for f in favs_with_standings],
+                    )
                 )
             except Exception as e:
                 logger.warning(
@@ -491,14 +440,10 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             favorite_match=match_favorites(g.home, g.away, favorites),
             spread=g.spread,
             closeness=g.closeness,
-            stakes_a=stakes_a,
-            stakes_b=stakes_b,
-            stakes_thresholds_hit=thresholds_hit,
-            season_progress=float(extra.get("season_progress") or 0.0),
             tournament_stage=extra.get("stage"),
-            impact_on_favorites=impact_favs,
             importance_points=importance_pts,
             importance_notes=importance_notes,
+            importance_thresholds_hit=importance_thresholds_hit,
         )
         score = score_game(signals, weights)
         scored.append((g, signals, score))
@@ -566,12 +511,10 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "score_breakdown": score.breakdown,
             "score_notes": score.notes,
             "favorites_matched": signals.favorite_match,
-            "stakes_thresholds_hit": signals.stakes_thresholds_hit,
-            "season_progress": signals.season_progress,
             "tournament_stage": signals.tournament_stage,
-            "impact_on_favorites": signals.impact_on_favorites,
             "importance_points": signals.importance_points,
             "importance_notes": signals.importance_notes,
+            "importance_thresholds_hit": signals.importance_thresholds_hit,
             "channel_id": match.channel_id,           # primary, kept for backward-compat
             "channel_ids": list(match.channel_ids),   # all matched, primary first
             "channel_name_current": match.channel_name,
@@ -766,21 +709,27 @@ def _resolve_park_base(target_base: int, num_games: int) -> int:
 
 
 def _build_signals_score_from_payload(g: Dict[str, Any]):
-    """Reconstruct GameSignals + GameScore from cache.json payload."""
+    """Reconstruct GameSignals + GameScore from cache.json payload.
+
+    Phase C.4 retired GameSignals.stakes_a/_b, stakes_thresholds_hit,
+    season_progress, and impact_on_favorites — the Monte Carlo importance
+    signal subsumes all four. A cache.json written before C.4 still
+    contains those keys; they're ignored here. The reader degrades
+    gracefully: missing importance_thresholds_hit (pre-C.4) falls back to
+    the legacy `stakes_thresholds_hit` if present, so the first post-C.4
+    apply against a stale cache still gets a tagline.
+    """
     from .scoring import GameSignals, GameScore
-    # Normalize impact_on_favorites across cache-format generations:
-    # pre-B.1 caches stored List[str] (names only); B.1+ stores
-    # List[List[name, stakes_raw, distance]] (JSON-encoded tuples).
-    # Legacy entries get stakes_raw=0.0 / distance=0 so score_game's
-    # inheritance contributes 0 — graceful degradation for one apply
-    # cycle until the next refresh writes the new shape.
-    impact_raw = g.get("impact_on_favorites") or []
-    impact_normalized: List[Tuple[str, float, int]] = []
-    for item in impact_raw:
-        if isinstance(item, str):
-            impact_normalized.append((item, 0.0, 0))
-        elif isinstance(item, (list, tuple)) and len(item) == 3:
-            impact_normalized.append((str(item[0]), float(item[1]), int(item[2])))
+    # Pre-C.4 caches stored thresholds under `stakes_thresholds_hit`; the
+    # post-C.4 key is `importance_thresholds_hit`. Reading both supports a
+    # one-cycle migration window where apply runs against a refresh that
+    # was generated by the previous code. After the first post-C.4
+    # refresh writes a fresh cache, the legacy key disappears.
+    thresholds_hit = (
+        g.get("importance_thresholds_hit")
+        or g.get("stakes_thresholds_hit")
+        or []
+    )
     signals = GameSignals(
         rank_a=g.get("rank_home"),
         rank_b=g.get("rank_away"),
@@ -789,14 +738,12 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         favorite_match=g.get("favorites_matched", []),
         spread=g.get("spread"),
         closeness=g.get("closeness"),
-        stakes_thresholds_hit=g.get("stakes_thresholds_hit") or [],
-        season_progress=g.get("season_progress") or 0.0,
         tournament_stage=g.get("tournament_stage"),
-        impact_on_favorites=impact_normalized,
         # Phase C: pre-weight importance roundtrip. Missing from pre-C.3
-        # caches → defaults (0.0 / []) preserve the legacy code path.
+        # caches → defaults (0.0 / []) preserve graceful degradation.
         importance_points=float(g.get("importance_points") or 0.0),
         importance_notes=list(g.get("importance_notes") or []),
+        importance_thresholds_hit=list(thresholds_hit),
     )
     # `score_raw` is the unbounded sum, `score` is the 0-10 compressed value.
     # If the cache predates `score_raw`, fall back to the breakdown sum (still
@@ -1209,7 +1156,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 favorites_matched=g.get("favorites_matched", []),
                 spread=g.get("spread"),
                 closeness=g.get("closeness"),
-                stakes_thresholds=g.get("stakes_thresholds_hit") or [],
+                importance_thresholds=(
+                    g.get("importance_thresholds_hit")
+                    or g.get("stakes_thresholds_hit")  # pre-C.4 cache fallback
+                    or []
+                ),
                 tournament_stage=g.get("tournament_stage"),
                 rank_a=g.get("rank_home"),
                 rank_b=g.get("rank_away"),

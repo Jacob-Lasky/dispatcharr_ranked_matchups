@@ -208,9 +208,6 @@ class SoccerSource(SportSource):
         # GameRow.closeness (not GameRow.spread).
         closeness_by_pair = self._fetch_closeness()
 
-        # Compute season_progress from standings: avg of (playedGames / total).
-        season_progress = self._estimate_season_progress(table_full)
-
         rows: List[GameRow] = []
         for f in fixtures:
             home = (f.get("homeTeam") or {}).get("name")
@@ -247,7 +244,6 @@ class SoccerSource(SportSource):
                     "raw_position_home": rh,
                     "raw_position_away": ra,
                     "fd_competition_code": self.config.fd_code,
-                    "season_progress": season_progress,
                     # Standings is position-based (not poll-based) — the WHY
                     # renderer uses this to skip "both top-N" framing that's
                     # meaningless when every team in the league is already
@@ -269,27 +265,6 @@ class SoccerSource(SportSource):
                 },
             ))
         return rows
-
-    @staticmethod
-    def _estimate_season_progress(table: List[Dict]) -> float:
-        """Approximate fraction of season completed.
-
-        Uses average of (playedGames / total_matchdays). For knockout comps with
-        no league table (UCL etc.), falls back to 0 (means: don't apply
-        late-season multiplier).
-        """
-        if not table:
-            return 0.0
-        played: List[int] = [
-            int(t["playedGames"]) for t in table if t.get("playedGames") is not None
-        ]
-        if not played:
-            return 0.0
-        # Round-robin home/away → total_md = (n - 1) * 2 for n teams in the table.
-        n = len(table)
-        total_md = max(1, (n - 1) * 2)
-        avg_played = sum(played) / len(played)
-        return min(1.0, avg_played / total_md)
 
     # ---------- standings ----------
 
@@ -355,12 +330,12 @@ class SoccerSource(SportSource):
         if not seed_table:
             return current_by_team, current_table
         # Reset playedGames to 0 — the seed represents a fresh season's
-        # prior, not last year's residual. compute_team_stakes uses
-        # matches_remaining = total_md - playedGames; we want the full
-        # new season ahead, so no race is mathematically locked at MD0.
-        # Keep last year's points so the impact-narrative still renders
-        # "1 spot and 3 points away" with realistic numbers — gating
-        # math is dominated by matches_remaining*3 at this stage anyway.
+        # prior, not last year's residual. Downstream consumers
+        # (build_impact_narratives, the matcher's rank cap) read these
+        # numbers; the importance simulator builds its own standings from
+        # the fixture list and doesn't depend on this field. Keep last
+        # year's points so the narrative still renders "1 spot and 3
+        # points away" with realistic numbers.
         fresh_table = [
             {
                 "name": r["name"],

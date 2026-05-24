@@ -36,9 +36,11 @@ UNRANKED = 26
 class Weights:
     """Per-signal weights. Tweakable via plugin settings.
 
-    Defaults reflect priority order: standings > rank > favorites > tournament/spread.
-    Narrative defaults to 0 because heuristics (stakes/tournament/impact-on-favorite)
-    cover what LLM narrative scoring would surface. Enable by setting weight > 0.
+    Defaults reflect priority order: importance > rank > favorites > tournament/spread.
+    Narrative defaults to 0 because the importance signal covers the structural
+    "stakes" ground (champion / UCL / relegation leverage on each match). Enable
+    LLM narrative by setting weight > 0 for game-flavor / storyline coverage that
+    Monte Carlo can't capture.
     """
     rank: float = 1.0
     # spread/closeness signal: applied to a [0, 1] coinflip-ness measure.
@@ -51,27 +53,18 @@ class Weights:
     spread: float = 3.0
     favorite: float = 6.0
     rivalry: float = 2.0
-    # stakes was 2.0 in the pre-Phase-A.5 era when compute_team_stakes
-    # returned un-weighted proximity points (0-3). After Phase A.5/A.6
-    # the function returns leverage_in_[0,1] times consequence_weight
-    # (2-5 range). To keep the combined stakes contribution from
-    # saturating the score, reduce the user-tunable multiplier here.
-    # Net effect: a relegation six-pointer (both teams at d=0,
-    # weight 5.0, late_mult 2.0) now contributes 1.0*5*2*0.5 = 5 raw
-    # per team = 10 raw total, instead of 60 (pre-fix).
-    stakes: float = 0.5
     tournament: float = 1.5      # knockout-stage cup games
-    impact_favorite: float = 1.0  # non-favorite game shifts favorite's table
     narrative: float = 0.0       # LLM narrative score (disabled by default)
     # Phase C: Lahvička Monte Carlo importance. Per-game raw points are
     # sum_over_(team,outcome) of leverage × consequence_weight (leverage in
     # [0,1] from Kendall tau-c, weight from LEAGUE_CONTEXTS thresholds —
-    # relegation=5, UCL=4, title=5, etc.). Default 1.0 is the C.3 starting
-    # value; the structural fix replaces stakes + impact_on_favorites +
-    # late_mult in C.4, so this weight will likely climb to ~3.0-5.0 once
-    # the legacy signals come out. For now, both signals fire alongside
-    # each other so we can compare rankings before flipping the cutover.
-    importance: float = 1.0
+    # relegation=5, UCL=4, title=5, etc.). C.4 calibration target: 3.0.
+    # That matches the typical "high-leverage relegation game" magnitude
+    # (0.5 leverage × 5 weight × 2 teams = 5 raw, times 3.0 weight = 15
+    # raw — the same order as a Phase-A relegation six-pointer with the
+    # legacy stakes signal). Replaces the legacy stakes + impact_favorite
+    # + _late_season_multiplier signal family (Phase C.4 cutover).
+    importance: float = 3.0
 
 
 @dataclass
@@ -90,34 +83,26 @@ class GameSignals:
     # same signal — pick the right path per source. See sources/base.py.
     closeness: Optional[float] = None
 
-    # Phase 3 — standings + stage signals (sport-aware, computed by plugin from
-    # source-provided context).
-    stakes_a: float = 0.0             # 0-3 ish, how close team A is to a league threshold
-    stakes_b: float = 0.0
-    stakes_thresholds_hit: List[str] = field(default_factory=list)  # ['playoff','relegation']
-    season_progress: float = 0.0      # 0.0-1.0 — late-season amplifies stakes
     tournament_stage: Optional[str] = None  # 'FINAL', 'SEMI_FINALS', 'QUARTER_FINALS', etc.
-    # Rich impact-on-favorite tuples: (favorite_name, inherited_stakes_raw,
-    # distance). `inherited_stakes_raw` is the favorite's own
-    # compute_team_stakes result (pre-late_mult, pre-weights.stakes) — so a
-    # non-favorite game that pivots a relegation-threshold favorite inherits
-    # the same magnitude that the favorite gets in their own game, scaled by
-    # how close the game's teams sit to the favorite's slot. See issue #11.
-    # DO NOT collapse to List[str]; the names-only shape lost the magnitude
-    # signal and made West Ham vs Leeds (Tottenham relegation-pivot) score
-    # identically to a Bournemouth-Forest dead-rubber.
-    impact_on_favorites: List[Tuple[str, float, int]] = field(default_factory=list)
 
     is_rivalry: bool = False
     narrative_score: Optional[float] = None  # 0-10 from LLM (last)
 
-    # Phase C: Lahvička Monte Carlo importance points (pre-weight). The
-    # plugin's _action_refresh calls compute_match_importance for sources
-    # that support it (currently SoccerSource only) and stashes the
-    # result here. Sources that don't support importance leave this at 0.0
-    # and score_game's importance block falls through without contributing.
+    # Phase C: Lahvička Monte Carlo importance, pre-weight. The plugin's
+    # _action_refresh calls compute_match_importance for sources that
+    # support it (currently SoccerSource only) and stashes the result here.
+    # Sources that don't support importance leave the points at 0.0 and
+    # score_game's importance block falls through without contributing.
+    #
+    # `importance_thresholds_hit` is the deduped list of outcome bands
+    # with nonzero leverage on any queried team (the playing teams plus
+    # in-league favorites). pick_tagline uses it for editorial taglines
+    # ("relegation race" / "title race"). Replaces the pre-C.4
+    # stakes_thresholds_hit field which was derived from the legacy
+    # proximity heuristic.
     importance_points: float = 0.0
     importance_notes: List[str] = field(default_factory=list)
+    importance_thresholds_hit: List[str] = field(default_factory=list)
 
 
 # ---------- League-specific thresholds ----------
@@ -242,25 +227,6 @@ def _effective_closeness(closeness: Optional[float], spread: Optional[float]) ->
     return None
 
 
-def _late_season_multiplier(season_progress: float) -> float:
-    """Boost on stakes/impact signals as the season runs out.
-
-    1.0x normally; 1.5x past 70% of matchdays; 2.0x past 85%. Shared
-    by the stakes block AND the impact-on-favorites block in
-    score_game so they amplify identically when both fire late.
-
-    DO NOT inline this back into score_game. Two call sites need
-    identical thresholds; an inline copy will silently drift and
-    break the "impact magnitude tracks own-game magnitude" invariant
-    that issue #11 fixed.
-    """
-    if season_progress >= 0.85:
-        return 2.0
-    if season_progress >= 0.70:
-        return 1.5
-    return 1.0
-
-
 # Trailing tokens that mean "same team" (typically the team-type / club suffix).
 # When these follow a favorite name, we allow the match. Superset of the
 # matcher's GENERIC_TEAM_SECOND_WORDS — adds the dotted club-tag variants and
@@ -343,18 +309,6 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
         else:
             notes.append(f"betting spread: {signals.spread:+.1f} pts")
 
-    # Phase 3 — stakes (proximity to meaningful league threshold), with
-    # late-season multiplier so games matter more when season is winding down.
-    late_mult = _late_season_multiplier(signals.season_progress)
-    stakes_total = signals.stakes_a + signals.stakes_b
-    if stakes_total > 0:
-        stakes_pts = stakes_total * late_mult * weights.stakes
-        breakdown["stakes"] = round(stakes_pts, 2)
-        notes.append(
-            f"standings stakes: thresholds={signals.stakes_thresholds_hit}, "
-            f"season_progress={signals.season_progress:.0%}, late_mult={late_mult:.1f}x"
-        )
-
     if signals.tournament_stage:
         ts = signals.tournament_stage.upper()
         stage_score = {
@@ -369,28 +323,6 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             tourn_pts = stage_score * weights.tournament
             breakdown["tournament_stage"] = round(tourn_pts, 2)
             notes.append(f"tournament stage: {ts.lower().replace('_', ' ')}")
-
-    if signals.impact_on_favorites:
-        # Inherit the affected favorite's own stakes contribution, scaled
-        # by how close the game's teams sit to the favorite's slot
-        # (distance=0 → full inheritance, distance=cap → 1/(cap+1)).
-        # Late-season multiplier amplifies impact the same way it
-        # amplifies the favorite's own stakes block, so an impact game
-        # at MD37 tracks the urgency of the favorite's own MD37 game.
-        # See issue #11 for the West Ham vs Leeds (Tottenham relegation)
-        # worked example; flat +1 per favorite buried it at #8.
-        leverage_denom = float(_IMPACT_PROXIMITY_CAP + 1)
-        inherited_raw = 0.0
-        for _, fav_stakes_raw, d in signals.impact_on_favorites:
-            leverage = (_IMPACT_PROXIMITY_CAP + 1 - d) / leverage_denom
-            inherited_raw += fav_stakes_raw * leverage
-        impact_pts = inherited_raw * late_mult * weights.impact_favorite
-        breakdown["impact_on_favorite"] = round(impact_pts, 2)
-        names = [t[0] for t in signals.impact_on_favorites]
-        notes.append(
-            f"affects favorite{'s' if len(names) > 1 else ''}: "
-            f"{', '.join(names)}"
-        )
 
     if signals.is_rivalry:
         breakdown["rivalry"] = round(weights.rivalry, 2)
@@ -427,173 +359,59 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
     )
 
 
-def compute_team_stakes(
-    team_position: Optional[int],
-    league_thresholds: List[Tuple[int, str, float]],
-    proximity: int = 2,
-    *,
-    team_points: int = 0,
-    matches_remaining: int = 0,
-    standings_points_by_position: Optional[Dict[int, int]] = None,
-) -> Tuple[float, List[str]]:
-    """How close is this team to a meaningful league threshold, weighted
-    by the threshold's consequence weight, with mathematical
-    elimination gating.
-
-    Returns (points, hit_labels). Points per threshold:
-      (proximity + 1 - d) * weight
-
-    With weight=1.0 this reproduces the old un-weighted behavior:
-    3 if exactly at threshold, 2 if adjacent (±1), 1 if ±2, 0 otherwise.
-
-    Stacks across thresholds: a 4th-place EPL side is at the UCL line
-    AND within proximity-2 of the title line; both fire.
-
-    Elimination gating (only active when `standings_points_by_position`
-    is provided — the soccer plugin has it; CFB/CBB / knockout comps
-    don't, and pass nothing):
-
-    - If the team is BELOW the threshold position (climbing toward
-      promotion / a title / a higher band), drop the threshold when
-      team_points + matches_remaining * 3 < threshold_team_points.
-      That's "I cannot mathematically catch the team currently at the
-      cutoff" — the band is locked out, no points should fire.
-
-    - If the team is ABOVE the threshold position (defending a higher
-      band against teams below), drop the threshold when
-      threshold_team_points + matches_remaining * 3 < team_points.
-      That's "no team can catch me down to this band" — locked in,
-      the band stops being a live race for me.
-
-    Without standings/remaining info, falls back to pure proximity
-    (matches the pre-Phase-A behavior).
-    """
-    if team_position is None:
-        return 0.0, []
-    # Gate whenever the caller provided standings data. matches_remaining
-    # may legitimately be 0 (final whistle of the season) — in that case
-    # the math below treats current points as final, and locked positions
-    # correctly drop out. Older signature didn't gate without standings;
-    # that path is kept for knockout comps that have no league table.
-    gating = standings_points_by_position is not None
-    # Proximity is in [0, proximity+1]; normalize to [0, 1] before
-    # multiplying by the consequence weight so the contribution stays
-    # in the same magnitude as the report's calibration ("leverage in
-    # [0,1] times weight" — see TUNING_REPORT.md's cross-sport
-    # calibration section). Without this, a relegation match at d=0
-    # would contribute (3 * 5) * late_mult * weights.stakes = 60 raw
-    # which saturates _FINAL_KNEE long before other signals can speak.
-    leverage_denom = float(proximity + 1)
-    pts = 0.0
-    hit: List[str] = []
-    for cutoff, label, weight in league_thresholds:
-        d = abs(team_position - cutoff)
-        if d > proximity:
-            continue
-        if gating:
-            # standings_points_by_position guaranteed non-None by the
-            # gating bool above; assert reassures the type checker.
-            assert standings_points_by_position is not None
-            if team_position > cutoff:
-                # Climber: below the cutoff (numerically larger
-                # position number = worse standing in soccer tables).
-                # The live opponent is the team currently AT the cutoff.
-                threshold_team_points = standings_points_by_position.get(cutoff, 0)
-                if team_points + matches_remaining * 3 < threshold_team_points:
-                    continue  # locked out from above
-            else:
-                # Defender (team_position <= cutoff): on the winning
-                # side of the cutoff line, including AT the cutoff
-                # (the marginal team). The live opponent is the team
-                # at cutoff+1 — the chaser who would push us over the
-                # line if they catch.
-                chaser_points = standings_points_by_position.get(cutoff + 1, 0)
-                if chaser_points + matches_remaining * 3 < team_points:
-                    continue  # locked in, race is decided
-        leverage = float(proximity + 1 - d) / leverage_denom
-        pts += leverage * weight
-        hit.append(label)
-    return pts, hit
-
-
-# Max distance (in standings positions) between a game's team and a
-# favorite's position for the game to count as "impacting" the favorite.
-# Used by both compute_impact_on_favorites (to filter) AND score_game's
-# impact block (to compute leverage decay). Keep in sync — divergence
-# would mean the function emits tuples score_game can't normalize.
-_IMPACT_PROXIMITY_CAP = 3
-
-
-def compute_impact_on_favorites(
-    rank_a: Optional[int], rank_b: Optional[int],
-    team_a: str, team_b: str,
-    favorites_in_league: List[Tuple[str, int, float]],  # [(name, position, own_stakes_raw), ...]
-    proximity: int = _IMPACT_PROXIMITY_CAP,
-) -> List[Tuple[str, float, int]]:
-    """Favorites whose table position this game's outcome would move,
-    paired with the stakes the favorite would earn in their own game.
-
-    Returns [(fav_name, fav_own_stakes_raw, distance), ...] where
-    distance is `min(|game_team_rank - fav_pos|)` across both game
-    teams. distance=0 means a game team sits exactly in the favorite's
-    slot — maximal swap risk.
-
-    `fav_own_stakes_raw` is the favorite's compute_team_stakes result
-    BEFORE late_mult and weights.stakes (so score_game can apply
-    late_mult uniformly across stakes + impact). The caller pre-computes
-    it; this function just carries it through.
-    """
-    affected: List[Tuple[str, float, int]] = []
-    a_lc, b_lc = team_a.lower(), team_b.lower()
-    for fav_name, fav_pos, fav_stakes_raw in favorites_in_league:
-        fav_lc = fav_name.lower()
-        # Skip games where the favorite IS playing (already covered by 'favorite' signal)
-        if fav_lc in a_lc or fav_lc in b_lc:
-            continue
-        best_d: Optional[int] = None
-        for r in [rank_a, rank_b]:
-            if r is None:
-                continue
-            d = abs(r - fav_pos)
-            if d <= proximity and (best_d is None or d < best_d):
-                best_d = d
-        if best_d is not None:
-            affected.append((fav_name, fav_stakes_raw, best_d))
-    return affected
-
-
 def compute_match_importance(
     source: Any,                 # SportSource; Any-typed to avoid a circular import
     match: Any,                  # GameRow
     league_ctx: "LeagueContext",
     n_sims: int = 500,
     rng: Optional[Any] = None,   # random.Random; deferred for the same circular reason
-) -> Tuple[float, List[str]]:
-    """Lahvička Monte Carlo match importance, summed across the match's
-    two teams and the league's outcome bands, weighted by consequence.
+    favorites_in_league: Optional[List[str]] = None,
+) -> Tuple[float, List[str], List[str]]:
+    """Lahvička Monte Carlo match importance, summed across the queried
+    teams and the league's outcome bands, weighted by consequence.
 
-    Returns `(raw_points, notes)` where `raw_points` is
-    `sum over (team in {home, away}) over band in league_ctx.thresholds of
-    |tau_c(match, team, band.label)| * band.weight`.
+    Queries cover:
+      - The two teams playing the target match (home, away)
+      - Every favorite in `favorites_in_league` who ISN'T already in the
+        match (cross-team importance — this match's result affects the
+        favorite's standings outcome, even though the favorite isn't
+        playing). Restores the impact-on-favorites signal structurally —
+        the legacy `compute_impact_on_favorites` proximity heuristic is
+        retired in Phase C.4 because Monte Carlo handles it correctly.
 
-    `notes` is a per-(team, label) line like "Tottenham relegation: 0.42
-    × 5.0 = 2.10" — only the nonzero contributions are listed so the
-    breakdown stays readable in cache.json.
+    Returns `(raw_points, notes, thresholds_hit)` where:
+      - `raw_points` is the sum of (leverage × weight) over all queries.
+      - `notes` lists nonzero contributions sorted by descending magnitude,
+        formatted "{team} {label}: 0.42 leverage × 5.0 = 2.10".
+      - `thresholds_hit` is the deduped list of band labels with nonzero
+        leverage on any queried team. Used by pick_tagline to surface
+        "relegation race" / "title race" type editorial taglines.
 
-    Returns (0.0, []) immediately when the source doesn't support
+    Returns (0.0, [], []) immediately when the source doesn't support
     importance simulation (caller should also gate, but defense in depth).
-    Returns (0.0, []) when the league has no outcome bands (e.g., a
+    Returns (0.0, [], []) when the league has no outcome bands (e.g., a
     knockout-only competition routed into this path by mistake).
     """
     from .simulation import monte_carlo_importance_batch
     if not getattr(source, "supports_importance", False):
-        return 0.0, []
+        return 0.0, [], []
     if not league_ctx.thresholds:
-        return 0.0, []
+        return 0.0, [], []
 
-    # Build the (team, outcome_label) query list — 2 teams × N bands.
+    # Teams to query: the two playing teams plus favorites in this league
+    # who aren't already playing. Skipping the in-match favorites avoids
+    # double-counting (their leverage is already in the home/away queries).
+    teams_to_query: List[str] = [match.home, match.away]
+    in_match_lc = {match.home.lower(), match.away.lower()}
+    if favorites_in_league:
+        for fav in favorites_in_league:
+            if fav.lower() in in_match_lc:
+                continue
+            teams_to_query.append(fav)
+
+    # (team, outcome_label) query list — len(teams) × N bands.
     queries: List[Tuple[str, str]] = []
-    for team in (match.home, match.away):
+    for team in teams_to_query:
         for _, label, _ in league_ctx.thresholds:
             queries.append((team, label))
 
@@ -608,6 +426,8 @@ def compute_match_importance(
 
     raw = 0.0
     notes: List[str] = []
+    labels_hit: List[str] = []
+    seen_labels: set = set()
     for (team, label), leverage in leverages.items():
         if leverage <= 0:
             continue
@@ -623,11 +443,14 @@ def compute_match_importance(
             f"{strip_team_suffix(team)} {label}: "
             f"{leverage:.2f} leverage × {weight:.1f} = {contrib:.2f}"
         )
+        if label not in seen_labels:
+            seen_labels.add(label)
+            labels_hit.append(label)
     # Sort notes by descending contribution so the biggest signals lead.
     # Parse the trailing "= X.XX" since the contrib isn't in scope here;
-    # cheap enough at 2-8 lines per game.
+    # cheap enough at 2-32 lines per game (depends on favorite count).
     notes.sort(key=lambda s: -float(s.rsplit("= ", 1)[1]))
-    return raw, notes
+    return raw, notes, labels_hit
 
 
 def strip_team_suffix(name: str) -> str:
@@ -646,7 +469,7 @@ def pick_tagline(
     score_breakdown: Dict[str, float],
     favorites_matched: List[str],
     spread: Optional[float],
-    stakes_thresholds: Optional[List[str]],
+    importance_thresholds: Optional[List[str]],
     tournament_stage: Optional[str],
     rank_a: Optional[int],
     rank_b: Optional[int],
@@ -654,13 +477,14 @@ def pick_tagline(
     closeness: Optional[float] = None,
 ) -> str:
     """Pick a single dominant tagline for the channel name. Priority:
-       tournament-stage → stakes → poll-rank-pair → toss-up → favorite.
+       tournament-stage → importance bands → poll-rank-pair → toss-up → favorite.
 
     `rank_source` distinguishes poll-based ranks (NCAAF / NCAAM AP Top 25)
     where 'top-N' framing is meaningful, from standings-position ranks
     (EPL / EFL where every team in the league is automatically 'top-N').
-    Stakes covers the league-position case with proper labels (title race,
-    relegation, etc.) so we drop the rank-pair tagline for standings.
+    The importance signal's threshold list covers the league-position case
+    with proper labels (title race, relegation, etc.) so we drop the
+    rank-pair tagline for standings.
     """
     if tournament_stage:
         ts = tournament_stage.upper()
@@ -675,8 +499,8 @@ def pick_tagline(
         if ts in stage_labels:
             return stage_labels[ts]
 
-    if "stakes" in score_breakdown and stakes_thresholds:
-        labels = list(dict.fromkeys(stakes_thresholds))[:2]
+    if "importance" in score_breakdown and importance_thresholds:
+        labels = list(dict.fromkeys(importance_thresholds))[:2]
         if labels:
             return " / ".join(labels) + " race"
 
@@ -867,10 +691,8 @@ def build_why_text(
     favorites_matched: List[str],
     score_breakdown: Dict[str, float],
     spread: Optional[float] = None,
-    stakes_thresholds: Optional[List[str]] = None,
+    importance_thresholds: Optional[List[str]] = None,
     tournament_stage: Optional[str] = None,
-    impact_on_favorites: Optional[List[str]] = None,
-    season_progress: Optional[float] = None,
     rank_source: str = "poll",
 ) -> str:
     """Human-readable explanation of why this game made the cut. Used for
@@ -879,9 +701,12 @@ def build_why_text(
     For poll-based sports (rank_source='poll', e.g. NCAAF AP Top 25), rank
     pair gets a 'top-N' label. For standings-based sports
     (rank_source='standings', e.g. EPL where every team is ranked), the
-    rank-pair label is dropped — the stakes signal carries league-aware
+    rank-pair label is dropped — the importance signal carries league-aware
     semantics ('title race', 'playoff race', 'relegation battle') and is
-    what users actually care about.
+    what users actually care about. Phase C.4 retired the separate
+    season-progress / impact_on_favorites parameters because the Monte
+    Carlo importance signal subsumes both (late season → naturally higher
+    leverage swings; cross-team impact → favorite-team importance queries).
     """
     parts: List[str] = []
 
@@ -907,25 +732,13 @@ def build_why_text(
         else:
             parts.append(f"favorites ({', '.join(favorites_matched)})")
 
-    if "stakes" in score_breakdown and stakes_thresholds:
-        labels = list(dict.fromkeys(stakes_thresholds))[:2]
+    if "importance" in score_breakdown and importance_thresholds:
+        labels = list(dict.fromkeys(importance_thresholds))[:2]
         if labels:
-            stakes_str = " / ".join(labels) + " stakes"
-            if season_progress is not None and season_progress >= 0.85:
-                stakes_str += " (final stretch ×2)"
-            elif season_progress is not None and season_progress >= 0.70:
-                stakes_str += " (late season ×1.5)"
-            parts.append(stakes_str)
+            parts.append(" / ".join(labels) + " stakes")
 
     if "tournament_stage" in score_breakdown and tournament_stage:
         parts.append(f"{tournament_stage.lower().replace('_', ' ')}")
-
-    if "impact_on_favorite" in score_breakdown and impact_on_favorites:
-        names = [strip_team_suffix(n) for n in impact_on_favorites]
-        if len(names) == 1:
-            parts.append(f"impact on {names[0]}")
-        else:
-            parts.append(f"impact on {', '.join(names)}")
 
     if "close_game" in score_breakdown and spread is not None:
         if spread <= 3:

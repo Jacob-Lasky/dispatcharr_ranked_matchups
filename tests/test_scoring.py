@@ -7,14 +7,10 @@ from dispatcharr_ranked_matchups.scoring import (
     LeagueContext,
     TEAM_QUALIFIER_TOKENS,
     TEAM_SUFFIX_TOKENS,
-    _IMPACT_PROXIMITY_CAP,
     _compress_to_10,
-    _late_season_multiplier,
     build_impact_narratives,
     build_why_text,
-    compute_impact_on_favorites,
     compute_match_importance,
-    compute_team_stakes,
     format_channel_name,
     match_favorites,
     pick_tagline,
@@ -98,301 +94,6 @@ class TestSuffixTokens:
             assert tok in TEAM_QUALIFIER_TOKENS, f"{tok!r} drifted"
 
 
-class TestComputeTeamStakes:
-    # Each threshold tuple is (position, label, consequence_weight) per
-    # Phase A.5/A.6. weight=1.0 here so the proximity arithmetic in
-    # these tests reproduces the pre-weighted behavior unchanged.
-
-    def test_none_position(self):
-        assert compute_team_stakes(None, [(1, "title", 1.0)]) == (0.0, [])
-
-    # compute_team_stakes returns leverage_in_[0,1] × consequence_weight
-    # per Phase A.5/A.6. With proximity=2:
-    #   d=0 (exact)    → leverage 1.0   (3/3)
-    #   d=1 (adjacent) → leverage ~0.67 (2/3)
-    #   d=2 (two away) → leverage ~0.33 (1/3)
-    # With weight=1.0 the leverage IS the score; with weight=5.0
-    # (relegation/title) the score scales up by 5x.
-
-    def test_exact_threshold(self):
-        # PL: 4th = UCL line. d=0 → leverage 1.0 × weight 1.0 = 1.0 pt.
-        thresholds = [(1, "title", 1.0), (4, "UCL", 1.0), (17, "relegation", 1.0)]
-        pts, hits = compute_team_stakes(4, thresholds)
-        assert pts == 1.0
-        assert "UCL" in hits
-
-    def test_adjacent(self):
-        thresholds = [(4, "UCL", 1.0)]
-        pts, hits = compute_team_stakes(5, thresholds)
-        # d=1 → leverage 2/3 × weight 1.0
-        assert round(pts, 4) == round(2.0 / 3.0, 4)
-        assert hits == ["UCL"]
-
-    def test_two_away(self):
-        thresholds = [(4, "UCL", 1.0)]
-        pts, hits = compute_team_stakes(6, thresholds)
-        # d=2 → leverage 1/3 × weight 1.0
-        assert round(pts, 4) == round(1.0 / 3.0, 4)
-        assert hits == ["UCL"]
-
-    def test_far_away_no_points(self):
-        thresholds = [(4, "UCL", 1.0)]
-        pts, hits = compute_team_stakes(15, thresholds)
-        assert pts == 0.0
-        assert hits == []
-
-    def test_stacks_across_thresholds(self):
-        # 4th place = at UCL line AND 3 away from title. With proximity=2,
-        # only UCL fires.
-        thresholds = [(1, "title", 1.0), (4, "UCL", 1.0)]
-        pts, hits = compute_team_stakes(4, thresholds)
-        assert "UCL" in hits
-        assert "title" not in hits
-        assert pts == 1.0  # only UCL, d=0, weight 1.0
-
-    def test_weight_multiplies_into_score(self):
-        # relegation weight 5.0, exact match (d=0, leverage 1.0) → 5.0 pts.
-        thresholds = [(17, "relegation", 5.0)]
-        pts, _ = compute_team_stakes(17, thresholds)
-        assert pts == 5.0
-
-    def test_weights_distinguish_consequences(self):
-        # Title (5) and Europa (2) at the same proximity diverge cleanly.
-        # The cross-sport calibration in microcosm.
-        title = [(1, "title", 5.0)]
-        europa = [(7, "Europa", 2.0)]
-        title_pts, _ = compute_team_stakes(1, title)
-        europa_pts, _ = compute_team_stakes(7, europa)
-        assert title_pts == 5.0
-        assert europa_pts == 2.0
-        assert title_pts > europa_pts
-
-    # ---- Elimination gating (A.5) ----
-
-    def test_no_standings_no_gating(self):
-        # Without standings_points_by_position, gating is OFF and
-        # behavior reverts to pure proximity (the back-compat path
-        # used by knockout comps with no league table).
-        thresholds = [(4, "UCL", 1.0)]
-        pts, _ = compute_team_stakes(4, thresholds)
-        assert pts == 1.0  # d=0 → leverage 1.0 × weight 1.0
-        # Explicit None.
-        pts2, _ = compute_team_stakes(
-            4, thresholds,
-            team_points=20,
-            matches_remaining=10,
-            standings_points_by_position=None,
-        )
-        assert pts2 == 1.0
-
-    def test_climber_locked_out_dropped(self):
-        # Team at position 6 (d=2 from UCL cutoff at 4), proximity-eligible.
-        # Has 40 points, 2 matches left, max reachable = 46.
-        # Team at 4th has 60 points. 46 < 60 → mathematically can't catch.
-        # Threshold should be dropped; pts=0.
-        thresholds = [(4, "UCL", 1.0)]
-        pts, hits = compute_team_stakes(
-            6, thresholds,
-            team_points=40, matches_remaining=2,
-            standings_points_by_position={4: 60},
-        )
-        assert pts == 0.0
-        assert hits == []
-
-    def test_climber_within_reach_still_fires(self):
-        # Same shape as above but with enough matches left to catch.
-        # Team has 40, 10 left → max 70. 4th has 60 → catchable.
-        thresholds = [(4, "UCL", 1.0)]
-        pts, hits = compute_team_stakes(
-            6, thresholds,
-            team_points=40, matches_remaining=10,
-            standings_points_by_position={4: 60},
-        )
-        # d=2 → leverage 1/3 × weight 1.0
-        assert round(pts, 4) == round(1.0 / 3.0, 4)
-        assert "UCL" in hits
-
-    def test_defender_locked_in_dropped(self):
-        # Team at position 3 (d=1 above UCL cutoff at 4). Defending.
-        # The live opponent is at cutoff+1 (position 5) — they're the
-        # chaser. With chaser at 30 pts + 5 matches × 3 = 45 max, and
-        # defender at 60, chaser can't catch → locked in.
-        thresholds = [(4, "UCL", 1.0)]
-        pts, _ = compute_team_stakes(
-            3, thresholds,
-            team_points=60, matches_remaining=5,
-            standings_points_by_position={5: 30},
-        )
-        assert pts == 0.0
-
-    def test_defender_still_vulnerable_fires(self):
-        # Chaser at position 5 has 50 points and 5 matches left
-        # → max 65 > 60 (defender at #3). The race is live.
-        thresholds = [(4, "UCL", 1.0)]
-        pts, _ = compute_team_stakes(
-            3, thresholds,
-            team_points=60, matches_remaining=5,
-            standings_points_by_position={5: 50},
-        )
-        # d=1 → leverage 2/3 × weight 1.0
-        assert round(pts, 4) == round(2.0 / 3.0, 4)
-
-    def test_at_threshold_treated_as_defender(self):
-        # team_position == cutoff: the marginal winner, holding the
-        # band. Live opponent is at cutoff+1 (the chaser). If the
-        # chaser can catch, race is live; if not, locked in.
-        thresholds = [(4, "UCL", 1.0)]
-        # Chaser at #5 has 60 pts, 1 match left → max 63 > 99? No.
-        # team_points=99 > chaser_max=63 → locked in.
-        pts_locked, _ = compute_team_stakes(
-            4, thresholds,
-            team_points=99, matches_remaining=1,
-            standings_points_by_position={5: 60},
-        )
-        assert pts_locked == 0.0
-        # Same setup but chaser at 98 + 3 = 101 > 99 → live.
-        pts_live, _ = compute_team_stakes(
-            4, thresholds,
-            team_points=99, matches_remaining=1,
-            standings_points_by_position={5: 98},
-        )
-        assert pts_live == 1.0  # leverage 1.0 × weight 1.0
-
-    def test_dead_rubber_relegation_drops_out(self):
-        # The canonical Phase-A.5 acceptance test: Blackburn-Leicester
-        # MD46 type scenario. Both teams in the bottom three, already
-        # mathematically relegated. The relegation threshold should NOT
-        # fire, even though they're close to position 21.
-        thresholds = [(21, "relegation", 4.0)]
-        # Team at position 22, 35 points, 1 match left (this matchday).
-        # Position 21 has 45 points → max reachable 35+3=38 < 45.
-        # Locked out from above; threshold drops.
-        pts, _ = compute_team_stakes(
-            22, thresholds,
-            team_points=35, matches_remaining=1,
-            standings_points_by_position={21: 45},
-        )
-        assert pts == 0.0
-
-    def test_dead_rubber_season_over(self):
-        # End-of-season check: matches_remaining=0 means the season is
-        # done. With standings provided, the gate still activates and
-        # any unreachable threshold drops cleanly. (Old contract
-        # disabled gating at matches_remaining=0; the new one treats
-        # current points as final.)
-        thresholds = [(21, "relegation", 4.0)]
-        pts, _ = compute_team_stakes(
-            22, thresholds,
-            team_points=35, matches_remaining=0,
-            standings_points_by_position={21: 45},
-        )
-        assert pts == 0.0
-
-
-class TestComputeImpactOnFavorites:
-    def test_skips_when_favorite_is_playing(self):
-        affected = compute_impact_on_favorites(
-            rank_a=4, rank_b=5,
-            team_a="Wrexham AFC", team_b="Hull City AFC",
-            favorites_in_league=[("Wrexham AFC", 4, 5.0)],
-        )
-        # Wrexham IS playing → skip; impact-on-favorite is for OTHER games.
-        assert affected == []
-
-    def test_picks_up_neighbor_game(self):
-        affected = compute_impact_on_favorites(
-            rank_a=5, rank_b=7,
-            team_a="Hull City AFC", team_b="Watford FC",
-            favorites_in_league=[("Wrexham AFC", 4, 5.0)],
-            proximity=3,
-        )
-        # Wrexham at pos 4; Hull at 5 = d=1; Watford at 7 = d=3; min(d)=1.
-        assert affected == [("Wrexham AFC", 5.0, 1)]
-
-    def test_far_away_no_impact(self):
-        affected = compute_impact_on_favorites(
-            rank_a=20, rank_b=21,
-            team_a="Cardiff City", team_b="Bristol City",
-            favorites_in_league=[("Wrexham AFC", 4, 5.0)],
-            proximity=3,
-        )
-        assert affected == []
-
-    def test_picks_closest_distance(self):
-        # Both home and away within proximity — should report the min distance.
-        affected = compute_impact_on_favorites(
-            rank_a=4, rank_b=6,
-            team_a="Hull City AFC", team_b="Watford FC",
-            favorites_in_league=[("Wrexham AFC", 5, 5.0)],
-            proximity=3,
-        )
-        # Wrexham at 5; Hull at 4 (d=1), Watford at 6 (d=1); min=1.
-        assert affected == [("Wrexham AFC", 5.0, 1)]
-
-    def test_carries_stakes_value_through(self):
-        # Stakes pts passed in must be returned untouched — this function
-        # is a carrier, not a recomputer.
-        affected = compute_impact_on_favorites(
-            rank_a=5, rank_b=7,
-            team_a="Hull City AFC", team_b="Watford FC",
-            favorites_in_league=[("Wrexham AFC", 4, 3.75)],
-            proximity=3,
-        )
-        assert affected == [("Wrexham AFC", 3.75, 1)]
-
-    def test_multiple_favorites_each_get_own_stakes(self):
-        affected = compute_impact_on_favorites(
-            rank_a=5, rank_b=18,
-            team_a="Hull City AFC", team_b="Sunderland",
-            favorites_in_league=[
-                ("Wrexham AFC", 4, 5.0),
-                ("Tottenham Hotspur FC", 17, 4.5),
-            ],
-            proximity=3,
-        )
-        # Hull (5) is d=1 from Wrexham (4); Sunderland (18) is d=1 from Tottenham (17).
-        assert ("Wrexham AFC", 5.0, 1) in affected
-        assert ("Tottenham Hotspur FC", 4.5, 1) in affected
-        assert len(affected) == 2
-
-    def test_zero_stakes_still_emitted(self):
-        # A favorite with a locked-in/locked-out race (stakes=0 from
-        # compute_team_stakes) should still emit a tuple — score_game's
-        # contribution will be 0, no harm. The narrative path may want
-        # to mention the proximity even when stakes have decided.
-        affected = compute_impact_on_favorites(
-            rank_a=5, rank_b=7,
-            team_a="Hull City AFC", team_b="Watford FC",
-            favorites_in_league=[("Wrexham AFC", 4, 0.0)],
-            proximity=3,
-        )
-        assert affected == [("Wrexham AFC", 0.0, 1)]
-
-
-class TestLateSeasonMultiplier:
-    """Pinned because both score_game's stakes block AND its
-    impact-on-favorite block depend on these exact thresholds. A drift
-    here desynchronizes them, which was the original B.1 bug shape."""
-
-    def test_early_season_is_1x(self):
-        assert _late_season_multiplier(0.0) == 1.0
-        assert _late_season_multiplier(0.5) == 1.0
-        assert _late_season_multiplier(0.69) == 1.0
-
-    def test_late_70pct_is_1_5x(self):
-        assert _late_season_multiplier(0.70) == 1.5
-        assert _late_season_multiplier(0.84) == 1.5
-
-    def test_final_stretch_85pct_is_2x(self):
-        assert _late_season_multiplier(0.85) == 2.0
-        assert _late_season_multiplier(1.0) == 2.0
-
-    def test_above_1_clamps_at_2x(self):
-        # season_progress > 1.0 (e.g. extra-time tiebreakers) shouldn't
-        # produce surprise multipliers; just stay at 2x.
-        assert _late_season_multiplier(1.5) == 2.0
-
-
 class TestScoreGame:
     def test_both_top_5(self):
         signals = GameSignals(rank_a=1, rank_b=5)
@@ -409,28 +110,13 @@ class TestScoreGame:
         s = score_game(sig, Weights())
         assert s.breakdown["favorite"] == 6.0
 
-    def test_late_season_doubles_stakes(self):
-        # Phase A bumped the weights.stakes default to 0.5 (was 2.0)
-        # to compensate for compute_team_stakes returning
-        # leverage_in_[0,1] × weight instead of the un-weighted
-        # proximity points. Math: 2.0 raw × 2x late × 0.5 weight = 2.0.
-        sig = GameSignals(stakes_a=2.0, season_progress=0.90)
-        s = score_game(sig, Weights())
-        assert s.breakdown["stakes"] == 2.0
-
-    def test_mid_season_no_late_mult(self):
-        # 2.0 × 1.0 × 0.5 = 1.0.
-        sig = GameSignals(stakes_a=2.0, season_progress=0.5)
-        s = score_game(sig, Weights())
-        assert s.breakdown["stakes"] == 1.0
-
     def test_close_spread(self):
         sig = GameSignals(spread=0.5)
         s = score_game(sig, Weights())
         assert "close_game" in s.breakdown
 
     def test_unranked_vs_unranked_no_signal(self):
-        # No rank, no favorite, no stakes → empty breakdown, score 0.
+        # No rank, no favorite, no importance → empty breakdown, score 0.
         sig = GameSignals()
         s = score_game(sig, Weights())
         assert s.raw == 0.0
@@ -441,124 +127,12 @@ class TestScoreGame:
             rank_a=2, rank_b=3,
             favorite_match=["Wrexham"],
             spread=2.0,
-            stakes_a=1.0, stakes_b=1.0, season_progress=0.85,
+            importance_points=4.0,
         )
         s = score_game(sig, Weights())
         # raw must equal sum of breakdown contributions to within rounding
         breakdown_sum = round(sum(s.breakdown.values()), 2)
         assert abs(s.raw - breakdown_sum) < 0.01
-
-
-class TestScoreGameImpactInheritance:
-    """B.1 / issue #11: impact-on-favorite inherits the favorite's own
-    stakes magnitude, scaled by how close the game's teams sit to the
-    favorite's slot, and amplified by the same late-season multiplier
-    the favorite's own stakes would receive. The pre-B.1 flat +1 per
-    favorite buried West Ham vs Leeds (Tottenham relegation pivot) at
-    #8 — these tests prove the magnitude now tracks the urgency."""
-
-    def test_distance_zero_full_inheritance(self):
-        # d=0 means a game team sits exactly in the favorite's slot →
-        # maximum swap risk → no proximity decay. With weights.impact_favorite
-        # = 1.0 default and no late_mult, impact_pts = fav_stakes_raw exactly.
-        sig = GameSignals(
-            impact_on_favorites=[("Tottenham", 5.0, 0)],
-            season_progress=0.0,
-        )
-        s = score_game(sig, Weights())
-        assert s.breakdown["impact_on_favorite"] == 5.0
-
-    def test_distance_decay_to_quarter_at_cap(self):
-        # d == _IMPACT_PROXIMITY_CAP (3) → leverage = 1/(3+1) = 0.25.
-        # 5.0 × 0.25 × 1.0 × 1.0 = 1.25.
-        sig = GameSignals(
-            impact_on_favorites=[("Tottenham", 5.0, _IMPACT_PROXIMITY_CAP)],
-            season_progress=0.0,
-        )
-        s = score_game(sig, Weights())
-        assert s.breakdown["impact_on_favorite"] == 1.25
-
-    def test_late_season_doubles_impact(self):
-        # 5.0 × 1.0 (d=0) × 2.0 (late) × 1.0 weight = 10.0.
-        sig = GameSignals(
-            impact_on_favorites=[("Tottenham", 5.0, 0)],
-            season_progress=0.90,
-        )
-        s = score_game(sig, Weights())
-        assert s.breakdown["impact_on_favorite"] == 10.0
-
-    def test_impact_tracks_own_stakes_at_same_late_mult(self):
-        # The whole point of B.1: a game IMPACTING a favorite at the
-        # relegation cutoff should score the SAME stakes magnitude as
-        # the favorite's own game at the same matchday (modulo proximity
-        # decay and weights.impact_favorite vs weights.stakes).
-        late = 0.90
-        fav_stakes_raw = 5.0
-        # Game where the favorite plays (their own stakes block fires).
-        own_sig = GameSignals(stakes_a=fav_stakes_raw, season_progress=late)
-        own = score_game(own_sig, Weights())
-        # Other game that impacts the favorite at d=0 (a team sits in the
-        # favorite's slot — maximal pivot risk).
-        impact_sig = GameSignals(
-            impact_on_favorites=[("Fav", fav_stakes_raw, 0)],
-            season_progress=late,
-        )
-        impact = score_game(impact_sig, Weights())
-        # Both apply the same late_mult. The remaining ratio is
-        # weights.stakes vs weights.impact_favorite — both currently 0.5
-        # and 1.0 respectively, so impact == 2 × stakes-contribution at d=0.
-        # Stakes contribution: 5.0 × 2.0 × 0.5 = 5.0
-        # Impact contribution: 5.0 × 1.0 × 2.0 × 1.0 = 10.0
-        # If late_mult ever desyncs between blocks, this ratio breaks.
-        ratio = impact.breakdown["impact_on_favorite"] / own.breakdown["stakes"]
-        weights_ratio = Weights().impact_favorite / Weights().stakes
-        assert abs(ratio - weights_ratio) < 0.01
-
-    def test_multiple_affected_favorites_sum(self):
-        # Two affected favorites at d=1 each, stakes 5.0 + 3.0.
-        # leverage = (3+1-1)/(3+1) = 0.75. Contribution = (5.0 + 3.0) × 0.75 = 6.0.
-        sig = GameSignals(
-            impact_on_favorites=[("A", 5.0, 1), ("B", 3.0, 1)],
-            season_progress=0.0,
-        )
-        s = score_game(sig, Weights())
-        assert s.breakdown["impact_on_favorite"] == 6.0
-
-    def test_zero_stakes_zero_contribution(self):
-        # A favorite locked-in/out of every threshold (stakes_raw=0) and
-        # still proximate → 0 inheritance. The signal is silent rather
-        # than firing a flat +1 like pre-B.1.
-        sig = GameSignals(
-            impact_on_favorites=[("Tottenham", 0.0, 0)],
-            season_progress=0.90,
-        )
-        s = score_game(sig, Weights())
-        assert "impact_on_favorite" not in s.breakdown or s.breakdown["impact_on_favorite"] == 0.0
-
-    def test_weight_multiplies_in(self):
-        # weights.impact_favorite acts as a final user-facing scaler.
-        # 5.0 × 1.0 × 1.0 × 2.5 = 12.5.
-        sig = GameSignals(
-            impact_on_favorites=[("Tottenham", 5.0, 0)],
-            season_progress=0.0,
-        )
-        s = score_game(sig, Weights(impact_favorite=2.5))
-        assert s.breakdown["impact_on_favorite"] == 12.5
-
-    def test_notes_extract_names_from_tuples(self):
-        # The post-B.1 notes formatting must unpack tuples; if score_game
-        # ever regressed to joining tuples directly, the note would
-        # become "affects favorite: ('Tottenham', 5.0, 0)".
-        sig = GameSignals(
-            impact_on_favorites=[("Tottenham Hotspur FC", 5.0, 0)],
-            season_progress=0.0,
-        )
-        s = score_game(sig, Weights())
-        # Find the impact note
-        impact_notes = [n for n in s.notes if "affects favorite" in n]
-        assert len(impact_notes) == 1
-        assert "Tottenham Hotspur FC" in impact_notes[0]
-        assert "(" not in impact_notes[0]  # no raw tuple repr
 
 
 class TestEffectiveCloseness:
@@ -701,14 +275,18 @@ class TestBuildWhyText:
         why = build_why_text(2, 5, [], {"rank_pair": 5.0})
         assert "top-5" in why
 
-    def test_late_season_qualifier(self):
+    def test_importance_stakes_phrase(self):
+        # Phase C.4: build_why_text reads importance_thresholds and emits a
+        # "title / UCL stakes" phrase. The legacy late-season qualifier
+        # was dropped — the importance signal naturally weights late-season
+        # leverage, so an explicit "(final stretch ×2)" annotation is
+        # redundant noise.
         why = build_why_text(
             None, None, [],
-            {"stakes": 5.0},
-            stakes_thresholds=["title", "UCL"],
-            season_progress=0.90,
+            {"importance": 5.0},
+            importance_thresholds=["title", "UCL"],
         )
-        assert "final stretch" in why
+        assert "title / UCL stakes" in why
 
     def test_toss_up_phrase(self):
         why = build_why_text(None, None, [], {"close_game": 3.0}, spread=0.5)
@@ -853,18 +431,19 @@ class TestPickTagline:
             score_breakdown={"tournament_stage": 5.0},
             favorites_matched=[],
             spread=None,
-            stakes_thresholds=["title"],
+            importance_thresholds=["title"],
             tournament_stage="FINAL",
             rank_a=1, rank_b=2, rank_source="poll",
         )
         assert tag == "Final"
 
-    def test_stakes_picks_label(self):
+    def test_importance_picks_label(self):
+        # Phase C.4: tagline derives from importance breakdown + thresholds_hit.
         tag = pick_tagline(
-            score_breakdown={"stakes": 8.0},
+            score_breakdown={"importance": 8.0},
             favorites_matched=[],
             spread=None,
-            stakes_thresholds=["title", "UCL"],
+            importance_thresholds=["title", "UCL"],
             tournament_stage=None,
             rank_a=3, rank_b=9, rank_source="standings",
         )
@@ -875,7 +454,7 @@ class TestPickTagline:
             score_breakdown={"rank_pair": 5.0},
             favorites_matched=[],
             spread=None,
-            stakes_thresholds=[],
+            importance_thresholds=[],
             tournament_stage=None,
             rank_a=2, rank_b=4, rank_source="poll",
         )
@@ -888,7 +467,7 @@ class TestPickTagline:
             score_breakdown={"rank_pair": 5.0},
             favorites_matched=[],
             spread=None,
-            stakes_thresholds=[],
+            importance_thresholds=[],
             tournament_stage=None,
             rank_a=2, rank_b=4, rank_source="standings",
         )
@@ -899,7 +478,7 @@ class TestPickTagline:
             score_breakdown={"close_game": 3.0},
             favorites_matched=[],
             spread=1.5,
-            stakes_thresholds=[],
+            importance_thresholds=[],
             tournament_stage=None,
             rank_a=None, rank_b=None, rank_source="poll",
         )
@@ -1013,7 +592,7 @@ class TestComputeMatchImportance:
         # Simulator never gets called when supports_importance is False.
         class NoImportance:
             supports_importance = False
-        raw, notes = compute_match_importance(
+        raw, notes, _hit = compute_match_importance(
             NoImportance(), _FakeMatch("A", "B"), self._epl_ctx(), n_sims=10,
         )
         assert raw == 0.0
@@ -1023,7 +602,7 @@ class TestComputeMatchImportance:
         empty_ctx = LeagueContext(code="EMPTY", matchdays_total=10, thresholds=[])
         class S:
             supports_importance = True
-        raw, notes = compute_match_importance(
+        raw, notes, _hit = compute_match_importance(
             S(), _FakeMatch("A", "B"), empty_ctx, n_sims=10,
         )
         assert raw == 0.0
@@ -1055,7 +634,7 @@ class TestComputeMatchImportance:
         )
         class S:
             supports_importance = True
-        raw, notes = compute_match_importance(
+        raw, notes, _hit = compute_match_importance(
             S(), _FakeMatch("Tottenham", "Everton"),
             self._epl_ctx(), n_sims=10,
         )
@@ -1092,7 +671,7 @@ class TestComputeMatchImportance:
         )
         class S:
             supports_importance = True
-        raw, notes = compute_match_importance(
+        raw, notes, _hit = compute_match_importance(
             S(), _FakeMatch("Arsenal", "Crystal Palace"),
             self._epl_ctx(), n_sims=10,
         )
@@ -1120,7 +699,7 @@ class TestComputeMatchImportance:
         )
         class S:
             supports_importance = True
-        raw, notes = compute_match_importance(
+        raw, notes, _hit = compute_match_importance(
             S(), _FakeMatch("Burnley", "Wolves"),
             self._epl_ctx(), n_sims=10,
         )
@@ -1149,7 +728,7 @@ class TestComputeMatchImportance:
         )
         class S:
             supports_importance = True
-        raw, notes = compute_match_importance(
+        raw, notes, _hit = compute_match_importance(
             S(), _FakeMatch("Home", "Away"),
             LEAGUE_CONTEXTS["PL"], n_sims=10,
         )

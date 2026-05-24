@@ -153,9 +153,16 @@ def build_llm_context(g: Dict[str, Any], tagline: str, boundary_summary: str = "
         for narrative in impact_narratives:
             lines.append(f"  - {narrative}")
 
-    stakes_thresholds = g.get("stakes_thresholds_hit") or []
-    if stakes_thresholds:
-        lines.append(f"Stakes thresholds in play: {', '.join(stakes_thresholds)}")
+    # Phase C.4 renamed `stakes_thresholds_hit` → `importance_thresholds_hit`;
+    # accept either so a cache.json written by pre-C.4 code still produces
+    # a reasonable prompt during the one-cycle migration window.
+    thresholds_hit = (
+        g.get("importance_thresholds_hit")
+        or g.get("stakes_thresholds_hit")
+        or []
+    )
+    if thresholds_hit:
+        lines.append(f"Outcome bands in play: {', '.join(thresholds_hit)}")
 
     if tagline:
         lines.append(f"Editorial frame (use as a hint, do not quote): {tagline}")
