@@ -4,6 +4,8 @@ and `sources/*.py` can import without circulars."""
 from __future__ import annotations
 
 import hashlib
+import math
+import random
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -32,6 +34,27 @@ def stable_hash_int(s: str) -> int:
     uniqueness and is identical across processes / restarts."""
     digest = hashlib.md5(s.encode("utf-8")).hexdigest()
     return int(digest[:16], 16)
+
+
+def poisson_sample(lam: float, rng: random.Random) -> int:
+    """Draw one Poisson(lam) sample via Knuth's algorithm. Pure-Python (no
+    numpy dependency, the plugin runs in Dispatcharr's lean container).
+
+    Shared by every points-based / goals-based sport source. Soccer uses
+    lam ~ 1.4 (goals/match). NCAAF / NCAAM use lam ~ 28 / 75 (points/team).
+    Knuth's algorithm is O(lam) — for lam > ~50 a normal-approximation
+    would be measurably faster, but the per-refresh sim cost is dominated
+    by season iteration, not the inner Poisson, so we keep one
+    implementation for simplicity. Swap in a normal approx here if profiling
+    shows it matters.
+    """
+    L = math.exp(-lam)
+    k = 0
+    p = 1.0
+    while p > L:
+        k += 1
+        p *= rng.random()
+    return k - 1
 
 
 # Soccer-style trailing club tags. football-data.org canonical names end in

@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import GameRow, SportSource
+from .base import GameRow
+from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaaf")
@@ -26,11 +27,25 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaaf")
 CFBD_BASE = "https://api.collegefootballdata.com"
 
 
-class NcaafSource(SportSource):
-    sport_prefix = "CFB"
-    sport_label = "NCAA Football"
+class NcaafSource(PointsBasedSportSource):
+    league_context_code = "CFB"
+
+    # CFB per-team average scoring is ~28 points/game. Cold-start fallback
+    # for teams with no FINISHED games in the current season (weeks 1-2,
+    # newly-promoted FCS-to-FBS programs).
+    _DEFAULT_POINTS_FOR = 28.0
+    _DEFAULT_POINTS_AGAINST = 28.0
+
+    @property
+    def sport_prefix(self) -> str:
+        return "CFB"
+
+    @property
+    def sport_label(self) -> str:
+        return "NCAA Football"
 
     def __init__(self, api_key: str, poll_name: str = "AP Top 25"):
+        super().__init__()
         self.api_key = api_key
         self.poll_name = poll_name
         self._headers = {"Authorization": f"Bearer {api_key}"}
@@ -62,6 +77,8 @@ class NcaafSource(SportSource):
             start = parse_iso_utc(g.get("startDate"))
             if start is None:
                 continue
+            cfbd_id = g.get("id")
+            spread = spread_by_id.get(cfbd_id) if cfbd_id is not None else None
             rows.append(GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
@@ -71,7 +88,7 @@ class NcaafSource(SportSource):
                 rank_away=rank_by_team.get(away),
                 start_time=start,
                 venue=g.get("venue"),
-                spread=spread_by_id.get(g.get("id")),
+                spread=spread,
                 extra={
                     "cfbd_id": g.get("id"),
                     "week": g.get("week"),
@@ -79,6 +96,11 @@ class NcaafSource(SportSource):
                     "neutral": g.get("neutralSite", False),
                     "conference_game": g.get("conferenceGame", False),
                     "excitement_index": g.get("excitementIndex"),
+                    # Phase D.2: importance signal lookup key. The plugin's
+                    # compute_match_importance reads this to find the
+                    # LEAGUE_CONTEXTS entry that carries the win-count
+                    # thresholds and consequence weights.
+                    "fd_competition_code": self.league_context_code,
                 },
             ))
         return rows
@@ -170,4 +192,61 @@ class NcaafSource(SportSource):
                     out[gid] = abs(float(spread))
                 except (TypeError, ValueError):
                     continue
+        return out
+
+    # ---------- Phase D.2: Monte Carlo importance ----------
+
+    def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
+        """Return all FBS-classified regular-season games for the current
+        season as match dicts for the points-based simulator. One CFBD
+        /games call covers the whole season; cached per source instance
+        in the base class.
+
+        Filters to games where at least one side is FBS-classified — keeps
+        FBS vs FCS cupcake matchups (they count toward FBS wins) but
+        drops pure FCS-vs-FCS scheduling. CFBD's typical /games?year=
+        response is ~3700 rows; after FBS filter, ~750-900 remain. That
+        keeps the per-refresh Monte Carlo cost tractable (~5-10s across
+        all upcoming-game importance batches).
+        """
+        if not self.api_key:
+            return []
+        year = self._current_season_year()
+        try:
+            r = requests.get(
+                f"{CFBD_BASE}/games",
+                headers=self._headers,
+                params={"year": year, "seasonType": "regular"},
+                timeout=30,
+            )
+            r.raise_for_status()
+            raw = r.json() or []
+        except Exception as e:
+            logger.warning("[ncaaf] full-season /games fetch failed: %s", e)
+            return []
+        out: List[Dict[str, Any]] = []
+        for g in raw:
+            # Keep games where at least one side is FBS; both classifications
+            # are present in the v4 schema. Mixed FBS/FCS counts; pure FCS
+            # gets dropped to bound simulator cost.
+            home_cls = g.get("homeClassification")
+            away_cls = g.get("awayClassification")
+            if home_cls != "fbs" and away_cls != "fbs":
+                continue
+            home = g.get("homeTeam") or g.get("home_team")
+            away = g.get("awayTeam") or g.get("away_team")
+            if not home or not away:
+                continue
+            hp = g.get("homePoints")
+            ap = g.get("awayPoints")
+            completed = bool(g.get("completed"))
+            out.append({
+                "id": g.get("id"),
+                "home": home,
+                "away": away,
+                "home_points": hp if completed else None,
+                "away_points": ap if completed else None,
+                "status": "FINISHED" if completed else "SCHEDULED",
+                "start_time": parse_iso_utc(g.get("startDate")),
+            })
         return out

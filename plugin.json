@@ -60,7 +60,7 @@
       "input_type": "password",
       "label": "CollegeFootballData.com API key",
       "default": "",
-      "help_text": "Free at collegefootballdata.com/key. Same key works for collegebasketballdata.com (Phase 2)."
+      "help_text": "Register: https://collegefootballdata.com/key (free, 1k req/day). The same key works for collegebasketballdata.com — one key powers both NCAAF and NCAAM, including the Monte Carlo importance signal (Phase D.2/D.3)."
     },
     {
       "id": "football_data_api_key",
@@ -68,7 +68,7 @@
       "input_type": "password",
       "label": "Football-Data.org API key",
       "default": "",
-      "help_text": "Free at football-data.org/client/register. Covers EPL, EFL Championship, UCL, and 9 others on the free tier."
+      "help_text": "Register: https://www.football-data.org/client/register (free, 10 req/min). Free tier covers EPL, EFL Championship, UCL, Bundesliga, La Liga, Serie A, Ligue 1, and 5 more competitions."
     },
     {
       "id": "odds_api_key",
@@ -76,7 +76,7 @@
       "input_type": "password",
       "label": "The Odds API key (optional)",
       "default": "",
-      "help_text": "Free at the-odds-api.com (500 req/mo). Powers the close-game / spread signal across all enabled sports. If blank, that signal is skipped."
+      "help_text": "Register: https://the-odds-api.com (free 500 req/mo). Powers the close-game / spread signal across all enabled sports. If blank, that signal is skipped — other signals still fire."
     },
     {
       "id": "anthropic_api_key",
@@ -84,7 +84,7 @@
       "input_type": "password",
       "label": "Anthropic API key (optional)",
       "default": "",
-      "help_text": "Used for EPG-to-channel matching when regex pre-filter is ambiguous, and for the LLM narrative signal (off by default). Only required if either of those is engaged."
+      "help_text": "Register: https://console.anthropic.com — used for two things, both optional: (1) EPG-to-channel matching when the regex pre-filter is ambiguous (cheap, Haiku, ~$0.0001 per ambiguous match), (2) LLM-rewritten EPG descriptions when 'Enable LLM-rewritten EPG descriptions' below is on. Only required if either is engaged."
     },
     {
       "id": "model",

@@ -13,7 +13,7 @@ you can tune:
 | `rank_pair` | Both teams ranked / one ranked | 1.0 |
 | `favorite` | One of YOUR favorite teams is playing | 6.0 (flat) |
 | `close_game` | Coinflip-ness in [0, 1] — soccer uses devigged h2h moneylines, NCAAF/NCAAM normalize point spread | 3.0 |
-| `importance` | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands (title / UCL / Europa / relegation / promotion). Locked seasons → 0; late-season leverage rises naturally. Soccer only (NCAAF / NCAAM TBD in Phase D). | 3.0 |
+| `importance` | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands. Soccer leagues: title / UCL / Europa / relegation / promotion. UCL knockouts: round_of_16 → quarterfinal → semifinal → final → winner. NCAAF / NCAAM: win-count bands (bowl_eligible / 10+ / 11+; 15+ / 20+ / 25+). Locked outcomes contribute 0; uncertainty drives leverage. | 3.0 |
 | `tournament_stage` | Knockout cup game (R16, QF, SF, F) | 1.5 |
 | `rivalry` | Known rivalry game (rivalry DB pending) | 2.0 (flat) |
 | `narrative` | LLM-judged narrative bonus (off by default) | 0.0 |

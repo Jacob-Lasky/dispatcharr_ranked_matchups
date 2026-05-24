@@ -126,9 +126,10 @@ you'd:
 Shared CFBD key already covers basketball (same Bearer token).
 
 For league-based sports (where standings position is the "rank"), populate
-`extra["fd_competition_code"]` to a code in `scoring.LEAGUE_CONTEXTS` so the
-`importance` signal knows your thresholds and consequence weights. NCAAF
-doesn't need this yet — Phase D.2 will add it.
+`extra["fd_competition_code"]` to a code in `scoring.LEAGUE_CONTEXTS` so
+the `importance` signal knows your thresholds and consequence weights.
+NCAAF and NCAAM use codes `"CFB"` / `"CBB"` with `format="win_count"` —
+cutoffs are minimum win counts rather than position cutoffs.
 
 ## Known gotchas / lessons learned
 
@@ -198,7 +199,10 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
 
 **Working:**
 - NCAAF source (CFBD) and NCAAM source (CollegeBasketballData) — both via
-  the same Bearer token, both auto-skip during their respective offseason
+  the same Bearer token, both auto-skip during their respective offseason.
+  Phase D.2/D.3: both implement Monte Carlo importance via the shared
+  `PointsBasedSportSource` base (Poisson on points, win-count outcome
+  bands per LEAGUE_CONTEXTS["CFB"]/["CBB"]).
 - EPL + EFL Championship sources (Football-Data.org + Odds API, league-shaped)
 - UCL source (Phase D.1: `KnockoutSoccerSource`, bracket-shaped with ET +
   penalty sampling and feeds_from-via-participant bracket inference)

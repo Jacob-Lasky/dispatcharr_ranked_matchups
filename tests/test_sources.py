@@ -22,8 +22,11 @@ class TestNcaafConstants:
         assert issubclass(NcaafSource, SportSource)
 
     def test_constants(self):
-        assert NcaafSource.sport_prefix == "CFB"
-        assert NcaafSource.sport_label == "NCAA Football"
+        # Phase D.2 made sport_prefix / sport_label @property to satisfy the
+        # SportSource ABC's property declaration. Read them off an instance.
+        src = NcaafSource(api_key="fake")
+        assert src.sport_prefix == "CFB"
+        assert src.sport_label == "NCAA Football"
 
     def test_no_key_returns_empty(self):
         assert NcaafSource(api_key="").fetch_upcoming() == []
@@ -77,8 +80,9 @@ class TestNcaamConstants:
         assert issubclass(NcaamSource, SportSource)
 
     def test_constants(self):
-        assert NcaamSource.sport_prefix == "CBB"
-        assert NcaamSource.sport_label == "NCAA Men's Basketball"
+        src = NcaamSource(api_key="fake")
+        assert src.sport_prefix == "CBB"
+        assert src.sport_label == "NCAA Men's Basketball"
 
     def test_no_key_returns_empty(self):
         assert NcaamSource(api_key="").fetch_upcoming() == []
@@ -1263,3 +1267,349 @@ class TestKnockoutSoccerSource:
             rng = random.Random(seed)
             outcomes.add(KnockoutSoccerSource._sample_penalty_shootout(rng))
         assert outcomes == {"HOME", "AWAY"}
+
+
+class TestPointsBasedSportSource:
+    """Phase D.2 / D.3: shared Monte Carlo machinery for NCAAF + NCAAM.
+
+    Tests use a minimal `_MiniSource` subclass that returns a canned
+    `_fetch_full_season_games` list, so the state machine is exercised
+    without any HTTP. CFBD/CBBD-specific filtering lives on NcaafSource /
+    NcaamSource and is tested separately.
+    """
+
+    @staticmethod
+    def _mini_source(games, league_code="CFB"):
+        from dispatcharr_ranked_matchups.sources.points_based import PointsBasedSportSource
+
+        class _MiniSource(PointsBasedSportSource):
+            league_context_code = league_code
+            _DEFAULT_POINTS_FOR = 28.0
+            _DEFAULT_POINTS_AGAINST = 28.0
+
+            @property
+            def sport_prefix(self):
+                return "MINI"
+
+            @property
+            def sport_label(self):
+                return "Mini Sport"
+
+            def fetch_upcoming(self, days_ahead: int = 7):
+                return []
+
+            def _fetch_full_season_games(self):
+                return games
+
+        return _MiniSource()
+
+    @staticmethod
+    def _g(gid, home, away, hp, ap, status="FINISHED"):
+        from datetime import datetime, timezone
+        return {
+            "id": gid, "home": home, "away": away,
+            "home_points": hp, "away_points": ap, "status": status,
+            "start_time": datetime(2025, 10, 1, tzinfo=timezone.utc),
+        }
+
+    # ---------- estimate_strengths ----------
+
+    def test_estimate_strengths_from_finished(self):
+        # Team A scored 35, 28; conceded 21, 14. Avg pf=31.5, pa=17.5.
+        games = [
+            self._g(1, "A", "X", 35, 21),
+            self._g(2, "A", "Y", 28, 14),
+            self._g(3, "B", "Z", None, None, status="SCHEDULED"),
+        ]
+        src = self._mini_source(games)
+        strengths = src.estimate_strengths()
+        assert "A" in strengths
+        assert strengths["A"]["pf_per_game"] == pytest.approx(31.5)
+        assert strengths["A"]["pa_per_game"] == pytest.approx(17.5)
+        assert "B" not in strengths  # no FINISHED data
+        b_strength = src._strength_for(strengths, "B")
+        assert b_strength["pf_per_game"] == 28.0
+
+    def test_estimate_strengths_caches(self):
+        games = [self._g(1, "A", "B", 28, 21)]
+        src = self._mini_source(games)
+        first = src.estimate_strengths()
+        first["MARKER"] = {"pf_per_game": 99.0, "pa_per_game": 99.0}
+        second = src.estimate_strengths()
+        assert "MARKER" in second
+
+    # ---------- initial_state ----------
+
+    def test_initial_state_records_wins_and_losses(self):
+        games = [
+            self._g(1, "A", "B", 28, 21),
+            self._g(2, "C", "A", 35, 14),
+            self._g(3, "B", "C", None, None, status="SCHEDULED"),
+        ]
+        src = self._mini_source(games)
+        state = src.initial_state()
+        teams = state["_teams"]
+        assert teams["A"]["wins"] == 1 and teams["A"]["losses"] == 1
+        assert teams["B"]["wins"] == 0 and teams["B"]["losses"] == 1
+        assert teams["C"]["wins"] == 1 and teams["C"]["losses"] == 0
+        assert state["_applied"] == frozenset({1, 2})
+
+    def test_initial_state_caches(self):
+        games = [self._g(1, "A", "B", 28, 21)]
+        src = self._mini_source(games)
+        first = src.initial_state()
+        first["_teams"]["MARKER"] = {"wins": 99}
+        second = src.initial_state()
+        assert "MARKER" in second["_teams"]
+
+    # ---------- remaining_matches ----------
+
+    def test_remaining_matches_only_unapplied(self):
+        games = [
+            self._g(1, "A", "B", 28, 21),
+            self._g(2, "C", "D", None, None, status="SCHEDULED"),
+            self._g(3, "A", "C", None, None, status="SCHEDULED"),
+        ]
+        src = self._mini_source(games)
+        state = src.initial_state()
+        rem = src.remaining_matches(state)
+        assert len(rem) == 2
+        rem_ids = {m.extra["game_id"] for m in rem}
+        assert rem_ids == {2, 3}
+
+    # ---------- sample_result ----------
+
+    def test_sample_result_breaks_ties(self):
+        """NCAA games never end in regulation ties for win-count purposes
+        (OT resolves). sample_result must coin-flip a +1 boost when
+        Poisson lands on the same value both sides."""
+        games = [self._g(1, "A", "B", 28, 28)]
+        src = self._mini_source(games)
+        state = src.initial_state()
+        strengths = src.estimate_strengths()
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        from datetime import datetime, timezone
+        target = GameRow(
+            sport_prefix="MINI", sport_label="Mini",
+            home="A", away="B", rank_home=None, rank_away=None,
+            start_time=datetime(2025, 11, 1, tzinfo=timezone.utc),
+            extra={"game_id": 99},
+        )
+        for seed in range(50):
+            rng = random.Random(seed)
+            result = src.sample_result(state, target, strengths, rng)
+            assert result.home_goals != result.away_goals, (
+                f"seed={seed}: home={result.home_goals}, away={result.away_goals}")
+
+    # ---------- apply_result + state immutability ----------
+
+    def test_apply_result_returns_new_state(self):
+        games = [
+            self._g(1, "A", "B", 28, 21),
+            self._g(2, "A", "C", None, None, status="SCHEDULED"),
+        ]
+        src = self._mini_source(games)
+        from dispatcharr_ranked_matchups.sources.base import MatchResult
+        state = src.initial_state()
+        prior_a_wins = state["_teams"]["A"]["wins"]
+        rem = src.remaining_matches(state)
+        target = rem[0]
+        new_state = src.apply_result(state, target, MatchResult(home_goals=35, away_goals=14))
+        assert state["_teams"]["A"]["wins"] == prior_a_wins
+        assert new_state["_teams"]["A"]["wins"] == prior_a_wins + 1
+        assert 2 in new_state["_applied"]
+
+    # ---------- terminal_outcomes ----------
+
+    def test_terminal_outcomes_cascade_win_count_bands(self):
+        src = self._mini_source([])
+        state = {
+            "_applied": frozenset(),
+            "_teams": {
+                "Elite":    {"wins": 11, "losses": 1, "pf": 0, "pa": 0, "games_played": 12},
+                "Good":     {"wins": 8,  "losses": 4, "pf": 0, "pa": 0, "games_played": 12},
+                "Mediocre": {"wins": 6,  "losses": 6, "pf": 0, "pa": 0, "games_played": 12},
+                "Bad":      {"wins": 3,  "losses": 9, "pf": 0, "pa": 0, "games_played": 12},
+            },
+        }
+        outcomes = src.terminal_outcomes(state)
+        assert set(outcomes["Elite"]) == {"11_wins", "10_wins", "8_wins", "bowl_eligible"}
+        assert set(outcomes["Good"]) == {"8_wins", "bowl_eligible"}
+        assert set(outcomes["Mediocre"]) == {"bowl_eligible"}
+        assert outcomes["Bad"] == []
+
+    def test_terminal_outcomes_empty_for_unknown_league(self):
+        src = self._mini_source([], league_code="UNKNOWN_LEAGUE_CODE")
+        state = {"_applied": frozenset(),
+                 "_teams": {"X": {"wins": 25, "losses": 0,
+                                  "pf": 0, "pa": 0, "games_played": 25}}}
+        assert src.terminal_outcomes(state) == {}
+
+    # ---------- end-to-end Monte Carlo ----------
+
+    def test_monte_carlo_runs_without_crashing(self):
+        from dispatcharr_ranked_matchups.simulation import monte_carlo_importance
+        games = [
+            self._g(1, "A", "B", 28, 21),
+            self._g(2, "C", "D", 35, 14),
+            self._g(3, "B", "C", 28, 14),
+            self._g(4, "D", "A", 21, 35),
+            self._g(5, "A", "C", None, None, status="SCHEDULED"),
+            self._g(6, "B", "D", None, None, status="SCHEDULED"),
+        ]
+        src = self._mini_source(games, league_code="CFB")
+        state = src.initial_state()
+        rem = src.remaining_matches(state)
+        target = next(m for m in rem if m.home == "A" and m.away == "C")
+        rng = random.Random(7)
+        imp = monte_carlo_importance(src, target, "A", "bowl_eligible",
+                                     n_sims=50, rng=rng)
+        assert 0.0 <= imp <= 1.0
+
+
+class TestNcaafFullSeasonFilter:
+    """NcaafSource._fetch_full_season_games filters to FBS-class games."""
+
+    def test_filter_drops_fcs_vs_fcs(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+
+        class FakeResp:
+            def __init__(self, payload):
+                self._p = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._p
+
+        payload = [
+            {  # FBS vs FBS — kept
+                "id": 1, "homeClassification": "fbs", "awayClassification": "fbs",
+                "homeTeam": "Michigan", "awayTeam": "Ohio State",
+                "homePoints": 28, "awayPoints": 21, "completed": True,
+                "startDate": "2025-11-29T12:00:00.000Z",
+            },
+            {  # FBS vs FCS — kept (cupcake counts toward FBS win total)
+                "id": 2, "homeClassification": "fbs", "awayClassification": "fcs",
+                "homeTeam": "Alabama", "awayTeam": "Chattanooga",
+                "homePoints": 56, "awayPoints": 7, "completed": True,
+                "startDate": "2025-09-15T16:00:00.000Z",
+            },
+            {  # FCS vs FCS — dropped
+                "id": 3, "homeClassification": "fcs", "awayClassification": "fcs",
+                "homeTeam": "Furman", "awayTeam": "Wofford",
+                "homePoints": 24, "awayPoints": 21, "completed": True,
+                "startDate": "2025-10-01T16:00:00.000Z",
+            },
+            {  # SCHEDULED FBS vs FBS — kept, no scores
+                "id": 4, "homeClassification": "fbs", "awayClassification": "fbs",
+                "homeTeam": "Georgia", "awayTeam": "Texas",
+                "homePoints": None, "awayPoints": None, "completed": False,
+                "startDate": "2026-01-01T20:00:00.000Z",
+            },
+        ]
+        monkeypatch.setattr(ncaaf_mod.requests, "get",
+                            lambda *a, **kw: FakeResp(payload))
+        src = ncaaf_mod.NcaafSource(api_key="fake")
+        games = src._fetch_full_season_games()
+        ids = {g["id"] for g in games}
+        assert ids == {1, 2, 4}
+        scheduled = next(g for g in games if g["id"] == 4)
+        assert scheduled["status"] == "SCHEDULED"
+        assert scheduled["home_points"] is None
+        completed = next(g for g in games if g["id"] == 1)
+        assert completed["status"] == "FINISHED"
+        assert completed["home_points"] == 28
+
+
+class TestNcaamFullSeasonFilter:
+    """NcaamSource._fetch_full_season_games filters to games involving at
+    least one AP-ranked team. Returns [] gracefully if no poll exists."""
+
+    def test_returns_empty_when_no_ranked_teams(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+        src = ncaam_mod.NcaamSource(api_key="fake")
+        monkeypatch.setattr(src, "_fetch_rankings", lambda _season: None)
+        called = []
+        monkeypatch.setattr(ncaam_mod.requests, "get",
+                            lambda *a, **kw: called.append(1))
+        out = src._fetch_full_season_games()
+        assert out == []
+        assert called == []  # never hit /games
+
+    def test_filter_keeps_only_ap_relevant_games(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+
+        class FakeResp:
+            def __init__(self, payload):
+                self._p = payload
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return self._p
+
+        src = ncaam_mod.NcaamSource(api_key="fake")
+        monkeypatch.setattr(src, "_fetch_rankings",
+                            lambda _season: {"Duke": 1, "UConn": 2})
+        payload = [
+            {  # AP vs AP — kept
+                "id": 101, "homeTeam": "Duke", "awayTeam": "UConn",
+                "homePoints": 78, "awayPoints": 72,
+                "homeWinner": True, "awayWinner": False,
+                "startDate": "2025-12-15T20:00:00.000Z",
+            },
+            {  # AP vs non-AP — kept (Duke needs all their games tracked)
+                "id": 102, "homeTeam": "Duke", "awayTeam": "Some Mid-Major",
+                "homePoints": 95, "awayPoints": 60,
+                "homeWinner": True, "awayWinner": False,
+                "startDate": "2025-11-20T20:00:00.000Z",
+            },
+            {  # Non-AP vs Non-AP — dropped
+                "id": 103, "homeTeam": "Random A", "awayTeam": "Random B",
+                "homePoints": 70, "awayPoints": 68,
+                "homeWinner": True, "awayWinner": False,
+                "startDate": "2025-11-25T19:00:00.000Z",
+            },
+        ]
+        monkeypatch.setattr(ncaam_mod.requests, "get",
+                            lambda *a, **kw: FakeResp(payload))
+        games = src._fetch_full_season_games()
+        ids = [g["id"] for g in games]
+        assert 101 in ids
+        assert 102 in ids
+        assert 103 not in ids
+        for g in games:
+            assert g["status"] == "FINISHED"
+
+    def test_chunks_cover_continuous_date_range(self, monkeypatch):
+        """The 3-chunk date range covers Nov-Apr with no gaps. A game on
+        the exact boundary (e.g., 2026-02-16) must land in a chunk, not
+        between two chunks."""
+        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
+
+        captured = []
+
+        class FakeResp:
+            def __init__(self, p): self._p = p
+            def raise_for_status(self): pass
+            def json(self): return self._p
+
+        def capture_get(*args, **kwargs):
+            params = kwargs.get("params", {})
+            captured.append((params.get("startDateRange"),
+                             params.get("endDateRange")))
+            return FakeResp([])
+
+        src = ncaam_mod.NcaamSource(api_key="fake")
+        monkeypatch.setattr(src, "_current_season_year", lambda: 2026)
+        monkeypatch.setattr(src, "_fetch_rankings", lambda _season: {"Duke": 1})
+        monkeypatch.setattr(ncaam_mod.requests, "get", capture_get)
+        src._fetch_full_season_games()
+        assert len(captured) == 3
+        # Chunk boundaries: end of chunk N + 1 day = start of chunk N+1.
+        assert captured[0] == ("2025-11-01", "2025-12-31")
+        assert captured[1] == ("2026-01-01", "2026-02-15")
+        assert captured[2] == ("2026-02-16", "2026-04-30")

@@ -21,7 +21,6 @@ right class by `LEAGUE_CONTEXTS[fd_code].format`.
 from __future__ import annotations
 
 import logging
-import math
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -30,7 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from .base import GameRow, MatchResult, SportSource
-from .._util import parse_iso_utc
+from .._util import parse_iso_utc, poisson_sample as _poisson
 from ..scoring import KNOCKOUT_ROUND_DEPTH, LEAGUE_CONTEXTS, TEAM_SUFFIX_TOKENS
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.soccer")
@@ -1455,20 +1454,3 @@ class KnockoutSoccerSource(SoccerSource):
             h += int(rng.random() < 0.70)
             a += int(rng.random() < 0.70)
         return "HOME" if h > a else "AWAY"
-
-
-def _poisson(lam: float, rng: random.Random) -> int:
-    """Draw one Poisson sample via Knuth's algorithm. Pure-Python (no numpy
-    dependency, the plugin runs in Dispatcharr's lean container).
-
-    For lam in [0, 10] this is fast enough — soccer goal counts hover at
-    ~1.4 mean, deepest tail rarely exceeds 7-8 goals/game. For larger lam
-    a normal approximation would be needed; not relevant here.
-    """
-    L = math.exp(-lam)
-    k = 0
-    p = 1.0
-    while p > L:
-        k += 1
-        p *= rng.random()
-    return k - 1

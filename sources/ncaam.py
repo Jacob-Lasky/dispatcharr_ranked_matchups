@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import GameRow, SportSource
+from .base import GameRow
+from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaam")
@@ -37,11 +38,24 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaam")
 CBB_BASE = "https://api.collegebasketballdata.com"
 
 
-class NcaamSource(SportSource):
-    sport_prefix = "CBB"
-    sport_label = "NCAA Men's Basketball"
+class NcaamSource(PointsBasedSportSource):
+    league_context_code = "CBB"
+
+    # NCAA men's basketball averages ~75 points/game per team. Cold-start
+    # fallback for teams without any FINISHED games yet (early November).
+    _DEFAULT_POINTS_FOR = 75.0
+    _DEFAULT_POINTS_AGAINST = 75.0
+
+    @property
+    def sport_prefix(self) -> str:
+        return "CBB"
+
+    @property
+    def sport_label(self) -> str:
+        return "NCAA Men's Basketball"
 
     def __init__(self, api_key: str, poll_name: str = "AP Top 25"):
+        super().__init__()
         self.api_key = api_key
         self.poll_name = poll_name
         self._headers = {"Authorization": f"Bearer {api_key}"}
@@ -75,6 +89,8 @@ class NcaamSource(SportSource):
             start = parse_iso_utc(g.get("startDate"))
             if start is None:
                 continue
+            cbb_id = g.get("id")
+            spread = spread_by_id.get(cbb_id) if cbb_id is not None else None
             rows.append(GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
@@ -84,7 +100,7 @@ class NcaamSource(SportSource):
                 rank_away=rank_by_team.get(away),
                 start_time=start,
                 venue=g.get("venue"),
-                spread=spread_by_id.get(g.get("id")),
+                spread=spread,
                 extra={
                     "cbb_id": g.get("id"),
                     "season": g.get("season"),
@@ -92,6 +108,8 @@ class NcaamSource(SportSource):
                     "conference_game": g.get("conferenceGame", False),
                     "excitement_index": g.get("excitement"),
                     "tournament": g.get("tournament"),
+                    # Phase D.3: importance lookup key for LEAGUE_CONTEXTS.
+                    "fd_competition_code": self.league_context_code,
                 },
             ))
         return rows
@@ -195,4 +213,89 @@ class NcaamSource(SportSource):
                     break
                 except (TypeError, ValueError):
                     continue
+        return out
+
+    # ---------- Phase D.3: Monte Carlo importance ----------
+
+    def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
+        """Return the current regular-season game list filtered to games
+        involving an AP-ranked team. The full D1 schedule is ~7500 games
+        — too many for the Monte Carlo simulator to iterate every refresh
+        at acceptable latency. Filtering to AP-relevant games drops it to
+        ~700-1000 (each of ~25 AP teams plays ~30 games, with overlap),
+        which keeps per-refresh importance cost in the seconds, not
+        minutes.
+
+        Limitation: a non-AP favorite team's games against non-AP
+        opponents won't be in the cache, so the simulator will miss
+        those wins when computing the favorite's win-count outcomes. The
+        plugin's `favorites_in_league` mechanism still queries those
+        teams but the leverage is biased low. Future fix: extend the
+        filter to also include all FAVORITE teams' direct opponents.
+        """
+        if not self.api_key:
+            return []
+        season = self._current_season_year()
+        ranked = self._fetch_rankings(season)
+        if not ranked:
+            # No AP poll yet (preseason). Importance signal returns 0
+            # via terminal_outcomes' empty dict — graceful no-op.
+            return []
+        ap_teams = set(ranked.keys())
+
+        # Season window: Nov 1 of (season-1) through Apr 30 of season.
+        # Three date-range chunks to stay under CBBD's 3000-row cap per call.
+        chunks: List[tuple] = [
+            (datetime(season - 1, 11, 1, tzinfo=timezone.utc),
+             datetime(season - 1, 12, 31, tzinfo=timezone.utc)),
+            (datetime(season, 1, 1, tzinfo=timezone.utc),
+             datetime(season, 2, 15, tzinfo=timezone.utc)),
+            (datetime(season, 2, 16, tzinfo=timezone.utc),
+             datetime(season, 4, 30, tzinfo=timezone.utc)),
+        ]
+        all_games: List[Dict[str, Any]] = []
+        for start, end in chunks:
+            try:
+                r = requests.get(
+                    f"{CBB_BASE}/games",
+                    headers=self._headers,
+                    params={
+                        "startDateRange": start.strftime("%Y-%m-%d"),
+                        "endDateRange": end.strftime("%Y-%m-%d"),
+                        "seasonType": "regular",
+                    },
+                    timeout=30,
+                )
+                r.raise_for_status()
+                all_games.extend(r.json() or [])
+            except Exception as e:
+                logger.warning("[ncaam] full-season chunk %s..%s failed: %s",
+                               start.date(), end.date(), e)
+                continue
+
+        out: List[Dict[str, Any]] = []
+        for g in all_games:
+            home = g.get("homeTeam")
+            away = g.get("awayTeam")
+            if not home or not away:
+                continue
+            if home not in ap_teams and away not in ap_teams:
+                continue
+            hp = g.get("homePoints")
+            ap_pts = g.get("awayPoints")
+            # CBBD encodes completion via the homeWinner/awayWinner booleans
+            # being non-null AND the *Points fields being numeric. Use the
+            # joint check — `status` field doesn't always reflect completion.
+            completed = (hp is not None and ap_pts is not None
+                         and (g.get("homeWinner") is not None
+                              or g.get("awayWinner") is not None))
+            out.append({
+                "id": g.get("id"),
+                "home": home,
+                "away": away,
+                "home_points": hp if completed else None,
+                "away_points": ap_pts if completed else None,
+                "status": "FINISHED" if completed else "SCHEDULED",
+                "start_time": parse_iso_utc(g.get("startDate")),
+            })
         return out

@@ -183,6 +183,31 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="R16 → QF → SF → Final → Champion",
     ),
+    # Phase D.2 / D.3: NCAA football and men's basketball. Format is
+    # "win_count" — threshold cutoffs are MINIMUM win counts rather than
+    # position cutoffs (the SoccerSource interpretation). The points-
+    # based source's `terminal_outcomes` assigns a label when a team's
+    # win total >= cutoff. Bands chosen to differentiate marquee from
+    # middling seasons.
+    "CFB": LeagueContext(
+        code="CFB", matchdays_total=12, format="win_count",
+        thresholds=[
+            (6,  "bowl_eligible", 2.0),  # 6 wins = bowl game lock
+            (8,  "8_wins",        3.0),  # strong season, NY6 talk
+            (10, "10_wins",       4.0),  # top-25 / CFP edge
+            (11, "11_wins",       5.0),  # near-certain CFP, elite season
+        ],
+        boundary_summary="6+ wins → bowl eligible · 8+ → strong · 10+ → CFP contender",
+    ),
+    "CBB": LeagueContext(
+        code="CBB", matchdays_total=30, format="win_count",
+        thresholds=[
+            (15, "15_wins", 1.5),  # bubble / NIT consideration
+            (20, "20_wins", 3.0),  # near-lock NCAA tournament bid
+            (25, "25_wins", 5.0),  # elite season, top seed candidate
+        ],
+        boundary_summary="15+ wins → NIT bubble · 20+ → NCAA bid · 25+ → elite",
+    ),
 }
 
 
