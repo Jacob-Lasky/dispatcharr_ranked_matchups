@@ -342,6 +342,20 @@ _NHL_ROUND_TO_STAGE: Dict[int, str] = {
 NHL_HOME_PATTERN: Tuple[bool, ...] = (True, True, False, False, True, False, True)
 
 
+# Sentinel team names for the synthesized CUP_FINAL placeholder tie. The
+# `/v1/playoff-bracket/{season}` endpoint only publishes a series after
+# its participants are determined, so during the conference-finals week
+# the Stanley Cup Final series doesn't appear in the bracket data even
+# though we can already see which 4 teams are alive. Synthesizing a
+# placeholder lets the importance simulator propagate counterfactual
+# CONF_FINAL winners into the CUP_FINAL → CUP_WINNER cascade. DO NOT
+# change these strings without also updating `_build_bracket`'s
+# placeholder-detection branch — the names are the join key. Bit me on
+# the first round of #17 work before I made this constant.
+_CUP_FINAL_TOP_SENTINEL = "CF_A_WINNER"
+_CUP_FINAL_BOT_SENTINEL = "CF_B_WINNER"
+
+
 class NhlPlayoffSource(BestOfNSeriesSource):
     """Stanley Cup Playoffs as a best-of-7 BracketSportSource.
 
@@ -577,5 +591,127 @@ class NhlPlayoffSource(BestOfNSeriesSource):
                         "top_seed": top_name,
                     },
                 })
+
+        # Issue #17 fix: synthesize a CUP_FINAL placeholder tie when both
+        # CONF_FINAL series have known participants but the bracket
+        # endpoint hasn't yet populated the SCF series with teams. The
+        # endpoint emits a Round-4 stub with topSeedTeam/bottomSeedTeam
+        # = None during the conference-finals week — the loop above
+        # silently skips that stub (because _team_canonical_name returns
+        # "" for the None teams). Without this placeholder, the cup_winner
+        # leverage signal reads 0 during the very week when it matters
+        # most. The placeholder uses sentinel team names that
+        # _build_bracket wires to the upstream CONF_FINAL series via
+        # feeds_from.
+        cf_emitted = sum(1 for g in out if g["stage"] == "CONF_FINAL")
+        cup_emitted = sum(1 for g in out if g["stage"] == "CUP_FINAL")
+        # 2 CONF_FINAL series × 7 games max = 14 games possible. We use
+        # cf_emitted > 0 (data exists) rather than ==14 (all games published)
+        # because the schedule endpoint emits games as they're scheduled,
+        # not all up-front. The 2-series count comes from grouping inside
+        # _build_bracket — easier to check via the actual game emission.
+        cf_series_with_teams = sum(
+            1 for s in bracket_data.get("series", []) or []
+            if _NHL_ROUND_TO_STAGE.get(s.get("playoffRound") or 0) == "CONF_FINAL"
+            and _team_canonical_name(s.get("topSeedTeam") or {})
+            and _team_canonical_name(s.get("bottomSeedTeam") or {})
+        )
+        del cf_emitted  # cf_series_with_teams is the stronger gate
+        if cf_series_with_teams == 2 and cup_emitted == 0:
+            out.extend(self._synth_cup_final_placeholder_games())
+
         self._bracket_games_cache = out
         return out
+
+    # ---------- CUP_FINAL placeholder synthesis (#17) ----------
+
+    def _synth_cup_final_placeholder_games(self) -> List[Dict[str, Any]]:
+        """Emit 7 SCHEDULED CUP_FINAL games with sentinel team names
+        following the NHL 2-2-1-1-1 home pattern. Game IDs are negative
+        ints to guarantee non-collision with real api-web game IDs
+        (which are positive 8-digit numbers like 2025030323).
+
+        The sentinels are stable across refreshes within one importance
+        run — they're matched by _build_bracket below to wire feeds_from
+        to the two CONF_FINAL series.
+        """
+        games: List[Dict[str, Any]] = []
+        for matchday in range(1, len(NHL_HOME_PATTERN) + 1):
+            top_home = NHL_HOME_PATTERN[matchday - 1]
+            home = _CUP_FINAL_TOP_SENTINEL if top_home else _CUP_FINAL_BOT_SENTINEL
+            away = _CUP_FINAL_BOT_SENTINEL if top_home else _CUP_FINAL_TOP_SENTINEL
+            games.append({
+                "game_id": -(100000 + matchday),  # synthetic, non-colliding
+                "stage": "CUP_FINAL",
+                "matchday": matchday,
+                "home": home,
+                "away": away,
+                "home_goals": None,
+                "away_goals": None,
+                "status": "SCHEDULED",
+                "start_time": None,
+                "extra": {
+                    "is_placeholder": True,
+                    "series_letter": "synthetic-scf",
+                },
+            })
+        return games
+
+    def _build_bracket(self, games: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        """Override the shared bracket build to wire feeds_from on the
+        CUP_FINAL placeholder tie (whose participants are sentinel team
+        names, which the participant-set inference in the base class
+        can't match against the actual CONF_FINAL participants).
+
+        Called by BracketSportSource.initial_state — we call super for
+        the standard structural pass, then post-process the placeholder
+        if it's present.
+        """
+        bracket = super()._build_bracket(games)
+        cf_ties = bracket.get("CONF_FINAL", [])
+        cup_ties = bracket.get("CUP_FINAL", [])
+        if len(cf_ties) != 2 or len(cup_ties) != 1:
+            return bracket
+        cup_tie = cup_ties[0]
+        teams = cup_tie.get("teams") or frozenset()
+        if not (
+            _CUP_FINAL_TOP_SENTINEL in teams
+            and _CUP_FINAL_BOT_SENTINEL in teams
+        ):
+            return bracket  # not a placeholder, leave alone
+
+        # Wire feeds_from explicitly: each sentinel resolves to the winner
+        # of its corresponding CONF_FINAL series. Order matters — sentinel
+        # _CUP_FINAL_TOP_SENTINEL maps to CONF_FINAL[0]'s winner; bottom
+        # to CONF_FINAL[1]. Order within the bracket comes from
+        # _build_bracket's grouping pass which is deterministic per
+        # frozenset insertion order — stable enough for a 2-series
+        # check. For home-ice priority in the placeholder, we assume
+        # CONF_FINAL[0]'s winner gets games 1/2/5/7 at home (the higher
+        # regular-season seed normally would; without seeding data, the
+        # uniform assumption is harmless to importance computation).
+        cup_tie["feeds_from"] = {
+            _CUP_FINAL_TOP_SENTINEL: ("CONF_FINAL", 0),
+            _CUP_FINAL_BOT_SENTINEL: ("CONF_FINAL", 1),
+        }
+        cup_tie["is_entry_tie"] = False
+        return bracket
+
+    def _source_team_for(self, sim_team: str, tie_meta: Dict[str, Any]) -> str:
+        """For the CUP_FINAL placeholder, the sentinel team names need
+        to map to the resolved CONF_FINAL winners by position. Return
+        the FIRST game's source-published home so the home/away swap
+        logic in BracketSportSource._emit_remaining_games_for_tie
+        compares the current game's src_home against the consistent
+        "team_a is sentinel-A" mapping rather than against the
+        resolved team name (which would never match a sentinel).
+
+        Non-placeholder cases get the same behavior for free: games[0].home
+        IS team_a's source name in those cases too (since _resolve_
+        participants defines team_a as the resolution of games[0].home).
+        """
+        del sim_team  # mapping derived from tie_meta, not sim_team identity
+        games = tie_meta.get("games") or []
+        if not games:
+            return ""
+        return games[0].get("home") or ""

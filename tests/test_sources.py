@@ -2566,3 +2566,173 @@ class TestNcaaSoccerSource:
             cuts = [c for c, _l, _w in LEAGUE_CONTEXTS[code].thresholds]
             for i in range(len(cuts) - 1):
                 assert cuts[i] < cuts[i + 1], f"{code} cutoffs must be monotonic: {cuts}"
+
+
+# =====================================================================
+# Issue #17: NHL CUP_FINAL placeholder during conf-finals
+# =====================================================================
+
+class TestNhlCupFinalPlaceholder:
+    """Issue #17: synthesize a CUP_FINAL placeholder tie when both
+    CONF_FINAL series exist but the api-web bracket endpoint hasn't
+    yet populated the SCF series (which only happens after both
+    conf-finals end). Without the placeholder, cup_winner leverage
+    reads 0 during the highest-leverage week of the season.
+    """
+
+    @staticmethod
+    def _stub_source(bracket_games):
+        """Build an NhlPlayoffSource with a pre-baked bracket-games list
+        so tests don't hit the network."""
+        from dispatcharr_ranked_matchups.sources.nhl import NhlPlayoffSource
+        src = NhlPlayoffSource(season="20252026")
+        src._bracket_games_cache = bracket_games
+        return src
+
+    @staticmethod
+    def _r1_to_cf_games_two_conf_finals():
+        """Synthesize bracket-games covering R1 + R2 + CONF_FINAL with no
+        CUP_FINAL games. Mimics the live shape during conf-finals week.
+        """
+        from dispatcharr_ranked_matchups.sources.nhl import NHL_HOME_PATTERN
+        games = []
+        # Two CONF_FINAL series, each at 0-0 (no games applied yet for
+        # the placeholder logic to fire — it's structural based on
+        # series existence, not on series progress).
+        for series_idx, (top, bot) in enumerate([("Colorado", "Vegas"), ("Montreal", "Carolina")]):
+            for matchday in range(1, len(NHL_HOME_PATTERN) + 1):
+                top_home = NHL_HOME_PATTERN[matchday - 1]
+                home = top if top_home else bot
+                away = bot if top_home else top
+                games.append({
+                    "game_id": 9000000 + series_idx * 10 + matchday,
+                    "stage": "CONF_FINAL",
+                    "matchday": matchday,
+                    "home": home, "away": away,
+                    "home_goals": None, "away_goals": None,
+                    "status": "SCHEDULED",
+                    "start_time": None,
+                    "extra": {"series_letter": chr(ord("a") + series_idx)},
+                })
+        return games
+
+    # ---------- synthesis ----------
+
+    def test_placeholder_fires_when_two_conf_finals_no_cup_final(self):
+        # Bypass _fetch_bracket_games' network call by stubbing the
+        # cache directly with conf-final games + placeholder games.
+        from dispatcharr_ranked_matchups.sources.nhl import (
+            NhlPlayoffSource, _CUP_FINAL_TOP_SENTINEL, _CUP_FINAL_BOT_SENTINEL,
+        )
+        src = NhlPlayoffSource(season="20252026")
+        bracket_games = self._r1_to_cf_games_two_conf_finals()
+        bracket_games.extend(src._synth_cup_final_placeholder_games())
+        src._bracket_games_cache = bracket_games
+        state = src.initial_state()
+        cup_ties = state["_bracket"].get("CUP_FINAL", [])
+        assert len(cup_ties) == 1
+        teams = set(cup_ties[0]["teams"])
+        assert teams == {_CUP_FINAL_TOP_SENTINEL, _CUP_FINAL_BOT_SENTINEL}
+
+    def test_placeholder_feeds_from_wired_to_conf_finals(self):
+        from dispatcharr_ranked_matchups.sources.nhl import (
+            NhlPlayoffSource, _CUP_FINAL_TOP_SENTINEL, _CUP_FINAL_BOT_SENTINEL,
+        )
+        src = NhlPlayoffSource(season="20252026")
+        bracket_games = self._r1_to_cf_games_two_conf_finals()
+        bracket_games.extend(src._synth_cup_final_placeholder_games())
+        src._bracket_games_cache = bracket_games
+        state = src.initial_state()
+        cup_tie = state["_bracket"]["CUP_FINAL"][0]
+        feeds = cup_tie["feeds_from"]
+        assert feeds[_CUP_FINAL_TOP_SENTINEL] == ("CONF_FINAL", 0)
+        assert feeds[_CUP_FINAL_BOT_SENTINEL] == ("CONF_FINAL", 1)
+        # Downstream tie (not entry-level) so it blocks until both
+        # conf-finals resolve before emitting remaining games.
+        assert cup_tie["is_entry_tie"] is False
+
+    def test_placeholder_blocks_remaining_matches_until_conf_finals_resolve(self):
+        # While conf-finals are unresolved, the placeholder shouldn't
+        # appear in remaining_matches output (resolve_participants
+        # returns None when feeds aren't settled).
+        from dispatcharr_ranked_matchups.sources.nhl import NhlPlayoffSource
+        src = NhlPlayoffSource(season="20252026")
+        bracket_games = self._r1_to_cf_games_two_conf_finals()
+        bracket_games.extend(src._synth_cup_final_placeholder_games())
+        src._bracket_games_cache = bracket_games
+        state = src.initial_state()
+        remaining = src.remaining_matches(state)
+        # Conf-finals games remain (14 from 2 series × 7 each, all SCHEDULED).
+        # CUP_FINAL placeholder is blocked.
+        cup_remaining = [g for g in remaining if g.extra.get("stage") == "CUP_FINAL"]
+        assert len(cup_remaining) == 0, "CUP_FINAL must be blocked while conf-finals unresolved"
+
+    def test_synth_cup_final_uses_seven_games_with_nhl_home_pattern(self):
+        from dispatcharr_ranked_matchups.sources.nhl import (
+            NhlPlayoffSource, _CUP_FINAL_TOP_SENTINEL, _CUP_FINAL_BOT_SENTINEL,
+            NHL_HOME_PATTERN,
+        )
+        src = NhlPlayoffSource(season="20252026")
+        games = src._synth_cup_final_placeholder_games()
+        assert len(games) == 7
+        assert all(g["stage"] == "CUP_FINAL" for g in games)
+        assert all(g["status"] == "SCHEDULED" for g in games)
+        assert all(g["game_id"] < 0 for g in games), \
+            "placeholder game IDs must be negative to avoid collision with real NHL game IDs"
+        # Home pattern verification: game 1 has top sentinel at home;
+        # game 3 has bottom sentinel at home; etc.
+        for matchday in range(1, 8):
+            top_home = NHL_HOME_PATTERN[matchday - 1]
+            expected_home = _CUP_FINAL_TOP_SENTINEL if top_home else _CUP_FINAL_BOT_SENTINEL
+            assert games[matchday - 1]["home"] == expected_home
+            assert games[matchday - 1]["matchday"] == matchday
+
+    def test_placeholder_resolves_to_real_teams_after_conf_finals(self):
+        # After applying CONF_FINAL results, the placeholder's
+        # _resolve_participants should yield the real conf-final winners.
+        from dispatcharr_ranked_matchups.sources.nhl import NhlPlayoffSource
+        from dispatcharr_ranked_matchups.sources.base import MatchResult
+        src = NhlPlayoffSource(season="20252026")
+        bracket_games = self._r1_to_cf_games_two_conf_finals()
+        bracket_games.extend(src._synth_cup_final_placeholder_games())
+        src._bracket_games_cache = bracket_games
+        state = src.initial_state()
+        # Apply 4 wins to Colorado vs Vegas (CF series 0): 4-0 sweep.
+        remaining = src.remaining_matches(state)
+        for _ in range(4):
+            target = next(
+                g for g in src.remaining_matches(state)
+                if g.extra.get("stage") == "CONF_FINAL"
+                and "Colorado" in (g.home, g.away)
+                and "Vegas" in (g.home, g.away)
+            )
+            # Make Colorado the winner regardless of home/away assignment.
+            if target.home == "Colorado":
+                result = MatchResult(home_goals=3, away_goals=1)
+            else:
+                result = MatchResult(home_goals=1, away_goals=3)
+            state = src.apply_result(state, target, result)
+        # Now apply 4 wins to Carolina vs Montreal (CF series 1).
+        for _ in range(4):
+            target = next(
+                g for g in src.remaining_matches(state)
+                if g.extra.get("stage") == "CONF_FINAL"
+                and "Carolina" in (g.home, g.away)
+                and "Montreal" in (g.home, g.away)
+            )
+            if target.home == "Carolina":
+                result = MatchResult(home_goals=3, away_goals=1)
+            else:
+                result = MatchResult(home_goals=1, away_goals=3)
+            state = src.apply_result(state, target, result)
+        # Both conf-finals resolved. CUP_FINAL placeholder should now
+        # surface its games with REAL team names (Colorado / Carolina).
+        remaining_after = src.remaining_matches(state)
+        cup_games = [g for g in remaining_after if g.extra.get("stage") == "CUP_FINAL"]
+        assert len(cup_games) == 7, f"expected 7 SCF games unblocked, got {len(cup_games)}"
+        cup_teams = set()
+        for g in cup_games:
+            cup_teams.add(g.home)
+            cup_teams.add(g.away)
+        assert cup_teams == {"Colorado", "Carolina"}, \
+            f"CUP_FINAL should be CF winners (Colorado vs Carolina), got {cup_teams}"
