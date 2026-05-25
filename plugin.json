@@ -140,6 +140,13 @@
       "help_text": "D1 baseball regular season. ESPN unofficial API + D1Baseball.com Top 25 poll. Bands: 30+ wins tournament bubble, 35+ at-large lock, 40+ top regional seed, 45+ national seed, 50+ #1 overall contention. CWS postseason bracket not yet modeled (favorites + rank signal still surface postseason matchups). No API key required."
     },
     {
+      "id": "enable_ncaa_softball",
+      "type": "boolean",
+      "label": "NCAA Softball (D1)",
+      "default": false,
+      "help_text": "D1 softball regular season. ESPN unofficial API + ESPN/USA Softball Collegiate Top 25 poll. Bands: 30+ wins bubble, 35+ at-large lock, 40+ top regional, 45+ national seed, 50+ #1 overall. WCWS bracket (double-elimination) not yet modeled. No API key required."
+    },
+    {
       "id": "enable_ncaa_mens_soccer",
       "type": "boolean",
       "label": "NCAA Men's Soccer (D1)",

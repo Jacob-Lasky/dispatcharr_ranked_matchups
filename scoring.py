@@ -561,6 +561,23 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="R64 → R32 → Sweet 16 → Elite 8 → Final Four → NCG → Champion",
     ),
+    # Phase N: NCAA Division I Softball regular season. ~55-game season,
+    # 64-team NCAA Tournament. Selection bands mirror BSB but tuned
+    # slightly tighter — softball's RPI bar tends to clear at lower
+    # win totals because the field is smaller / more concentrated.
+    # WCWS bracket is double-elimination and not modeled in V1
+    # (follow-up).
+    "SBL": LeagueContext(
+        code="SBL", matchdays_total=55, format="win_count",
+        thresholds=[
+            (30, "tournament_bubble",    1.5),
+            (35, "at_large_lock",        2.5),
+            (40, "top_regional_seed",    3.5),
+            (45, "national_seed",        4.5),
+            (50, "no_1_overall",         5.0),
+        ],
+        boundary_summary="30+ wins → bubble · 35+ → at-large lock · 40+ → top regional · 45+ → national seed · 50+ → #1 overall",
+    ),
 }
 
 

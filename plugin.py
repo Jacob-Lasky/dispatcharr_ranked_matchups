@@ -297,7 +297,7 @@ def _build_sources(settings: Dict[str, Any]):
         NbaPlayoffSource, NbaRegularSource,
         WnbaPlayoffSource, WnbaRegularSource,
         NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
-        NcaaBaseballSource, NcaaSoccerSource,
+        NcaaBaseballSource, NcaaSoftballSource, NcaaSoccerSource,
         NcaafSource, NcaamSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
     )
@@ -445,6 +445,13 @@ def _build_sources(settings: Dict[str, Any]):
     # games still surface via favorite + rank-pair signal.
     if settings.get("enable_ncaa_baseball", False):
         sources.append(NcaaBaseballSource())
+
+    # Phase N: NCAA Division I softball. Same structure as NCAA baseball
+    # (free ESPN unofficial, no key, win-count thresholds). WCWS bracket
+    # is double-elimination and not modeled in V1 — postseason games
+    # still surface via favorite + rank-pair signal.
+    if settings.get("enable_ncaa_softball", False):
+        sources.append(NcaaSoftballSource())
 
     # Phase O: NCAA D1 men's + women's soccer. One source class
     # parametrized on gender — same structure / endpoints / threshold
