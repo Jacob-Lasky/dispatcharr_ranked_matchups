@@ -10,12 +10,13 @@ Two source classes ship under the `enable_ncaa_baseball` toggle:
   - `NcaaBaseballRegularSource(PointsBasedSportSource)`: regular-season
     win-count importance. Tournament-bubble through national-seed bands
     (see LEAGUE_CONTEXTS["BSB"]).
-  - `NcaaBaseballPlayoffSource(BestOfNSeriesSource)`: postseason. Phase 1
-    ships the cleanly-labeled best-of-3 stages — Super Regional and the
-    MCWS Championship Final. Regional (4-team double-elim per site) and
-    the 8-team MCWS bracket in Omaha are Phase 2 (#43): ESPN headlines
-    on those stages carry no game-number or bracket-position metadata,
-    so chronological inference is needed and that's a separate design.
+  - `NcaaBaseballPlayoffSource(BestOfNSeriesSource)`: postseason.
+    Currently models the best-of-3 stages — Super Regional and MCWS
+    Championship Final — both of which carry clean ESPN game-number
+    metadata. Regional (4-team double-elim per site) and the 8-team
+    MCWS bracket in Omaha are tracked in #43: ESPN headlines on those
+    stages carry no game-number or bracket-position metadata, requiring
+    chronological inference.
 
 API endpoints used:
   - /apis/site/v2/sports/baseball/college-baseball/scoreboard
@@ -114,10 +115,9 @@ def _is_postseason_event(event: Dict[str, Any]) -> bool:
       - 6: Championship Finals (best-of-3 in Omaha / OKC).
 
     The regular-season source filters these out; the playoff source
-    filters them in. Headline parsing further narrows to the stages we
-    actually model (Phase 1: SUPER_REGIONAL + FINALS only — the others
-    are headline-metadata-poor and require chronological inference for
-    Phase 2).
+    filters them in. Headline parsing further narrows to the stages
+    actually modeled (SUPER_REGIONAL + FINALS); the Regional and 8-team
+    MCWS bracket stages are headline-metadata-poor and tracked in #43.
 
     DO NOT use the `notes[].headline` "Championship" substring as a
     postseason discriminator — D1 conference tournaments in May use
@@ -361,7 +361,7 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
 
 
 # =====================================================================
-# NcaaBaseballPlayoffSource — Phase 1 best-of-3 stages
+# NcaaBaseballPlayoffSource — best-of-3 stages (Super Regional + MCWS Final)
 # =====================================================================
 
 
@@ -378,11 +378,11 @@ _FINALS_MARKER = "Championship Final - Game "
 
 
 def _parse_baseball_playoff_headline(headline: str) -> Tuple[Optional[str], Optional[int]]:
-    """Map an ESPN postseason headline to (stage, game_index) for the
-    Phase 1 best-of-3 stages. Returns (None, None) for Regional games
-    (no game number, no bracket position — Phase 2) and the MCWS bracket
-    games ("Men's College World Series - Double Elimination Round" /
-    "Elimination Game", also Phase 2).
+    """Map an ESPN postseason headline to (stage, game_index). Returns
+    (None, None) for Regional games (no game number, no bracket position)
+    and MCWS 8-team bracket games ("Men's College World Series - Double
+    Elimination Round" / "Elimination Game") — those stages are tracked
+    in #43.
 
     Patterns observed in 2025-2026 ESPN data:
       - "NCAA Baseball Championship - Auburn Super Regional - Game 1"
@@ -399,20 +399,20 @@ def _parse_baseball_playoff_headline(headline: str) -> Tuple[Optional[str], Opti
 
 
 class NcaaBaseballPlayoffSource(BestOfNSeriesSource):
-    """NCAA Baseball postseason — Phase 1: Super Regional + MCWS Finals.
+    """NCAA Baseball postseason: Super Regional + MCWS Finals.
 
     Both stages are best-of-3 (`SERIES_LENGTH = 3`) with ESPN headlines
     that carry the game number, so the BestOfNSeriesSource infrastructure
     fits cleanly. The intermediate Regional (4-team double-elim per
     site) and 8-team MCWS bracket in Omaha lack game-number metadata in
-    ESPN's data and require chronological inference — Phase 2 (#43).
+    ESPN's data and require chronological inference — tracked in #43.
 
-    The forward-compatible depth structure (BSB_REG=0 → BSB_SR=1 → MCWS=2
-    → MCWS_F=3 → MCWS_W=4) means Phase 2 can extend KO_STAGES without
-    touching threshold labels in LEAGUE_CONTEXTS["MCWS_PO"]. The
-    `omaha_bound` band (depth 2) fires for Super Regional WINNERS in
-    Phase 1 because `_winner_advance_label("BSB_SR")` returns None →
-    default `stage_depth + 1` rule → winner gets depth 2 (= MCWS depth).
+    The depth structure (BSB_REG=0 → BSB_SR=1 → MCWS=2 → MCWS_F=3 →
+    MCWS_W=4) lets #43 extend KO_STAGES without touching threshold
+    labels in LEAGUE_CONTEXTS["MCWS_PO"]. The `omaha_bound` band
+    (depth 2) fires for Super Regional WINNERS because
+    `_winner_advance_label("BSB_SR")` returns None → default
+    `stage_depth + 1` rule → winner gets depth 2 (= MCWS depth).
 
     Strength sharing: pre-postseason, the plugin pulls regular-season
     strength estimates from NcaaBaseballRegularSource and seeds them
@@ -456,7 +456,7 @@ class NcaaBaseballPlayoffSource(BestOfNSeriesSource):
     def _winner_advance_label(self, stage: str) -> Optional[str]:
         # MCWS Final winner → MCWS_W (depth 4). Super Regional winner
         # advances via the default `stage_depth + 1` rule → depth 2,
-        # which is the placeholder MCWS depth (8-team bracket; Phase 2).
+        # which is the MCWS bracket depth (modeled in #43).
         if stage == "MCWS_F":
             return "MCWS_W"
         return None
@@ -467,17 +467,17 @@ class NcaaBaseballPlayoffSource(BestOfNSeriesSource):
         """Pull next-N-day postseason games. Same per-day scoreboard
         sweep as the regular-season source but with `_is_postseason_event`
         flipped (filter IN postseason). Headlines are then parsed via
-        `_parse_baseball_playoff_headline`; only stages Phase 1 models
+        `_parse_baseball_playoff_headline`; only the modeled stages
         (Super Regional + MCWS Finals) survive — Regional and 8-team
         MCWS bracket games are silently dropped here AND from the
-        regular-season source's sibling fetch. They are entirely absent
-        from the curated guide until Phase 2 ships.
+        regular-season source's sibling fetch. Those stages are tracked
+        in #43.
 
-        DO NOT lift the headline filter without also implementing
-        Phase 2 chronological inference: doing so would emit Regional
-        games with `fd_competition_code="MCWS_PO"` and the importance
-        simulator would see them with no upstream feeders, producing
-        an under-informed leverage signal that's worse than no signal.
+        DO NOT lift the headline filter without also implementing the
+        #43 chronological inference: doing so would emit Regional games
+        with `fd_competition_code="MCWS_PO"` and the importance simulator
+        would see them with no upstream feeders, producing an under-
+        informed leverage signal that's worse than no signal.
         """
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
@@ -602,8 +602,8 @@ class NcaaBaseballPlayoffSource(BestOfNSeriesSource):
 
     def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
         """Sweep the postseason date window day-by-day, filter to
-        season.type=3 events with a Phase 1 stage headline, and emit
-        the bracket per-game record shape.
+        postseason events whose headline matches a modeled stage, and
+        emit the bracket per-game record shape.
 
         Window: May 25 (selection day; Regional play starts Friday of
         Memorial Day weekend) through July 1 (worst-case Finals slip).
@@ -633,7 +633,8 @@ class NcaaBaseballPlayoffSource(BestOfNSeriesSource):
         """Convert one ESPN postseason event into the bracket per-game
         record shape (`game_id`, `stage`, `matchday`, `home`, `away`,
         `home_goals`, `away_goals`, `status`, `start_time`, `extra`).
-        Returns None for stages we don't model in Phase 1.
+        Returns None for stages whose headlines don't match a modeled
+        stage marker (Regional + 8-team MCWS bracket; see #43).
         """
         comps = event.get("competitions") or []
         if not comps:

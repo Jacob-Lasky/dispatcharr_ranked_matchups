@@ -108,7 +108,7 @@ class NcaamSource(PointsBasedSportSource):
                     "conference_game": g.get("conferenceGame", False),
                     "excitement_index": g.get("excitement"),
                     "tournament": g.get("tournament"),
-                    # Phase D.3: importance lookup key for LEAGUE_CONTEXTS.
+                    # Importance lookup key for LEAGUE_CONTEXTS.
                     "fd_competition_code": self.league_context_code,
                 },
             ))
@@ -215,7 +215,7 @@ class NcaamSource(PointsBasedSportSource):
                     continue
         return out
 
-    # ---------- Phase D.3: Monte Carlo importance ----------
+    # ---------- Monte Carlo importance ----------
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
         """Return the current regular-season game list filtered to games
@@ -226,12 +226,11 @@ class NcaamSource(PointsBasedSportSource):
         which keeps per-refresh importance cost in the seconds, not
         minutes.
 
-        Limitation: a non-AP favorite team's games against non-AP
-        opponents won't be in the cache, so the simulator will miss
-        those wins when computing the favorite's win-count outcomes. The
+        Known limitation: a non-AP favorite team's games against non-AP
+        opponents aren't in the cache, so the simulator misses those
+        wins when computing the favorite's win-count outcomes. The
         plugin's `favorites_in_league` mechanism still queries those
-        teams but the leverage is biased low. Future fix: extend the
-        filter to also include all FAVORITE teams' direct opponents.
+        teams but the leverage is biased low.
         """
         if not self.api_key:
             return []

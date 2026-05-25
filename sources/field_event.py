@@ -4,16 +4,16 @@ Racing and golf don't fit the team-based GameRow model because they're
 field events: one race or tournament with 20+ competitors and a
 finishing order, not a head-to-head outcome between two teams.
 
-V1 design (Phase R)
+Design:
 
   - Emit one GameRow per scheduled event, with `home = event_name`
     (e.g., "Heineken Chinese GP", "The Masters") and `away = "Field"`
     as a sentinel.
   - Tag with `tournament_stage = "EVENT"` (regular tour stop) or
-    `"MAJOR"` (golf majors / future marquee racing events). The
-    scoring layer's `tournament` signal handles the rest; both labels
-    map to non-zero stage_score so field events always surface in the
-    guide when toggled on.
+    `"MAJOR"` (golf majors / marquee racing events the source flags
+    as MAJOR). The scoring layer's `tournament` signal handles the
+    rest; both labels map to non-zero stage_score so field events
+    always surface in the guide when toggled on.
   - No importance simulation, no closeness, no rank — the rarity of
     these events (~1/week) means just-show-it-up is the right product.
     The matcher fuzzy-matches the event name against EPG titles.
@@ -53,14 +53,14 @@ class FieldEventSource(SportSource):
       - `SPORT_PREFIX`: short channel-name prefix.
       - `SPORT_LABEL`: human-readable label.
       - `FD_COMPETITION_CODE`: arbitrary string carried through extra
-        for future routing.
+        for downstream routing (e.g., score-breakdown attribution).
       - `MAJOR_REGEX`: optional compiled regex; when an event name
         matches, the event is tagged tournament_stage="MAJOR"
         (otherwise "EVENT"). Default None means everything is "EVENT".
     """
 
     # supports_importance left at the SportSource default (False).
-    # Field events surface via the tournament signal alone in V1.
+    # Field events surface via the tournament signal alone.
 
     ESPN_SLUG: str = ""
     SPORT_PREFIX: str = ""
@@ -169,7 +169,7 @@ class F1Source(FieldEventSource):
 class NascarSource(FieldEventSource):
     """NASCAR Cup Series — ~36 races per year, including the Daytona
     500 (season opener) and the Coca-Cola 600. Both are 'crown jewels'
-    but for V1 every race is EVENT-tier."""
+    but currently every race is EVENT-tier (no MAJOR_REGEX set)."""
 
     ESPN_SLUG = "racing/nascar-premier"
     SPORT_PREFIX = "NASCAR"

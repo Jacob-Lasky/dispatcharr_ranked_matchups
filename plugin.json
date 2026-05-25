@@ -1,7 +1,7 @@
 {
   "name": "Ranked Matchups (Top Games)",
   "version": "0.1.0",
-  "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them by rank pair / favorites / spread (and Phase 3+: rivalry, narrative), matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching.",
+  "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them on interestingness, matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching.",
   "author": "Jake (with Claude)",
   "license": "MIT",
   "repo_url": "https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups",
@@ -256,7 +256,7 @@
       "input_type": "password",
       "label": "CollegeFootballData.com API key",
       "default": "",
-      "help_text": "Register: https://collegefootballdata.com/key (free, 1k req/day). The same key works for collegebasketballdata.com — one key powers both NCAAF and NCAAM, including the Monte Carlo importance signal (Phase D.2/D.3)."
+      "help_text": "Register: https://collegefootballdata.com/key (free, 1k req/day). The same key works for collegebasketballdata.com — one key powers both NCAAF and NCAAM, including the Monte Carlo importance signal."
     },
     {
       "id": "football_data_api_key",
@@ -367,7 +367,7 @@
       "type": "number",
       "label": "Rivalry boost",
       "default": 2.0,
-      "help_text": "Flat points added for known rivalry games (future: rivalry DB)."
+      "help_text": "Flat points added when a source flags a game as a rivalry. No sources currently populate this signal (tracked in #8)."
     },
     {
       "id": "weight_tournament",
@@ -388,7 +388,7 @@
       "type": "number",
       "label": "Monte Carlo importance weight",
       "default": 3.0,
-      "help_text": "Multiplier on Lahvička match-importance: |Kendall tau-c| × consequence weight, summed across both playing teams' outcome bands AND any in-league favorites' outcome bands (so a non-favorite game that swings a favorite's relegation chance gets credit structurally). Only fires for sources that implement simulation (currently soccer). Phase C.4 retired the legacy stakes / impact-on-favorite / late-season-multiplier signal family — this signal replaces all three. Set to 0 to disable."
+      "help_text": "Multiplier on Lahvička match-importance: |Kendall tau-c| × consequence weight, summed across both playing teams' outcome bands AND any in-league favorites' outcome bands (so a non-favorite game that swings a favorite's relegation chance gets credit structurally). Set to 0 to disable."
     },
     {
       "id": "n_importance_sims",

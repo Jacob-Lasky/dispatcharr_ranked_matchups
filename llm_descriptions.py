@@ -153,9 +153,10 @@ def build_llm_context(g: Dict[str, Any], tagline: str, boundary_summary: str = "
         for narrative in impact_narratives:
             lines.append(f"  - {narrative}")
 
-    # Phase C.4 renamed `stakes_thresholds_hit` → `importance_thresholds_hit`;
-    # accept either so a cache.json written by pre-C.4 code still produces
-    # a reasonable prompt during the one-cycle migration window.
+    # Older cache files stored the band list under `stakes_thresholds_hit`;
+    # accept either key so a cache.json written by an older plugin version
+    # still produces a reasonable prompt during the one-cycle migration
+    # window.
     thresholds_hit = (
         g.get("importance_thresholds_hit")
         or g.get("stakes_thresholds_hit")

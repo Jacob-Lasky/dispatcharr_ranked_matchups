@@ -15,11 +15,11 @@ men's, 2025) has only 13 wins but 47 standings points — without the
 draws credit the win-count thresholds would misclassify them as
 bubble when they're a national seed contender.
 
-College Cup postseason bracket is NOT modeled in V1. Filed as
-follow-up; same shape as the WC / EURO knockout (single-leg
-elimination), so the existing KnockoutSoccerSource machinery can
-absorb it later. fetch_upcoming still surfaces postseason games via
-rank + favorite signals.
+College Cup postseason bracket is NOT modeled — same shape as the
+WC / EURO knockout (single-leg elimination), so the existing
+KnockoutSoccerSource machinery can absorb it when wired up.
+fetch_upcoming still surfaces postseason games via rank + favorite
+signals.
 """
 
 from __future__ import annotations

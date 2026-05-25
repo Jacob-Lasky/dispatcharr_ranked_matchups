@@ -781,11 +781,11 @@ class DoubleEliminationSource(BracketSportSource):
         idempotent under multiple calls with the same winner — each
         loser still caps at `stage_depth`, the winner is still set to
         `winner_depth` via `max()`.
-      - Phase 2a is SOURCE-DRIVEN ONLY: `_emit_remaining_games_for_tie`
-        emits the source-published games (in chronological order) that
-        haven't been applied yet. It does NOT synthesize speculative
-        future games from the double-elim game tree — that's a Phase 2b
-        responsibility once live source data is being wired in.
+      - Source-driven only: `_emit_remaining_games_for_tie` emits the
+        source-published games (in chronological order) that haven't
+        been applied yet. It does NOT synthesize speculative future
+        games from the double-elim game tree — that's a #43 follow-up
+        once live source data is wired in.
 
     Subclass contract: implement `_fetch_bracket_games` (inherited) AND
     `_tie_grouping_key(game)` (new). Set `KO_STAGES` and
@@ -878,7 +878,7 @@ class DoubleEliminationSource(BracketSportSource):
         """Group games by (stage, _tie_grouping_key(game)) into tie_meta
         records carrying the full participant set. feeds_from wiring is
         intentionally empty for double-elim: each sub-bracket tie is an
-        entry tie at its stage (Phase 2a doesn't connect Regional →
+        entry tie at its stage (this class doesn't connect Regional →
         Super Regional structurally — that handoff lives in the
         regular-season-strength sharing already on the playoff sources).
         """

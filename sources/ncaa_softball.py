@@ -4,13 +4,14 @@ No API key required.
 Two source classes ship under the `enable_ncaa_softball` toggle:
   - `NcaaSoftballRegularSource(PointsBasedSportSource)`: regular-season
     win-count importance (LEAGUE_CONTEXTS["SBL"]).
-  - `NcaaSoftballPlayoffSource(BestOfNSeriesSource)`: postseason. Phase 1
-    ships the cleanly-labeled best-of-3 stages — Super Regional and
-    WCWS Championship Finals. Regional (4-team double-elim per site)
-    and the 8-team WCWS bracket in OKC are Phase 2 (#43): ESPN
-    headlines on those stages are "Women's College World Series -
-    Double Elimination Round" with no game-number or bracket-position
-    metadata, so chronological inference is needed.
+  - `NcaaSoftballPlayoffSource(BestOfNSeriesSource)`: postseason.
+    Currently models the best-of-3 stages — Super Regional and WCWS
+    Championship Finals — both with clean ESPN game-number metadata.
+    Regional (4-team double-elim per site) and the 8-team WCWS bracket
+    in OKC are tracked in #43: ESPN headlines on those stages are
+    "Women's College World Series - Double Elimination Round" with no
+    game-number or bracket-position metadata, so chronological
+    inference is needed.
 
 API path: ESPN groups college softball under the `baseball` sport
 namespace (NOT `softball`). The scoreboard endpoint:
@@ -298,7 +299,7 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
 
 
 # =====================================================================
-# NcaaSoftballPlayoffSource — Phase 1 best-of-3 stages
+# NcaaSoftballPlayoffSource — best-of-3 stages (Super Regional + WCWS Finals)
 # =====================================================================
 
 
@@ -310,10 +311,9 @@ _FINALS_MARKER = "Championship Finals - Game "
 
 
 def _parse_softball_playoff_headline(headline: str) -> Tuple[Optional[str], Optional[int]]:
-    """Map an ESPN softball postseason headline to (stage, game_index)
-    for the Phase 1 best-of-3 stages. Returns (None, None) for stages
-    we don't model (Regional, 8-team WCWS bracket — both lack game
-    metadata in ESPN's data and are Phase 2).
+    """Map an ESPN softball postseason headline to (stage, game_index).
+    Returns (None, None) for unmodeled stages (Regional, 8-team WCWS
+    bracket — both lack headline game metadata in ESPN's data; see #43).
 
     Patterns observed in 2025-2026 ESPN data:
       - "NCAA Softball Championship - Lincoln Super Regional - Game 1"
@@ -330,17 +330,17 @@ def _parse_softball_playoff_headline(headline: str) -> Tuple[Optional[str], Opti
 
 
 class NcaaSoftballPlayoffSource(BestOfNSeriesSource):
-    """NCAA Softball postseason — Phase 1: Super Regional + WCWS Finals.
+    """NCAA Softball postseason: Super Regional + WCWS Finals.
 
     Both stages are best-of-3 (`SERIES_LENGTH = 3`). Regional double-elim
     and the 8-team WCWS bracket in OKC carry no headline game-number
     metadata in ESPN's data and require chronological inference —
-    Phase 2 (#43).
+    tracked in #43.
 
     The depth structure (SB_REG=0 → SB_SR=1 → WCWS=2 → WCWS_F=3 →
-    WCWS_W=4) is forward-compatible with Phase 2. The `okc_bound`
-    band (depth 2) fires for Super Regional WINNERS in Phase 1 via
-    the default `stage_depth + 1` advance rule.
+    WCWS_W=4) is set up so #43 can extend KO_STAGES without touching
+    threshold labels. The `okc_bound` band (depth 2) fires for Super
+    Regional WINNERS via the default `stage_depth + 1` advance rule.
 
     Strength sharing: pre-postseason, the plugin pulls regular-season
     strengths from NcaaSoftballRegularSource and seeds them via
@@ -497,9 +497,9 @@ class NcaaSoftballPlayoffSource(BestOfNSeriesSource):
     # ---------- bracket fetch ----------
 
     def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
-        """Sweep the WCWS date window day-by-day, filter to
-        season.type=3 events with a Phase 1 stage headline, emit the
-        bracket per-game record shape.
+        """Sweep the WCWS date window day-by-day, filter to postseason
+        events whose headline matches a modeled stage, emit the bracket
+        per-game record shape.
 
         Window: May 15 (Regional play opens the postseason; we start a
         few days early to catch any timezone wraparound) through
