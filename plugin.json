@@ -105,6 +105,13 @@
       "help_text": "Regular season uses win count (85+ bubble, 90+ playoff-secured, 95+ division pace, 105+ elite). Postseason mixes series lengths: Wild Card best-of-3, Division Series best-of-5, LCS / World Series best-of-7. No API key required — official statsapi.mlb.com."
     },
     {
+      "id": "enable_nba",
+      "type": "boolean",
+      "label": "NBA (regular season + playoffs)",
+      "default": false,
+      "help_text": "Regular season uses win count (40+ play-in bubble, 50+ playoff-secured, 55+ top-seed pace, 65+ elite). Playoffs are best-of-7 each round (R1 / Conf Semis / Conf Finals / NBA Finals). No API key required — uses ESPN's unofficial site.api.espn.com (stats.nba.com is WAF-blocked from most homelab egress)."
+    },
+    {
       "id": "enable_ncaa_baseball",
       "type": "boolean",
       "label": "NCAA Baseball (D1)",

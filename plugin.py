@@ -293,6 +293,7 @@ def _build_weights(settings: Dict[str, Any]):
 def _build_sources(settings: Dict[str, Any]):
     from .sources import (
         KnockoutSoccerSource, MlbPlayoffSource, MlbRegularSource,
+        NbaPlayoffSource, NbaRegularSource,
         NcaaBaseballSource, NcaaSoccerSource,
         NcaafSource, NcaamSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
@@ -381,6 +382,23 @@ def _build_sources(settings: Dict[str, Any]):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[mlb] could not seed playoff strengths: %s", exc)
         sources.append(mlb_po)
+
+    # NBA — no API key required. ESPN unofficial API is used (stats.nba.com
+    # is WAF-blocked from most homelab egress); same pair-and-seed pattern
+    # as NHL/MLB: the playoff source borrows regular-season strength
+    # estimates from the regular source so a 60-game per-team baseline
+    # informs playoff-game sampling instead of the 115/115 league-average
+    # prior. If the user enables only one of the two, the playoff source
+    # falls back to that default.
+    if settings.get("enable_nba", False):
+        nba_reg = NbaRegularSource()
+        sources.append(nba_reg)
+        nba_po = NbaPlayoffSource()
+        try:
+            nba_po.set_regular_season_strengths(nba_reg.estimate_strengths())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[nba] could not seed playoff strengths: %s", exc)
+        sources.append(nba_po)
 
     # Phase M: NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
     # poll, no key needed. Win-count thresholds (30 / 35 / 40 / 45 / 50) drive
