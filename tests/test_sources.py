@@ -2399,3 +2399,170 @@ class TestNcaaBaseballSource:
         cuts = [cut for cut, _label, _w in LEAGUE_CONTEXTS["BSB"].thresholds]
         for i in range(len(cuts) - 1):
             assert cuts[i] < cuts[i + 1], f"BSB band cutoffs must be monotonic: {cuts}"
+
+
+# =====================================================================
+# Phase O: NCAA Soccer (M's + W's parametrized on gender)
+# =====================================================================
+
+class TestNcaaSoccerSource:
+    """Phase O: one source class for both M's and W's, parametrized on
+    `gender`. Standings-points-based (3 W / 1 D / 0 L) since draws are
+    common in college soccer.
+    """
+
+    @staticmethod
+    def _make_source(gender="m"):
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer import NcaaSoccerSource
+        return NcaaSoccerSource(gender=gender, season_year=2025)
+
+    # ---------- identity + parametrization ----------
+
+    def test_gender_routes_to_correct_context(self):
+        m = self._make_source("m")
+        w = self._make_source("w")
+        assert m.league_context_code == "NCAA_MSOC"
+        assert w.league_context_code == "NCAA_WSOC"
+        assert m.sport_prefix == "NCAAMSOC"
+        assert w.sport_prefix == "NCAAWSOC"
+        assert "Men's" in m.sport_label
+        assert "Women's" in w.sport_label
+
+    def test_gender_routes_to_correct_espn_slug(self):
+        m = self._make_source("m")
+        w = self._make_source("w")
+        assert m._espn_slug == "usa.ncaa.m.1"
+        assert w._espn_slug == "usa.ncaa.w.1"
+
+    def test_invalid_gender_rejected(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer import NcaaSoccerSource
+        try:
+            NcaaSoccerSource(gender="x")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected ValueError on invalid gender")
+
+    def test_count_field_is_standings_points(self):
+        src = self._make_source()
+        assert src._count_field == "standings_points"
+
+    def test_supports_importance(self):
+        assert self._make_source().supports_importance is True
+
+    # ---------- standings_points credit (3 / 1 / 0) ----------
+
+    def test_record_result_win_credits_three_points_to_winner(self):
+        src = self._make_source()
+        teams = {
+            "Washington": {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+            "Stanford":   {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+        }
+        src._record_result_into_state(teams, "Washington", "Stanford", 2, 1)
+        assert teams["Washington"]["standings_points"] == 3
+        assert teams["Stanford"]["standings_points"] == 0
+        assert teams["Washington"]["wins"] == 1
+        assert teams["Stanford"]["losses"] == 1
+        # draws field initialized at 0
+        assert teams["Washington"]["draws"] == 0
+
+    def test_record_result_draw_credits_one_point_each(self):
+        src = self._make_source()
+        teams = {
+            "Florida State": {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+            "Duke":          {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+        }
+        src._record_result_into_state(teams, "Florida State", "Duke", 1, 1)
+        # Draw: 1 standings point each, no W/L update, draws counter +1.
+        assert teams["Florida State"]["standings_points"] == 1
+        assert teams["Duke"]["standings_points"] == 1
+        assert teams["Florida State"]["wins"] == 0
+        assert teams["Florida State"]["losses"] == 0
+        assert teams["Florida State"]["draws"] == 1
+        assert teams["Duke"]["draws"] == 1
+
+    def test_record_result_loss_credits_zero_points(self):
+        src = self._make_source()
+        teams = {
+            "TCU":     {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+            "NC State": {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+        }
+        src._record_result_into_state(teams, "TCU", "NC State", 0, 2)
+        assert teams["TCU"]["standings_points"] == 0
+        assert teams["NC State"]["standings_points"] == 3
+
+    def test_draws_heavy_team_outranks_winless_in_standings(self):
+        # The whole point of standings_points: a 5-3-7 team (5W 3L 7D, 22 pts)
+        # ranks above a 6-9-0 team (18 pts) even with fewer wins.
+        src = self._make_source()
+        def fresh_row():
+            return {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0}
+        teams = {"DrawHeavy": fresh_row(), "WinHeavy": fresh_row()}
+        # Pre-seed stub opponents so _record_result_into_state doesn't KeyError.
+        for k in ("Stub1", "Stub2", "Stub3", "Stub4", "Stub5"):
+            teams[k] = fresh_row()
+        # DrawHeavy: 5W (vs Stub1), 3L (vs Stub2), 7D (vs Stub3)
+        for _ in range(5):
+            src._record_result_into_state(teams, "DrawHeavy", "Stub1", 2, 1)
+        for _ in range(3):
+            src._record_result_into_state(teams, "DrawHeavy", "Stub2", 0, 2)
+        for _ in range(7):
+            src._record_result_into_state(teams, "DrawHeavy", "Stub3", 1, 1)
+        # WinHeavy: 6W (vs Stub4), 9L (vs Stub5)
+        for _ in range(6):
+            src._record_result_into_state(teams, "WinHeavy", "Stub4", 2, 0)
+        for _ in range(9):
+            src._record_result_into_state(teams, "WinHeavy", "Stub5", 0, 3)
+        assert teams["DrawHeavy"]["standings_points"] == 22  # 5*3 + 7*1
+        assert teams["WinHeavy"]["standings_points"] == 18   # 6*3
+        # DrawHeavy outranks WinHeavy despite fewer wins.
+        assert teams["DrawHeavy"]["standings_points"] > teams["WinHeavy"]["standings_points"]
+
+    # ---------- sample_result allows ties ----------
+
+    def test_sample_result_can_produce_ties(self):
+        import random
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        from datetime import datetime, timezone
+        src = self._make_source()
+        strengths = {"A": {"pf_per_game": 1.0, "pa_per_game": 1.0},
+                     "B": {"pf_per_game": 1.0, "pa_per_game": 1.0}}
+        gr = GameRow(
+            sport_prefix="NCAAMSOC", sport_label="NCAA Men's Soccer",
+            home="A", away="B", rank_home=None, rank_away=None,
+            start_time=datetime(2025, 10, 1, tzinfo=timezone.utc),
+        )
+        # With lambda~1.0 and 200 samples, draws happen frequently
+        # (Poisson(1) variance puts ~30%+ chance of identical scores).
+        # Confirm at least one tie sampled — base PointsBasedSportSource
+        # would have force-coin-flipped it away.
+        seen_tie = False
+        for seed in range(200):
+            rng = random.Random(seed)
+            res = src.sample_result({}, gr, strengths, rng)
+            if res.home_goals == res.away_goals:
+                seen_tie = True
+                break
+        assert seen_tie, "soccer sample_result must allow ties (1 pt each)"
+
+    # ---------- LEAGUE_CONTEXTS bands ----------
+
+    def test_ncaa_msoc_in_league_contexts(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS["NCAA_MSOC"]
+        assert ctx.format == "points_count"
+        labels = {label for _c, label, _w in ctx.thresholds}
+        assert "tournament_bubble" in labels
+        assert "national_seed" in labels
+
+    def test_ncaa_wsoc_in_league_contexts(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS["NCAA_WSOC"]
+        assert ctx.format == "points_count"
+
+    def test_ncaa_soccer_thresholds_monotonic(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        for code in ("NCAA_MSOC", "NCAA_WSOC"):
+            cuts = [c for c, _l, _w in LEAGUE_CONTEXTS[code].thresholds]
+            for i in range(len(cuts) - 1):
+                assert cuts[i] < cuts[i + 1], f"{code} cutoffs must be monotonic: {cuts}"
