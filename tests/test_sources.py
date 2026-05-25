@@ -3788,3 +3788,189 @@ class TestWnbaPlayoffSource:
         depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
         for i in range(len(depths) - 1):
             assert depths[i] < depths[i + 1]
+
+
+# =====================================================================
+# Phase L: NCAA Women's Basketball + March Madness
+# =====================================================================
+
+class TestNcaawBasketballHeadlineParser:
+    """NCAA W headlines have a "Regional N in {City}" prefix for R64-E8
+    and no prefix for F4/NCG. Plus the round names use "1st Round" /
+    "2nd Round" (numeric) and "Sweet 16" / "Elite 8" (with space)."""
+
+    @staticmethod
+    def _parse(headline):
+        from dispatcharr_ranked_matchups.sources.ncaaw_basketball import (
+            _parse_stage_from_headline,
+        )
+        return _parse_stage_from_headline(headline)
+
+    def test_first_round_with_regional(self):
+        assert self._parse(
+            "NCAA Women's Championship - Regional 2 in Birmingham - 1st Round"
+        ) == {"stage": "R64", "matchday": 1}
+
+    def test_second_round_with_regional(self):
+        assert self._parse(
+            "NCAA Women's Championship - Regional 3 in Birmingham - 2nd Round"
+        ) == {"stage": "R32", "matchday": 1}
+
+    def test_sweet_sixteen_with_regional(self):
+        assert self._parse(
+            "NCAA Women's Championship - Regional 1 in Spokane - Sweet 16"
+        ) == {"stage": "S16", "matchday": 1}
+
+    def test_elite_eight_with_regional(self):
+        assert self._parse(
+            "NCAA Women's Championship - Regional 4 in Spokane - Elite 8"
+        ) == {"stage": "E8", "matchday": 1}
+
+    def test_final_four_no_regional(self):
+        assert self._parse(
+            "NCAA Women's Championship - Final Four"
+        ) == {"stage": "F4", "matchday": 1}
+
+    def test_national_championship(self):
+        assert self._parse(
+            "NCAA Women's Championship - National Championship"
+        ) == {"stage": "NCG", "matchday": 1}
+
+    def test_none_for_unparseable(self):
+        assert self._parse(None) is None
+        assert self._parse("") is None
+        assert self._parse("Some Conference Tournament - Game 1") is None
+
+    def test_apostrophe_optional(self):
+        # ESPN occasionally drops the apostrophe in "Women's"; the
+        # regex allows both forms.
+        assert self._parse(
+            "NCAA Womens Championship - Final Four"
+        ) == {"stage": "F4", "matchday": 1}
+
+
+class TestNcaawBasketballRegularSource:
+
+    @staticmethod
+    def _make():
+        from dispatcharr_ranked_matchups.sources.ncaaw_basketball import (
+            NcaawBasketballRegularSource,
+        )
+        return NcaawBasketballRegularSource(season_end_year=2025)
+
+    def test_identity(self):
+        src = self._make()
+        assert src.sport_prefix == "NCAAW"
+        assert "Women" in src.sport_label
+        assert src.league_context_code == "NCAAW_BBALL"
+        assert src._count_field == "wins"
+
+    def test_supports_importance(self):
+        assert self._make().supports_importance is True
+
+    def test_outcome_labels(self):
+        labels = self._make().outcome_labels
+        assert "tournament_bubble" in labels
+        assert "at_large_lock" in labels
+        assert "top_4_seed" in labels
+        assert "no_1_seed" in labels
+
+    def test_thresholds_monotonic(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS["NCAAW_BBALL"]
+        cuts = [t[0] for t in ctx.thresholds]
+        for i in range(len(cuts) - 1):
+            assert cuts[i] < cuts[i + 1]
+
+
+class TestNcaawBasketballPlayoffSource:
+
+    @staticmethod
+    def _make(bracket_games=None):
+        from dispatcharr_ranked_matchups.sources.ncaaw_basketball import (
+            NcaawBasketballPlayoffSource,
+        )
+        src = NcaawBasketballPlayoffSource(season_end_year=2025)
+        src._bracket_games_cache = bracket_games or []
+        return src
+
+    def test_identity(self):
+        src = self._make()
+        assert src.sport_prefix == "NCAAW"
+        assert "Tournament" in src.sport_label
+        assert src._league_context_code() == "NCAAW_BBALL_PO"
+
+    def test_supports_importance(self):
+        assert self._make().supports_importance is True
+
+    def test_ko_stages(self):
+        assert self._make().KO_STAGES == ("R64", "R32", "S16", "E8", "F4", "NCG")
+
+    def test_series_length_uniform_one(self):
+        """Single-game elim — every stage uses SERIES_LENGTH=1; the
+        clinching-wins target is ceil(1/2)=1."""
+        src = self._make()
+        for stage in src.KO_STAGES:
+            assert src._series_length_for_stage(stage) == 1
+            assert src._clinching_wins_for_stage(stage) == 1
+
+    def test_winner_advance_label(self):
+        src = self._make()
+        assert src._winner_advance_label("NCG") == "NCG_WINNER"
+        assert src._winner_advance_label("F4") is None
+        assert src._winner_advance_label("R64") is None
+
+    def test_outcome_labels(self):
+        labels = self._make().outcome_labels
+        assert "round_of_32" in labels
+        assert "sweet_16" in labels
+        assert "elite_8" in labels
+        assert "final_four" in labels
+        assert "national_final" in labels
+        assert "national_champ" in labels
+
+    def test_champion_cascade(self):
+        """A team that wins each round reaches NCG_WINNER depth and
+        terminal_outcomes returns every band. Synthesize one team's
+        path through R64-NCG (6 wins)."""
+        # Champion's path: beat 6 different opponents in 6 single-game
+        # series, one at each stage.
+        games = []
+        for i, (stage, opp) in enumerate([
+            ("R64", "Sixteen"),
+            ("R32", "Eight"),
+            ("S16", "Four"),
+            ("E8", "Two"),
+            ("F4", "One"),
+            ("NCG", "Final"),
+        ]):
+            games.append({
+                "game_id": f"ncaaw-{i+1}",
+                "stage": stage,
+                "matchday": 1,
+                "home": "Champion",
+                "away": opp,
+                "home_goals": 80,
+                "away_goals": 70,
+                "status": "FINISHED",
+                "start_time": None,
+                "extra": {},
+            })
+        src = self._make(bracket_games=games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"]["Champion"] == KNOCKOUT_ROUND_DEPTH["NCG_WINNER"]
+        assert state["_round_reached"]["Final"] == KNOCKOUT_ROUND_DEPTH["NCG"]
+        assert state["_round_reached"]["One"] == KNOCKOUT_ROUND_DEPTH["F4"]
+        outcomes = src.terminal_outcomes(state)
+        assert "national_champ" in outcomes["Champion"]
+        assert "national_final" in outcomes["Final"]
+        assert "national_final" not in outcomes["One"]
+        assert "final_four" in outcomes["One"]
+
+    def test_ncaaw_po_thresholds_are_depth_ordered(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, KNOCKOUT_ROUND_DEPTH
+        ctx = LEAGUE_CONTEXTS["NCAAW_BBALL_PO"]
+        depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
+        for i in range(len(depths) - 1):
+            assert depths[i] < depths[i + 1]

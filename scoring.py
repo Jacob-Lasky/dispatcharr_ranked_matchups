@@ -192,6 +192,15 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     # cross-contamination. SF needs its own depth between R1 and FINALS.
     "SF":              1,  # WNBA Semifinals (between R1 and FINALS)
     "WNBA_WINNER":     4,  # WNBA Champion (same synthetic depth as FINALS_WINNER)
+    # NCAA Women's March Madness (Phase L): 6 rounds, all single-game
+    # elimination. SERIES_LENGTH=1 per stage; first to 1 win clinches.
+    "R64":             0,  # 1st Round (32 games)
+    "R32":             1,  # 2nd Round (16 games)
+    "S16":             2,  # Sweet 16 (8 games)
+    "E8":              3,  # Elite 8 (4 games)
+    "F4":              4,  # Final Four (2 games)
+    "NCG":             5,  # National Championship Game
+    "NCG_WINNER":      6,  # National Champion
 }
 
 
@@ -520,6 +529,37 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             ("WNBA_WINNER",  "wnba_winner",   10.0),
         ],
         boundary_summary="R1 → Semis → WNBA Finals → Champion",
+    ),
+    # Phase L: NCAA Women's Basketball regular season. ~32-game D1 season;
+    # 64 teams make the NCAA Tournament. Threshold bands cover the
+    # selection / seeding lines: 20 wins is the rough at-large bubble
+    # for power-conf teams, 25+ is a comfortable at-large lock, 28+
+    # tends to anchor a top-4 seed line, 32+ contends for #1 overall.
+    "NCAAW_BBALL": LeagueContext(
+        code="NCAAW_BBALL", matchdays_total=32, format="win_count",
+        thresholds=[
+            (20, "tournament_bubble",   1.5),
+            (25, "at_large_lock",       2.5),
+            (28, "top_4_seed",          4.0),
+            (32, "no_1_seed",           5.0),
+        ],
+        boundary_summary="20+ wins → bubble · 25+ → at-large lock · 28+ → top-4 seed · 32+ → #1 seed",
+    ),
+    # Phase L: NCAA Women's March Madness. 6 rounds, single-game
+    # elimination at each step. Weights ramp steeper than the pro
+    # bracket leagues because single-game elim concentrates leverage
+    # — every game IS the series for the round.
+    "NCAAW_BBALL_PO": LeagueContext(
+        code="NCAAW_BBALL_PO", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("R32",        "round_of_32",    1.0),
+            ("S16",        "sweet_16",       2.0),
+            ("E8",         "elite_8",        3.5),
+            ("F4",         "final_four",     5.0),
+            ("NCG",        "national_final", 7.0),
+            ("NCG_WINNER", "national_champ", 10.0),
+        ],
+        boundary_summary="R64 → R32 → Sweet 16 → Elite 8 → Final Four → NCG → Champion",
     ),
 }
 

@@ -4,6 +4,9 @@ from .mlb import MlbPlayoffSource, MlbRegularSource
 from .mls import MlsSource
 from .nba import NbaPlayoffSource, NbaRegularSource
 from .wnba import WnbaPlayoffSource, WnbaRegularSource
+from .ncaaw_basketball import (
+    NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
+)
 from .ncaa_baseball import NcaaBaseballSource
 from .ncaa_soccer import NcaaSoccerSource
 from .ncaaf import NcaafSource
@@ -21,6 +24,7 @@ __all__ = [
     "MlsSource",
     "NbaRegularSource", "NbaPlayoffSource",
     "WnbaRegularSource", "WnbaPlayoffSource",
+    "NcaawBasketballRegularSource", "NcaawBasketballPlayoffSource",
     "NcaaBaseballSource", "NcaaSoccerSource",
     "NcaafSource", "NcaamSource",
     "NhlRegularSource", "NhlPlayoffSource",

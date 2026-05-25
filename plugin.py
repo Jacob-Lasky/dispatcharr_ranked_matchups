@@ -296,6 +296,7 @@ def _build_sources(settings: Dict[str, Any]):
         MlsSource,
         NbaPlayoffSource, NbaRegularSource,
         WnbaPlayoffSource, WnbaRegularSource,
+        NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
         NcaaBaseballSource, NcaaSoccerSource,
         NcaafSource, NcaamSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
@@ -424,6 +425,19 @@ def _build_sources(settings: Dict[str, Any]):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[wnba] could not seed playoff strengths: %s", exc)
         sources.append(wnba_po)
+
+    # NCAA Women's Basketball + March Madness — no API key required.
+    # Single-game-elim bracket (SERIES_LENGTH=1 per stage). Pair-and-
+    # seed strength sharing identical to NHL/MLB/NBA/WNBA.
+    if settings.get("enable_ncaaw_basketball", False):
+        ncaaw_reg = NcaawBasketballRegularSource()
+        sources.append(ncaaw_reg)
+        ncaaw_po = NcaawBasketballPlayoffSource()
+        try:
+            ncaaw_po.set_regular_season_strengths(ncaaw_reg.estimate_strengths())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ncaaw_basketball] could not seed playoff strengths: %s", exc)
+        sources.append(ncaaw_po)
 
     # Phase M: NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
     # poll, no key needed. Win-count thresholds (30 / 35 / 40 / 45 / 50) drive

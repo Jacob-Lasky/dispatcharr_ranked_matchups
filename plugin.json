@@ -126,6 +126,13 @@
       "help_text": "Regular season uses win count (20+ bubble, 25+ playoff-secured, 30+ top-seed pace, 35+ elite) over the 40-game season. Playoffs have mixed series lengths: R1 best-of-3, Semifinals best-of-5, Finals best-of-5 in 2024 / best-of-7 in 2025+. No API key required — uses ESPN's unofficial site.api.espn.com."
     },
     {
+      "id": "enable_ncaaw_basketball",
+      "type": "boolean",
+      "label": "NCAA Women's Basketball (D1 + March Madness)",
+      "default": false,
+      "help_text": "D1 regular season uses win count (20+ tournament bubble, 25+ at-large lock, 28+ top-4 seed, 32+ #1 seed contention). March Madness bracket is single-game elimination: R64 → R32 → Sweet 16 → Elite 8 → Final Four → National Championship → Champion. ESPN unofficial API + AP Top 25. No API key required."
+    },
+    {
       "id": "enable_ncaa_baseball",
       "type": "boolean",
       "label": "NCAA Baseball (D1)",
