@@ -14,8 +14,16 @@ from .ncaaw_basketball import (
     NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
 )
 from .nfl import NflPlayoffSource, NflRegularSource
-from .ncaa_baseball import NcaaBaseballPlayoffSource, NcaaBaseballRegularSource
-from .ncaa_softball import NcaaSoftballPlayoffSource, NcaaSoftballRegularSource
+from .ncaa_baseball import (
+    NcaaBaseballPlayoffBracketSource,
+    NcaaBaseballPlayoffSource,
+    NcaaBaseballRegularSource,
+)
+from .ncaa_softball import (
+    NcaaSoftballPlayoffBracketSource,
+    NcaaSoftballPlayoffSource,
+    NcaaSoftballRegularSource,
+)
 from .ncaa_soccer import NcaaSoccerSource
 from .ncaaf import NcaafSource
 from .ncaam import NcaamSource
@@ -35,8 +43,8 @@ __all__ = [
     "NbaRegularSource", "NbaPlayoffSource",
     "WnbaRegularSource", "WnbaPlayoffSource",
     "NcaawBasketballRegularSource", "NcaawBasketballPlayoffSource",
-    "NcaaBaseballRegularSource", "NcaaBaseballPlayoffSource",
-    "NcaaSoftballRegularSource", "NcaaSoftballPlayoffSource",
+    "NcaaBaseballRegularSource", "NcaaBaseballPlayoffSource", "NcaaBaseballPlayoffBracketSource",
+    "NcaaSoftballRegularSource", "NcaaSoftballPlayoffSource", "NcaaSoftballPlayoffBracketSource",
     "NcaaSoccerSource",
     "NcaafSource", "NcaamSource",
     "NhlRegularSource", "NhlPlayoffSource",

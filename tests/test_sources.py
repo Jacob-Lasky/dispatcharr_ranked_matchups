@@ -2609,6 +2609,492 @@ class TestNcaaBaseballPostseasonFilter:
 
 
 # =====================================================================
+# #43 Phase 2b: NcaaBaseballPlayoffBracketSource
+# =====================================================================
+
+
+class TestBaseballBracketHeadlineParser:
+    """Verbatim ESPN headline patterns for the Regional + 8-team MCWS
+    bracket stages. The parser MUST stay aligned with ESPN's exact text;
+    pin every observed pattern as a regression test."""
+
+    def test_regional_game_n(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        stage, key = _parse_baseball_bracket_headline(
+            "NCAA Baseball Championship - Auburn Regional - Game 1"
+        )
+        assert stage == "BSB_REG"
+        assert key == "Auburn Regional"
+
+    def test_regional_elimination_game(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        stage, key = _parse_baseball_bracket_headline(
+            "NCAA Baseball Championship - Knoxville Regional - Elimination Game"
+        )
+        assert stage == "BSB_REG"
+        assert key == "Knoxville Regional"
+
+    def test_regional_advances_to_super_regional(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        # ESPN flags the Regional final with "advances to Super Regional".
+        stage, key = _parse_baseball_bracket_headline(
+            "NCAA Baseball Championship - Auburn Regional - Auburn advances to Super Regional"
+        )
+        assert stage == "BSB_REG"
+        assert key == "Auburn Regional"
+
+    def test_mcws_double_elimination_round(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        stage, key = _parse_baseball_bracket_headline(
+            "Men's College World Series - Double Elimination Round"
+        )
+        assert stage == "MCWS"
+        # Partial key — sub-bracket resolution happens chronologically.
+        assert key is None
+
+    def test_mcws_elimination_game(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        stage, _key = _parse_baseball_bracket_headline(
+            "Men's College World Series - Elimination Game"
+        )
+        assert stage == "MCWS"
+
+    def test_mcws_advances_to_championship_series(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        # Bracket-final terminal signal.
+        stage, _key = _parse_baseball_bracket_headline(
+            "Coastal Carolina advances to Championship Series"
+        )
+        assert stage == "MCWS"
+
+    def test_super_regional_headline_belongs_to_sibling_source(self):
+        # SUPER_REGIONAL headlines are owned by NcaaBaseballPlayoffSource,
+        # NOT the bracket source — the bracket parser must return None.
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        stage, key = _parse_baseball_bracket_headline(
+            "NCAA Baseball Championship - Auburn Super Regional - Game 1"
+        )
+        assert stage is None
+        assert key is None
+
+    def test_finals_headline_belongs_to_sibling_source(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        stage, key = _parse_baseball_bracket_headline(
+            "Men's College World Series Championship Final - Game 1"
+        )
+        assert stage is None
+        assert key is None
+
+    def test_empty_and_unrelated_headlines_return_none(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        assert _parse_baseball_bracket_headline("") == (None, None)
+        assert _parse_baseball_bracket_headline("regular-season game") == (None, None)
+
+
+class TestMcwsSubBracketClassification:
+    """The 8-team MCWS bracket partitions into two 4-team sub-brackets
+    based on Day-1-vs-Day-2 opening pairings. Verified against the
+    2025 MCWS schedule documented in #43's issue comment."""
+
+    @staticmethod
+    def _g(home, away, ts):
+        return {"home": home, "away": away, "start_time": ts}
+
+    def test_2025_mcws_day_partition(self):
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _classify_mcws_sub_brackets,
+        )
+        # 2025 MCWS schedule from issue #43 comment:
+        # Day 1 (06-13): CC vs Arizona, Oregon State vs Louisville → sub1
+        # Day 2 (06-14): UCLA vs Murray State, Arkansas vs LSU       → sub2
+        # Day 3+ partitions confirmed against actual 2025 games.
+        games = [
+            self._g("Coastal Carolina", "Arizona",
+                    datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc)),
+            self._g("Oregon State", "Louisville",
+                    datetime(2025, 6, 13, 23, 0, tzinfo=timezone.utc)),
+            self._g("UCLA", "Murray State",
+                    datetime(2025, 6, 14, 18, 0, tzinfo=timezone.utc)),
+            self._g("Arkansas", "LSU",
+                    datetime(2025, 6, 14, 23, 0, tzinfo=timezone.utc)),
+        ]
+        out = _classify_mcws_sub_brackets(games)
+        # Sub 1 (Day 1 teams):
+        assert out["Coastal Carolina"] == "MCWS_sub1"
+        assert out["Arizona"] == "MCWS_sub1"
+        assert out["Oregon State"] == "MCWS_sub1"
+        assert out["Louisville"] == "MCWS_sub1"
+        # Sub 2 (Day 2 teams):
+        assert out["UCLA"] == "MCWS_sub2"
+        assert out["Murray State"] == "MCWS_sub2"
+        assert out["Arkansas"] == "MCWS_sub2"
+        assert out["LSU"] == "MCWS_sub2"
+
+    def test_day3_game_inherits_from_opening_day(self):
+        # Day 3 game (Oregon State vs Coastal Carolina) — both teams
+        # already classified to sub1 from Day 1, so the Day 3 game
+        # MUST stay sub1.
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _classify_mcws_sub_brackets,
+        )
+        games = [
+            # Day 1 establishes sub1
+            self._g("Coastal Carolina", "Arizona",
+                    datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc)),
+            self._g("Oregon State", "Louisville",
+                    datetime(2025, 6, 13, 23, 0, tzinfo=timezone.utc)),
+            # Day 2 establishes sub2
+            self._g("UCLA", "Arkansas",
+                    datetime(2025, 6, 14, 18, 0, tzinfo=timezone.utc)),
+            # Day 3 rematch — both teams classified already.
+            self._g("Oregon State", "Coastal Carolina",
+                    datetime(2025, 6, 15, 23, 0, tzinfo=timezone.utc)),
+        ]
+        out = _classify_mcws_sub_brackets(games)
+        assert out["Oregon State"] == "MCWS_sub1"
+        assert out["Coastal Carolina"] == "MCWS_sub1"
+
+    def test_empty_input_returns_empty_dict(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _classify_mcws_sub_brackets,
+        )
+        assert _classify_mcws_sub_brackets([]) == {}
+
+    def test_missing_start_time_skipped(self):
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _classify_mcws_sub_brackets,
+        )
+        games = [
+            self._g("UCLA", "Arkansas", None),  # skipped
+            self._g("Oregon State", "Louisville",
+                    datetime(2025, 6, 13, 23, 0, tzinfo=timezone.utc)),
+        ]
+        out = _classify_mcws_sub_brackets(games)
+        assert "UCLA" not in out
+        assert out["Oregon State"] == "MCWS_sub1"
+
+    def test_day_partition_handles_utc_midnight_cross(self):
+        # Real MCWS schedule: Day 1 evening game in Omaha (CT) crosses
+        # UTC midnight. Pin the venue-local partition logic.
+        # Day 1 in Omaha = 2025-06-13 CT:
+        #   - 1 PM CT  = 2025-06-13 18:00 UTC
+        #   - 7 PM CT  = 2025-06-14 00:00 UTC   ← different UTC date
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _classify_mcws_sub_brackets,
+        )
+        games = [
+            self._g("Coastal Carolina", "Arizona",
+                    datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc)),
+            # Second Day-1 game crosses to next UTC date.
+            self._g("Oregon State", "Louisville",
+                    datetime(2025, 6, 14, 0, 0, tzinfo=timezone.utc)),
+            # Day 2 first game.
+            self._g("UCLA", "Murray State",
+                    datetime(2025, 6, 14, 18, 0, tzinfo=timezone.utc)),
+            # Day 2 second game crosses.
+            self._g("Arkansas", "LSU",
+                    datetime(2025, 6, 15, 0, 0, tzinfo=timezone.utc)),
+        ]
+        out = _classify_mcws_sub_brackets(games)
+        # All Day-1-in-CT teams in sub1.
+        for team in ("Coastal Carolina", "Arizona", "Oregon State", "Louisville"):
+            assert out[team] == "MCWS_sub1", f"{team} = {out.get(team)}"
+        # All Day-2-in-CT teams in sub2.
+        for team in ("UCLA", "Murray State", "Arkansas", "LSU"):
+            assert out[team] == "MCWS_sub2", f"{team} = {out.get(team)}"
+
+    def test_chronological_order_independent_of_input_order(self):
+        # Pass games out of chronological order; the classifier sorts
+        # by start_time internally.
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _classify_mcws_sub_brackets,
+        )
+        games = [
+            # Day 2 first in the list
+            self._g("UCLA", "Arkansas",
+                    datetime(2025, 6, 14, 18, 0, tzinfo=timezone.utc)),
+            # Day 1 second
+            self._g("Coastal Carolina", "Arizona",
+                    datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc)),
+        ]
+        out = _classify_mcws_sub_brackets(games)
+        assert out["Coastal Carolina"] == "MCWS_sub1"
+        assert out["UCLA"] == "MCWS_sub2"
+
+
+class TestNcaaBaseballPlayoffBracketSource:
+    """End-to-end source class for BSB_REG + MCWS. Uses a patched
+    `_fetch_bracket_games` so no HTTP touches the test path."""
+
+    @staticmethod
+    def _src_with_games(games):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            NcaaBaseballPlayoffBracketSource,
+        )
+        src = NcaaBaseballPlayoffBracketSource()
+        src._bracket_games_cache = games
+        return src
+
+    def test_ko_stages_are_regional_and_mcws(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            NcaaBaseballPlayoffBracketSource,
+        )
+        assert NcaaBaseballPlayoffBracketSource.KO_STAGES == ("BSB_REG", "MCWS")
+
+    def test_league_context_code(self):
+        src = self._src_with_games([])
+        assert src._league_context_code() == "MCWS_PO"
+
+    def test_winner_advance_mcws_to_finals(self):
+        # MCWS sub-bracket winner advances to MCWS_F (depth 3, handled
+        # by sibling source). BSB_REG winner falls through to default.
+        src = self._src_with_games([])
+        assert src._winner_advance_label("MCWS") == "MCWS_F"
+        assert src._winner_advance_label("BSB_REG") is None
+
+    def test_supports_importance(self):
+        src = self._src_with_games([])
+        assert src.supports_importance is True
+
+    def test_strength_seeding_roundtrip(self):
+        src = self._src_with_games([])
+        s = {"LSU": {"pf_per_game": 7.5, "pa_per_game": 4.2}}
+        src.set_regular_season_strengths(s)
+        assert src.estimate_strengths() == s
+
+    def test_strength_default_for_unseeded_team(self):
+        src = self._src_with_games([])
+        # Default falls back to _DEFAULT_RUNS_FOR / AGAINST (6.0 each).
+        out = src._strength_for({}, "Unknown")
+        assert out == {"pf_per_game": 6.0, "pa_per_game": 6.0}
+
+
+class TestNcaaBaseballPlayoffBracketSourceFiltering:
+    """Make sure the bracket source DOES NOT step on the sibling
+    NcaaBaseballPlayoffSource's stages — best-of-3 BSB_SR + MCWS_F
+    headlines must be ignored by the bracket parser."""
+
+    def test_super_regional_excluded(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        for headline in [
+            "NCAA Baseball Championship - Knoxville Super Regional - Game 1",
+            "NCAA Baseball Championship - Auburn Super Regional - Game 3 (if necessary)",
+        ]:
+            stage, key = _parse_baseball_bracket_headline(headline)
+            assert (stage, key) == (None, None), f"bracket parser claimed {headline!r}"
+
+    def test_finals_excluded(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_bracket_headline,
+        )
+        for headline in [
+            "Men's College World Series Championship Final - Game 1",
+            "Men's College World Series Championship Final - Game 3 (if necessary)",
+        ]:
+            stage, key = _parse_baseball_bracket_headline(headline)
+            assert (stage, key) == (None, None), f"bracket parser claimed {headline!r}"
+
+
+# =====================================================================
+# #43 Phase 2b: NcaaSoftballPlayoffBracketSource
+# =====================================================================
+
+
+class TestSoftballBracketHeadlineParser:
+    def test_regional_game_n(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            _parse_softball_bracket_headline,
+        )
+        stage, key = _parse_softball_bracket_headline(
+            "NCAA Softball Championship - Lincoln Regional - Game 2"
+        )
+        assert stage == "SB_REG"
+        assert key == "Lincoln Regional"
+
+    def test_regional_elimination_game(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            _parse_softball_bracket_headline,
+        )
+        stage, key = _parse_softball_bracket_headline(
+            "NCAA Softball Championship - Tallahassee Regional - Elimination Game"
+        )
+        assert stage == "SB_REG"
+        assert key == "Tallahassee Regional"
+
+    def test_wcws_double_elimination_round(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            _parse_softball_bracket_headline,
+        )
+        stage, key = _parse_softball_bracket_headline(
+            "Women's College World Series - Double Elimination Round"
+        )
+        assert stage == "WCWS"
+        assert key is None
+
+    def test_wcws_elimination_game_if_necessary(self):
+        # Verbatim text from 2025 WCWS — "If Necessary" suffix is part
+        # of the elimination-game pattern.
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            _parse_softball_bracket_headline,
+        )
+        stage, _key = _parse_softball_bracket_headline(
+            "Women's College World Series - Elimination Game If Necessary"
+        )
+        assert stage == "WCWS"
+
+    def test_super_regional_belongs_to_sibling_source(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            _parse_softball_bracket_headline,
+        )
+        stage, key = _parse_softball_bracket_headline(
+            "NCAA Softball Championship - Lincoln Super Regional - Game 1"
+        )
+        assert (stage, key) == (None, None)
+
+    def test_wcws_finals_plural_belongs_to_sibling_source(self):
+        # Softball uses "Finals" plural (vs baseball's singular "Final");
+        # the parser must NOT swallow it.
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            _parse_softball_bracket_headline,
+        )
+        stage, key = _parse_softball_bracket_headline(
+            "Women's College World Series Championship Finals - Game 1"
+        )
+        assert (stage, key) == (None, None)
+
+
+class TestWcwsSubBracketClassification:
+    """Same day-partition heuristic as MCWS — pinned by a representative
+    fixture using verbatim 2026 WCWS opening-day pairings."""
+
+    @staticmethod
+    def _g(home, away, ts):
+        return {"home": home, "away": away, "start_time": ts}
+
+    def test_empty_input_returns_empty_dict(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            _classify_wcws_sub_brackets,
+        )
+        assert _classify_wcws_sub_brackets([]) == {}
+
+    def test_chronological_order_independent_of_input_order(self):
+        # Out-of-order input → classifier sorts by start_time internally.
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            _classify_wcws_sub_brackets,
+        )
+        games = [
+            # Day 2 first in the list
+            self._g("UCLA", "Tennessee",
+                    datetime(2026, 5, 30, 22, 0, tzinfo=timezone.utc)),
+            # Day 1 second
+            self._g("Texas Tech", "Oklahoma",
+                    datetime(2026, 5, 29, 22, 0, tzinfo=timezone.utc)),
+        ]
+        out = _classify_wcws_sub_brackets(games)
+        assert out["Texas Tech"] == "WCWS_sub1"
+        assert out["UCLA"] == "WCWS_sub2"
+
+    def test_wcws_day_partition_across_utc_midnight(self):
+        # Real WCWS schedule: Day 1 evening games in OKC (CT) routinely
+        # cross UTC midnight. Pin the venue-local partition logic with
+        # a fixture that exercises this exact case.
+        # Day 1 in OKC = 2026-05-29 CT:
+        #   - 5 PM CT = 2026-05-29 22:00 UTC
+        #   - 7:30 PM CT = 2026-05-30 00:30 UTC   ← different UTC date!
+        # Day 2 in OKC = 2026-05-30 CT:
+        #   - 5 PM CT = 2026-05-30 22:00 UTC
+        #   - 7:30 PM CT = 2026-05-31 00:30 UTC
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            _classify_wcws_sub_brackets,
+        )
+        games = [
+            # Day 1 (May 29 CT) — first game stays in May 29 UTC.
+            self._g("Texas Tech", "Oklahoma",
+                    datetime(2026, 5, 29, 22, 0, tzinfo=timezone.utc)),
+            # Day 1 second game crosses into May 30 UTC.
+            self._g("UCLA", "Tennessee",
+                    datetime(2026, 5, 30, 0, 30, tzinfo=timezone.utc)),
+            # Day 2 (May 30 CT) first game.
+            self._g("Florida", "LSU",
+                    datetime(2026, 5, 30, 22, 0, tzinfo=timezone.utc)),
+            # Day 2 second game crosses into May 31 UTC.
+            self._g("Oregon", "Arkansas",
+                    datetime(2026, 5, 31, 0, 30, tzinfo=timezone.utc)),
+        ]
+        out = _classify_wcws_sub_brackets(games)
+        # All 4 Day-1-in-CT teams must land in sub1 even though their
+        # game times span 2 different UTC dates.
+        assert out["Texas Tech"] == "WCWS_sub1"
+        assert out["Oklahoma"] == "WCWS_sub1"
+        assert out["UCLA"] == "WCWS_sub1"
+        assert out["Tennessee"] == "WCWS_sub1"
+        # Day 2 teams in sub2.
+        assert out["Florida"] == "WCWS_sub2"
+        assert out["LSU"] == "WCWS_sub2"
+        assert out["Oregon"] == "WCWS_sub2"
+        assert out["Arkansas"] == "WCWS_sub2"
+
+
+class TestNcaaSoftballPlayoffBracketSource:
+    @staticmethod
+    def _src_with_games(games):
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            NcaaSoftballPlayoffBracketSource,
+        )
+        src = NcaaSoftballPlayoffBracketSource()
+        src._bracket_games_cache = games
+        return src
+
+    def test_ko_stages_are_regional_and_wcws(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            NcaaSoftballPlayoffBracketSource,
+        )
+        assert NcaaSoftballPlayoffBracketSource.KO_STAGES == ("SB_REG", "WCWS")
+
+    def test_league_context_code(self):
+        src = self._src_with_games([])
+        assert src._league_context_code() == "WCWS_PO"
+
+    def test_winner_advance_wcws_to_finals(self):
+        src = self._src_with_games([])
+        assert src._winner_advance_label("WCWS") == "WCWS_F"
+        assert src._winner_advance_label("SB_REG") is None
+
+    def test_strength_default_uses_softball_5_runs(self):
+        # Softball default is 5.0 runs (lower-scoring than baseball's 6.0).
+        src = self._src_with_games([])
+        out = src._strength_for({}, "Unknown")
+        assert out == {"pf_per_game": 5.0, "pa_per_game": 5.0}
+
+
+# =====================================================================
 # Phase O: NCAA Soccer (M's + W's parametrized on gender)
 # =====================================================================
 
