@@ -91,6 +91,27 @@
       "help_text": "UEFA's quadrennial national-team tournament. Pure knockout in V1 — group-stage importance not yet modeled. R16 → QF → SF → Final → Champion. Requires Football-Data.org key."
     },
     {
+      "id": "enable_eredivisie",
+      "type": "boolean",
+      "label": "Eredivisie (Netherlands, top flight)",
+      "default": false,
+      "help_text": "18 teams, 34 matchdays. Top 3 → UCL/qualifying, 4-5 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key."
+    },
+    {
+      "id": "enable_primeira_liga",
+      "type": "boolean",
+      "label": "Primeira Liga (Portugal, top flight)",
+      "default": false,
+      "help_text": "18 teams, 34 matchdays. Top 3 → UCL/qualifying, 4-5 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key."
+    },
+    {
+      "id": "enable_brazilian_serie_a",
+      "type": "boolean",
+      "label": "Brazilian Série A",
+      "default": false,
+      "help_text": "Top flight of Brazilian football. 20 teams, 38 matchdays. Top 6 → Copa Libertadores, 7-12 → Sudamericana, bottom 4 → relegation. Requires Football-Data.org key."
+    },
+    {
       "id": "enable_nfl",
       "type": "boolean",
       "label": "NFL (regular season + playoffs)",
@@ -124,6 +145,20 @@
       "label": "MLS (regular season + Cup playoffs)",
       "default": false,
       "help_text": "MLS games surface with favorite + closeness scoring only in V1 — no standings-based importance yet (conference structure and the mixed-format MLS Cup bracket are follow-ups). Uses ESPN's unofficial site.api.espn.com for the schedule. The Odds API key enables closeness via the soccer_usa_mls market; without it, MLS games appear but with no closeness signal."
+    },
+    {
+      "id": "enable_nwsl",
+      "type": "boolean",
+      "label": "NWSL (National Women's Soccer League)",
+      "default": false,
+      "help_text": "NWSL games surface with favorite + closeness scoring only in V1 (same scope as MLS — no standings importance or playoff bracket yet). ESPN unofficial API + Odds API (soccer_usa_nwsl). No ESPN key required."
+    },
+    {
+      "id": "enable_liga_mx",
+      "type": "boolean",
+      "label": "Liga MX (Mexican top flight)",
+      "default": false,
+      "help_text": "Mexican Apertura + Clausura + Liguilla playoff. Schedule + closeness scoring only in V1 (same minimal scope as MLS / NWSL). ESPN unofficial API + Odds API (soccer_mexico_ligamx). Relevant for US viewers with Univision / Telemundo channels in their EPG."
     },
     {
       "id": "enable_wnba",

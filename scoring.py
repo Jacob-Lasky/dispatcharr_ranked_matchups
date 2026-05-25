@@ -299,6 +299,48 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="Top 3 → UCL · 4-5 → Europa · bottom 3 → relegation",
     ),
+    # Phase Q: Eredivisie (Netherlands). 18 teams, 34 matchdays. Top 1
+    # direct UCL group stage; 2-3 UCL qualifying; 4-5 Europa/Conference
+    # qualifying; bottom 1 direct relegation, 16-17 relegation playoff
+    # (we use cutoff=15 to fire the relegation band for 16/17/18 like
+    # Bundesliga).
+    "DED": LeagueContext(
+        code="DED", matchdays_total=34,
+        thresholds=[
+            (1,  "title",             5.0),
+            (3,  "UCL",               4.0),
+            (5,  "Europa/Conference", 2.0),
+            (15, "relegation",        5.0),
+        ],
+        boundary_summary="Top 3 → UCL · 4-5 → Europa · bottom 3 → relegation",
+    ),
+    # Phase Q: Primeira Liga (Portugal). 18 teams, 34 matchdays. Same
+    # slot semantics as Eredivisie — 2 direct UCL spots, 3rd UCL
+    # qualifying, 4-5 Europa, bottom 3 relegation.
+    "PPL": LeagueContext(
+        code="PPL", matchdays_total=34,
+        thresholds=[
+            (1,  "title",             5.0),
+            (3,  "UCL",               4.0),
+            (5,  "Europa/Conference", 2.0),
+            (15, "relegation",        5.0),
+        ],
+        boundary_summary="Top 3 → UCL · 4-5 → Europa · bottom 3 → relegation",
+    ),
+    # Phase Q: Brazilian Série A. 20 teams, 38 matchdays. Different
+    # slot semantics from Euro leagues — continental qualifications
+    # are for Copa Libertadores (top 6 in modern era) and Copa
+    # Sudamericana (7-12). No UCL line. Bottom 4 relegated to Série B.
+    "BSA": LeagueContext(
+        code="BSA", matchdays_total=38,
+        thresholds=[
+            (1,  "title",             5.0),
+            (6,  "libertadores",      4.0),
+            (12, "sudamericana",      2.0),
+            (16, "relegation",        5.0),
+        ],
+        boundary_summary="Top 6 → Libertadores · 7-12 → Sudamericana · bottom 4 → relegation",
+    ),
     # Phase I: international tournaments.
     #
     # World Cup 2026 onward uses the 48-team format: 12 groups of 4, top

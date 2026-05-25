@@ -4314,3 +4314,101 @@ class TestNflPlayoffSource:
         depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
         for i in range(len(depths) - 1):
             assert depths[i] < depths[i + 1]
+
+
+# =====================================================================
+# Phase Q: NWSL + Liga MX (subclasses of MlsSource)
+# =====================================================================
+
+class TestNwslSource:
+    """NwslSource subclasses MlsSource with NWSL endpoint + Odds API
+    key. The shared fetch/closeness machinery is exercised by the
+    MlsSource tests; these tests pin the per-league config."""
+
+    def test_identity(self):
+        from dispatcharr_ranked_matchups.sources.nwsl import NwslSource
+        src = NwslSource(odds_api_key="")
+        assert src.sport_prefix == "NWSL"
+        assert src.sport_label == "NWSL"
+
+    def test_espn_slug(self):
+        from dispatcharr_ranked_matchups.sources.nwsl import NwslSource
+        src = NwslSource()
+        assert src._ESPN_SLUG == "soccer/usa.nwsl"
+        assert src._espn_base().endswith("/soccer/usa.nwsl")
+
+    def test_odds_sport_key(self):
+        from dispatcharr_ranked_matchups.sources.nwsl import NwslSource
+        assert NwslSource._ODDS_SPORT_KEY == "soccer_usa_nwsl"
+
+    def test_fd_code_distinct_from_mls(self):
+        from dispatcharr_ranked_matchups.sources.nwsl import NwslSource
+        from dispatcharr_ranked_matchups.sources.mls import MlsSource
+        # NWSL must carry its own fd_competition_code so scoring
+        # doesn't mis-route NWSL games into MLS.
+        assert NwslSource._FD_CODE != MlsSource._FD_CODE
+        assert NwslSource._FD_CODE == "NWSL"
+
+    def test_no_importance_in_v1(self):
+        from dispatcharr_ranked_matchups.sources.nwsl import NwslSource
+        assert NwslSource().supports_importance is False
+
+
+class TestLigaMxSource:
+    """LigaMxSource: same shape as NwslSource. Liga MX runs two
+    seasons per calendar year (Apertura / Clausura) plus a Liguilla
+    playoff. The `extra.season_slug` field on emitted GameRows carries
+    that distinction."""
+
+    def test_identity(self):
+        from dispatcharr_ranked_matchups.sources.liga_mx import LigaMxSource
+        src = LigaMxSource(odds_api_key="")
+        assert src.sport_prefix == "LigaMX"
+        assert src.sport_label == "Liga MX"
+
+    def test_espn_slug(self):
+        from dispatcharr_ranked_matchups.sources.liga_mx import LigaMxSource
+        src = LigaMxSource()
+        assert src._ESPN_SLUG == "soccer/mex.1"
+        assert src._espn_base().endswith("/soccer/mex.1")
+
+    def test_odds_sport_key(self):
+        from dispatcharr_ranked_matchups.sources.liga_mx import LigaMxSource
+        assert LigaMxSource._ODDS_SPORT_KEY == "soccer_mexico_ligamx"
+
+    def test_fd_code_distinct(self):
+        from dispatcharr_ranked_matchups.sources.liga_mx import LigaMxSource
+        from dispatcharr_ranked_matchups.sources.mls import MlsSource
+        from dispatcharr_ranked_matchups.sources.nwsl import NwslSource
+        assert LigaMxSource._FD_CODE == "LigaMX"
+        codes = {MlsSource._FD_CODE, NwslSource._FD_CODE, LigaMxSource._FD_CODE}
+        assert len(codes) == 3
+
+    def test_season_slug_carries_through(self, monkeypatch):
+        """Liga MX has Apertura/Clausura/Liguilla seasons.
+        `extra.season_slug` on emitted GameRows must carry ESPN's
+        slug so future routing can use it."""
+        import dispatcharr_ranked_matchups.sources.mls as mls_mod
+        from dispatcharr_ranked_matchups.sources.liga_mx import LigaMxSource
+
+        espn_response = {
+            "events": [{
+                "id": "401900001",
+                "date": "2026-02-15T03:00Z",
+                "season": {"year": 2026, "type": 2, "slug": "torneo-clausura"},
+                "competitions": [{
+                    "competitors": [
+                        {"homeAway": "home",
+                         "team": {"displayName": "Club America"}},
+                        {"homeAway": "away",
+                         "team": {"displayName": "Chivas Guadalajara"}},
+                    ],
+                }],
+            }],
+        }
+        monkeypatch.setattr(mls_mod, "_http_get", lambda *a, **kw: espn_response)
+        src = LigaMxSource(odds_api_key="")
+        games = src.fetch_upcoming(days_ahead=0)
+        assert len(games) == 1
+        assert games[0].extra.get("season_slug") == "torneo-clausura"
+        assert games[0].extra.get("fd_competition_code") == "LigaMX"
