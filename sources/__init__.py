@@ -8,6 +8,7 @@ from .ncaaw_basketball import (
     NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
 )
 from .ncaa_baseball import NcaaBaseballSource
+from .ncaa_softball import NcaaSoftballSource
 from .ncaa_soccer import NcaaSoccerSource
 from .ncaaf import NcaafSource
 from .ncaam import NcaamSource
@@ -25,7 +26,7 @@ __all__ = [
     "NbaRegularSource", "NbaPlayoffSource",
     "WnbaRegularSource", "WnbaPlayoffSource",
     "NcaawBasketballRegularSource", "NcaawBasketballPlayoffSource",
-    "NcaaBaseballSource", "NcaaSoccerSource",
+    "NcaaBaseballSource", "NcaaSoftballSource", "NcaaSoccerSource",
     "NcaafSource", "NcaamSource",
     "NhlRegularSource", "NhlPlayoffSource",
     "SoccerSource", "KnockoutSoccerSource", "SOCCER_COMPETITIONS",

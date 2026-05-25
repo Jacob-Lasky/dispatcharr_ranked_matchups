@@ -3974,3 +3974,82 @@ class TestNcaawBasketballPlayoffSource:
         depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
         for i in range(len(depths) - 1):
             assert depths[i] < depths[i + 1]
+
+
+# =====================================================================
+# Phase N: NCAA Softball
+# =====================================================================
+
+class TestNcaaSoftballSource:
+    """V1: regular-season importance only. WCWS bracket (double-elim)
+    is filed as a follow-up — same scope deferral as NCAA Baseball's CWS."""
+
+    @staticmethod
+    def _make():
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import NcaaSoftballSource
+        return NcaaSoftballSource(season_year=2025)
+
+    def test_identity(self):
+        src = self._make()
+        assert src.sport_prefix == "NCAASBL"
+        assert "Softball" in src.sport_label
+        assert src.league_context_code == "SBL"
+        assert src._count_field == "wins"
+
+    def test_supports_importance(self):
+        assert self._make().supports_importance is True
+
+    def test_outcome_labels(self):
+        labels = self._make().outcome_labels
+        assert "tournament_bubble" in labels
+        assert "at_large_lock" in labels
+        assert "top_regional_seed" in labels
+        assert "national_seed" in labels
+        assert "no_1_overall" in labels
+
+    def test_thresholds_monotonic(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS["SBL"]
+        cuts = [t[0] for t in ctx.thresholds]
+        for i in range(len(cuts) - 1):
+            assert cuts[i] < cuts[i + 1]
+
+    def test_record_result_credits_winner_a_win(self):
+        src = self._make()
+        teams = {
+            "Oklahoma": {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+            "Texas":    {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+        }
+        src._record_result_into_state(teams, "Oklahoma", "Texas", 6, 2)
+        assert teams["Oklahoma"]["wins"] == 1
+        assert teams["Texas"]["losses"] == 1
+        assert teams["Oklahoma"]["pf"] == 6
+        assert teams["Oklahoma"]["pa"] == 2
+
+    def test_terminal_outcomes_buckets_by_win_count(self):
+        src = self._make()
+        state = {
+            "_applied": frozenset(),
+            "_teams": {
+                "Cellar":   {"wins": 20, "losses": 30, "pf": 0, "pa": 0, "games_played": 50},
+                "Bubble":   {"wins": 32, "losses": 22, "pf": 0, "pa": 0, "games_played": 54},
+                "AtLarge":  {"wins": 38, "losses": 16, "pf": 0, "pa": 0, "games_played": 54},
+                "Regional": {"wins": 42, "losses": 12, "pf": 0, "pa": 0, "games_played": 54},
+                "National": {"wins": 47, "losses":  8, "pf": 0, "pa": 0, "games_played": 55},
+                "Overall1": {"wins": 52, "losses":  3, "pf": 0, "pa": 0, "games_played": 55},
+            },
+        }
+        outcomes = src.terminal_outcomes(state)
+        assert outcomes["Cellar"] == []
+        assert set(outcomes["Bubble"]) == {"tournament_bubble"}
+        assert set(outcomes["AtLarge"]) == {"tournament_bubble", "at_large_lock"}
+        assert set(outcomes["Regional"]) == {
+            "tournament_bubble", "at_large_lock", "top_regional_seed",
+        }
+        assert set(outcomes["National"]) == {
+            "tournament_bubble", "at_large_lock", "top_regional_seed", "national_seed",
+        }
+        assert set(outcomes["Overall1"]) == {
+            "tournament_bubble", "at_large_lock", "top_regional_seed",
+            "national_seed", "no_1_overall",
+        }
