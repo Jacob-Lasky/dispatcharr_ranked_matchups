@@ -61,10 +61,18 @@ CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
 # unchanged) and the LLM cache can be safely deleted to force regen without
 # losing scoring state.
 LLM_DESCRIPTIONS_CACHE_PATH = os.path.join(PLUGIN_DIR, "llm_descriptions_cache.json")
+# Sidecar cache for SportsDB matchup-thumbnail URLs (marker -> url). Persists
+# across runs so apply only HTTP-probes each marker once per _POSITIVE_TTL /
+# _NEGATIVE_TTL window. Safe to delete to force re-resolution.
+SPORTSDB_THUMB_CACHE_PATH = os.path.join(PLUGIN_DIR, "sportsdb_thumb_cache.json")
 CFBD_KEY_PATH = os.path.join(PLUGIN_DIR, "cfbd_api_key")
 FD_KEY_PATH = os.path.join(PLUGIN_DIR, "football_data_api_key")
 ODDS_KEY_PATH = os.path.join(PLUGIN_DIR, "odds_api_key")
 ANTHROPIC_KEY_PATH = os.path.join(PLUGIN_DIR, "anthropic_api_key")
+SPORTSDB_KEY_PATH = os.path.join(PLUGIN_DIR, "sportsdb_api_key")
+# Free public test tier. Patreon keys unlock higher rate limits per
+# https://www.thesportsdb.com/api.php.
+SPORTSDB_DEFAULT_KEY = "3"
 
 # Window relative to game start in which the EPG should show the game.
 EPG_PRE_MIN = 30      # 30 min before game starts
@@ -1415,6 +1423,76 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         else:
             llm_cache = llm_descriptions.read_cache(LLM_DESCRIPTIONS_CACHE_PATH)
 
+    # Per-matchup logo: TheSportsDB pre-renders a 960x540 graphic for every
+    # event (both crests + league wordmark + region backdrop). Look up by
+    # team-name pair, download to /data/logos/ranked_matchups_<hash>.jpg, and
+    # point Channel.logo at it. On any miss (no event indexed, network failure,
+    # field-event source, dry_run) we fall through to the source channel's
+    # logo — preserving the v0 behavior for the long tail. Per-marker thumb
+    # URLs cached on disk to keep API hits to once per fixture per ~14 days.
+    from . import logos as matchup_logos
+    matchup_logos_enabled = bool(settings.get("enable_matchup_logos", True))
+    sportsdb_api_key = SPORTSDB_DEFAULT_KEY
+    thumb_cache: Optional[matchup_logos.ThumbCache] = None
+    matchup_logos_used = 0
+    matchup_logos_fallback = 0
+    if matchup_logos_enabled and not dry_run:
+        sportsdb_api_key = (
+            _resolve_key(settings, "sportsdb_api_key", SPORTSDB_KEY_PATH)
+            or SPORTSDB_DEFAULT_KEY
+        )
+        thumb_cache = matchup_logos.ThumbCache(SPORTSDB_THUMB_CACHE_PATH)
+
+    def _resolve_matchup_logo_id(
+        game: Dict[str, Any], marker: str, source,
+    ) -> Tuple[Optional[int], bool]:
+        """Returns (logo_id, hit_via_sportsdb).
+
+        Tries SportsDB lookup → local download → Logo.get_or_create. Falls back
+        to source.logo_id (current v0 behavior) on any miss; the bool tells the
+        caller which path was taken so it can update the per-apply counters
+        without recomputing the fallback id. Dry_run and feature-disabled
+        paths short-circuit to the fallback before any HTTP.
+        """
+        fallback_id = source.logo_id if source else None
+        if not matchup_logos_enabled or dry_run or thumb_cache is None:
+            return fallback_id, False
+        fresh, cached_url = thumb_cache.get(marker)
+        thumb_url = cached_url
+        if not fresh:
+            start_dt = parse_iso_utc(game.get("start_time_utc"))
+            if start_dt is None:
+                return fallback_id, False
+            thumb_url = matchup_logos.resolve_thumb_url(
+                home=game.get("home", ""),
+                away=game.get("away", ""),
+                expected_dt=start_dt,
+                sport_prefix=game.get("sport_prefix"),
+                api_key=sportsdb_api_key,
+            )
+            thumb_cache.put(marker, thumb_url)
+        if not thumb_url:
+            return fallback_id, False
+        # Ensure /data/logos/ exists (Dispatcharr creates it lazily on first
+        # upload via the UI; we might race a fresh install).
+        try:
+            os.makedirs(matchup_logos.LOGO_DIR, exist_ok=True)
+        except OSError as e:
+            logger.warning("[ranked_matchups] cannot mkdir %s: %s", matchup_logos.LOGO_DIR, e)
+            return fallback_id, False
+        local_path = os.path.join(
+            matchup_logos.LOGO_DIR, matchup_logos.marker_to_filename(marker),
+        )
+        if not os.path.exists(local_path):
+            if not matchup_logos.download_thumb(thumb_url, local_path):
+                return fallback_id, False
+        from apps.channels.models import Logo
+        logo_obj, _ = Logo.objects.get_or_create(
+            url=local_path,
+            defaults={"name": f"Top Matchup: {game.get('home','?')} vs {game.get('away','?')}"},
+        )
+        return logo_obj.id, True
+
     with transaction.atomic():
         # Phase 0: park existing virtual channels in a high temporary number
         # range so we can renumber based on cache order without colliding with
@@ -1540,14 +1618,20 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             source_streams = [sid for _, _, sid in stream_pool]
             existing = existing_virtuals.get(marker)
 
+            resolved_logo_id, used_sportsdb = _resolve_matchup_logo_id(g, marker, source)
+            if matchup_logos_enabled and not dry_run:
+                if used_sportsdb:
+                    matchup_logos_used += 1
+                else:
+                    matchup_logos_fallback += 1
+
             if existing:
                 changed = False
                 if existing.name != new_name:
                     existing.name = new_name
                     changed = True
-                source_logo_id = source.logo_id if source else None
-                if existing.logo_id != source_logo_id:
-                    existing.logo_id = source_logo_id
+                if existing.logo_id != resolved_logo_id:
+                    existing.logo_id = resolved_logo_id
                     changed = True
                 if existing.channel_number != target_chnum:
                     existing.channel_number = target_chnum
@@ -1584,7 +1668,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         channel_number=target_chnum,
                         channel_group=target_group,
                         tvg_id=marker,
-                        logo=(source.logo if source else None),
+                        logo_id=resolved_logo_id,
                         auto_created=False,
                     )
                     for order, sid in enumerate(source_streams):
@@ -1712,6 +1796,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         pruned = llm_descriptions.prune_cache(llm_cache, seen_markers)
         llm_descriptions.write_cache(LLM_DESCRIPTIONS_CACHE_PATH, pruned)
 
+    # Persist the SportsDB thumb-URL cache and sweep stale matchup logo files
+    # from /data/logos/. Both prune to the live marker set so disk usage
+    # doesn't grow unbounded across many refresh cycles. Logo rows pointing
+    # at deleted files are left for Dispatcharr's own cleanup_unused_logos
+    # endpoint — deleting them here would race with concurrent UI reads.
+    stale_logo_files_swept = 0
+    if matchup_logos_enabled and not dry_run and thumb_cache is not None:
+        thumb_cache.prune(seen_markers)
+        thumb_cache.save()
+        stale_logo_files_swept = matchup_logos.sweep_stale_logo_files(seen_markers)
+
     prefix = "[dry] " if dry_run else ""
     rename_msg = ""
     if migrated_from_old_group or deleted_old_groups or deleted_old_sources:
@@ -1727,12 +1822,19 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     llm_msg = ""
     if llm_enabled:
         llm_msg = f" LLM descriptions: {llm_used} written, {llm_failed} fell back to deterministic."
+    logo_msg = ""
+    if matchup_logos_enabled and not dry_run:
+        logo_msg = (
+            f" Matchup logos: {matchup_logos_used} resolved via SportsDB, "
+            f"{matchup_logos_fallback} fell back to source-channel logo, "
+            f"{stale_logo_files_swept} stale file(s) swept."
+        )
     msg = (
         f"{prefix}Group {group_name!r}: created={created}, updated={updated} "
         f"(placeholders={placeholder_channels_created} included), "
         f"stale_deleted={deleted_stale}, "
         f"orphan_epg_deleted={orphan_epg_deleted if 'orphan_epg_deleted' in locals() else 0}, "
-        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{llm_msg} "
+        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{llm_msg}{logo_msg} "
         f"WHY descriptions written to EPG source."
     )
     return {"status": "ok", "message": msg}
