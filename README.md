@@ -57,6 +57,7 @@ first in any IPTV client.
 | NHL (regular + Stanley Cup Playoffs) | [api-web.nhle.com](https://api-web.nhle.com/) (official, undocumented) | Yes (no key required) |
 | MLB (regular + postseason) | [statsapi.mlb.com](https://statsapi.mlb.com/) (official, undocumented) | Yes (no key required) |
 | NBA (regular + playoffs) | [site.api.espn.com](https://site.api.espn.com/) (unofficial — stats.nba.com WAF-blocks most homelab egress) | Yes (no key required) |
+| MLS (regular + Cup playoffs) | [site.api.espn.com](https://site.api.espn.com/) for schedule + [The Odds API](https://the-odds-api.com/) (`soccer_usa_mls`) for closeness | Yes (Odds API free tier; ESPN no key) |
 | NCAA Baseball (D1 regular season) | [site.api.espn.com](https://site.api.espn.com/) (unofficial) + D1Baseball.com poll | Yes (no key required) |
 | NCAA Soccer — Men's + Women's (D1 regular season) | [site.api.espn.com](https://site.api.espn.com/) (unofficial) + United Soccer Coaches Top 25 | Yes (no key required) |
 | Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |

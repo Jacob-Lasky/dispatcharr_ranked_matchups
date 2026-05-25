@@ -112,6 +112,13 @@
       "help_text": "Regular season uses win count (40+ play-in bubble, 50+ playoff-secured, 55+ top-seed pace, 65+ elite). Playoffs are best-of-7 each round (R1 / Conf Semis / Conf Finals / NBA Finals). No API key required — uses ESPN's unofficial site.api.espn.com (stats.nba.com is WAF-blocked from most homelab egress)."
     },
     {
+      "id": "enable_mls",
+      "type": "boolean",
+      "label": "MLS (regular season + Cup playoffs)",
+      "default": false,
+      "help_text": "MLS games surface with favorite + closeness scoring only in V1 — no standings-based importance yet (conference structure and the mixed-format MLS Cup bracket are follow-ups). Uses ESPN's unofficial site.api.espn.com for the schedule. The Odds API key enables closeness via the soccer_usa_mls market; without it, MLS games appear but with no closeness signal."
+    },
+    {
       "id": "enable_ncaa_baseball",
       "type": "boolean",
       "label": "NCAA Baseball (D1)",

@@ -3351,3 +3351,206 @@ class TestNbaPlayoffSource:
         depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
         for i in range(len(depths) - 1):
             assert depths[i] < depths[i + 1], f"NBA_PO bands out of depth order: {depths}"
+
+
+# =====================================================================
+# Phase J: MLS
+# =====================================================================
+
+class TestMlsSourceIdentity:
+    """MlsSource: V1 schedule+closeness adapter. No importance, no
+    standings — just confirm the basic contract holds."""
+
+    @staticmethod
+    def _make():
+        from dispatcharr_ranked_matchups.sources.mls import MlsSource
+        return MlsSource(odds_api_key="")
+
+    def test_identity(self):
+        src = self._make()
+        assert src.sport_prefix == "MLS"
+        assert src.sport_label == "MLS"
+
+    def test_does_not_support_importance_in_v1(self):
+        """V1 explicitly omits the importance simulator path. The
+        flag stays False; future MLS importance work (filed as a
+        follow-up) will flip this on."""
+        assert self._make().supports_importance is False
+
+
+class TestMlsHeadToHeadParse:
+    """The h2h-to-closeness math is the only non-trivial pure function
+    in this source; pin its behavior against pickem and blowout odds
+    profiles. Same calibration line as the soccer.py _h2h_to_closeness
+    so MLS closeness scores stay comparable to EPL/UCL/etc."""
+
+    @staticmethod
+    def _conv(outcomes, home_lc, away_lc):
+        from dispatcharr_ranked_matchups.sources.mls import _h2h_to_closeness
+        return _h2h_to_closeness(outcomes, home_lc, away_lc)
+
+    def test_pickem_match_high_closeness(self):
+        # Equal odds = perfect pickem after devig.
+        outcomes = [
+            {"name": "LA Galaxy", "price": 2.0},
+            {"name": "Draw", "price": 3.5},
+            {"name": "Inter Miami CF", "price": 2.0},
+        ]
+        c = self._conv(outcomes, "LA Galaxy", "Inter Miami CF")
+        assert c is not None
+        assert c >= 0.95  # pickem ~= closeness 1.0
+
+    def test_blowout_low_closeness(self):
+        outcomes = [
+            {"name": "LA Galaxy", "price": 1.2},   # heavy favorite
+            {"name": "Draw", "price": 6.0},
+            {"name": "FC Cincinnati", "price": 12.0},  # heavy dog
+        ]
+        c = self._conv(outcomes, "LA Galaxy", "FC Cincinnati")
+        assert c is not None
+        # Heavy mismatch -> low closeness.
+        assert c <= 0.25
+
+    def test_returns_none_on_missing_home_outcome(self):
+        outcomes = [
+            {"name": "Some Other Team", "price": 1.5},
+            {"name": "Draw", "price": 3.0},
+            {"name": "FC Cincinnati", "price": 4.0},
+        ]
+        # Neither outcome matches "LA Galaxy", so we can't compute closeness.
+        assert self._conv(outcomes, "LA Galaxy", "Atlanta United FC") is None
+
+    def test_suffix_fuzzy_match(self):
+        """ESPN says 'Atlanta United FC'; Odds API says 'Atlanta
+        United'. The normalize-and-substring matcher should treat
+        them as the same outcome row."""
+        outcomes = [
+            {"name": "Atlanta United", "price": 2.0},
+            {"name": "Draw", "price": 3.5},
+            {"name": "Inter Miami", "price": 2.0},
+        ]
+        c = self._conv(outcomes, "Atlanta United FC", "Inter Miami CF")
+        assert c is not None
+        assert c >= 0.95
+
+
+class TestMlsLookupClosenessFuzzy:
+    """The lookup_closeness matcher handles ESPN/Odds API team-name
+    drift (typically club-tag suffix differences). These tests pin
+    the matcher so a future change to TEAM_SUFFIX_TOKENS doesn't
+    silently break MLS odds lookup."""
+
+    @staticmethod
+    def _lookup(odds_map, home, away):
+        from dispatcharr_ranked_matchups.sources.mls import MlsSource
+        return MlsSource._lookup_closeness(odds_map, home, away)
+
+    def test_exact_match(self):
+        odds = {("la galaxy", "inter miami cf"): 0.65}
+        assert self._lookup(odds, "LA Galaxy", "Inter Miami CF") == 0.65
+
+    def test_suffix_strip_match(self):
+        # ESPN: "Atlanta United FC"; Odds API: "Atlanta United"
+        odds = {("atlanta united", "inter miami"): 0.55}
+        assert self._lookup(odds, "Atlanta United FC", "Inter Miami CF") == 0.55
+
+    def test_no_match_returns_none(self):
+        odds = {("atlanta united", "inter miami"): 0.55}
+        assert self._lookup(odds, "Seattle Sounders FC", "Toronto FC") is None
+
+    def test_empty_odds_map_returns_none(self):
+        assert self._lookup({}, "LA Galaxy", "Inter Miami CF") is None
+
+
+class TestMlsFetchUpcomingShape:
+    """Pin the GameRow shape MlsSource emits without making HTTP
+    calls. Exercises the integration of ESPN scoreboard parsing +
+    Odds API closeness lookup by stubbing both sides."""
+
+    def test_fetch_upcoming_with_stubbed_endpoints(self, monkeypatch):
+        import dispatcharr_ranked_matchups.sources.mls as mls_mod
+
+        # Stub ESPN: one upcoming MLS game.
+        espn_response = {
+            "events": [{
+                "id": "401123",
+                "date": "2026-04-10T23:00Z",
+                "season": {"year": 2026, "type": 2, "slug": "regular-season"},
+                "competitions": [{
+                    "competitors": [
+                        {"homeAway": "home",
+                         "team": {"displayName": "LA Galaxy"}},
+                        {"homeAway": "away",
+                         "team": {"displayName": "Inter Miami CF"}},
+                    ],
+                }],
+            }],
+        }
+
+        # Stub Odds API: one upcoming match with pickem odds.
+        odds_response = [{
+            "home_team": "LA Galaxy",
+            "away_team": "Inter Miami",
+            "bookmakers": [{
+                "markets": [{
+                    "key": "h2h",
+                    "outcomes": [
+                        {"name": "LA Galaxy", "price": 2.0},
+                        {"name": "Draw", "price": 3.5},
+                        {"name": "Inter Miami", "price": 2.0},
+                    ],
+                }],
+            }],
+        }]
+
+        def stub_http_get(url, timeout=15.0, **params):
+            if "the-odds-api" in url or "odds" in url:
+                return odds_response
+            return espn_response
+
+        monkeypatch.setattr(mls_mod, "_http_get", stub_http_get)
+
+        src = mls_mod.MlsSource(odds_api_key="stubkey")
+        games = src.fetch_upcoming(days_ahead=1)
+
+        # ESPN is called twice (days_ahead=1 -> today + tomorrow) and
+        # both return the same stub event; dedupe by event_id keeps
+        # the count at 1.
+        assert len(games) == 1
+        g = games[0]
+        assert g.home == "LA Galaxy"
+        assert g.away == "Inter Miami CF"
+        assert g.sport_prefix == "MLS"
+        # Closeness was populated from the pickem Odds API outcome.
+        assert g.closeness is not None
+        assert g.closeness >= 0.95
+        # season_slug carried through for future bracket routing.
+        assert g.extra.get("season_slug") == "regular-season"
+
+    def test_fetch_upcoming_works_without_odds_key(self, monkeypatch):
+        """Without an Odds API key, ESPN still drives the schedule and
+        closeness is left None. Plugin must still surface MLS games."""
+        import dispatcharr_ranked_matchups.sources.mls as mls_mod
+
+        espn_response = {
+            "events": [{
+                "id": "401124",
+                "date": "2026-04-11T23:00Z",
+                "season": {"year": 2026, "type": 2, "slug": "regular-season"},
+                "competitions": [{
+                    "competitors": [
+                        {"homeAway": "home",
+                         "team": {"displayName": "Atlanta United FC"}},
+                        {"homeAway": "away",
+                         "team": {"displayName": "Toronto FC"}},
+                    ],
+                }],
+            }],
+        }
+        monkeypatch.setattr(mls_mod, "_http_get", lambda *a, **kw: espn_response)
+
+        src = mls_mod.MlsSource(odds_api_key="")  # no key
+        games = src.fetch_upcoming(days_ahead=0)
+
+        assert len(games) == 1
+        assert games[0].closeness is None  # no odds, no closeness
