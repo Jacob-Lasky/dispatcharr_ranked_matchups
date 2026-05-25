@@ -448,9 +448,19 @@ class AggregateLegSource(BracketSportSource):
     """
 
     def _new_tie_record(self, tie_meta: Dict[str, Any]) -> Dict[str, Any]:
+        # Capture the number of games published for this tie so completeness
+        # can be data-driven instead of guessing from stage name. UEFA cup
+        # ties run 2 legs except the FINAL (1 leg). International tournaments
+        # (WC, EURO) run 1 leg per round including non-finals. Single source
+        # of truth: count the games FD.org publishes for the tie. DO NOT
+        # branch on `stage == KO_STAGES[-1]` — that misclassifies single-leg
+        # non-finals (WC LAST_16, EURO QF, etc.) as incomplete forever and
+        # the round_reached cascade never fires.
+        games_in_tie = len(tie_meta.get("games") or [])
         return {
             "stage": tie_meta.get("stage"),
             "teams": tie_meta.get("teams"),
+            "legs_in_tie": games_in_tie if games_in_tie else 2,
             "leg1": None,
             "leg2": None,
             "winner": None,
@@ -474,10 +484,10 @@ class AggregateLegSource(BracketSportSource):
 
         legs = [tie["leg1"], tie["leg2"]]
         legs_present = [L for L in legs if L is not None]
-        is_final_stage = tie["stage"] == self.KO_STAGES[-1] if self.KO_STAGES else False
+        legs_in_tie = tie.get("legs_in_tie", 2)
         complete = (
-            (is_final_stage and tie["leg1"] is not None)
-            or (tie["leg1"] is not None and tie["leg2"] is not None)
+            (legs_in_tie == 1 and tie["leg1"] is not None)
+            or (legs_in_tie >= 2 and tie["leg1"] is not None and tie["leg2"] is not None)
         )
         if not complete:
             return

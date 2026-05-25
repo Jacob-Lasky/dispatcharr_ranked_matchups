@@ -77,6 +77,20 @@
       "help_text": "18 teams, 34 matchdays. Top 3 → UCL (4th = UCL playoff), 5 → Europa, bottom 3 → relegation. Requires Football-Data.org key."
     },
     {
+      "id": "enable_world_cup",
+      "type": "boolean",
+      "label": "FIFA World Cup",
+      "default": false,
+      "help_text": "Quadrennial international tournament. Pure knockout in V1 — group-stage importance not yet modeled (filed as follow-up). LAST_32 (new 48-team format) → R16 → QF → SF → Final → Champion. Requires Football-Data.org key."
+    },
+    {
+      "id": "enable_euros",
+      "type": "boolean",
+      "label": "UEFA European Championship (EURO)",
+      "default": false,
+      "help_text": "UEFA's quadrennial national-team tournament. Pure knockout in V1 — group-stage importance not yet modeled. R16 → QF → SF → Final → Champion. Requires Football-Data.org key."
+    },
+    {
       "id": "enable_nhl",
       "type": "boolean",
       "label": "NHL (regular season + Stanley Cup Playoffs)",

@@ -53,7 +53,7 @@ first in any IPTV client.
 |---|---|---|
 | NCAA Football | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (1k req/day) |
 | NCAA Men's Basketball | [CollegeBasketballData.com](https://collegebasketballdata.com/) (same key as CFBD) | Yes |
-| EPL / EFL Championship / UCL / Bundesliga / La Liga / Serie A / Ligue 1 | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, 12 free comps) |
+| EPL / EFL Championship / UCL / Bundesliga / La Liga / Serie A / Ligue 1 / FIFA World Cup / UEFA EURO | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, 12 free comps) |
 | NHL (regular + Stanley Cup Playoffs) | [api-web.nhle.com](https://api-web.nhle.com/) (official, undocumented) | Yes (no key required) |
 | Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |
 

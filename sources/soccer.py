@@ -186,6 +186,23 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         rank_cap=18,
         total_matchdays=34,
     ),
+    # Phase I: international tournaments. Both pure knockout (group stage
+    # not modeled in importance — see Phase I follow-up). LEAGUE_CONTEXTS
+    # routes them to KnockoutSoccerSource via format="knockout".
+    "world_cup": SoccerCompetitionConfig(
+        fd_code="WC",
+        sport_prefix="WC",
+        sport_label="FIFA World Cup",
+        odds_sport_key="soccer_fifa_world_cup",
+        use_position_as_rank=False,  # tournament, not a league table
+    ),
+    "euros": SoccerCompetitionConfig(
+        fd_code="EC",
+        sport_prefix="EURO",
+        sport_label="UEFA European Championship",
+        odds_sport_key="soccer_uefa_european_championship",
+        use_position_as_rank=False,
+    ),
 }
 
 
@@ -863,7 +880,22 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
     strengths, sport_prefix/label, and __init__.
     """
 
-    KO_STAGES = ("PLAYOFFS", "LAST_16", "QUARTER_FINALS", "SEMI_FINALS", "FINAL")
+    # Stage tuple ordered by depth (earlier rounds first). PLAYOFFS and
+    # LAST_32 are both at depth 0 — UEFA cup competitions use PLAYOFFS as
+    # the entry round (pos 9-24 face the league phase's top 8); the new
+    # 48-team FIFA World Cup uses LAST_32. The ordering matters only for
+    # feeds_from inference (each tie looks back through earlier stages);
+    # since no single competition uses both PLAYOFFS and LAST_32, they
+    # don't collide. EURO and FIFA pre-2026 tournaments simply have
+    # neither stage populated — _build_bracket skips empty stages.
+    KO_STAGES = (
+        "PLAYOFFS",
+        "LAST_32",
+        "LAST_16",
+        "QUARTER_FINALS",
+        "SEMI_FINALS",
+        "FINAL",
+    )
 
     def _league_context_code(self) -> str:
         return self.config.fd_code
@@ -885,9 +917,23 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
         outcome lives in `score.penalties` — we apply the +1 here so the
         downstream aggregate computation in AggregateLegSource doesn't
         need to know about shootout semantics).
+
+        Matchday normalization: FD.org's `matchday` is competition-relative.
+        For UEFA cup two-leg ties it doubles as the leg index (1 = leg 1,
+        2 = leg 2 — works directly). For international tournaments (WC,
+        EURO) it's the overall tournament-day counter (e.g., matchday=7
+        for the EURO 2024 final), which DOES NOT map to a leg index. We
+        normalize per-tie here: matchday becomes the 1-indexed leg position
+        within the tie, ordered chronologically. DO NOT pass FD's matchday
+        through unchanged for single-leg-per-round competitions — the
+        AggregateLegSource records the score into `leg2` instead of
+        `leg1` and the tie never marks itself complete.
         """
+        from collections import defaultdict
         matches = self._fetch_all_season_matches()
-        out: List[Dict[str, Any]] = []
+        # Pre-group matches by (stage, frozenset of teams) so we can assign
+        # leg indices per tie based on chronological order within the group.
+        ties: Dict[Tuple[str, frozenset], List[Dict[str, Any]]] = defaultdict(list)
         for m in matches:
             stage = m.get("stage")
             if stage not in self.KO_STAGES:
@@ -896,36 +942,46 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
             away = (m.get("awayTeam") or {}).get("name")
             if not home or not away:
                 continue
-            score = m.get("score") or {}
-            full_time = score.get("fullTime") or {}
-            home_goals = full_time.get("home")
-            away_goals = full_time.get("away")
-            duration = score.get("duration")
-            penalties = score.get("penalties") or {}
-            if (
-                duration == "PENALTY_SHOOTOUT"
-                and home_goals is not None
-                and away_goals is not None
-            ):
-                pen_home = penalties.get("home")
-                pen_away = penalties.get("away")
-                if pen_home is not None and pen_away is not None:
-                    if pen_home > pen_away:
-                        home_goals = (home_goals or 0) + 1
-                    elif pen_away > pen_home:
-                        away_goals = (away_goals or 0) + 1
-            out.append({
-                "game_id": m.get("id"),
-                "stage": stage,
-                "matchday": m.get("matchday") or 1,
-                "home": home,
-                "away": away,
-                "home_goals": home_goals,
-                "away_goals": away_goals,
-                "status": m.get("status"),
-                "start_time": parse_iso_utc(m.get("utcDate")),
-                "extra": {"fd_id": m.get("id")},
-            })
+            ties[(stage, frozenset({home, away}))].append(m)
+
+        out: List[Dict[str, Any]] = []
+        for (stage, _pair), tie_matches in ties.items():
+            # Sort by FD's utcDate so leg 1 is chronologically first.
+            tie_matches.sort(key=lambda x: x.get("utcDate") or "")
+            for leg_idx, m in enumerate(tie_matches, start=1):
+                home = (m.get("homeTeam") or {}).get("name")
+                away = (m.get("awayTeam") or {}).get("name")
+                score = m.get("score") or {}
+                full_time = score.get("fullTime") or {}
+                home_goals = full_time.get("home")
+                away_goals = full_time.get("away")
+                duration = score.get("duration")
+                penalties = score.get("penalties") or {}
+                if (
+                    duration == "PENALTY_SHOOTOUT"
+                    and home_goals is not None
+                    and away_goals is not None
+                ):
+                    pen_home = penalties.get("home")
+                    pen_away = penalties.get("away")
+                    if pen_home is not None and pen_away is not None:
+                        if pen_home > pen_away:
+                            home_goals = (home_goals or 0) + 1
+                        elif pen_away > pen_home:
+                            away_goals = (away_goals or 0) + 1
+                out.append({
+                    "game_id": m.get("id"),
+                    "stage": stage,
+                    "matchday": leg_idx,
+                    "home": home,
+                    "away": away,
+                    "home_goals": home_goals,
+                    "away_goals": away_goals,
+                    "status": m.get("status"),
+                    "start_time": parse_iso_utc(m.get("utcDate")),
+                    "extra": {"fd_id": m.get("id"),
+                              "fd_matchday": m.get("matchday")},
+                })
         return out
 
     # ---------- soccer-specific sampling: regulation + ET + penalty ----------

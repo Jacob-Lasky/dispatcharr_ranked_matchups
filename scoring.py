@@ -153,6 +153,11 @@ class LeagueContext:
 KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     # UEFA cup soccer (UCL / UEL / UECL):
     "PLAYOFFS":        0,  # UCL play-off round (pos 9-24 entrants)
+    # International tournaments (Phase I) use LAST_32 as the entry-level
+    # knockout round in the new 48-team World Cup 2026 format. Same depth
+    # as PLAYOFFS because both are "before LAST_16"; no competition uses
+    # both stages, so they don't collide in the bracket cascade.
+    "LAST_32":         0,
     "LAST_16":         1,
     "QUARTER_FINALS":  2,
     "SEMI_FINALS":     3,
@@ -249,6 +254,48 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             (15, "relegation",        5.0),
         ],
         boundary_summary="Top 3 → UCL · 4-5 → Europa · bottom 3 → relegation",
+    ),
+    # Phase I: international tournaments.
+    #
+    # World Cup 2026 onward uses the 48-team format: 12 groups of 4, top
+    # 2 + best 8 third-place advance to a LAST_32 round. Pre-2026 World
+    # Cups used 32 teams entering at LAST_16. The LEAGUE_CONTEXTS entry
+    # below describes the post-2026 bracket; if you point this at an
+    # older WC season FD.org will publish no LAST_32 matches and the
+    # bracket source will treat LAST_16 as the entry round automatically.
+    #
+    # Weights ramp aggressively for international finals because they're
+    # the highest-viewership soccer matches by an order of magnitude.
+    # WC Final / Winner outweigh UCL equivalents (5.0 / 10.0) because
+    # the WC happens once every 4 years vs UCL every year, concentrating
+    # consequence.
+    #
+    # NB: GROUP_STAGE importance isn't modeled in V1 — the bracket
+    # source only tracks knockout-round eligibility. Group-stage
+    # "survive and advance" games still pick up favorite + closeness
+    # signal but importance reads 0. Filed as follow-up.
+    "WC": LeagueContext(
+        code="WC", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("LAST_32",        "last_32",       0.5),
+            ("LAST_16",        "round_of_16",   1.5),
+            ("QUARTER_FINALS", "quarterfinal",  3.0),
+            ("SEMI_FINALS",    "semifinal",     5.0),
+            ("FINAL",          "final",         8.0),
+            ("WINNER",         "winner",       15.0),
+        ],
+        boundary_summary="R32 → R16 → QF → SF → Final → Champion (FIFA World Cup)",
+    ),
+    "EC": LeagueContext(
+        code="EC", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("LAST_16",        "round_of_16",   1.0),
+            ("QUARTER_FINALS", "quarterfinal",  2.5),
+            ("SEMI_FINALS",    "semifinal",     4.0),
+            ("FINAL",          "final",         6.0),
+            ("WINNER",         "winner",       10.0),
+        ],
+        boundary_summary="R16 → QF → SF → Final → Champion (UEFA EURO)",
     ),
     # Phase D.2 / D.3: NCAA football and men's basketball. Format is
     # "win_count" — threshold cutoffs are MINIMUM win counts rather than
