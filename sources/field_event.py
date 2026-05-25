@@ -202,3 +202,29 @@ class GolfSource(FieldEventSource):
     SPORT_LABEL = "PGA Tour"
     FD_COMPETITION_CODE = "PGA"
     MAJOR_REGEX = _GOLF_MAJOR_RE
+
+
+# UFC PPV detection. ESPN names PPV events "UFC <number>: <headline>"
+# (e.g., "UFC 309: Jones vs. Miocic"). Fight Nights and ESPN-broadcast
+# events use "UFC Fight Night: …" or "UFC on ESPN: …" without a
+# number. The MAJOR tier is reserved for numbered PPVs because those
+# are the marquee cards (typically a title fight as the main event).
+_UFC_PPV_RE: Pattern[str] = re.compile(r"^\s*UFC\s+\d+\b", re.IGNORECASE)
+
+
+class UfcSource(FieldEventSource):
+    """UFC — one EPG entry per fight night card. The card itself is
+    the broadcast unit; ESPN's `event.name` carries the headliner
+    framing ("UFC 309: Jones vs. Miocic", "UFC Fight Night:
+    Sandhagen vs. Figueiredo").
+
+    Architecturally the same shape as racing / golf: emit one row
+    per scheduled card with the card title as `home`. PPVs (numbered
+    UFC events) get MAJOR tier; Fight Nights get EVENT tier.
+    """
+
+    ESPN_SLUG = "mma/ufc"
+    SPORT_PREFIX = "UFC"
+    SPORT_LABEL = "UFC"
+    FD_COMPETITION_CODE = "UFC"
+    MAJOR_REGEX = _UFC_PPV_RE

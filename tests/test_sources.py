@@ -4609,3 +4609,85 @@ class TestFieldEventScoring:
         # MAJOR must outrank EVENT — golf majors should beat regular
         # tour stops in the guide.
         assert major_score.raw > event_score.raw
+
+
+# =====================================================================
+# Phase S: UFC
+# =====================================================================
+
+class TestUfcSource:
+    """UFC fits the FieldEventSource pattern — one EPG entry per
+    fight card. Numbered PPVs (UFC 309, etc.) get MAJOR; Fight
+    Nights and ESPN-broadcast cards get EVENT."""
+
+    @staticmethod
+    def _make():
+        from dispatcharr_ranked_matchups.sources.field_event import UfcSource
+        return UfcSource()
+
+    def test_identity(self):
+        src = self._make()
+        assert src.sport_prefix == "UFC"
+        assert src.sport_label == "UFC"
+        assert src.ESPN_SLUG == "mma/ufc"
+
+    def test_does_not_support_importance(self):
+        assert self._make().supports_importance is False
+
+    def test_ppv_detected_as_major(self):
+        src = self._make()
+        assert src.MAJOR_REGEX is not None
+        # Numbered PPV — MAJOR.
+        assert src.MAJOR_REGEX.search("UFC 309: Jones vs. Miocic")
+        assert src.MAJOR_REGEX.search("UFC 310: Pantoja vs. Asakura")
+        # Three-digit (future-proofing).
+        assert src.MAJOR_REGEX.search("UFC 999: Some Fight")
+
+    def test_fight_night_not_major(self):
+        src = self._make()
+        assert src.MAJOR_REGEX is not None
+        # Fight Night and ESPN cards — EVENT-tier.
+        assert not src.MAJOR_REGEX.search(
+            "UFC Fight Night: Sandhagen vs. Figueiredo"
+        )
+        assert not src.MAJOR_REGEX.search("UFC on ESPN: Lewis vs. Nascimento")
+
+    def test_emits_ppv_with_major_tier(self, monkeypatch):
+        """Live ESPN response shape — UFC card surfaces as one row."""
+        import dispatcharr_ranked_matchups.sources.field_event as field_mod
+        espn_response = {
+            "events": [{
+                "id": "401900800",
+                "name": "UFC 309: Jones vs. Miocic",
+                "shortName": "UFC 309",
+                "date": "2024-11-17T03:00Z",
+                "competitions": [{"competitors": []}],
+            }],
+        }
+        monkeypatch.setattr(field_mod, "_http_get", lambda *a, **kw: espn_response)
+        from dispatcharr_ranked_matchups.sources.field_event import UfcSource
+        games = UfcSource().fetch_upcoming(days_ahead=7)
+        assert len(games) == 1
+        g = games[0]
+        assert g.home == "UFC 309: Jones vs. Miocic"
+        assert g.away == "Field"
+        assert g.sport_prefix == "UFC"
+        assert g.extra.get("stage") == "MAJOR"  # PPV bumped to MAJOR
+        assert g.extra.get("is_field_event") is True
+
+    def test_emits_fight_night_with_event_tier(self, monkeypatch):
+        import dispatcharr_ranked_matchups.sources.field_event as field_mod
+        espn_response = {
+            "events": [{
+                "id": "401900801",
+                "name": "UFC Fight Night: Sandhagen vs. Figueiredo",
+                "shortName": "UFC Fight Night",
+                "date": "2025-05-03T22:00Z",
+                "competitions": [{"competitors": []}],
+            }],
+        }
+        monkeypatch.setattr(field_mod, "_http_get", lambda *a, **kw: espn_response)
+        from dispatcharr_ranked_matchups.sources.field_event import UfcSource
+        games = UfcSource().fetch_upcoming(days_ahead=7)
+        assert len(games) == 1
+        assert games[0].extra.get("stage") == "EVENT"

@@ -4,7 +4,7 @@ from .mlb import MlbPlayoffSource, MlbRegularSource
 from .mls import MlsSource
 from .nwsl import NwslSource
 from .liga_mx import LigaMxSource
-from .field_event import F1Source, NascarSource, GolfSource, FieldEventSource
+from .field_event import F1Source, NascarSource, GolfSource, UfcSource, FieldEventSource
 from .nba import NbaPlayoffSource, NbaRegularSource
 from .wnba import WnbaPlayoffSource, WnbaRegularSource
 from .ncaaw_basketball import (
@@ -27,7 +27,7 @@ __all__ = [
     "GameRow", "SportSource",
     "MlbRegularSource", "MlbPlayoffSource",
     "MlsSource", "NwslSource", "LigaMxSource",
-    "FieldEventSource", "F1Source", "NascarSource", "GolfSource",
+    "FieldEventSource", "F1Source", "NascarSource", "GolfSource", "UfcSource",
     "NbaRegularSource", "NbaPlayoffSource",
     "WnbaRegularSource", "WnbaPlayoffSource",
     "NcaawBasketballRegularSource", "NcaawBasketballPlayoffSource",
