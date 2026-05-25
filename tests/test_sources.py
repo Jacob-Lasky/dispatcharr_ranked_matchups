@@ -3554,3 +3554,237 @@ class TestMlsFetchUpcomingShape:
 
         assert len(games) == 1
         assert games[0].closeness is None  # no odds, no closeness
+
+
+# =====================================================================
+# Phase K: WNBA
+# =====================================================================
+
+class TestWnbaHeadlineParser:
+    """WNBA headline regex differs from NBA — no East/West prefix on R1
+    ("First Round"), WNBA name appears explicitly on Semifinals and
+    Finals ("WNBA Semifinals", "WNBA Finals")."""
+
+    @staticmethod
+    def _parse(headline):
+        from dispatcharr_ranked_matchups.sources.wnba import _parse_stage_from_headline
+        return _parse_stage_from_headline(headline)
+
+    def test_first_round(self):
+        assert self._parse("First Round - Game 1") == {"stage": "R1", "matchday": 1}
+
+    def test_first_round_game_3(self):
+        # Best-of-3 R1 can go to game 3.
+        assert self._parse("First Round - Game 3") == {"stage": "R1", "matchday": 3}
+
+    def test_semifinals(self):
+        assert self._parse("WNBA Semifinals - Game 5") == {"stage": "SF", "matchday": 5}
+
+    def test_finals_game_one(self):
+        assert self._parse("WNBA Finals - Game 1") == {"stage": "FINALS", "matchday": 1}
+
+    def test_finals_game_seven(self):
+        # 2025+ Finals can go to game 7.
+        assert self._parse("WNBA Finals - Game 7") == {"stage": "FINALS", "matchday": 7}
+
+    def test_no_headline_returns_none(self):
+        assert self._parse(None) is None
+        assert self._parse("") is None
+
+    def test_unrecognized_returns_none(self):
+        assert self._parse("Preseason - Exhibition") is None
+        assert self._parse("Commissioner's Cup") is None
+
+    def test_case_insensitive(self):
+        assert self._parse("first round - game 2") == {"stage": "R1", "matchday": 2}
+        assert self._parse("wnba finals - game 1") == {"stage": "FINALS", "matchday": 1}
+
+
+class TestWnbaAllStarFilter:
+    """Same All-Star filter pattern as NBA — WNBA also runs an
+    All-Star Game tagged competition.type.abbreviation=ALLSTAR."""
+
+    @staticmethod
+    def _extract(event):
+        from dispatcharr_ranked_matchups.sources.wnba import _extract_game_record
+        return _extract_game_record(event)
+
+    def test_all_star_game_filtered(self):
+        event = {
+            "id": "401705500",
+            "date": "2025-07-19T23:00Z",
+            "season": {"year": 2025, "type": 2, "slug": "regular-season"},
+            "competitions": [{
+                "type": {"id": "4", "abbreviation": "ALLSTAR"},
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "score": "120",
+                     "team": {"displayName": "Team Caitlin"}},
+                    {"homeAway": "away", "score": "115",
+                     "team": {"displayName": "Team Aliyah"}},
+                ],
+            }],
+        }
+        assert self._extract(event) is None
+
+    def test_regular_season_game_passes(self):
+        event = {
+            "id": "401705501",
+            "date": "2025-06-15T23:00Z",
+            "season": {"year": 2025, "type": 2, "slug": "regular-season"},
+            "competitions": [{
+                "type": {"id": "1", "abbreviation": "STD"},
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "score": "82",
+                     "team": {"displayName": "New York Liberty"}},
+                    {"homeAway": "away", "score": "78",
+                     "team": {"displayName": "Connecticut Sun"}},
+                ],
+            }],
+        }
+        rec = self._extract(event)
+        assert rec is not None
+        assert rec["home"] == "New York Liberty"
+        assert rec["season_type"] == 2
+
+
+class TestWnbaRegularSource:
+
+    @staticmethod
+    def _make():
+        from dispatcharr_ranked_matchups.sources.wnba import WnbaRegularSource
+        return WnbaRegularSource(season_year=2024)
+
+    def test_identity(self):
+        src = self._make()
+        assert src.sport_prefix == "WNBA"
+        assert src.sport_label == "WNBA"
+        assert src.league_context_code == "WNBA"
+        assert src._count_field == "wins"
+
+    def test_supports_importance(self):
+        assert self._make().supports_importance is True
+
+    def test_outcome_labels(self):
+        labels = self._make().outcome_labels
+        assert "playoff_bubble" in labels
+        assert "playoff_secured" in labels
+        assert "top_seed_pace" in labels
+        assert "elite" in labels
+
+    def test_thresholds_monotonic(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS["WNBA"]
+        cuts = [t[0] for t in ctx.thresholds]
+        for i in range(len(cuts) - 1):
+            assert cuts[i] < cuts[i + 1]
+
+    def test_terminal_outcomes_by_win_count(self):
+        src = self._make()
+        state = {
+            "_applied": frozenset(),
+            "_teams": {
+                "Cellar":   {"wins":  8, "losses": 32, "pf": 0, "pa": 0, "games_played": 40},
+                "Bubble":   {"wins": 22, "losses": 18, "pf": 0, "pa": 0, "games_played": 40},
+                "Comfy":    {"wins": 26, "losses": 14, "pf": 0, "pa": 0, "games_played": 40},
+                "Top":      {"wins": 32, "losses":  8, "pf": 0, "pa": 0, "games_played": 40},
+                "Historic": {"wins": 38, "losses":  2, "pf": 0, "pa": 0, "games_played": 40},
+            },
+        }
+        outcomes = src.terminal_outcomes(state)
+        assert outcomes["Cellar"] == []
+        assert set(outcomes["Bubble"]) == {"playoff_bubble"}
+        assert set(outcomes["Comfy"]) == {"playoff_bubble", "playoff_secured"}
+        assert set(outcomes["Top"]) == {"playoff_bubble", "playoff_secured", "top_seed_pace"}
+        assert set(outcomes["Historic"]) == {
+            "playoff_bubble", "playoff_secured", "top_seed_pace", "elite",
+        }
+
+
+class TestWnbaPlayoffSource:
+
+    @staticmethod
+    def _make_source(season_year=2024, bracket_games=None):
+        from dispatcharr_ranked_matchups.sources.wnba import WnbaPlayoffSource
+        src = WnbaPlayoffSource(season_year=season_year)
+        src._bracket_games_cache = bracket_games or []
+        return src
+
+    def test_identity(self):
+        src = self._make_source()
+        assert src.sport_prefix == "WNBA"
+        assert "Playoffs" in src.sport_label
+        assert src._league_context_code() == "WNBA_PO"
+
+    def test_supports_importance(self):
+        assert self._make_source().supports_importance is True
+
+    def test_ko_stages(self):
+        assert self._make_source().KO_STAGES == ("R1", "SF", "FINALS")
+
+    def test_series_lengths_2024(self):
+        src = self._make_source(season_year=2024)
+        assert src._series_length_for_stage("R1") == 3
+        assert src._series_length_for_stage("SF") == 5
+        assert src._series_length_for_stage("FINALS") == 5  # legacy
+
+    def test_series_lengths_2025(self):
+        src = self._make_source(season_year=2025)
+        assert src._series_length_for_stage("R1") == 3
+        assert src._series_length_for_stage("SF") == 5
+        assert src._series_length_for_stage("FINALS") == 7  # modern
+
+    def test_winner_advance_label(self):
+        src = self._make_source()
+        assert src._winner_advance_label("FINALS") == "WNBA_WINNER"
+        assert src._winner_advance_label("R1") is None
+        assert src._winner_advance_label("SF") is None
+
+    def test_outcome_labels(self):
+        labels = self._make_source().outcome_labels
+        assert "wnba_semis" in labels
+        assert "wnba_finals" in labels
+        assert "wnba_winner" in labels
+
+    def test_finals_winner_advance_reaches_synthetic_depth(self):
+        """2024 WNBA Finals: Liberty beat Lynx 3-2 in best-of-5. Synthesize
+        the 5-game series and confirm Liberty reaches WNBA_WINNER depth."""
+        games = [
+            {"game_id": "f1", "stage": "FINALS", "matchday": 1,
+             "home": "Liberty", "away": "Lynx",
+             "home_goals": 87, "away_goals": 81,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "f2", "stage": "FINALS", "matchday": 2,
+             "home": "Liberty", "away": "Lynx",
+             "home_goals": 78, "away_goals": 80,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "f3", "stage": "FINALS", "matchday": 3,
+             "home": "Lynx", "away": "Liberty",
+             "home_goals": 80, "away_goals": 77,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "f4", "stage": "FINALS", "matchday": 4,
+             "home": "Lynx", "away": "Liberty",
+             "home_goals": 71, "away_goals": 80,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "f5", "stage": "FINALS", "matchday": 5,
+             "home": "Liberty", "away": "Lynx",
+             "home_goals": 67, "away_goals": 62,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        src = self._make_source(season_year=2024, bracket_games=games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"]["Liberty"] == KNOCKOUT_ROUND_DEPTH["WNBA_WINNER"]
+        assert state["_round_reached"]["Lynx"] == KNOCKOUT_ROUND_DEPTH["FINALS"]
+        outcomes = src.terminal_outcomes(state)
+        assert "wnba_winner" in outcomes["Liberty"]
+        assert "wnba_winner" not in outcomes["Lynx"]
+        assert "wnba_finals" in outcomes["Lynx"]
+
+    def test_wnba_po_thresholds_are_depth_ordered(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, KNOCKOUT_ROUND_DEPTH
+        ctx = LEAGUE_CONTEXTS["WNBA_PO"]
+        depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
+        for i in range(len(depths) - 1):
+            assert depths[i] < depths[i + 1]

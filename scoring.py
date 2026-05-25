@@ -184,8 +184,14 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     # depth label across NHL and NBA doesn't cause cross-contamination.
     "CSF":             1,  # Conference Semifinals (4 series)
     "CF":              2,  # Conference Finals (2 series)
-    "FINALS":          3,  # NBA Finals (1 series)
+    "FINALS":          3,  # NBA Finals (1 series) / WNBA Finals (1 series)
     "FINALS_WINNER":   4,  # NBA Champion
+    # WNBA playoffs (Phase K): 3 rounds, mixed series lengths.
+    # R1 (depth 0) and FINALS (depth 3) reuse the labels already in
+    # this table — terminal_outcomes reads per-league bands so no
+    # cross-contamination. SF needs its own depth between R1 and FINALS.
+    "SF":              1,  # WNBA Semifinals (between R1 and FINALS)
+    "WNBA_WINNER":     4,  # WNBA Champion (same synthetic depth as FINALS_WINNER)
 }
 
 
@@ -485,6 +491,35 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             ("FINALS_WINNER",  "finals_winner",    10.0),
         ],
         boundary_summary="R1 → Conf Semis → Conf Finals → NBA Finals → Champion",
+    ),
+    # Phase K: WNBA regular season. 40-game season; 8 of 12-13 teams
+    # make playoffs (since 2022's expansion). The playoff bubble has
+    # historically settled around 19-21 wins; top seed pace is ~28-32
+    # in the current era. Thresholds are tighter than NBA's because
+    # the season is shorter — equal "strength" of a 25-win WNBA team
+    # ≈ 50-win NBA team relative to the league.
+    "WNBA": LeagueContext(
+        code="WNBA", matchdays_total=40, format="win_count",
+        thresholds=[
+            (20, "playoff_bubble",   1.5),  # 8th seed line
+            (25, "playoff_secured",  2.5),  # comfortable in
+            (30, "top_seed_pace",    4.0),  # top-2 seed pace
+            (35, "elite",            5.0),  # historic
+        ],
+        boundary_summary="20+ wins → bubble · 25+ → comfortable · 30+ → top seed · 35+ → elite",
+    ),
+    # Phase K: WNBA playoffs. Three rounds with variable series
+    # lengths (R1=3, SF=5, FINALS=5 in 2024 or 7 in 2025+). Weights
+    # mirror NBA's playoff ramp; bracket structure differs (no
+    # conference reseeding, fewer total games).
+    "WNBA_PO": LeagueContext(
+        code="WNBA_PO", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("SF",           "wnba_semis",     1.0),
+            ("FINALS",       "wnba_finals",    5.0),
+            ("WNBA_WINNER",  "wnba_winner",   10.0),
+        ],
+        boundary_summary="R1 → Semis → WNBA Finals → Champion",
     ),
 }
 
