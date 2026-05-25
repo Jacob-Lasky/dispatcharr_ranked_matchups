@@ -292,7 +292,8 @@ def _build_weights(settings: Dict[str, Any]):
 
 def _build_sources(settings: Dict[str, Any]):
     from .sources import (
-        KnockoutSoccerSource, NcaaBaseballSource, NcaaSoccerSource,
+        KnockoutSoccerSource, MlbPlayoffSource, MlbRegularSource,
+        NcaaBaseballSource, NcaaSoccerSource,
         NcaafSource, NcaamSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
     )
@@ -365,6 +366,21 @@ def _build_sources(settings: Dict[str, Any]):
             # source — it can still run on the default prior.
             logger.warning("[nhl] could not seed playoff strengths: %s", exc)
         sources.append(nhl_po)
+
+    # MLB — no API key required (statsapi.mlb.com is free). Same pair-and-
+    # seed pattern as NHL: the playoff source borrows regular-season
+    # strength estimates from the regular source so postseason game-
+    # sampling reflects per-team scoring skill instead of the 4.5/4.5
+    # league-average prior.
+    if settings.get("enable_mlb", False):
+        mlb_reg = MlbRegularSource()
+        sources.append(mlb_reg)
+        mlb_po = MlbPlayoffSource()
+        try:
+            mlb_po.set_regular_season_strengths(mlb_reg.estimate_strengths())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[mlb] could not seed playoff strengths: %s", exc)
+        sources.append(mlb_po)
 
     # Phase M: NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
     # poll, no key needed. Win-count thresholds (30 / 35 / 40 / 45 / 50) drive

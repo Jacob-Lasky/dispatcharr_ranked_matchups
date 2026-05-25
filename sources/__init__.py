@@ -1,5 +1,6 @@
 """Per-sport data sources. Each source produces a list of GameRow."""
 from .base import GameRow, SportSource
+from .mlb import MlbPlayoffSource, MlbRegularSource
 from .ncaa_baseball import NcaaBaseballSource
 from .ncaa_soccer import NcaaSoccerSource
 from .ncaaf import NcaafSource
@@ -13,6 +14,7 @@ from .soccer import (
 
 __all__ = [
     "GameRow", "SportSource",
+    "MlbRegularSource", "MlbPlayoffSource",
     "NcaaBaseballSource", "NcaaSoccerSource",
     "NcaafSource", "NcaamSource",
     "NhlRegularSource", "NhlPlayoffSource",

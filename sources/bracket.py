@@ -582,12 +582,26 @@ class BestOfNSeriesSource(BracketSportSource):
     those records (with home/away pattern) in `_fetch_bracket_games`.
     """
 
-    SERIES_LENGTH: int = 7   # subclass overrides as needed
+    SERIES_LENGTH: int = 7   # subclass overrides as needed (uniform-length sports)
 
-    @property
-    def series_clinching_wins(self) -> int:
-        """Wins needed to clinch the series. ceil(N/2) for an odd N."""
-        return (self.SERIES_LENGTH // 2) + 1
+    def _series_length_for_stage(self, stage: str) -> int:
+        """Per-stage series length. Default returns the class-level
+        SERIES_LENGTH so uniform-format sports (NHL, NBA) keep their
+        existing behavior. MLB overrides because Wild Card = best-of-3,
+        Division Series = best-of-5, LCS / World Series = best-of-7.
+
+        `stage` MUST be one of the entries in self.KO_STAGES; behavior is
+        undefined for unknown stages (returns the uniform default, which
+        matches the SCHEDULED pre-bracket case gracefully).
+        """
+        del stage  # default returns uniform; subclass uses the arg
+        return self.SERIES_LENGTH
+
+    def _clinching_wins_for_stage(self, stage: str) -> int:
+        """ceil(N/2) for the per-stage series length. Wins needed to
+        win the tie."""
+        n = self._series_length_for_stage(stage)
+        return (n // 2) + 1
 
     def _new_tie_record(self, tie_meta: Dict[str, Any]) -> Dict[str, Any]:
         teams = list(tie_meta.get("teams") or [])
@@ -627,7 +641,7 @@ class BestOfNSeriesSource(BracketSportSource):
         tie["series_wins"] = wins
         tie["games_recorded"] = (tie.get("games_recorded") or frozenset()) | {game_index}
 
-        target = self.series_clinching_wins
+        target = self._clinching_wins_for_stage(tie.get("stage") or "")
         if wins.get(home_team, 0) >= target:
             tie["winner"] = home_team
             tie["loser"] = away_team
@@ -652,7 +666,9 @@ class BestOfNSeriesSource(BracketSportSource):
         games = tie_meta.get("games") or []
         wins_a = (tie.get("series_wins") or {}).get(team_a, 0)
         wins_b = (tie.get("series_wins") or {}).get(team_b, 0)
-        target = self.series_clinching_wins
+        stage = tie_meta.get("stage") or ""
+        target = self._clinching_wins_for_stage(stage)
+        series_length = self._series_length_for_stage(stage)
         # Walk source-published games in order; only emit ones not yet
         # applied AND that the series is still alive long enough to reach.
         # We model this by emitting games[i] only when wins_a < target AND
@@ -694,7 +710,7 @@ class BestOfNSeriesSource(BracketSportSource):
                 "stage": tie_meta["stage"],
                 "matchday": matchday,
                 "game_index": matchday,
-                "games_in_series": self.SERIES_LENGTH,
+                "games_in_series": series_length,
                 "is_decisive_leg": True,  # every series game can go to OT
             }
             extra.update(g.get("extra", {}) or {})

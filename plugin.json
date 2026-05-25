@@ -98,6 +98,13 @@
       "help_text": "Regular season uses standings points (95+ bubble, 100+ playoff-secured, 110+ division pace, 125+ Presidents' Trophy). Playoffs are best-of-7 each round. No API key required — official api-web.nhle.com."
     },
     {
+      "id": "enable_mlb",
+      "type": "boolean",
+      "label": "MLB (regular season + postseason)",
+      "default": false,
+      "help_text": "Regular season uses win count (85+ bubble, 90+ playoff-secured, 95+ division pace, 105+ elite). Postseason mixes series lengths: Wild Card best-of-3, Division Series best-of-5, LCS / World Series best-of-7. No API key required — official statsapi.mlb.com."
+    },
+    {
       "id": "enable_ncaa_baseball",
       "type": "boolean",
       "label": "NCAA Baseball (D1)",
