@@ -1,11 +1,16 @@
 """Generic bracket Monte Carlo machinery for knockout / playoff sports.
 
-Three concrete shapes share the bracket state machine:
+Four concrete shapes share the bracket state machine:
 
   - Two-leg aggregate (UEFA cup soccer): tied teams play home + away;
     aggregate goals + away-goals/ET/penalties decide. See AggregateLegSource.
-  - Best-of-N series (NHL / NBA / MLB playoffs): tied teams play up to
-    N games; first to ceil(N/2) wins advances. See BestOfNSeriesSource.
+  - Best-of-N series (NHL / NBA / MLB / NCAA Baseball-Softball Super
+    Regional + Finals): tied teams play up to N games; first to ceil(N/2)
+    wins advances. See BestOfNSeriesSource.
+  - N-team double-elimination (NCAA Baseball / Softball Regional sites
+    and the 8-team MCWS/WCWS bracket modeled as two 4-team sub-brackets):
+    4 teams enter the tie, each eliminated at 2 losses, last team
+    standing wins. See DoubleEliminationSource.
   - Single-elimination (planned: NCAA M/W tournament): one game per tie.
 
 The shared bits live in `BracketSportSource`:
@@ -734,3 +739,377 @@ class BestOfNSeriesSource(BracketSportSource):
         contract; the default doesn't need it."""
         del tie_meta
         return sim_team
+
+
+# =====================================================================
+# DoubleEliminationSource — N-team double-elimination bracket
+# =====================================================================
+
+class DoubleEliminationSource(BracketSportSource):
+    """N-team double-elimination tie (NCAA Baseball / Softball Regional
+    sites, MCWS / WCWS 8-team bracket modeled as two 4-team sub-brackets).
+    Each team is eliminated at 2 losses; the tie resolves when all but
+    one team have crossed that threshold (the last team standing is the
+    sub-bracket winner).
+
+    Tie record:
+      {
+        "stage":                  str,
+        "teams":                  frozenset of all n participants,
+        "grouping_key":           str,                 # site label or sub-bracket id
+        "losses_by_team":         {team: int},
+        "games_recorded":         frozenset of game_index values applied,
+        "elimination_loss_count": int,                 # default 2
+        "winner":                 str | None,
+        "eliminated_teams":       list[str],           # populated as teams hit threshold
+      }
+
+    Key deviations from the existing 2-team BracketSportSource shape:
+
+      - Tie identity is `(stage, frozenset(all_n_participants))`, not
+        `(stage, frozenset({home, away}))`. The simulator drives a SET
+        of teams through one shared loss-tracking state, rather than a
+        pair through a shared series-wins state.
+      - `_build_bracket` groups games by `_tie_grouping_key(game)` (a
+        subclass-provided string from the source headline — e.g.,
+        "Auburn Regional" or "MCWS_sub1"), not by team-pair set.
+      - `apply_result` looks up the tie via the game's `grouping_key`
+        (carried in the GameRow `extra`), with a defensive fallback to
+        membership-superset search.
+      - `_advance_round_reached` is called once per eliminated team, not
+        once per tie. The base method's `(winner, loser)` signature is
+        idempotent under multiple calls with the same winner — each
+        loser still caps at `stage_depth`, the winner is still set to
+        `winner_depth` via `max()`.
+      - Phase 2a is SOURCE-DRIVEN ONLY: `_emit_remaining_games_for_tie`
+        emits the source-published games (in chronological order) that
+        haven't been applied yet. It does NOT synthesize speculative
+        future games from the double-elim game tree — that's a Phase 2b
+        responsibility once live source data is being wired in.
+
+    Subclass contract: implement `_fetch_bracket_games` (inherited) AND
+    `_tie_grouping_key(game)` (new). Set `KO_STAGES` and
+    `_league_context_code` as for any BracketSportSource.
+    """
+
+    ELIMINATION_LOSS_COUNT: int = 2
+
+    # ---------- subclass hooks ----------
+
+    @abstractmethod
+    def _tie_grouping_key(self, game: Dict[str, Any]) -> Optional[str]:
+        """Return a string identifying which double-elim tie this game
+        belongs to. Games with the same (stage, grouping_key) are grouped
+        into one tie_meta and share one loss-tracking state. Return None
+        to exclude the game from bracket construction (e.g., the source
+        emitted a game whose sub-bracket couldn't yet be inferred)."""
+
+    # ---------- tie record shape ----------
+
+    def _new_tie_record(self, tie_meta: Dict[str, Any]) -> Dict[str, Any]:
+        teams = list(tie_meta.get("teams") or [])
+        return {
+            "stage": tie_meta.get("stage"),
+            "teams": tie_meta.get("teams"),
+            "grouping_key": tie_meta.get("grouping_key"),
+            "losses_by_team": {t: 0 for t in teams},
+            "games_recorded": frozenset(),
+            "elimination_loss_count": self.ELIMINATION_LOSS_COUNT,
+            "winner": None,
+            "eliminated_teams": [],
+        }
+
+    def _copy_tie_record(self, tie: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "stage": tie.get("stage"),
+            "teams": tie.get("teams"),
+            "grouping_key": tie.get("grouping_key"),
+            "losses_by_team": dict(tie.get("losses_by_team") or {}),
+            "games_recorded": tie.get("games_recorded") or frozenset(),
+            "elimination_loss_count": tie.get(
+                "elimination_loss_count", self.ELIMINATION_LOSS_COUNT
+            ),
+            "winner": tie.get("winner"),
+            "eliminated_teams": list(tie.get("eliminated_teams") or []),
+        }
+
+    def _record_game_into_tie(
+        self, tie, home_team, away_team,
+        home_score, away_score, game_index,
+    ) -> None:
+        if tie.get("winner") is not None:
+            return  # tie already resolved; defensive no-op for double-apply
+        losses = dict(tie.get("losses_by_team") or {})
+        for t in (home_team, away_team):
+            losses.setdefault(t, 0)
+        if home_score > away_score:
+            new_loser_team = away_team
+        elif away_score > home_score:
+            new_loser_team = home_team
+        else:
+            return  # baseball / softball don't tie; defensive no-op
+        losses[new_loser_team] += 1
+        tie["losses_by_team"] = losses
+        tie["games_recorded"] = (tie.get("games_recorded") or frozenset()) | {game_index}
+
+        threshold = tie.get("elimination_loss_count", self.ELIMINATION_LOSS_COUNT)
+        eliminated = list(tie.get("eliminated_teams") or [])
+        if losses[new_loser_team] >= threshold and new_loser_team not in eliminated:
+            eliminated.append(new_loser_team)
+        tie["eliminated_teams"] = eliminated
+
+        teams = list(tie.get("teams") or [])
+        survivors = [t for t in teams if t not in eliminated]
+        if teams and len(survivors) == 1:
+            tie["winner"] = survivors[0]
+
+    def _is_decisive_game(self, tie, game_index, games_in_tie) -> bool:
+        # Every game in a double-elim CAN be a tie-ending game (the one
+        # that puts the last 1-loss team at 2 losses), so always True.
+        # The base class contract uses this for ET / extra-innings hooks
+        # in subclass sample_result — baseball / softball use no shootout
+        # so it doesn't matter, but stay consistent with BestOfNSeries.
+        del tie, game_index, games_in_tie
+        return True
+
+    # ---------- emission / state machinery ----------
+
+    def _build_bracket(self, games: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        """Group games by (stage, _tie_grouping_key(game)) into tie_meta
+        records carrying the full participant set. feeds_from wiring is
+        intentionally empty for double-elim: each sub-bracket tie is an
+        entry tie at its stage (Phase 2a doesn't connect Regional →
+        Super Regional structurally — that handoff lives in the
+        regular-season-strength sharing already on the playoff sources).
+        """
+        by_stage: Dict[str, Dict[str, Dict[str, Any]]] = {
+            s: {} for s in self.KO_STAGES
+        }
+        for g in games:
+            stage = g.get("stage")
+            if stage not in by_stage:
+                continue
+            home = g.get("home")
+            away = g.get("away")
+            if not home or not away:
+                continue
+            key = self._tie_grouping_key(g)
+            if key is None:
+                continue
+            slot = by_stage[stage].setdefault(key, {"teams": set(), "games": []})
+            slot["teams"].add(home)
+            slot["teams"].add(away)
+            slot["games"].append(g)
+
+        bracket: Dict[str, List[Dict[str, Any]]] = {s: [] for s in self.KO_STAGES}
+        for stage in self.KO_STAGES:
+            for grouping_key, slot in by_stage[stage].items():
+                slot["games"].sort(
+                    key=lambda gg: gg.get("start_time") or _SENTINEL_START
+                )
+                bracket[stage].append({
+                    "stage": stage,
+                    "teams": frozenset(slot["teams"]),
+                    "games": slot["games"],
+                    "grouping_key": grouping_key,
+                    "feeds_from": {},
+                    "is_entry_tie": True,
+                })
+        return bracket
+
+    def initial_state(self) -> Dict[str, Any]:
+        if self._initial_state_cache is not None:
+            return self._initial_state_cache
+        from ..scoring import KNOCKOUT_ROUND_DEPTH
+        games = self._fetch_bracket_games()
+        bracket = self._build_bracket(games)
+        applied: List[Any] = []
+        tie_results: Dict[Any, Dict[str, Any]] = {}
+        round_reached: Dict[str, int] = {}
+
+        for stage in self.KO_STAGES:
+            for tie_meta in bracket.get(stage, []):
+                tk = (stage, frozenset(tie_meta["teams"]))
+                tie_results[tk] = self._new_tie_record(tie_meta)
+                # Chronological replay: games in tie_meta are already sorted
+                # by start_time in _build_bracket; apply each FINISHED one in
+                # order so loss counts accumulate correctly.
+                for game in tie_meta["games"]:
+                    if (
+                        game.get("status") == "FINISHED"
+                        and game.get("home_goals") is not None
+                        and game.get("away_goals") is not None
+                    ):
+                        self._record_game_into_tie(
+                            tie_results[tk],
+                            game["home"], game["away"],
+                            int(game["home_goals"]), int(game["away_goals"]),
+                            game.get("matchday", 1),
+                        )
+                        applied.append(game["game_id"])
+                self._propagate_round_reached(
+                    round_reached, stage, tie_results[tk], KNOCKOUT_ROUND_DEPTH,
+                )
+
+        state = {
+            "_applied": frozenset(applied),
+            "_tie_results": tie_results,
+            "_bracket": bracket,
+            "_round_reached": round_reached,
+        }
+        self._initial_state_cache = state
+        return state
+
+    def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
+        applied = state.get("_applied", frozenset())
+        tie_results = state.get("_tie_results", {})
+        bracket = state.get("_bracket", {})
+        out: List[GameRow] = []
+        for stage in self.KO_STAGES:
+            for tie_meta in bracket.get(stage, []):
+                tk = (stage, frozenset(tie_meta["teams"]))
+                tie = tie_results.get(tk) or self._new_tie_record(tie_meta)
+                # Double-elim has no fixed home/away pair per tie; pass
+                # empty strings so _emit_remaining_games_for_tie skips the
+                # pair-resolution path. Each game record carries its own
+                # source-published home/away.
+                out.extend(self._emit_remaining_games_for_tie(
+                    tie, tie_meta, applied, "", "",
+                ))
+        return out
+
+    def _emit_remaining_games_for_tie(
+        self, tie, tie_meta, applied, team_a, team_b,
+    ) -> List[GameRow]:
+        del team_a, team_b  # double-elim has no fixed pair; games are independent
+        out: List[GameRow] = []
+        if tie.get("winner") is not None:
+            return out
+        for g in tie_meta.get("games") or []:
+            if g["game_id"] in applied:
+                continue
+            home = g.get("home")
+            away = g.get("away")
+            if not home or not away:
+                continue
+            start = g.get("start_time") or _SENTINEL_START
+            extra: Dict[str, Any] = {
+                "game_id": g["game_id"],
+                "stage": tie_meta["stage"],
+                "matchday": g.get("matchday") or 1,
+                "grouping_key": tie_meta.get("grouping_key"),
+                "is_decisive_leg": True,  # any game can be a tie-ending game
+            }
+            extra.update(g.get("extra", {}) or {})
+            out.append(GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=home,
+                away=away,
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra=extra,
+            ))
+        return out
+
+    def apply_result(self, state, match, result):
+        from ..scoring import KNOCKOUT_ROUND_DEPTH
+        new_state = dict(state)
+        new_tie_results = dict(state.get("_tie_results", {}))
+        extra = match.extra if isinstance(match.extra, dict) else {}
+        stage_raw = extra.get("stage")
+        game_id = extra.get("game_id")
+        game_index = extra.get("matchday", 1)
+        grouping_key = extra.get("grouping_key")
+        bracket = state.get("_bracket", {})
+
+        stage: Optional[str] = stage_raw if isinstance(stage_raw, str) else None
+        target_meta = self._find_tie_meta(
+            stage, grouping_key, match.home, match.away, bracket,
+        ) if stage is not None else None
+
+        if target_meta is not None and stage is not None:
+            tk = (stage, frozenset(target_meta["teams"]))
+            prior_tie = new_tie_results.get(tk)
+            new_tie = (
+                self._copy_tie_record(prior_tie) if prior_tie
+                else self._new_tie_record(target_meta)
+            )
+            self._record_game_into_tie(
+                new_tie, match.home, match.away,
+                result.home_goals, result.away_goals, game_index,
+            )
+            new_tie_results[tk] = new_tie
+            new_state["_tie_results"] = new_tie_results
+
+            # Round-depth cascade. Idempotent under repeated calls
+            # because `_propagate_round_reached` uses max() everywhere,
+            # so we can drop the `prior_winner is None` / `newly_eliminated`
+            # guards the base class uses for the 2-team tie shape.
+            new_round = dict(state.get("_round_reached", {}))
+            self._propagate_round_reached(
+                new_round, stage, new_tie, KNOCKOUT_ROUND_DEPTH,
+            )
+            new_state["_round_reached"] = new_round
+
+        if game_id is not None:
+            new_state["_applied"] = state.get("_applied", frozenset()) | {game_id}
+        return new_state
+
+    # ---------- helpers ----------
+
+    def _find_tie_meta(
+        self,
+        stage: Optional[str],
+        grouping_key: Optional[str],
+        home: str,
+        away: str,
+        bracket: Dict[str, List[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        """Look up the tie_meta this game belongs to. Prefer grouping_key
+        (carried in extras from emission) for an unambiguous match;
+        fallback to team-set superset scan for defensive coverage when
+        the simulator constructs a counterfactual GameRow without
+        grouping_key (e.g., in tests, or a future synthesized game)."""
+        if not isinstance(stage, str):
+            return None
+        candidates = bracket.get(stage, [])
+        if grouping_key:
+            for tm in candidates:
+                if tm.get("grouping_key") == grouping_key:
+                    return tm
+        # Fallback: find a tie whose team set contains BOTH participants.
+        # Strict superset (not just containment of one team) so games
+        # that span sub-brackets (shouldn't happen with valid source
+        # data) are ignored rather than misattributed.
+        wanted = {home, away}
+        for tm in candidates:
+            teams = tm.get("teams") or frozenset()
+            if wanted.issubset(teams):
+                return tm
+        return None
+
+    def _propagate_round_reached(
+        self,
+        round_reached: Dict[str, int],
+        stage: str,
+        tie: Dict[str, Any],
+        knockout_depth: Dict[str, int],
+    ) -> None:
+        """Replay `_advance_round_reached` for a fully-loaded tie at
+        `initial_state` time. Mirrors the per-game logic in
+        `apply_result`: resolved ties advance the winner + cap every
+        loser; mid-tournament partial states cap eliminated teams at
+        this stage's depth without crowning a winner."""
+        winner = tie.get("winner")
+        eliminated = tie.get("eliminated_teams") or []
+        if winner is not None:
+            for loser in eliminated:
+                self._advance_round_reached(round_reached, winner, loser, stage)
+            return
+        depth = knockout_depth.get(stage, -1)
+        if depth < 0:
+            return
+        for loser in eliminated:
+            round_reached[loser] = max(round_reached.get(loser, -1), depth)

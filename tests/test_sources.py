@@ -5122,3 +5122,562 @@ class TestTennisSources:
         by_name = {g.home: g for g in games}
         assert by_name["Wimbledon"].extra.get("stage") == "MAJOR"
         assert by_name["Nordea Open"].extra.get("stage") == "EVENT"
+
+
+# =====================================================================
+# Phase O Phase 2a: DoubleEliminationSource base bracket-state-machine tests
+# =====================================================================
+
+class TestDoubleEliminationSource:
+    """Phase 2a of #43: 4-team double-elimination base for NCAA Baseball
+    / Softball Regional sites and the MCWS / WCWS 8-team bracket modeled
+    as two 4-team sub-brackets.
+
+    Exercises the new tie-state machinery (`losses_by_team` accumulation,
+    elimination at 2 losses, last-team-standing winner detection) and the
+    inherited terminal_outcomes cascade via the MCWS_PO league context
+    that Phase 1 set up. Uses a concrete minimal subclass that takes a
+    pre-baked list of game records so no HTTP touches the test path.
+    """
+
+    @staticmethod
+    def _make_source(games, ko_stages=("BSB_REG", "BSB_SR", "MCWS", "MCWS_F")):
+        """Concrete DoubleEliminationSource for testing. Inherits the
+        bracket machinery and trivially returns the pre-baked games list.
+        Uses MCWS_PO as the league context (set up in Phase 1) so the
+        terminal_outcomes cascade has real thresholds to bucket against.
+        Default KO_STAGES mirrors the production NCAA Baseball playoff
+        stage chain so winner-advance depth math hits the next stage
+        (e.g., Regional winner → BSB_SR depth) instead of the terminal
+        WINNER synthetic depth. Tie grouping_key is read off the game
+        record `extra["grouping_key"]`."""
+        from dispatcharr_ranked_matchups.sources.bracket import DoubleEliminationSource
+
+        class _TestSrc(DoubleEliminationSource):
+            KO_STAGES = ko_stages
+
+            @property
+            def sport_prefix(self):
+                return "TEST"
+
+            @property
+            def sport_label(self):
+                return "Test Double Elim"
+
+            def fetch_upcoming(self, days_ahead=7):
+                return []
+
+            def _league_context_code(self):
+                return "MCWS_PO"
+
+            def _fetch_bracket_games(self):
+                return list(games)
+
+            def _tie_grouping_key(self, game):
+                return (game.get("extra") or {}).get("grouping_key")
+
+        return _TestSrc()
+
+    @staticmethod
+    def _game(game_id, stage, grouping_key, home, away, scores=None, matchday=1, start_time=None):
+        """Synthesize one game record. `scores` is (home_score, away_score)
+        or None for SCHEDULED. `start_time` defaults to a sortable
+        date+matchday so the chronological-replay path in
+        `_build_bracket` orders games deterministically without depending
+        on matchday."""
+        from datetime import datetime, timezone, timedelta
+        if start_time is None:
+            base = datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc)
+            start_time = base + timedelta(days=matchday - 1)
+        if scores is None:
+            return {
+                "game_id": game_id, "stage": stage, "matchday": matchday,
+                "home": home, "away": away,
+                "home_goals": None, "away_goals": None,
+                "status": "SCHEDULED",
+                "start_time": start_time,
+                "extra": {"grouping_key": grouping_key},
+            }
+        return {
+            "game_id": game_id, "stage": stage, "matchday": matchday,
+            "home": home, "away": away,
+            "home_goals": scores[0], "away_goals": scores[1],
+            "status": "FINISHED",
+            "start_time": start_time,
+            "extra": {"grouping_key": grouping_key},
+        }
+
+    # ---------- _new_tie_record shape ----------
+
+    def test_new_tie_record_zero_losses_per_team(self):
+        src = self._make_source([])
+        tie = src._new_tie_record({
+            "stage": "BSB_REG",
+            "teams": frozenset({"A", "B", "C", "D"}),
+            "grouping_key": "Site1",
+        })
+        assert tie["losses_by_team"] == {"A": 0, "B": 0, "C": 0, "D": 0}
+        assert tie["winner"] is None
+        assert tie["eliminated_teams"] == []
+        assert tie["games_recorded"] == frozenset()
+        assert tie["elimination_loss_count"] == 2
+        assert tie["grouping_key"] == "Site1"
+
+    # ---------- _record_game_into_tie ----------
+
+    def test_record_game_increments_loser_loss_count(self):
+        src = self._make_source([])
+        tie = src._new_tie_record({
+            "stage": "BSB_REG",
+            "teams": frozenset({"A", "B", "C", "D"}),
+            "grouping_key": "Site1",
+        })
+        src._record_game_into_tie(tie, "A", "B", 5, 2, game_index=1)
+        assert tie["losses_by_team"]["B"] == 1
+        assert tie["losses_by_team"]["A"] == 0
+        assert tie["eliminated_teams"] == []
+        assert tie["winner"] is None
+
+    def test_record_game_eliminates_at_second_loss(self):
+        src = self._make_source([])
+        tie = src._new_tie_record({
+            "stage": "BSB_REG",
+            "teams": frozenset({"A", "B", "C", "D"}),
+            "grouping_key": "Site1",
+        })
+        # B loses to A (loss 1), then loses to C (loss 2 → eliminated).
+        src._record_game_into_tie(tie, "A", "B", 5, 2, game_index=1)
+        src._record_game_into_tie(tie, "B", "C", 1, 7, game_index=2)
+        assert tie["losses_by_team"]["B"] == 2
+        assert "B" in tie["eliminated_teams"]
+        assert tie["winner"] is None  # 3 teams still alive
+
+    def test_record_game_winner_is_last_team_standing(self):
+        # Simulate a complete 4-team double-elim where A wins.
+        # Loss progression to elimination (each team gets 2 losses except A):
+        #   G1: B loses to A    (B=1)
+        #   G2: D loses to C    (D=1)
+        #   G3: B loses to D    (B=2, eliminated)
+        #   G4: D loses to A    (D=2, eliminated)
+        #   G5: C loses to A    (C=1)  -- A is in the W bracket final, C in L bracket final
+        #   wait, in a real 4-team double-elim, C would still need 1 more loss
+        # Simpler test: cycle losses until 3 teams hit 2.
+        src = self._make_source([])
+        tie = src._new_tie_record({
+            "stage": "BSB_REG",
+            "teams": frozenset({"A", "B", "C", "D"}),
+            "grouping_key": "Site1",
+        })
+        # Eliminate B (2 losses)
+        src._record_game_into_tie(tie, "A", "B", 5, 2, game_index=1)
+        src._record_game_into_tie(tie, "C", "B", 4, 1, game_index=2)
+        # Eliminate D (2 losses)
+        src._record_game_into_tie(tie, "A", "D", 3, 0, game_index=3)
+        src._record_game_into_tie(tie, "C", "D", 6, 2, game_index=4)
+        # Eliminate C (2 losses). A wins.
+        src._record_game_into_tie(tie, "A", "C", 4, 3, game_index=5)
+        assert tie["winner"] is None  # C only has 1 loss
+        src._record_game_into_tie(tie, "A", "C", 7, 5, game_index=6)
+        assert tie["winner"] == "A"
+        assert set(tie["eliminated_teams"]) == {"B", "C", "D"}
+
+    def test_record_game_ignored_after_tie_resolved(self):
+        # Once winner is set, any further games are defensively no-op
+        # against simulator double-application.
+        src = self._make_source([])
+        tie = src._new_tie_record({
+            "stage": "BSB_REG",
+            "teams": frozenset({"A", "B", "C", "D"}),
+            "grouping_key": "Site1",
+        })
+        for h, a, sc in [
+            ("A", "B", (5, 2)), ("C", "B", (4, 1)),
+            ("A", "D", (3, 0)), ("C", "D", (6, 2)),
+            ("A", "C", (4, 3)), ("A", "C", (7, 5)),
+        ]:
+            src._record_game_into_tie(tie, h, a, sc[0], sc[1], game_index=1)
+        assert tie["winner"] == "A"
+        losses_at_resolve = dict(tie["losses_by_team"])
+        # Extra phantom game: should be a no-op.
+        src._record_game_into_tie(tie, "A", "B", 9, 0, game_index=7)
+        assert tie["losses_by_team"] == losses_at_resolve
+
+    def test_record_game_zero_zero_tie_score_is_noop(self):
+        # Baseball / softball don't tie, but defensively make sure
+        # equal scores don't increment any loss count.
+        src = self._make_source([])
+        tie = src._new_tie_record({
+            "stage": "BSB_REG",
+            "teams": frozenset({"A", "B", "C", "D"}),
+            "grouping_key": "Site1",
+        })
+        src._record_game_into_tie(tie, "A", "B", 3, 3, game_index=1)
+        assert tie["losses_by_team"] == {"A": 0, "B": 0, "C": 0, "D": 0}
+
+    # ---------- _build_bracket groups by (stage, grouping_key) ----------
+
+    def test_build_bracket_groups_by_grouping_key(self):
+        # 4-team double elim at Site1 + 4-team double elim at Site2.
+        # Same stage but different grouping_key → two tie_metas.
+        site1_games = [
+            self._game("s1-g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
+            self._game("s1-g2", "BSB_REG", "Site1", "C", "D", (4, 1), matchday=1),
+        ]
+        site2_games = [
+            self._game("s2-g1", "BSB_REG", "Site2", "E", "F", (3, 2), matchday=1),
+            self._game("s2-g2", "BSB_REG", "Site2", "G", "H", (6, 0), matchday=1),
+        ]
+        src = self._make_source(site1_games + site2_games)
+        bracket = src._build_bracket(site1_games + site2_games)
+        assert len(bracket["BSB_REG"]) == 2
+        keys_to_teams = {
+            tm["grouping_key"]: tm["teams"] for tm in bracket["BSB_REG"]
+        }
+        assert keys_to_teams["Site1"] == frozenset({"A", "B", "C", "D"})
+        assert keys_to_teams["Site2"] == frozenset({"E", "F", "G", "H"})
+
+    def test_build_bracket_skips_games_without_grouping_key(self):
+        # If the subclass's _tie_grouping_key returns None, the game is
+        # excluded from bracket construction (e.g., sub-bracket couldn't
+        # be inferred from the headline yet).
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2)),
+            self._game("g2", "BSB_REG", None, "X", "Y", (3, 1)),  # excluded
+        ]
+        src = self._make_source(games)
+        bracket = src._build_bracket(games)
+        assert len(bracket["BSB_REG"]) == 1
+        assert bracket["BSB_REG"][0]["teams"] == frozenset({"A", "B"})
+
+    def test_build_bracket_sorts_games_chronologically(self):
+        # _build_bracket sorts each tie's games by start_time so the
+        # chronological-replay in initial_state accumulates losses in
+        # the correct order.
+        from datetime import datetime, timezone
+        early = datetime(2025, 6, 13, 18, 0, tzinfo=timezone.utc)
+        late = datetime(2025, 6, 14, 18, 0, tzinfo=timezone.utc)
+        games = [
+            # Pass them out-of-order; expect sorted output.
+            self._game("late", "BSB_REG", "Site1", "C", "D", (4, 1), start_time=late),
+            self._game("early", "BSB_REG", "Site1", "A", "B", (5, 2), start_time=early),
+        ]
+        src = self._make_source(games)
+        bracket = src._build_bracket(games)
+        tie_meta = bracket["BSB_REG"][0]
+        assert [g["game_id"] for g in tie_meta["games"]] == ["early", "late"]
+
+    # ---------- initial_state replays games chronologically ----------
+
+    def test_initial_state_replays_finished_games(self):
+        # Site1: A beats B, then C beats B → B eliminated. 3 teams still alive.
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
+            self._game("g2", "BSB_REG", "Site1", "C", "B", (4, 1), matchday=2),
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        tk = ("BSB_REG", frozenset({"A", "B", "C"}))
+        tie = state["_tie_results"][tk]
+        assert tie["losses_by_team"] == {"A": 0, "B": 2, "C": 0}
+        assert "B" in tie["eliminated_teams"]
+        assert tie["winner"] is None
+        assert state["_applied"] == frozenset({"g1", "g2"})
+        # Mid-tournament cap: B at BSB_REG depth (0); A and C not yet in dict.
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"]["B"] == KNOCKOUT_ROUND_DEPTH["BSB_REG"]
+        assert "A" not in state["_round_reached"]
+        assert "C" not in state["_round_reached"]
+
+    def test_initial_state_complete_bracket_promotes_winner(self):
+        # Complete 4-team double-elim where A wins. The cascade hands A
+        # the BSB_SR (next-stage) depth and caps every loser at BSB_REG.
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
+            self._game("g2", "BSB_REG", "Site1", "C", "D", (4, 1), matchday=1),
+            self._game("g3", "BSB_REG", "Site1", "B", "D", (3, 1), matchday=2),  # D eliminated
+            self._game("g4", "BSB_REG", "Site1", "A", "C", (6, 3), matchday=2),  # C 1 loss
+            self._game("g5", "BSB_REG", "Site1", "B", "C", (2, 5), matchday=3),  # B eliminated
+            self._game("g6", "BSB_REG", "Site1", "A", "C", (4, 1), matchday=4),  # C eliminated → A wins
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        tk = ("BSB_REG", frozenset({"A", "B", "C", "D"}))
+        tie = state["_tie_results"][tk]
+        assert tie["winner"] == "A"
+        assert set(tie["eliminated_teams"]) == {"B", "C", "D"}
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        # Winner advances to next stage depth (BSB_SR).
+        assert state["_round_reached"]["A"] == KNOCKOUT_ROUND_DEPTH["BSB_SR"]
+        # Every loser caps at the tie's stage depth (BSB_REG).
+        for loser in ("B", "C", "D"):
+            assert state["_round_reached"][loser] == KNOCKOUT_ROUND_DEPTH["BSB_REG"]
+
+    # ---------- remaining_matches emits unapplied source-published games ----------
+
+    def test_remaining_matches_emits_unfinished_games(self):
+        # 2 finished + 1 scheduled; remaining should emit only the scheduled one.
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
+            self._game("g2", "BSB_REG", "Site1", "C", "D", (4, 1), matchday=1),
+            self._game("g3", "BSB_REG", "Site1", "A", "C", matchday=2),  # SCHEDULED
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        remaining = src.remaining_matches(state)
+        assert len(remaining) == 1
+        assert remaining[0].extra["game_id"] == "g3"
+        assert remaining[0].extra["grouping_key"] == "Site1"
+        assert remaining[0].extra["stage"] == "BSB_REG"
+        assert remaining[0].extra["is_decisive_leg"] is True
+
+    def test_remaining_matches_stops_after_winner(self):
+        # Once a tie is resolved, no more games are emitted from it
+        # even if subsequent SCHEDULED games are listed by the source.
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
+            self._game("g2", "BSB_REG", "Site1", "C", "D", (4, 1), matchday=1),
+            self._game("g3", "BSB_REG", "Site1", "B", "D", (3, 1), matchday=2),
+            self._game("g4", "BSB_REG", "Site1", "A", "C", (6, 3), matchday=2),
+            self._game("g5", "BSB_REG", "Site1", "B", "C", (2, 5), matchday=3),
+            self._game("g6", "BSB_REG", "Site1", "A", "C", (4, 1), matchday=4),
+            self._game("g7", "BSB_REG", "Site1", "A", "C", matchday=5),  # SCHEDULED if-nec
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        remaining = src.remaining_matches(state)
+        # Tie is resolved (A won at g6), so g7 (if-necessary) is dropped.
+        assert remaining == []
+
+    # ---------- apply_result threads counterfactual through losses_by_team ----------
+
+    def test_apply_result_increments_losses_via_grouping_key(self):
+        from dispatcharr_ranked_matchups.sources.base import GameRow, MatchResult
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", matchday=1),  # SCHEDULED
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        tk = ("BSB_REG", frozenset({"A", "B"}))
+        assert state["_tie_results"][tk]["losses_by_team"] == {"A": 0, "B": 0}
+
+        # Simulate the simulator drawing "A wins 5-2".
+        match = GameRow(
+            sport_prefix="TEST", sport_label="Test Double Elim",
+            home="A", away="B", rank_home=None, rank_away=None,
+            start_time=None,
+            extra={"game_id": "g1", "stage": "BSB_REG",
+                   "matchday": 1, "grouping_key": "Site1"},
+        )
+        result = MatchResult(home_goals=5, away_goals=2)
+        new_state = src.apply_result(state, match, result)
+
+        new_tie = new_state["_tie_results"][tk]
+        assert new_tie["losses_by_team"] == {"A": 0, "B": 1}
+        assert "g1" in new_state["_applied"]
+        # Original state untouched (immutability contract).
+        assert state["_tie_results"][tk]["losses_by_team"] == {"A": 0, "B": 0}
+
+    def test_apply_result_finds_tie_via_team_superset_fallback(self):
+        # If the simulator-emitted GameRow lacks `grouping_key` in extras
+        # (e.g., a counterfactual constructed without re-deriving the
+        # grouping), apply_result must still find the right tie by
+        # checking which tie_meta's `teams` superset contains both
+        # participants.
+        from dispatcharr_ranked_matchups.sources.base import GameRow, MatchResult
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", matchday=1),
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+
+        match = GameRow(
+            sport_prefix="TEST", sport_label="Test Double Elim",
+            home="A", away="B", rank_home=None, rank_away=None,
+            start_time=None,
+            # NB: no grouping_key in extras.
+            extra={"game_id": "g1", "stage": "BSB_REG", "matchday": 1},
+        )
+        result = MatchResult(home_goals=5, away_goals=2)
+        new_state = src.apply_result(state, match, result)
+
+        tk = ("BSB_REG", frozenset({"A", "B"}))
+        assert new_state["_tie_results"][tk]["losses_by_team"] == {"A": 0, "B": 1}
+
+    def test_apply_result_caps_eliminated_team_mid_tournament(self):
+        # When apply_result eliminates a team without resolving the tie,
+        # the eliminated team caps at the stage depth in _round_reached.
+        from dispatcharr_ranked_matchups.sources.base import GameRow, MatchResult
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
+            self._game("g2", "BSB_REG", "Site1", "C", "B", matchday=2),  # SCHEDULED
+            self._game("g3", "BSB_REG", "Site1", "A", "C", matchday=3),  # SCHEDULED
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        # Initial: B has 1 loss but isn't in _round_reached yet.
+        assert "B" not in state["_round_reached"]
+
+        # Simulator runs g2: C beats B → B is at 2 losses, eliminated,
+        # but tie not yet resolved (A and C both still alive).
+        match = GameRow(
+            sport_prefix="TEST", sport_label="Test Double Elim",
+            home="C", away="B", rank_home=None, rank_away=None,
+            start_time=None,
+            extra={"game_id": "g2", "stage": "BSB_REG",
+                   "matchday": 2, "grouping_key": "Site1"},
+        )
+        result = MatchResult(home_goals=7, away_goals=1)
+        new_state = src.apply_result(state, match, result)
+
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert new_state["_round_reached"]["B"] == KNOCKOUT_ROUND_DEPTH["BSB_REG"]
+        # No winner yet; A and C still not in _round_reached.
+        tk = ("BSB_REG", frozenset({"A", "B", "C"}))
+        assert new_state["_tie_results"][tk]["winner"] is None
+        assert "A" not in new_state["_round_reached"]
+        assert "C" not in new_state["_round_reached"]
+
+    def test_apply_result_promotes_winner_on_resolution(self):
+        # When apply_result resolves the tie, winner advances to next
+        # stage depth and every loser caps at this stage's depth.
+        from dispatcharr_ranked_matchups.sources.base import GameRow, MatchResult
+        # Pre-load enough finished games that the next apply resolves it:
+        # Need 3 teams at 2 losses each.
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
+            self._game("g2", "BSB_REG", "Site1", "C", "D", (4, 1), matchday=1),
+            self._game("g3", "BSB_REG", "Site1", "B", "D", (3, 1), matchday=2),
+            self._game("g4", "BSB_REG", "Site1", "A", "C", (6, 3), matchday=2),
+            self._game("g5", "BSB_REG", "Site1", "B", "C", (2, 5), matchday=3),
+            self._game("g6", "BSB_REG", "Site1", "A", "C", matchday=4),  # SCHEDULED
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        # State at g6: B and D eliminated (2 losses each); A undefeated; C has 1 loss.
+        tk = ("BSB_REG", frozenset({"A", "B", "C", "D"}))
+        assert state["_tie_results"][tk]["winner"] is None
+        assert set(state["_tie_results"][tk]["eliminated_teams"]) == {"B", "D"}
+
+        # Simulate g6: A beats C → C at 2 losses, eliminated → A wins.
+        match = GameRow(
+            sport_prefix="TEST", sport_label="Test Double Elim",
+            home="A", away="C", rank_home=None, rank_away=None,
+            start_time=None,
+            extra={"game_id": "g6", "stage": "BSB_REG",
+                   "matchday": 4, "grouping_key": "Site1"},
+        )
+        result = MatchResult(home_goals=4, away_goals=1)
+        new_state = src.apply_result(state, match, result)
+
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        new_tie = new_state["_tie_results"][tk]
+        assert new_tie["winner"] == "A"
+        assert set(new_tie["eliminated_teams"]) == {"B", "C", "D"}
+        # Winner advances to next stage (BSB_SR), losers cap at BSB_REG.
+        assert new_state["_round_reached"]["A"] == KNOCKOUT_ROUND_DEPTH["BSB_SR"]
+        for loser in ("B", "C", "D"):
+            assert new_state["_round_reached"][loser] == KNOCKOUT_ROUND_DEPTH["BSB_REG"]
+
+    def test_apply_result_returns_new_state_not_mutating_original(self):
+        # Immutability invariant: original state's _round_reached,
+        # _tie_results, and _applied must NOT change after apply_result.
+        from dispatcharr_ranked_matchups.sources.base import GameRow, MatchResult
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", matchday=1),
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+
+        match = GameRow(
+            sport_prefix="TEST", sport_label="Test Double Elim",
+            home="A", away="B", rank_home=None, rank_away=None,
+            start_time=None,
+            extra={"game_id": "g1", "stage": "BSB_REG",
+                   "matchday": 1, "grouping_key": "Site1"},
+        )
+        result = MatchResult(home_goals=5, away_goals=2)
+        snapshot_round = dict(state["_round_reached"])
+        snapshot_applied = set(state["_applied"])
+        tk = ("BSB_REG", frozenset({"A", "B"}))
+        snapshot_losses = dict(state["_tie_results"][tk]["losses_by_team"])
+
+        src.apply_result(state, match, result)
+
+        assert dict(state["_round_reached"]) == snapshot_round
+        assert set(state["_applied"]) == snapshot_applied
+        assert dict(state["_tie_results"][tk]["losses_by_team"]) == snapshot_losses
+
+    # ---------- terminal_outcomes via inherited cascade ----------
+
+    def test_terminal_outcomes_winner_gets_super_regional_band(self):
+        # MCWS_PO thresholds (Phase 1): BSB_SR/super_regional,
+        # MCWS/omaha_bound, MCWS_F/cws_final, MCWS_W/cws_champion.
+        # Phase 2a's Regional winner reaches BSB_SR depth = 1, which
+        # equals the super_regional threshold, so the winner picks up
+        # the super_regional band.
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
+            self._game("g2", "BSB_REG", "Site1", "C", "D", (4, 1), matchday=1),
+            self._game("g3", "BSB_REG", "Site1", "B", "D", (3, 1), matchday=2),
+            self._game("g4", "BSB_REG", "Site1", "A", "C", (6, 3), matchday=2),
+            self._game("g5", "BSB_REG", "Site1", "B", "C", (2, 5), matchday=3),
+            self._game("g6", "BSB_REG", "Site1", "A", "C", (4, 1), matchday=4),
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        outcomes = src.terminal_outcomes(state)
+        # Winner A reached BSB_SR depth → picks up super_regional band.
+        assert "super_regional" in outcomes["A"]
+        # Losers stay at BSB_REG depth (0) → no bands (lowest cutoff is
+        # BSB_SR at depth 1).
+        assert outcomes["B"] == []
+        assert outcomes["C"] == []
+        assert outcomes["D"] == []
+
+    # ---------- _find_tie_meta priority ----------
+
+    def test_find_tie_meta_prefers_grouping_key_over_team_superset(self):
+        # When grouping_key resolves, use it even if a different
+        # tie_meta's team set happens to contain both teams (defensive
+        # against future bracket reshape).
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        games = [
+            self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
+            self._game("g2", "BSB_REG", "Site2", "A", "B", (4, 1), matchday=1),
+            # Same {A, B} teams in two different sub-bracket grouping_keys.
+            # This shouldn't happen with real source data — teams don't
+            # span sub-brackets — but the contract should honor the
+            # grouping_key without ambiguity.
+        ]
+        src = self._make_source(games)
+        bracket = src._build_bracket(games)
+        # Two tie_metas, both containing {A, B}.
+        assert len(bracket["BSB_REG"]) == 2
+        site1_meta = next(tm for tm in bracket["BSB_REG"] if tm["grouping_key"] == "Site1")
+        site2_meta = next(tm for tm in bracket["BSB_REG"] if tm["grouping_key"] == "Site2")
+        # Lookup with explicit grouping_key resolves to that one.
+        assert src._find_tie_meta("BSB_REG", "Site1", "A", "B", bracket) is site1_meta
+        assert src._find_tie_meta("BSB_REG", "Site2", "A", "B", bracket) is site2_meta
+
+    def test_find_tie_meta_returns_none_for_unknown_stage(self):
+        src = self._make_source([])
+        bracket = {"BSB_REG": []}
+        assert src._find_tie_meta(
+            "NONEXISTENT", "Site1", "A", "B", bracket,
+        ) is None
+
+    # ---------- _is_decisive_game contract ----------
+
+    def test_is_decisive_game_always_true(self):
+        # Double-elim has no shootout / ET tiebreaker, but the
+        # BracketSportSource contract uses this hook to drive subclass
+        # sample_result. Every game can be a tie-ending game (the one
+        # that puts the last 1-loss team at 2 losses), so always True.
+        src = self._make_source([])
+        tie = src._new_tie_record({
+            "stage": "BSB_REG",
+            "teams": frozenset({"A", "B", "C", "D"}),
+            "grouping_key": "Site1",
+        })
+        for game_index in (1, 2, 3, 4, 5, 6, 7):
+            assert src._is_decisive_game(tie, game_index, games_in_tie=7) is True
