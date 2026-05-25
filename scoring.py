@@ -198,6 +198,58 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="R16 → QF → SF → Final → Champion",
     ),
+    # Phase H: top-flight European leagues. Slot semantics differ by league:
+    #   - UCL slots: Bundesliga 4, La Liga 4, Serie A 4, Ligue 1 3 (one
+    #     fewer; FL1's 4th place enters UEL/UECL playoff).
+    #   - Bundesliga: 16th plays relegation playoff vs Bundesliga 2's 3rd;
+    #     17-18 directly relegated. We use cutoff=15 (i.e. position > 15
+    #     == positions 16/17/18) to fire the relegation band for all three.
+    #   - La Liga / Serie A (20 teams): bottom 3 (18-20) relegated.
+    #   - Ligue 1 (18 teams): 16-18 relegated (same shape as BL1).
+    # Cross-sport weights mirror EPL's slot-by-slot importance because the
+    # consequences (UCL prize money, relegation revenue hit) are roughly
+    # comparable across the Big Five. Tuning each weight per-league
+    # would be premature without season-replay data.
+    "BL1": LeagueContext(
+        code="BL1", matchdays_total=34,
+        thresholds=[
+            (1,  "title",             5.0),
+            (4,  "UCL",               4.0),
+            (6,  "Europa/Conference", 2.0),
+            (15, "relegation",        5.0),
+        ],
+        boundary_summary="Top 4 → UCL · 5-6 → Europa · bottom 3 → relegation",
+    ),
+    "PD": LeagueContext(
+        code="PD", matchdays_total=38,
+        thresholds=[
+            (1,  "title",             5.0),
+            (4,  "UCL",               4.0),
+            (7,  "Europa/Conference", 2.0),
+            (17, "relegation",        5.0),
+        ],
+        boundary_summary="Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation",
+    ),
+    "SA": LeagueContext(
+        code="SA", matchdays_total=38,
+        thresholds=[
+            (1,  "title",             5.0),
+            (4,  "UCL",               4.0),
+            (7,  "Europa/Conference", 2.0),
+            (17, "relegation",        5.0),
+        ],
+        boundary_summary="Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation",
+    ),
+    "FL1": LeagueContext(
+        code="FL1", matchdays_total=34,
+        thresholds=[
+            (1,  "title",             5.0),
+            (3,  "UCL",               4.0),
+            (5,  "Europa/Conference", 2.0),
+            (15, "relegation",        5.0),
+        ],
+        boundary_summary="Top 3 → UCL · 4-5 → Europa · bottom 3 → relegation",
+    ),
     # Phase D.2 / D.3: NCAA football and men's basketball. Format is
     # "win_count" — threshold cutoffs are MINIMUM win counts rather than
     # position cutoffs (the SoccerSource interpretation). The points-

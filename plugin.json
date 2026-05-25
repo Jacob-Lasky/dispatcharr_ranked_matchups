@@ -49,6 +49,34 @@
       "help_text": "Knockout/group stage. Position-as-rank doesn't apply cleanly so favorites + odds carry the signal."
     },
     {
+      "id": "enable_bundesliga",
+      "type": "boolean",
+      "label": "Bundesliga (Germany, top flight)",
+      "default": false,
+      "help_text": "18 teams, 34 matchdays. Top 4 → UCL, 5-6 → Europa/Conference, 16 → relegation playoff, 17-18 → direct relegation. Requires Football-Data.org key."
+    },
+    {
+      "id": "enable_la_liga",
+      "type": "boolean",
+      "label": "La Liga (Spain, top flight)",
+      "default": false,
+      "help_text": "20 teams, 38 matchdays. Top 4 → UCL, 5-7 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key."
+    },
+    {
+      "id": "enable_serie_a",
+      "type": "boolean",
+      "label": "Serie A (Italy, top flight)",
+      "default": false,
+      "help_text": "20 teams, 38 matchdays. Top 4 → UCL, 5-7 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key."
+    },
+    {
+      "id": "enable_ligue_1",
+      "type": "boolean",
+      "label": "Ligue 1 (France, top flight)",
+      "default": false,
+      "help_text": "18 teams, 34 matchdays. Top 3 → UCL (4th = UCL playoff), 5 → Europa, bottom 3 → relegation. Requires Football-Data.org key."
+    },
+    {
       "id": "enable_nhl",
       "type": "boolean",
       "label": "NHL (regular season + Stanley Cup Playoffs)",
