@@ -128,13 +128,21 @@ class LeagueContext:
       - format="knockout": str round identifier matching the bracket
         source's stage labels (e.g., "QUARTER_FINALS"). A team is
         considered "in" the band if their `round_reached` equals or
-        exceeds this round. The knockout source ranks rounds by depth.
+        exceeds this round. The bracket source ranks rounds by depth.
+      - format="win_count": int MINIMUM win count (e.g., 11 = 11+ wins
+        gets the "11_wins" label). Cumulative: 11 wins gets "11_wins"
+        AND every lower-cutoff band that's still set. NCAAF / NCAAM /
+        NBA / MLB regular seasons use this.
+      - format="points_count": int MINIMUM standings-points count.
+        NHL uses this because OT / SO losses bank a partial point,
+        making raw win count a misleading playoff predictor. Bands at
+        95 / 100 / 110 / 125 points.
     """
     code: str                    # 'PL', 'ELC', 'CL', etc.
     matchdays_total: int         # season length (38 for EPL, 46 for ELC). 0 = N/A (knockouts).
     thresholds: List[Tuple[Any, str, float]] = field(default_factory=list)
     boundary_summary: str = ""   # e.g. "Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation"
-    format: str = "league"       # "league" | "knockout"
+    format: str = "league"       # "league" | "knockout" | "win_count" | "points_count"
 
 
 # Knockout-round depth ordering. Higher = deeper. The bracket source's
@@ -143,12 +151,19 @@ class LeagueContext:
 # DO NOT use stage names not present here as knockout thresholds — the
 # round-rank lookup would silently return -1 and no team would qualify.
 KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
+    # UEFA cup soccer (UCL / UEL / UECL):
     "PLAYOFFS":        0,  # UCL play-off round (pos 9-24 entrants)
     "LAST_16":         1,
     "QUARTER_FINALS":  2,
     "SEMI_FINALS":     3,
     "FINAL":           4,
     "WINNER":          5,  # synthetic: only the cup winner reaches this
+    # NHL Stanley Cup Playoffs (best-of-7 each round, 4 rounds):
+    "R1":              0,  # First round (8 series, 16 teams)
+    "R2":              1,  # Second round / Division finals (4 series)
+    "CONF_FINAL":      2,  # Conference finals (2 series)
+    "CUP_FINAL":       3,  # Stanley Cup Final (1 series)
+    "CUP_WINNER":      4,  # Stanley Cup champion
 }
 
 
@@ -207,6 +222,37 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             (25, "25_wins", 5.0),  # elite season, top seed candidate
         ],
         boundary_summary="15+ wins → NIT bubble · 20+ → NCAA bid · 25+ → elite",
+    ),
+    # Phase E: NHL regular season uses STANDINGS POINTS (regulation win = 2,
+    # OT/SO loss = 1, regulation loss = 0) rather than raw wins because the
+    # OT-loss bonus point makes a team with many OTLs look bubble-bound by
+    # win count when they are actually playoff-locked. Bands chosen against
+    # the 82-game season's historical playoff cutoffs (~95 pts has been the
+    # average Eastern Conference wild-card line over the salary-cap era).
+    "NHL": LeagueContext(
+        code="NHL", matchdays_total=82, format="points_count",
+        thresholds=[
+            (95,  "playoff_bubble",     1.5),  # roughly the wild-card line
+            (100, "playoff_secured",    2.5),  # comfortable in
+            (110, "division_pace",      4.0),  # division-winner pace
+            (125, "presidents_trophy",  5.0),  # Presidents' Trophy contender
+        ],
+        boundary_summary="95+ pts → playoff bubble · 100+ → comfortable · 110+ → div lead · 125+ → Presidents'",
+    ),
+    # Phase E: NHL Stanley Cup Playoffs (4 rounds, best-of-7 each).
+    # Round structure is identical across both conferences: 16 teams in,
+    # 1 champion out. Weights ramp aggressively into the Cup Final because
+    # a Game 6 / Game 7 SCF is the single highest-leverage game any NHL
+    # season produces.
+    "NHL_PO": LeagueContext(
+        code="NHL_PO", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("R2",         "round_2",       1.0),
+            ("CONF_FINAL", "conf_final",    2.5),
+            ("CUP_FINAL",  "cup_final",     5.0),
+            ("CUP_WINNER", "cup_winner",   10.0),
+        ],
+        boundary_summary="R1 → R2 → Conf Final → Cup Final → Champion",
     ),
 }
 

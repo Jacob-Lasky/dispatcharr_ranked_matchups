@@ -71,6 +71,15 @@ class PointsBasedSportSource(SportSource):
     _DEFAULT_POINTS_FOR: float = 25.0
     _DEFAULT_POINTS_AGAINST: float = 25.0
 
+    # Subclass override for `format="points_count"` sports (NHL) where the
+    # outcome threshold is total standings points (regulation wins = 2,
+    # OT/SO losses = 1, regulation losses = 0). Default "wins" matches
+    # NCAAF / NCAAM / NBA / MLB where the threshold is win count and
+    # there's no OT-loss point. terminal_outcomes reads team[_count_field]
+    # when bucketing by threshold cutoff; apply_result must populate the
+    # named field per game so the count keeps pace.
+    _count_field: str = "wins"
+
     def __init__(self) -> None:
         # Caches populated lazily on first importance call.
         self._all_games_cache: Optional[List[Dict[str, Any]]] = None
@@ -180,7 +189,10 @@ class PointsBasedSportSource(SportSource):
                 ap = g.get("away_points")
                 if hp is None or ap is None:
                     continue
-                self._record_result_into_state(teams, home, away, int(hp), int(ap))
+                self._record_result_into_state(
+                    teams, home, away, int(hp), int(ap),
+                    result_extra=g.get("extra"),
+                )
                 gid = g.get("id")
                 if gid is not None:
                     applied.append(gid)
@@ -264,9 +276,11 @@ class PointsBasedSportSource(SportSource):
                 # only appears in scheduled games). Seed a zero row.
                 new_teams[team] = {"wins": 0, "losses": 0,
                                    "pf": 0, "pa": 0, "games_played": 0}
+        result_extra = result.extra if isinstance(result.extra, dict) else None
         self._record_result_into_state(
             new_teams, match.home, match.away,
             result.home_goals, result.away_goals,
+            result_extra=result_extra,
         )
         new_state["_teams"] = new_teams
         extra = match.extra if isinstance(match.extra, dict) else {}
@@ -275,17 +289,26 @@ class PointsBasedSportSource(SportSource):
             new_state["_applied"] = state.get("_applied", frozenset()) | {gid}
         return new_state
 
-    @staticmethod
     def _record_result_into_state(
+        self,
         teams: Dict[str, Dict[str, int]],
         home: str, away: str,
         home_pts: int, away_pts: int,
+        result_extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Mutate `teams` in-place to record one game's result. Used by both
         initial_state (where we own the mutable state) and apply_result
         (which copies first to preserve immutability). NCAA games shouldn't
         end in regulation ties post-OT; if they do here, treat as a no-op
-        for the win/loss columns but still record points."""
+        for the win/loss columns but still record points.
+
+        `result_extra` is the sport-specific metadata bag (for NHL: the
+        `last_period_type` from sample_result, used to compute standings
+        points). Default ignores it; NHL subclasses override the method
+        to bake in the OT-loss-point logic. DO NOT use a @staticmethod
+        decorator — subclasses need `self` for overriding.
+        """
+        del result_extra  # base ignores; NHL subclass reads
         h = teams[home]
         a = teams[away]
         h["pf"] += home_pts
@@ -305,10 +328,17 @@ class PointsBasedSportSource(SportSource):
         # NCAA football/basketball).
 
     def terminal_outcomes(self, state: Dict[str, Any]) -> Dict[str, List[str]]:
-        """Bucket each team by win-count thresholds. The same team can
-        match multiple bands (e.g., 11 wins satisfies "11+ wins" AND "10+
-        wins" AND "8+ wins" AND "bowl_eligible") — the caller sums leverage
-        × consequence over the band set per the cross-sport calibration.
+        """Bucket each team by the count-field threshold for this sport.
+
+        For format="win_count" sports (CFB, CBB, NBA, MLB): _count_field
+        defaults to "wins". 11 wins satisfies "11+ wins" AND "10+ wins"
+        AND "8+ wins" AND "bowl_eligible" — the caller sums leverage ×
+        consequence over the band set per the cross-sport calibration.
+
+        For format="points_count" sports (NHL): _count_field is
+        "standings_points" and apply_result populates it per game from
+        the OT-aware result-classification (regulation_win = +2, OT_loss
+        = +1, regulation_loss = +0).
         """
         from ..scoring import LEAGUE_CONTEXTS
         ctx = LEAGUE_CONTEXTS.get(self.league_context_code)
@@ -316,9 +346,9 @@ class PointsBasedSportSource(SportSource):
             return {}
         teams = state.get("_teams", {})
         out: Dict[str, List[str]] = {team: [] for team in teams}
-        for min_wins, label, _ in ctx.thresholds:
+        for min_count, label, _ in ctx.thresholds:
             for team, row in teams.items():
-                if row.get("wins", 0) >= min_wins:
+                if row.get(self._count_field, 0) >= min_count:
                     out[team].append(label)
         return out
 

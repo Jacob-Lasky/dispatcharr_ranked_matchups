@@ -13,7 +13,7 @@ you can tune:
 | `rank_pair` | Both teams ranked / one ranked | 1.0 |
 | `favorite` | One of YOUR favorite teams is playing | 6.0 (flat) |
 | `close_game` | Coinflip-ness in [0, 1] — soccer uses devigged h2h moneylines, NCAAF/NCAAM normalize point spread | 3.0 |
-| `importance` | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands. Soccer leagues: title / UCL / Europa / relegation / promotion. UCL knockouts: round_of_16 → quarterfinal → semifinal → final → winner. NCAAF / NCAAM: win-count bands (bowl_eligible / 10+ / 11+; 15+ / 20+ / 25+). Locked outcomes contribute 0; uncertainty drives leverage. | 3.0 |
+| `importance` | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands. Soccer leagues: title / UCL / Europa / relegation / promotion. UCL knockouts: round_of_16 → quarterfinal → semifinal → final → winner. NCAAF / NCAAM: win-count bands (bowl_eligible / 10+ / 11+; 15+ / 20+ / 25+). NHL: standings-point bands (95+ bubble / 100+ secured / 110+ division / 125+ Presidents'); Stanley Cup Playoffs: R2 → Conf Final → Cup Final → Champion. Locked outcomes contribute 0; uncertainty drives leverage. | 3.0 |
 | `tournament_stage` | Knockout cup game (R16, QF, SF, F) | 1.5 |
 | `rivalry` | Known rivalry game (rivalry DB pending) | 2.0 (flat) |
 | `narrative` | LLM-judged narrative bonus (off by default) | 0.0 |
@@ -54,6 +54,7 @@ first in any IPTV client.
 | NCAA Football | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (1k req/day) |
 | NCAA Men's Basketball | [CollegeBasketballData.com](https://collegebasketballdata.com/) (same key as CFBD) | Yes |
 | EPL / EFL Championship / UCL | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, 12 free comps) |
+| NHL (regular + Stanley Cup Playoffs) | [api-web.nhle.com](https://api-web.nhle.com/) (official, undocumented) | Yes (no key required) |
 | Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |
 
 Adding a sport is a new file in `sources/` implementing the `SportSource`
