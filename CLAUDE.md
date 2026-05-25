@@ -24,7 +24,7 @@ plugin.py         ← orchestrator: refresh + apply + show_status + scheduler
 sources/          ← per-sport adapters (drop-in extensible)
   base.py         ← GameRow + SportSource interface
   ncaaf.py        ← NCAA Football via CFBD
-  soccer.py       ← EPL/EFL Championship/UCL via Football-Data.org + Odds API
+  soccer.py       ← EPL/Championship/UCL/Bundesliga/La Liga/Serie A/Ligue 1 via Football-Data.org + Odds API
   __init__.py
   ↓ produce
 List[GameRow]     ← {sport_prefix, home, away, rank_home, rank_away, start_time, spread, extra}

@@ -324,6 +324,17 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(_make_soccer("championship"))
     if settings.get("enable_ucl", False) and fd_key:
         sources.append(_make_soccer("ucl"))
+    # Phase H: top-flight European leagues. Same FD.org key as EPL etc.;
+    # _make_soccer routes each to SoccerSource because their LEAGUE_CONTEXTS
+    # entries default to format="league".
+    if settings.get("enable_bundesliga", False) and fd_key:
+        sources.append(_make_soccer("bundesliga"))
+    if settings.get("enable_la_liga", False) and fd_key:
+        sources.append(_make_soccer("la_liga"))
+    if settings.get("enable_serie_a", False) and fd_key:
+        sources.append(_make_soccer("serie_a"))
+    if settings.get("enable_ligue_1", False) and fd_key:
+        sources.append(_make_soccer("ligue_1"))
 
     # NHL — no API key required (api-web.nhle.com is free). Pair the
     # regular and playoff sources together: the playoff source borrows

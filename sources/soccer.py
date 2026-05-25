@@ -147,6 +147,45 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         use_position_as_rank=False,  # group/knockout standings don't map cleanly
         # total_matchdays=0 — knockout, not a fixed-length season
     ),
+    # Phase H: top-flight European league competitions. All available on
+    # Football-Data.org's free tier (verified 2026-05-25). Each is a
+    # standard round-robin league; SoccerSource handles them with no
+    # subclass needed. Threshold structures live in scoring.LEAGUE_CONTEXTS
+    # because they encode the same competition's slot semantics (UCL
+    # qualification, relegation lines) which are scoring concerns, not
+    # adapter concerns.
+    "bundesliga": SoccerCompetitionConfig(
+        fd_code="BL1",
+        sport_prefix="BL1",
+        sport_label="Bundesliga",
+        odds_sport_key="soccer_germany_bundesliga",
+        rank_cap=18,
+        total_matchdays=34,
+    ),
+    "la_liga": SoccerCompetitionConfig(
+        fd_code="PD",
+        sport_prefix="LaLiga",
+        sport_label="La Liga",
+        odds_sport_key="soccer_spain_la_liga",
+        rank_cap=20,
+        total_matchdays=38,
+    ),
+    "serie_a": SoccerCompetitionConfig(
+        fd_code="SA",
+        sport_prefix="SerieA",
+        sport_label="Serie A",
+        odds_sport_key="soccer_italy_serie_a",
+        rank_cap=20,
+        total_matchdays=38,
+    ),
+    "ligue_1": SoccerCompetitionConfig(
+        fd_code="FL1",
+        sport_prefix="Ligue1",
+        sport_label="Ligue 1",
+        odds_sport_key="soccer_france_ligue_one",
+        rank_cap=18,
+        total_matchdays=34,
+    ),
 }
 
 

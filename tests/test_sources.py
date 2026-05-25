@@ -261,7 +261,9 @@ class TestNcaamSpreadsShape:
 
 class TestSoccerCompetitions:
     def test_known_keys(self):
-        for k in ("epl", "championship", "ucl"):
+        # Phase H added bundesliga / la_liga / serie_a / ligue_1 to the catalog.
+        for k in ("epl", "championship", "ucl",
+                  "bundesliga", "la_liga", "serie_a", "ligue_1"):
             assert k in SOCCER_COMPETITIONS
 
     def test_epl_config(self):
@@ -288,11 +290,69 @@ class TestSoccerCompetitions:
 
     def test_unknown_competition_rejected(self):
         try:
-            SoccerSource("bundesliga", fd_api_key="x")
+            SoccerSource("not_a_real_league", fd_api_key="x")
         except ValueError:
             pass
         else:
             raise AssertionError("expected ValueError")
+
+    # ---------- Phase H: top-flight European leagues ----------
+
+    def test_bundesliga_matchdays(self):
+        # 18 teams → 34 matchdays. Off-by-one silently misleads "Matchday X of Y".
+        assert SOCCER_COMPETITIONS["bundesliga"].total_matchdays == 34
+        assert SOCCER_COMPETITIONS["bundesliga"].rank_cap == 18
+        assert SOCCER_COMPETITIONS["bundesliga"].fd_code == "BL1"
+
+    def test_la_liga_matchdays(self):
+        # 20 teams → 38 matchdays (same shape as EPL).
+        assert SOCCER_COMPETITIONS["la_liga"].total_matchdays == 38
+        assert SOCCER_COMPETITIONS["la_liga"].rank_cap == 20
+        assert SOCCER_COMPETITIONS["la_liga"].fd_code == "PD"
+
+    def test_serie_a_matchdays(self):
+        assert SOCCER_COMPETITIONS["serie_a"].total_matchdays == 38
+        assert SOCCER_COMPETITIONS["serie_a"].rank_cap == 20
+        assert SOCCER_COMPETITIONS["serie_a"].fd_code == "SA"
+
+    def test_ligue_1_matchdays(self):
+        # 18 teams → 34 matchdays (same as Bundesliga).
+        assert SOCCER_COMPETITIONS["ligue_1"].total_matchdays == 34
+        assert SOCCER_COMPETITIONS["ligue_1"].rank_cap == 18
+        assert SOCCER_COMPETITIONS["ligue_1"].fd_code == "FL1"
+
+    def test_top_flight_leagues_use_position_as_rank(self):
+        # All Big-Five leagues have a real points table — position-as-rank applies.
+        for k in ("bundesliga", "la_liga", "serie_a", "ligue_1"):
+            assert SOCCER_COMPETITIONS[k].use_position_as_rank is True
+
+    def test_top_flight_route_to_league_format_not_knockout(self):
+        # _make_soccer factory in plugin.py picks SoccerSource (not
+        # KnockoutSoccerSource) when LEAGUE_CONTEXTS[fd_code].format == "league".
+        # Verify the LEAGUE_CONTEXTS entries reflect that.
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        for code in ("BL1", "PD", "SA", "FL1"):
+            assert LEAGUE_CONTEXTS[code].format == "league", \
+                f"{code} should route through SoccerSource (format=league)"
+
+    def test_top_flight_thresholds_include_title_ucl_relegation(self):
+        # Every Big-Five entry must have title + UCL + relegation bands so
+        # importance leverage covers the most stakeholder-relevant outcomes.
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        for code in ("BL1", "PD", "SA", "FL1"):
+            labels = {label for _cut, label, _w in LEAGUE_CONTEXTS[code].thresholds}
+            assert "title" in labels, f"{code} missing title band"
+            assert "UCL" in labels, f"{code} missing UCL band"
+            assert "relegation" in labels, f"{code} missing relegation band"
+
+    def test_ligue_1_ucl_cutoff_is_three_not_four(self):
+        # FL1 only awards 3 direct UCL slots (4th plays UCL playoff round).
+        # Reflect that in the cutoff so importance for "did we make UCL"
+        # leverages the right boundary.
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ucl_cutoffs = [cut for cut, label, _w in LEAGUE_CONTEXTS["FL1"].thresholds
+                       if label == "UCL"]
+        assert ucl_cutoffs == [3]
 
 
 class TestPreviousSeasonStartYear:
