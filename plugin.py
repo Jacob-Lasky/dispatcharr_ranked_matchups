@@ -301,6 +301,7 @@ def _build_sources(settings: Dict[str, Any]):
         NcaafSource, NcaamSource,
         NflPlayoffSource, NflRegularSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
+        F1Source, NascarSource, GolfSource,
     )
     from .sources.soccer import COMPETITIONS
     from .scoring import LEAGUE_CONTEXTS
@@ -448,6 +449,17 @@ def _build_sources(settings: Dict[str, Any]):
     # Liga MX — Mexican top-flight. Same V1 minimal pattern.
     if settings.get("enable_liga_mx", False):
         sources.append(LigaMxSource(odds_api_key=odds_key or ""))
+
+    # Phase R: field events (racing + golf). No two-team head-to-head;
+    # each row is one race or tournament. Low event volume (~1/week)
+    # means "surface if toggled" is the right product — no importance
+    # ranking needed.
+    if settings.get("enable_f1", False):
+        sources.append(F1Source())
+    if settings.get("enable_nascar", False):
+        sources.append(NascarSource())
+    if settings.get("enable_golf", False):
+        sources.append(GolfSource())
 
     # WNBA — ESPN unofficial API; same pair-and-seed pattern as NHL/MLB/
     # NBA. Per-stage series lengths via BestOfNSeriesSource hooks: R1

@@ -825,6 +825,16 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             "ROUND_OF_16": 1.5, "LAST_16": 1.5,
             "ROUND_OF_32": 1.0, "LAST_32": 1.0,
             "PLAYOFF_ROUND": 1.0, "PLAYOFFS": 1.0,
+            # Phase R: field events (F1 GP, NASCAR race, golf tour
+            # weekly events). These have no two-team head-to-head
+            # structure so the rank / favorite / closeness signals
+            # don't apply — the tournament_stage band is what gets
+            # them into the guide at all. "MAJOR" is for golf's four
+            # majors (Masters / PGA / US Open / British Open) and
+            # any future marquee racing event we want bumped above
+            # the regular tour.
+            "EVENT": 1.5,
+            "MAJOR": 4.5,
         }.get(ts, 0.0)
         if stage_score > 0:
             tourn_pts = stage_score * weights.tournament
@@ -1002,6 +1012,8 @@ def pick_tagline(
             "ROUND_OF_16": "Round of 16", "LAST_16": "Round of 16",
             "ROUND_OF_32": "Round of 32", "LAST_32": "Round of 32",
             "PLAYOFF_ROUND": "Playoff", "PLAYOFFS": "Playoff",
+            "EVENT": "Event",
+            "MAJOR": "Major",
         }
         if ts in stage_labels:
             return stage_labels[ts]

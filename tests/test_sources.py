@@ -4412,3 +4412,200 @@ class TestLigaMxSource:
         assert len(games) == 1
         assert games[0].extra.get("season_slug") == "torneo-clausura"
         assert games[0].extra.get("fd_competition_code") == "LigaMX"
+
+
+# =====================================================================
+# Phase R: field events (F1 + NASCAR + Golf)
+# =====================================================================
+
+class TestFieldEventSourceContract:
+    """FieldEventSource is the ABC for racing + golf — events that
+    aren't head-to-head. Pin the contract: home=event_name, away="Field"
+    sentinel, no importance simulation."""
+
+    def test_f1_identity(self):
+        from dispatcharr_ranked_matchups.sources.field_event import F1Source
+        src = F1Source()
+        assert src.sport_prefix == "F1"
+        assert src.sport_label == "Formula 1"
+        assert src.ESPN_SLUG == "racing/f1"
+
+    def test_nascar_identity(self):
+        from dispatcharr_ranked_matchups.sources.field_event import NascarSource
+        src = NascarSource()
+        assert src.sport_prefix == "NASCAR"
+        assert "NASCAR" in src.sport_label
+        assert src.ESPN_SLUG == "racing/nascar-premier"
+
+    def test_golf_identity(self):
+        from dispatcharr_ranked_matchups.sources.field_event import GolfSource
+        src = GolfSource()
+        assert src.sport_prefix == "PGA"
+        assert "PGA" in src.sport_label
+        assert src.ESPN_SLUG == "golf/pga"
+
+    def test_field_events_do_not_support_importance(self):
+        """Field events surface via tournament_stage alone in V1; no
+        Monte Carlo importance simulation."""
+        from dispatcharr_ranked_matchups.sources.field_event import (
+            F1Source, NascarSource, GolfSource,
+        )
+        for src in (F1Source(), NascarSource(), GolfSource()):
+            assert src.supports_importance is False
+
+
+class TestGolfMajorDetection:
+    """The four golf majors get the MAJOR score tier. Detection is
+    regex-based against event name; regex must catch ESPN's varied
+    naming."""
+
+    @staticmethod
+    def _make():
+        from dispatcharr_ranked_matchups.sources.field_event import GolfSource
+        return GolfSource()
+
+    @staticmethod
+    def _is_major(src, name):
+        return src.MAJOR_REGEX is not None and bool(src.MAJOR_REGEX.search(name))
+
+    def test_masters(self):
+        src = self._make()
+        assert self._is_major(src, "Masters Tournament")
+        assert self._is_major(src, "The Masters")
+
+    def test_pga_championship(self):
+        src = self._make()
+        assert self._is_major(src, "PGA Championship")
+
+    def test_us_open(self):
+        src = self._make()
+        assert self._is_major(src, "U.S. Open Championship")
+        assert self._is_major(src, "US Open")
+
+    def test_british_open(self):
+        src = self._make()
+        # ESPN has used both "The Open Championship" and "British Open".
+        assert self._is_major(src, "The Open Championship")
+        assert self._is_major(src, "British Open")
+
+    def test_regular_tour_event_not_major(self):
+        src = self._make()
+        assert not self._is_major(src, "Charles Schwab Challenge")
+        assert not self._is_major(src, "FedEx St. Jude Championship")
+        assert not self._is_major(src, "Players Championship")
+
+    def test_f1_no_major_regex(self):
+        """F1 has no major tier in V1; the class attr is None."""
+        from dispatcharr_ranked_matchups.sources.field_event import F1Source
+        assert F1Source.MAJOR_REGEX is None
+
+
+class TestFieldEventFetchUpcoming:
+    """Pin the GameRow shape FieldEventSource emits."""
+
+    def test_emits_event_tier_row(self, monkeypatch):
+        import dispatcharr_ranked_matchups.sources.field_event as field_mod
+        espn_response = {
+            "events": [{
+                "id": "401900100",
+                "name": "Heineken Chinese Grand Prix",
+                "shortName": "Heineken Chinese GP",
+                "date": "2026-04-12T05:00Z",
+                "competitions": [{"competitors": []}],
+            }],
+        }
+        monkeypatch.setattr(field_mod, "_http_get", lambda *a, **kw: espn_response)
+        from dispatcharr_ranked_matchups.sources.field_event import F1Source
+        src = F1Source()
+        games = src.fetch_upcoming(days_ahead=7)
+        assert len(games) == 1
+        g = games[0]
+        assert g.home == "Heineken Chinese Grand Prix"
+        # Sentinel away team — field events have no opponent.
+        assert g.away == "Field"
+        assert g.sport_prefix == "F1"
+        assert g.extra.get("stage") == "EVENT"
+        assert g.extra.get("is_field_event") is True
+        assert g.extra.get("fd_competition_code") == "F1"
+
+    def test_emits_major_tier_for_golf_major(self, monkeypatch):
+        import dispatcharr_ranked_matchups.sources.field_event as field_mod
+        espn_response = {
+            "events": [{
+                "id": "401900200",
+                "name": "Masters Tournament",
+                "shortName": "Masters Tournament",
+                "date": "2026-04-09T17:00Z",
+                "competitions": [{"competitors": []}],
+            }],
+        }
+        monkeypatch.setattr(field_mod, "_http_get", lambda *a, **kw: espn_response)
+        from dispatcharr_ranked_matchups.sources.field_event import GolfSource
+        src = GolfSource()
+        games = src.fetch_upcoming(days_ahead=7)
+        assert len(games) == 1
+        assert games[0].extra.get("stage") == "MAJOR"
+
+    def test_emits_event_tier_for_regular_golf_tournament(self, monkeypatch):
+        import dispatcharr_ranked_matchups.sources.field_event as field_mod
+        espn_response = {
+            "events": [{
+                "id": "401900201",
+                "name": "Charles Schwab Challenge",
+                "shortName": "Charles Schwab Challenge",
+                "date": "2026-05-21T17:00Z",
+                "competitions": [{"competitors": []}],
+            }],
+        }
+        monkeypatch.setattr(field_mod, "_http_get", lambda *a, **kw: espn_response)
+        from dispatcharr_ranked_matchups.sources.field_event import GolfSource
+        src = GolfSource()
+        games = src.fetch_upcoming(days_ahead=7)
+        assert len(games) == 1
+        assert games[0].extra.get("stage") == "EVENT"
+
+    def test_empty_response_returns_empty_list(self, monkeypatch):
+        import dispatcharr_ranked_matchups.sources.field_event as field_mod
+        monkeypatch.setattr(field_mod, "_http_get", lambda *a, **kw: {"events": []})
+        from dispatcharr_ranked_matchups.sources.field_event import F1Source
+        assert F1Source().fetch_upcoming(days_ahead=7) == []
+
+    def test_http_failure_returns_empty_list(self, monkeypatch):
+        import dispatcharr_ranked_matchups.sources.field_event as field_mod
+        monkeypatch.setattr(field_mod, "_http_get", lambda *a, **kw: None)
+        from dispatcharr_ranked_matchups.sources.field_event import NascarSource
+        assert NascarSource().fetch_upcoming(days_ahead=7) == []
+
+
+class TestFieldEventScoring:
+    """tournament_stage = EVENT or MAJOR must produce a non-zero score
+    so field events appear in the curated guide."""
+
+    def test_event_stage_scores_nonzero(self):
+        from dispatcharr_ranked_matchups.scoring import (
+            GameSignals, Weights, score_game,
+        )
+        signals = GameSignals(
+            team_a="Heineken Chinese Grand Prix",
+            team_b="Field",
+            tournament_stage="EVENT",
+        )
+        score = score_game(signals, Weights())
+        assert score.raw > 0
+
+    def test_major_stage_scores_higher_than_event(self):
+        from dispatcharr_ranked_matchups.scoring import (
+            GameSignals, Weights, score_game,
+        )
+        weights = Weights()
+        event_score = score_game(
+            GameSignals(team_a="X", team_b="Field", tournament_stage="EVENT"),
+            weights,
+        )
+        major_score = score_game(
+            GameSignals(team_a="X", team_b="Field", tournament_stage="MAJOR"),
+            weights,
+        )
+        # MAJOR must outrank EVENT — golf majors should beat regular
+        # tour stops in the guide.
+        assert major_score.raw > event_score.raw

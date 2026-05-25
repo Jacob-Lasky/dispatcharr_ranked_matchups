@@ -161,6 +161,27 @@
       "help_text": "Mexican Apertura + Clausura + Liguilla playoff. Schedule + closeness scoring only in V1 (same minimal scope as MLS / NWSL). ESPN unofficial API + Odds API (soccer_mexico_ligamx). Relevant for US viewers with Univision / Telemundo channels in their EPG."
     },
     {
+      "id": "enable_f1",
+      "type": "boolean",
+      "label": "Formula 1",
+      "default": false,
+      "help_text": "~24 Grands Prix per year. Each scheduled race surfaces in the guide as a single 'Event'-tier entry — no per-driver importance ranking (the rarity of races makes 'show if toggled' the right product). No API key required — ESPN unofficial."
+    },
+    {
+      "id": "enable_nascar",
+      "type": "boolean",
+      "label": "NASCAR Cup Series",
+      "default": false,
+      "help_text": "~36 Cup Series races per year. Same field-event shape as F1: each race is one 'Event'-tier row. No API key required — ESPN unofficial."
+    },
+    {
+      "id": "enable_golf",
+      "type": "boolean",
+      "label": "PGA Tour (incl. majors)",
+      "default": false,
+      "help_text": "PGA Tour tour stops + the four majors (Masters / PGA Championship / US Open / The Open). Major tournaments get a higher score tier ('Major') than regular tour stops ('Event'). No API key required — ESPN unofficial."
+    },
+    {
       "id": "enable_wnba",
       "type": "boolean",
       "label": "WNBA (regular season + playoffs)",
