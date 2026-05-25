@@ -42,13 +42,14 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 from .base import GameRow, MatchResult
-from .bracket import BestOfNSeriesSource
+from .bracket import BestOfNSeriesSource, DoubleEliminationSource
 from .points_based import PointsBasedSportSource
 from .._util import (
     extract_game_number_after_marker,
@@ -398,21 +399,78 @@ def _parse_baseball_playoff_headline(headline: str) -> Tuple[Optional[str], Opti
     return None, None
 
 
-class NcaaBaseballPlayoffSource(BestOfNSeriesSource):
+class _BaseballPlayoffStrengthsMixin:
+    """Shared per-team Poisson strength tracking + sample_result for the
+    two NCAA Baseball playoff source classes (Super Regional + MCWS Finals
+    via BestOfNSeriesSource; Regional + 8-team MCWS bracket via
+    DoubleEliminationSource). Both pull regular-season strengths from
+    NcaaBaseballRegularSource via `set_regular_season_strengths` and use
+    the same Poisson sampling with extra-innings coin-flip tiebreak.
+    """
+
+    # Defined here so type-checkers know the attr exists; concrete
+    # subclasses initialize it in __init__ to avoid the class-level
+    # singleton pitfall.
+    _team_strengths_from_regular: Optional[Dict[str, Dict[str, float]]] = None
+
+    def estimate_strengths(self) -> Dict[str, Dict[str, float]]:
+        if self._team_strengths_from_regular is not None:
+            return self._team_strengths_from_regular
+        return {}
+
+    def set_regular_season_strengths(
+        self, strengths: Dict[str, Dict[str, float]],
+    ) -> None:
+        """Hook for plugin.py to seed per-team scoring/conceding rates
+        from the regular-season source."""
+        self._team_strengths_from_regular = strengths
+
+    def _strength_for(
+        self, strengths: Dict[str, Dict[str, float]], team: str,
+    ) -> Dict[str, float]:
+        if team in strengths:
+            return strengths[team]
+        return {
+            "pf_per_game": _DEFAULT_RUNS_FOR,
+            "pa_per_game": _DEFAULT_RUNS_AGAINST,
+        }
+
+    def sample_result(
+        self,
+        state: Dict[str, Any],
+        match: GameRow,
+        strengths: Dict[str, Dict[str, float]],
+        rng: random.Random,
+    ) -> MatchResult:
+        del state  # per-game classification only
+        h = self._strength_for(strengths, match.home)
+        a = self._strength_for(strengths, match.away)
+        lam_home = max(0.1, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
+        lam_away = max(0.1, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
+        home_runs = _poisson(lam_home, rng)
+        away_runs = _poisson(lam_away, rng)
+        # NCAA postseason has no draws — coin-flip the +1 to break the tie.
+        if home_runs == away_runs:
+            if rng.random() < 0.5:
+                home_runs += 1
+            else:
+                away_runs += 1
+        return MatchResult(home_goals=home_runs, away_goals=away_runs)
+
+
+class NcaaBaseballPlayoffSource(_BaseballPlayoffStrengthsMixin, BestOfNSeriesSource):
     """NCAA Baseball postseason: Super Regional + MCWS Finals.
 
     Both stages are best-of-3 (`SERIES_LENGTH = 3`) with ESPN headlines
     that carry the game number, so the BestOfNSeriesSource infrastructure
-    fits cleanly. The intermediate Regional (4-team double-elim per
-    site) and 8-team MCWS bracket in Omaha lack game-number metadata in
-    ESPN's data and require chronological inference — tracked in #43.
+    fits cleanly. The Regional (4-team double-elim per site) and 8-team
+    MCWS bracket stages are owned by NcaaBaseballPlayoffBracketSource
+    (sibling source), which extends DoubleEliminationSource and uses
+    chronological inference + headline site labels for grouping.
 
     The depth structure (BSB_REG=0 → BSB_SR=1 → MCWS=2 → MCWS_F=3 →
-    MCWS_W=4) lets #43 extend KO_STAGES without touching threshold
-    labels in LEAGUE_CONTEXTS["MCWS_PO"]. The `omaha_bound` band
-    (depth 2) fires for Super Regional WINNERS because
-    `_winner_advance_label("BSB_SR")` returns None → default
-    `stage_depth + 1` rule → winner gets depth 2 (= MCWS depth).
+    MCWS_W=4) is shared across the two playoff sources; this class
+    handles BSB_SR + MCWS_F, the sibling handles BSB_REG + MCWS.
 
     Strength sharing: pre-postseason, the plugin pulls regular-season
     strength estimates from NcaaBaseballRegularSource and seeds them
@@ -550,54 +608,6 @@ class NcaaBaseballPlayoffSource(BestOfNSeriesSource):
             },
         )
 
-    # ---------- strengths (reused from regular season) ----------
-
-    def estimate_strengths(self) -> Dict[str, Dict[str, float]]:
-        if self._team_strengths_from_regular is not None:
-            return self._team_strengths_from_regular
-        return {}
-
-    def set_regular_season_strengths(
-        self, strengths: Dict[str, Dict[str, float]]
-    ) -> None:
-        """Hook for plugin.py to seed per-team scoring/conceding rates
-        from the regular-season source. Same shape as MlbPlayoffSource."""
-        self._team_strengths_from_regular = strengths
-
-    def _strength_for(
-        self, strengths: Dict[str, Dict[str, float]], team: str,
-    ) -> Dict[str, float]:
-        if team in strengths:
-            return strengths[team]
-        return {
-            "pf_per_game": _DEFAULT_RUNS_FOR,
-            "pa_per_game": _DEFAULT_RUNS_AGAINST,
-        }
-
-    # ---------- sample_result (per-game Poisson with extra-innings) ----------
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        del state  # per-game classification only
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.1, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.1, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_runs = _poisson(lam_home, rng)
-        away_runs = _poisson(lam_away, rng)
-        # NCAA postseason has no draws — coin-flip the +1 to break the tie.
-        if home_runs == away_runs:
-            if rng.random() < 0.5:
-                home_runs += 1
-            else:
-                away_runs += 1
-        return MatchResult(home_goals=home_runs, away_goals=away_runs)
-
     # ---------- bracket fetch ----------
 
     def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
@@ -693,4 +703,454 @@ class NcaaBaseballPlayoffSource(BestOfNSeriesSource):
             "status": status,
             "start_time": parse_iso_utc(event.get("date")),
             "extra": {"headline": headline},
+        }
+
+
+# =====================================================================
+# NcaaBaseballPlayoffBracketSource — Regional + 8-team MCWS double-elim
+# =====================================================================
+
+
+# Site name is everything between "NCAA Baseball Championship - " and
+# " Regional" — e.g., "Auburn Regional" from
+# "NCAA Baseball Championship - Auburn Regional - Game 1".
+_REGIONAL_SITE_REGEX = re.compile(
+    r"NCAA Baseball Championship - (?P<site>[^-]+? Regional)\b"
+)
+
+# Headline substrings that classify a postseason game as a stage of the
+# Regional double-elim. ESPN tags the same event multiple ways across
+# its event lifecycle:
+#   - "NCAA Baseball Championship - Auburn Regional - Game 1"
+#   - "NCAA Baseball Championship - Auburn Regional - Elimination Game"
+#   - "NCAA Baseball Championship - Auburn Regional - {team} advances to Super Regional"
+_REGIONAL_MARKERS = (
+    "Regional - Game ",
+    "Regional - Elimination Game",
+    "Regional - ",  # catch-all for "advances to" + future ESPN variants
+)
+
+# 8-team MCWS bracket headline substrings (the cleanly-labeled best-of-3
+# Championship Final is _FINALS_MARKER above; this set covers the
+# sub-bracket double-elim that precedes it).
+_MCWS_BRACKET_MARKERS = (
+    "Men's College World Series - Double Elimination Round",
+    "Men's College World Series - Elimination Game",
+    " advances to Championship Series",
+)
+
+
+def _parse_baseball_bracket_headline(headline: str) -> Tuple[Optional[str], Optional[str]]:
+    """Map an ESPN postseason headline to (stage, partial_grouping_key).
+
+    For Regional games, returns ("BSB_REG", "<site> Regional") — the
+    grouping_key is the site label parsed from the headline.
+
+    For 8-team MCWS bracket games, returns ("MCWS", None) — the
+    sub-bracket assignment can't be determined from one headline alone;
+    `_classify_mcws_sub_brackets` does the chronological grouping later
+    in `_fetch_bracket_games` once all MCWS events are collected.
+
+    Returns (None, None) for headlines that belong to the sibling
+    NcaaBaseballPlayoffSource (Super Regional + Final) or are
+    non-postseason / unclassifiable.
+
+    DO NOT collapse the Regional / MCWS branches into a single regex
+    — Regional headlines carry the site name in a structured position
+    that we can extract; MCWS bracket headlines don't have any
+    sub-bracket hint, so the partition is purely chronological.
+    """
+    if not headline:
+        return None, None
+    # Best-of-3 stages are owned by the sibling playoff source — explicitly
+    # skip them here so the bracket source doesn't try to claim them.
+    if _SUPER_REGIONAL_MARKER in headline or _FINALS_MARKER in headline:
+        return None, None
+    m = _REGIONAL_SITE_REGEX.search(headline)
+    if m and any(marker in headline for marker in _REGIONAL_MARKERS):
+        return "BSB_REG", m.group("site")
+    if any(marker in headline for marker in _MCWS_BRACKET_MARKERS):
+        return "MCWS", None
+    return None, None
+
+
+try:
+    from zoneinfo import ZoneInfo
+    _MCWS_VENUE_TZ = ZoneInfo("America/Chicago")  # Omaha (Charles Schwab Field)
+except ImportError:
+    _MCWS_VENUE_TZ = timezone.utc  # fallback; shouldn't fire on Py 3.9+
+
+
+def _classify_mcws_sub_brackets(
+    mcws_games: List[Dict[str, Any]],
+) -> Dict[str, str]:
+    """Assign each MCWS team to one of two sub-brackets based on the
+    opening-day pairings heuristic verified against 2025 MCWS data:
+
+      - Day 1's 2 games define sub-bracket 1 (the 4 teams that played
+        on the earliest MCWS local-time date in Omaha).
+      - Day 2's 2 games define sub-bracket 2 (the 4 teams that played
+        on the second-earliest local-time date).
+      - Day 3+ games are partitioned by which sub-bracket each team
+        was assigned to on its opening day. Teams that somehow appear
+        without an opening-day assignment (rained-out openers, etc.)
+        inherit their opponent's sub-bracket if known, otherwise are
+        dropped.
+
+    Returns a dict {team_name: "MCWS_sub1" | "MCWS_sub2"}.
+
+    DO NOT partition by UTC date — MCWS evening games in Omaha
+    (CT) routinely cross UTC midnight (a 7:30 PM CT game is 12:30 AM
+    UTC the next day), which would split a single MCWS broadcast day
+    across two UTC dates and put opening-day pairings into different
+    sub-brackets. Converting to America/Chicago first pins the partition
+    to the broadcast calendar regardless of DST or UTC roll-over.
+
+    The 2025 MCWS schedule had two games on Day 1 (Jun 13: Coastal
+    Carolina vs Arizona, Oregon State vs Louisville) and two on Day 2
+    (Jun 14: UCLA vs Murray State, Arkansas vs LSU). The partition
+    holds 100% on Day 3+ (Oregon State vs Coastal Carolina is sub-
+    bracket 1, LSU vs UCLA is sub-bracket 2).
+    """
+    games_sorted = sorted(
+        mcws_games,
+        key=lambda g: g.get("start_time") or datetime(2099, 1, 1, tzinfo=timezone.utc),
+    )
+    sub_bracket: Dict[str, str] = {}
+    days_seen: List[Any] = []   # ordered list of unique venue-local dates
+    for g in games_sorted:
+        ts = g.get("start_time")
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        d = ts.astimezone(_MCWS_VENUE_TZ).date()
+        if d not in days_seen:
+            days_seen.append(d)
+        home = g.get("home")
+        away = g.get("away")
+        if not home or not away:
+            continue
+        if d == days_seen[0]:
+            sub_bracket.setdefault(home, "MCWS_sub1")
+            sub_bracket.setdefault(away, "MCWS_sub1")
+        elif len(days_seen) >= 2 and d == days_seen[1]:
+            sub_bracket.setdefault(home, "MCWS_sub2")
+            sub_bracket.setdefault(away, "MCWS_sub2")
+        else:
+            # Day 3+: rely on prior assignments. If one team is
+            # classified and the other isn't, inherit from the
+            # classified one (defensive coverage for opening-day no-shows).
+            home_sb = sub_bracket.get(home)
+            away_sb = sub_bracket.get(away)
+            if home_sb and not away_sb:
+                sub_bracket[away] = home_sb
+            elif away_sb and not home_sb:
+                sub_bracket[home] = away_sb
+    return sub_bracket
+
+
+def _mcws_meta_from_raw_events(
+    raw_events: List[Tuple[Dict[str, Any], str, Optional[str]]],
+) -> List[Dict[str, Any]]:
+    """Pluck the (home, away, start_time) projection from raw ESPN
+    events tagged MCWS, suitable for feeding `_classify_mcws_sub_brackets`.
+    Shared between fetch_upcoming and _fetch_bracket_games so the
+    chronological-grouping projection lives in one place."""
+    out: List[Dict[str, Any]] = []
+    for event, stage, _key in raw_events:
+        if stage != "MCWS":
+            continue
+        comps = event.get("competitions") or []
+        if not comps:
+            continue
+        competitors = comps[0].get("competitors") or []
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if home is None or away is None:
+            continue
+        out.append({
+            "home": _team_canonical_name(home.get("team") or {}),
+            "away": _team_canonical_name(away.get("team") or {}),
+            "start_time": parse_iso_utc(event.get("date")),
+        })
+    return out
+
+
+class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEliminationSource):
+    """NCAA Baseball postseason BRACKET stages: 4-team Regional double-
+    elim (16 sites) and the 8-team MCWS bracket (modeled as two 4-team
+    sub-brackets). Sibling to NcaaBaseballPlayoffSource which handles
+    the cleanly-labeled best-of-3 stages.
+
+    Tie grouping_key:
+      - BSB_REG: site name from headline (e.g., "Auburn Regional").
+      - MCWS: "MCWS_sub1" / "MCWS_sub2" assigned by the day-partition
+        heuristic in `_classify_mcws_sub_brackets`.
+
+    The bracket source emits records for BSB_REG and MCWS only — the
+    best-of-3 BSB_SR and MCWS_F headlines are explicitly skipped so the
+    sibling source owns them without duplication.
+
+    Strength sharing: same hook as the sibling — the plugin seeds
+    per-team strengths via `set_regular_season_strengths` from the
+    regular-season source. Without seeding, the 6-runs-per-team
+    Poisson default applies.
+    """
+
+    KO_STAGES = ("BSB_REG", "MCWS")
+    supports_importance = True
+
+    def __init__(self, season_year: Optional[int] = None) -> None:
+        now = datetime.now(timezone.utc)
+        self.season_year = (
+            season_year
+            if season_year is not None
+            else (now.year if now.month >= SEASON_START_MONTH else now.year - 1)
+        )
+        self._initial_state_cache: Optional[Dict[str, Any]] = None
+        self._bracket_games_cache: Optional[List[Dict[str, Any]]] = None
+        self._team_strengths_from_regular: Optional[Dict[str, Dict[str, float]]] = None
+
+    @property
+    def sport_prefix(self) -> str:
+        return "NCAABSB"
+
+    @property
+    def sport_label(self) -> str:
+        return "NCAA Baseball Postseason"
+
+    def _league_context_code(self) -> str:
+        return "MCWS_PO"
+
+    def _winner_advance_label(self, stage: str) -> Optional[str]:
+        # MCWS sub-bracket winner advances to MCWS_F (depth 3), handled by
+        # the sibling source. BSB_REG winner falls through to default
+        # `stage_depth + 1` → depth 1 = BSB_SR depth.
+        if stage == "MCWS":
+            return "MCWS_F"
+        return None
+
+    def _tie_grouping_key(self, game: Dict[str, Any]) -> Optional[str]:
+        return (game.get("extra") or {}).get("grouping_key")
+
+    # ---------- fetch_upcoming (EPG display side) ----------
+
+    def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
+        """Pull next-N-day postseason games whose headline matches a
+        bracket stage (Regional or 8-team MCWS bracket). Sibling
+        NcaaBaseballPlayoffSource handles the best-of-3 Super Regional
+        + Final headlines.
+        """
+        today = datetime.now(timezone.utc).date()
+        out: List[GameRow] = []
+        seen_ids: set = set()
+        # First sweep — collect ALL upcoming bracket events so MCWS
+        # sub-bracket grouping can use the full chronological context.
+        raw_events: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
+        for offset in range(days_ahead + 1):
+            day = today + timedelta(days=offset)
+            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            if not data:
+                continue
+            for event in data.get("events") or []:
+                if not _is_postseason_event(event):
+                    continue
+                eid = event.get("id")
+                if eid in seen_ids:
+                    continue
+                comps = event.get("competitions") or []
+                if not comps:
+                    continue
+                headline = ""
+                for note in (comps[0].get("notes") or []):
+                    if note.get("type") == "event":
+                        headline = note.get("headline") or ""
+                        break
+                stage, partial_key = _parse_baseball_bracket_headline(headline)
+                if stage is None:
+                    continue
+                seen_ids.add(eid)
+                raw_events.append((event, stage, partial_key))
+
+        mcws_sub_by_team = _classify_mcws_sub_brackets(
+            _mcws_meta_from_raw_events(raw_events)
+        )
+        for event, stage, partial_key in raw_events:
+            row = self._event_to_game_row(event, stage, partial_key, mcws_sub_by_team)
+            if row is not None:
+                out.append(row)
+        return out
+
+    def _event_to_game_row(
+        self,
+        event: Dict[str, Any],
+        stage: str,
+        partial_key: Optional[str],
+        mcws_sub_by_team: Dict[str, str],
+    ) -> Optional[GameRow]:
+        comps = event.get("competitions") or []
+        if not comps:
+            return None
+        comp = comps[0]
+        competitors = comp.get("competitors") or []
+        if len(competitors) != 2:
+            return None
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if home is None or away is None:
+            return None
+        home_team = _team_canonical_name(home.get("team") or {})
+        away_team = _team_canonical_name(away.get("team") or {})
+        if not home_team or not away_team:
+            return None
+        if home_team.upper() == "TBD" or away_team.upper() == "TBD":
+            return None
+        start = parse_iso_utc(event.get("date"))
+        if start is None:
+            return None
+
+        if stage == "BSB_REG":
+            grouping_key = partial_key
+        else:  # MCWS
+            grouping_key = mcws_sub_by_team.get(home_team) or mcws_sub_by_team.get(away_team)
+        if grouping_key is None:
+            return None
+
+        headline = ""
+        for note in (comp.get("notes") or []):
+            if note.get("type") == "event":
+                headline = note.get("headline") or ""
+                break
+
+        return GameRow(
+            sport_prefix=self.sport_prefix,
+            sport_label=self.sport_label,
+            home=home_team,
+            away=away_team,
+            rank_home=None,
+            rank_away=None,
+            start_time=start,
+            extra={
+                "espn_event_id": event.get("id"),
+                "fd_competition_code": self._league_context_code(),
+                "stage": stage,
+                "grouping_key": grouping_key,
+                "headline": headline,
+            },
+        )
+
+    # ---------- bracket fetch (full-season for Monte Carlo) ----------
+
+    def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
+        """Sweep the postseason date window day-by-day. Emit bracket
+        per-game records with the `grouping_key` attached so the
+        DoubleEliminationSource base can group games into tie_metas."""
+        if self._bracket_games_cache is not None:
+            return self._bracket_games_cache
+
+        raw: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
+        season_start = datetime(self.season_year, 5, 25, tzinfo=timezone.utc).date()
+        season_end = datetime(self.season_year, 7, 1, tzinfo=timezone.utc).date()
+        day = season_start
+        seen_ids: set = set()
+        while day <= season_end:
+            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            if data:
+                for event in data.get("events") or []:
+                    if not _is_postseason_event(event):
+                        continue
+                    eid = event.get("id")
+                    if eid in seen_ids:
+                        continue
+                    comps = event.get("competitions") or []
+                    if not comps:
+                        continue
+                    headline = ""
+                    for note in (comps[0].get("notes") or []):
+                        if note.get("type") == "event":
+                            headline = note.get("headline") or ""
+                            break
+                    stage, partial_key = _parse_baseball_bracket_headline(headline)
+                    if stage is None:
+                        continue
+                    seen_ids.add(eid)
+                    raw.append((event, stage, partial_key))
+            day += timedelta(days=1)
+
+        mcws_sub_by_team = _classify_mcws_sub_brackets(
+            _mcws_meta_from_raw_events(raw)
+        )
+
+        out: List[Dict[str, Any]] = []
+        for event, stage, partial_key in raw:
+            rec = self._event_to_bracket_record(event, stage, partial_key, mcws_sub_by_team)
+            if rec is not None:
+                out.append(rec)
+        self._bracket_games_cache = out
+        return out
+
+    def _event_to_bracket_record(
+        self,
+        event: Dict[str, Any],
+        stage: str,
+        partial_key: Optional[str],
+        mcws_sub_by_team: Dict[str, str],
+    ) -> Optional[Dict[str, Any]]:
+        comps = event.get("competitions") or []
+        if not comps:
+            return None
+        comp = comps[0]
+        competitors = comp.get("competitors") or []
+        if len(competitors) != 2:
+            return None
+        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
+        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
+        if home is None or away is None:
+            return None
+        home_team = _team_canonical_name(home.get("team") or {})
+        away_team = _team_canonical_name(away.get("team") or {})
+        if not home_team or not away_team:
+            return None
+        if home_team.upper() == "TBD" or away_team.upper() == "TBD":
+            return None
+
+        if stage == "BSB_REG":
+            grouping_key = partial_key
+        else:  # MCWS
+            grouping_key = mcws_sub_by_team.get(home_team) or mcws_sub_by_team.get(away_team)
+        if grouping_key is None:
+            return None
+
+        status_type = (comp.get("status") or {}).get("type") or {}
+        completed = bool(status_type.get("completed"))
+        state = (status_type.get("state") or "").lower()
+        if completed or state == "post":
+            status = "FINISHED"
+        else:
+            status = "SCHEDULED"
+        try:
+            hr = int(home.get("score")) if status == "FINISHED" else None
+        except (TypeError, ValueError):
+            hr = None
+        try:
+            ar = int(away.get("score")) if status == "FINISHED" else None
+        except (TypeError, ValueError):
+            ar = None
+        if status == "FINISHED" and (hr is None or ar is None):
+            status = "SCHEDULED"
+            hr = None
+            ar = None
+
+        return {
+            "game_id": event.get("id"),
+            "stage": stage,
+            "matchday": 1,    # double-elim has no fixed matchday; default 1
+            "home": home_team,
+            "away": away_team,
+            "home_goals": hr,
+            "away_goals": ar,
+            "status": status,
+            "start_time": parse_iso_utc(event.get("date")),
+            "extra": {"grouping_key": grouping_key},
         }

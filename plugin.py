@@ -354,8 +354,8 @@ def _build_sources(settings: Dict[str, Any]):
         NbaPlayoffSource, NbaRegularSource,
         WnbaPlayoffSource, WnbaRegularSource,
         NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
-        NcaaBaseballRegularSource, NcaaBaseballPlayoffSource,
-        NcaaSoftballRegularSource, NcaaSoftballPlayoffSource,
+        NcaaBaseballRegularSource, NcaaBaseballPlayoffSource, NcaaBaseballPlayoffBracketSource,
+        NcaaSoftballRegularSource, NcaaSoftballPlayoffSource, NcaaSoftballPlayoffBracketSource,
         NcaaSoccerSource,
         NcaafSource, NcaamSource,
         NflPlayoffSource, NflRegularSource,
@@ -566,36 +566,49 @@ def _build_sources(settings: Dict[str, Any]):
 
     # NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
     # poll. Regular-season win-count thresholds (30 / 35 / 40 / 45 / 50)
-    # drive the in-season importance signal. Postseason coverage is
-    # currently the cleanly-labeled best-of-3 stages (Super Regional,
-    # MCWS Finals); Regional double-elim + 8-team MCWS bracket are
-    # tracked in #43. Same pair-and-seed pattern as MLB: the playoff
-    # source borrows regular-season strengths from the regular source
-    # so postseason Poisson sampling reflects per-team scoring skill
-    # rather than the league-average prior.
+    # drive the in-season importance signal. Two playoff sources fan
+    # out under this single toggle:
+    #   - NcaaBaseballPlayoffSource: best-of-3 Super Regional + MCWS Final
+    #     (BSB_SR + MCWS_F). ESPN headlines carry game numbers, so the
+    #     BestOfNSeriesSource state machine fits.
+    #   - NcaaBaseballPlayoffBracketSource: 4-team Regional double-elim
+    #     + 8-team MCWS bracket (BSB_REG + MCWS). Uses chronological
+    #     inference + headline site labels for grouping.
+    # All three (regular + 2 playoff sources) share strength data so
+    # postseason Poisson sampling reflects per-team scoring skill.
     if settings.get("enable_ncaa_baseball", False):
         ncbsb_reg = NcaaBaseballRegularSource()
         sources.append(ncbsb_reg)
-        ncbsb_po = NcaaBaseballPlayoffSource()
         try:
-            ncbsb_po.set_regular_season_strengths(ncbsb_reg.estimate_strengths())
+            ncbsb_strengths = ncbsb_reg.estimate_strengths()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[ncaa_baseball] could not seed playoff strengths: %s", exc)
+            logger.warning("[ncaa_baseball] could not estimate regular-season strengths: %s", exc)
+            ncbsb_strengths = {}
+        ncbsb_po = NcaaBaseballPlayoffSource()
+        ncbsb_po.set_regular_season_strengths(ncbsb_strengths)
         sources.append(ncbsb_po)
+        ncbsb_br = NcaaBaseballPlayoffBracketSource()
+        ncbsb_br.set_regular_season_strengths(ncbsb_strengths)
+        sources.append(ncbsb_br)
 
-    # NCAA Division I softball. Same structure as NCAA baseball — regular-
-    # season win-count + best-of-3 postseason (Super Regional, WCWS Finals)
-    # coverage. Regional double-elim + 8-team WCWS bracket are tracked in
-    # #43.
+    # NCAA Division I softball. Same two-playoff-source fan-out as
+    # baseball above — NcaaSoftballPlayoffSource owns the best-of-3
+    # stages (SB_SR + WCWS_F), NcaaSoftballPlayoffBracketSource owns
+    # the Regional + 8-team WCWS bracket (SB_REG + WCWS).
     if settings.get("enable_ncaa_softball", False):
         ncsbl_reg = NcaaSoftballRegularSource()
         sources.append(ncsbl_reg)
-        ncsbl_po = NcaaSoftballPlayoffSource()
         try:
-            ncsbl_po.set_regular_season_strengths(ncsbl_reg.estimate_strengths())
+            ncsbl_strengths = ncsbl_reg.estimate_strengths()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[ncaa_softball] could not seed playoff strengths: %s", exc)
+            logger.warning("[ncaa_softball] could not estimate regular-season strengths: %s", exc)
+            ncsbl_strengths = {}
+        ncsbl_po = NcaaSoftballPlayoffSource()
+        ncsbl_po.set_regular_season_strengths(ncsbl_strengths)
         sources.append(ncsbl_po)
+        ncsbl_br = NcaaSoftballPlayoffBracketSource()
+        ncsbl_br.set_regular_season_strengths(ncsbl_strengths)
+        sources.append(ncsbl_br)
 
     # NCAA D1 men's + women's soccer. One source class
     # parametrized on gender — same structure / endpoints / threshold
