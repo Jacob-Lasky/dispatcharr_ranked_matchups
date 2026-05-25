@@ -335,6 +335,14 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(_make_soccer("serie_a"))
     if settings.get("enable_ligue_1", False) and fd_key:
         sources.append(_make_soccer("ligue_1"))
+    # Phase I: international tournaments. _make_soccer dispatches to
+    # KnockoutSoccerSource via the format="knockout" route. Group-stage
+    # importance isn't modeled in V1; group games still surface via
+    # fetch_upcoming with favorite + closeness signal only.
+    if settings.get("enable_world_cup", False) and fd_key:
+        sources.append(_make_soccer("world_cup"))
+    if settings.get("enable_euros", False) and fd_key:
+        sources.append(_make_soccer("euros"))
 
     # NHL — no API key required (api-web.nhle.com is free). Pair the
     # regular and playoff sources together: the playoff source borrows

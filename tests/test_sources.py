@@ -354,6 +354,69 @@ class TestSoccerCompetitions:
                        if label == "UCL"]
         assert ucl_cutoffs == [3]
 
+    # ---------- Phase I: international tournaments ----------
+
+    def test_world_cup_in_competitions(self):
+        cfg = SOCCER_COMPETITIONS["world_cup"]
+        assert cfg.fd_code == "WC"
+        assert cfg.use_position_as_rank is False  # tournament, not league table
+        assert cfg.total_matchdays == 0  # no fixed-length season
+
+    def test_euros_in_competitions(self):
+        cfg = SOCCER_COMPETITIONS["euros"]
+        assert cfg.fd_code == "EC"
+        assert cfg.use_position_as_rank is False
+        assert cfg.total_matchdays == 0
+
+    def test_world_cup_routes_to_knockout(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        assert LEAGUE_CONTEXTS["WC"].format == "knockout"
+        wc_labels = {label for _cut, label, _w in LEAGUE_CONTEXTS["WC"].thresholds}
+        # WC 2026's 48-team format adds LAST_32 as the entry knockout round.
+        assert "last_32" in wc_labels
+        assert "winner" in wc_labels
+
+    def test_euros_routes_to_knockout_without_last_32(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        assert LEAGUE_CONTEXTS["EC"].format == "knockout"
+        ec_labels = {label for _cut, label, _w in LEAGUE_CONTEXTS["EC"].thresholds}
+        # EURO is 24-team, enters at LAST_16 — no LAST_32 band.
+        assert "last_32" not in ec_labels
+        assert "round_of_16" in ec_labels
+        assert "winner" in ec_labels
+
+    def test_world_cup_winner_outweighs_ucl_winner(self):
+        # WC is once-every-4-years vs UCL annual; winner consequence
+        # weight reflects the rarity premium.
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        wc_winner_w = next(
+            w for _c, label, w in LEAGUE_CONTEXTS["WC"].thresholds if label == "winner"
+        )
+        ucl_winner_w = next(
+            w for _c, label, w in LEAGUE_CONTEXTS["CL"].thresholds if label == "winner"
+        )
+        assert wc_winner_w > ucl_winner_w, \
+            f"WC winner weight {wc_winner_w} should exceed UCL winner {ucl_winner_w}"
+
+    def test_last_32_in_knockout_depth(self):
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert "LAST_32" in KNOCKOUT_ROUND_DEPTH
+        # Entry-level (same depth as PLAYOFFS — both are pre-LAST_16).
+        assert KNOCKOUT_ROUND_DEPTH["LAST_32"] == 0
+        # Strictly shallower than LAST_16.
+        assert KNOCKOUT_ROUND_DEPTH["LAST_32"] < KNOCKOUT_ROUND_DEPTH["LAST_16"]
+
+    def test_knockout_source_includes_last_32_in_ko_stages(self):
+        # KnockoutSoccerSource.KO_STAGES must list LAST_32 between PLAYOFFS
+        # and LAST_16 so feeds_from inference can resolve WC LAST_16 ties
+        # back to their LAST_32 feeders.
+        from dispatcharr_ranked_matchups.sources.soccer import KnockoutSoccerSource
+        stages = KnockoutSoccerSource.KO_STAGES
+        idx_p = stages.index("PLAYOFFS")
+        idx_32 = stages.index("LAST_32")
+        idx_16 = stages.index("LAST_16")
+        assert idx_p < idx_32 < idx_16
+
 
 class TestPreviousSeasonStartYear:
     """B.2 / TUNING_REPORT finding #2: the seed-year derivation must pin
@@ -1080,9 +1143,13 @@ class TestKnockoutSoccerSource:
 
     def test_record_game_into_tie_two_leg_aggregate(self):
         src = self._make_source([])
+        # Phase I introduced data-driven leg counting: tie records carry
+        # `legs_in_tie` to support single-leg non-finals (international
+        # tournaments). Two-leg ties set it to 2.
         tie = {
             "stage": "SEMI_FINALS",
             "teams": frozenset({"A", "B"}),
+            "legs_in_tie": 2,
             "leg1": None, "leg2": None,
             "winner": None, "loser": None,
         }
@@ -1098,9 +1165,12 @@ class TestKnockoutSoccerSource:
 
     def test_record_game_into_tie_single_leg_final(self):
         src = self._make_source([])
+        # Single-leg tie: explicitly set legs_in_tie=1 to opt out of the
+        # default two-leg-aggregate completeness check.
         tie = {
             "stage": "FINAL",
             "teams": frozenset({"A", "C"}),
+            "legs_in_tie": 1,
             "leg1": None, "leg2": None,
             "winner": None, "loser": None,
         }
@@ -1109,6 +1179,22 @@ class TestKnockoutSoccerSource:
         # Single-leg tie completes after one record.
         assert tie["winner"] == "A"
         assert tie["loser"] == "C"
+
+    def test_record_game_into_tie_single_leg_non_final_for_international(self):
+        # Phase I: international tournaments (WC, EURO) use single-leg
+        # knockouts for ALL rounds, not just the final. Verify a SEMI_FINALS
+        # tie with legs_in_tie=1 completes after one record.
+        src = self._make_source([])
+        tie = {
+            "stage": "SEMI_FINALS",
+            "teams": frozenset({"Spain", "France"}),
+            "legs_in_tie": 1,
+            "leg1": None, "leg2": None,
+            "winner": None, "loser": None,
+        }
+        src._record_game_into_tie(tie, "Spain", "France", 2, 1, game_index=1)
+        assert tie["winner"] == "Spain"
+        assert tie["loser"] == "France"
 
     # ---------- _advance_round_reached ----------
 
