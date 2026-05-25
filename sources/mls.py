@@ -138,27 +138,43 @@ def _h2h_to_closeness(
 class MlsSource(SportSource):
     """MLS schedule + closeness signal. V1 omits standings-based
     importance and the MLS Cup playoff bracket — see follow-up issues
-    filed under Phase J."""
+    filed under Phase J.
+
+    Class attrs `_ESPN_SLUG`, `_ODDS_SPORT_KEY`, `_FD_CODE`,
+    `_SPORT_PREFIX`, `_SPORT_LABEL` parameterize the league. Phase Q
+    NwslSource and LigaMxSource subclass this and override these
+    five attrs — the rest of the fetch/closeness machinery is shared.
+    """
 
     # NOT supports_importance: the importance simulator skips MLS in V1.
     # Importance comes from `favorite` + `closeness` only.
+
+    # Per-league configuration (subclasses override):
+    _ESPN_SLUG: str = "soccer/usa.1"
+    _ODDS_SPORT_KEY: str = "soccer_usa_mls"
+    _FD_CODE: str = "MLS"
+    _SPORT_PREFIX: str = "MLS"
+    _SPORT_LABEL: str = "MLS"
 
     def __init__(self, odds_api_key: str = "") -> None:
         self.odds_api_key = odds_api_key
 
     @property
     def sport_prefix(self) -> str:
-        return "MLS"
+        return self._SPORT_PREFIX
 
     @property
     def sport_label(self) -> str:
-        return "MLS"
+        return self._SPORT_LABEL
+
+    def _espn_base(self) -> str:
+        return f"https://site.api.espn.com/apis/site/v2/sports/{self._ESPN_SLUG}"
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Per-day scoreboard sweep over today..today+days_ahead.
         Populate `closeness` from a single Odds API call that returns
-        all upcoming MLS matches; ESPN gives the schedule, Odds API
-        gives the moneyline market.
+        all upcoming matches for this league; ESPN gives the schedule,
+        Odds API gives the moneyline market.
 
         ESPN's scoreboard range syntax (`dates=YYYYMMDD-YYYYMMDD`)
         silently caps at 25 events. MLS has fewer games per day than
@@ -172,9 +188,10 @@ class MlsSource(SportSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
+        espn_base = self._espn_base()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard", dates=day.strftime("%Y%m%d"))
+            data = _http_get(f"{espn_base}/scoreboard", dates=day.strftime("%Y%m%d"))
             if not isinstance(data, dict):
                 continue
             for event in data.get("events") or []:
@@ -205,11 +222,14 @@ class MlsSource(SportSource):
                     continue
                 seen_ids.add(gid)
                 closeness = self._lookup_closeness(closeness_by_pair, home, away)
-                # ESPN exposes the playoff stage in
-                # `event.season.slug` ("regular-season", "mls-cup",
-                # "mls-cup-playoffs"). Carry it through as `extra.stage`
-                # so the future importance work can route on it
-                # without re-fetching.
+                # ESPN exposes the season/playoff stage in
+                # `event.season.slug`. Carry it through as
+                # `extra.season_slug` so future importance work can
+                # route on it without re-fetching. MLS values:
+                # "regular-season", "mls-cup", "mls-cup-playoffs".
+                # NWSL: "regular-season", "nwsl-playoffs", etc.
+                # Liga MX: "torneo-apertura", "torneo-clausura",
+                # "liguilla" (the Apertura/Clausura playoff).
                 season_slug = ((event.get("season") or {}).get("slug") or "")
                 out.append(GameRow(
                     sport_prefix=self.sport_prefix,
@@ -223,7 +243,7 @@ class MlsSource(SportSource):
                     extra={
                         "espn_event_id": gid,
                         "season_slug": season_slug,
-                        "fd_competition_code": "MLS",
+                        "fd_competition_code": self._FD_CODE,
                     },
                 ))
         return out
@@ -231,13 +251,14 @@ class MlsSource(SportSource):
     # ---------- closeness ----------
 
     def _fetch_closeness(self) -> Dict[Tuple[str, str], float]:
-        """Return {(home_lc, away_lc): closeness} for upcoming MLS
-        matches. Empty dict if the key is missing or the call fails.
+        """Return {(home_lc, away_lc): closeness} for upcoming matches
+        in this league. Empty dict if the key is missing or the call
+        fails.
         """
         if not self.odds_api_key:
             return {}
         data = _http_get(
-            f"{ODDS_BASE}/sports/{ODDS_SPORT_KEY}/odds/",
+            f"{ODDS_BASE}/sports/{self._ODDS_SPORT_KEY}/odds/",
             regions="us,uk,eu",
             markets="h2h",
             apiKey=self.odds_api_key,

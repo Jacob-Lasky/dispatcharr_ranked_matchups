@@ -203,6 +203,35 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         odds_sport_key="soccer_uefa_european_championship",
         use_position_as_rank=False,
     ),
+    # Phase Q: additional Football-Data.org free-tier leagues. Same
+    # config shape as Phase H's BL1/PD/SA/FL1 — pure data additions, no
+    # source code changes. UEFA Europa League and Conference League are
+    # NOT on the FD.org free tier (only Champions League is), so they're
+    # not included here despite being on the original Phase Q wishlist.
+    "eredivisie": SoccerCompetitionConfig(
+        fd_code="DED",
+        sport_prefix="Eredivisie",
+        sport_label="Eredivisie",
+        odds_sport_key="soccer_netherlands_eredivisie",
+        rank_cap=18,
+        total_matchdays=34,
+    ),
+    "primeira_liga": SoccerCompetitionConfig(
+        fd_code="PPL",
+        sport_prefix="PrimeiraLiga",
+        sport_label="Primeira Liga",
+        odds_sport_key="soccer_portugal_primeira_liga",
+        rank_cap=18,
+        total_matchdays=34,
+    ),
+    "brazilian_serie_a": SoccerCompetitionConfig(
+        fd_code="BSA",
+        sport_prefix="BSA",
+        sport_label="Campeonato Brasileiro Série A",
+        odds_sport_key="soccer_brazil_campeonato",
+        rank_cap=20,
+        total_matchdays=38,
+    ),
 }
 
 

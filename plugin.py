@@ -293,7 +293,7 @@ def _build_weights(settings: Dict[str, Any]):
 def _build_sources(settings: Dict[str, Any]):
     from .sources import (
         KnockoutSoccerSource, MlbPlayoffSource, MlbRegularSource,
-        MlsSource,
+        MlsSource, NwslSource, LigaMxSource,
         NbaPlayoffSource, NbaRegularSource,
         WnbaPlayoffSource, WnbaRegularSource,
         NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
@@ -350,6 +350,16 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(_make_soccer("world_cup"))
     if settings.get("enable_euros", False) and fd_key:
         sources.append(_make_soccer("euros"))
+
+    # Phase Q: additional FD.org free-tier leagues. Same _make_soccer
+    # router; LEAGUE_CONTEXTS uses format="league" so dispatch goes
+    # to SoccerSource (not KnockoutSoccerSource).
+    if settings.get("enable_eredivisie", False) and fd_key:
+        sources.append(_make_soccer("eredivisie"))
+    if settings.get("enable_primeira_liga", False) and fd_key:
+        sources.append(_make_soccer("primeira_liga"))
+    if settings.get("enable_brazilian_serie_a", False) and fd_key:
+        sources.append(_make_soccer("brazilian_serie_a"))
 
     # NFL — no API key required (ESPN unofficial). Same pair-and-seed
     # pattern as NHL/MLB/NBA. Bracket is single-game elimination
@@ -428,6 +438,16 @@ def _build_sources(settings: Dict[str, Any]):
     # it MLS games surface but with no closeness signal.
     if settings.get("enable_mls", False):
         sources.append(MlsSource(odds_api_key=odds_key or ""))
+
+    # NWSL — same V1 minimal pattern as MLS (schedule + closeness).
+    # Subclasses MlsSource with NWSL-specific endpoint and Odds API
+    # key. No importance / playoff bracket in V1.
+    if settings.get("enable_nwsl", False):
+        sources.append(NwslSource(odds_api_key=odds_key or ""))
+
+    # Liga MX — Mexican top-flight. Same V1 minimal pattern.
+    if settings.get("enable_liga_mx", False):
+        sources.append(LigaMxSource(odds_api_key=odds_key or ""))
 
     # WNBA — ESPN unofficial API; same pair-and-seed pattern as NHL/MLB/
     # NBA. Per-stage series lengths via BestOfNSeriesSource hooks: R1
