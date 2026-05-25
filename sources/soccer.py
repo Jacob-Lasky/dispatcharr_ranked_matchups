@@ -936,6 +936,25 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
             return "WINNER"
         return None
 
+    def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
+        """Drop GROUP_STAGE fixtures so they're owned exclusively by the
+        sibling GroupStageSoccerSource. Knockout fixtures (PLAYOFFS,
+        LAST_32 / LAST_16 / QF / SF / FINAL / THIRD_PLACE) pass through.
+
+        Safe for non-tournament competitions (UCL, UEL, UECL) — their
+        FD.org fixtures never carry stage="GROUP_STAGE" so the filter
+        is a no-op there. The filter is keyed off `extra.stage` set by
+        SoccerSource.fetch_upcoming, NOT off `self.KO_STAGES` — that
+        keeps the filter robust even if FD.org introduces a knockout
+        stage label we haven't seen yet (better to over-emit a new
+        knockout stage than to under-emit a known one).
+        """
+        rows = super().fetch_upcoming(days_ahead)
+        return [
+            r for r in rows
+            if (r.extra or {}).get("stage") != "GROUP_STAGE"
+        ]
+
     # ---------- FD.org → canonical bracket-game adapter ----------
 
     def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
@@ -1103,3 +1122,210 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
             h += int(rng.random() < 0.70)
             a += int(rng.random() < 0.70)
         return "HOME" if h > a else "AWAY"
+
+
+# =====================================================================
+# GroupStageSoccerSource — international-tournament group importance
+# =====================================================================
+
+
+# Top-N advancement per group. EURO format and the OLD WC 32-team format
+# both advance the top 2. WC 2026's 48-team format technically advances
+# top 2 + 8-best-3rd-place across 12 groups; the 3rd-place tiebreaker is
+# a follow-up (see GroupStageSoccerSource docstring).
+_GROUP_ADVANCE_TOP_N = 2
+
+
+class GroupStageSoccerSource(SoccerSource):
+    """Group-stage Monte Carlo importance for international tournaments
+    (WC, EURO). Sibling to KnockoutSoccerSource for the same competition:
+    KnockoutSoccerSource models the post-group bracket, this source
+    models the group-stage mini-leagues.
+
+    Each tournament has N parallel groups of 4 teams, each playing 6
+    games (each team plays 3 games). `terminal_outcomes` classifies
+    each team as `"advance"` (top 2 in its group) or `"eliminated"`.
+    Outcome labels are intentionally hardcoded — the group-stage
+    classification ("did I finish top-2 in MY group") doesn't fit the
+    flat-position-threshold shape that league sources use, so we bypass
+    LEAGUE_CONTEXTS.thresholds' cutoff field and provide our own
+    advancement logic.
+
+    Cross-source `feeds_from` to KnockoutSoccerSource (a group winner
+    structurally faces a different LAST_16 opponent than a runner-up)
+    is NOT modeled — the simulator doesn't currently support cross-
+    source advancement chains. The two sources run independently, so
+    group-stage leverage covers the advance/eliminate decision only,
+    not the downstream knockout-path differential. Tracked in #53.
+
+    WC 2026 48-team format limitation: the top 2 + 8-best-3rd-place
+    advancement rule isn't modeled — only top-2-per-group counts as
+    advance. Teams who would advance via the 3rd-place tiebreaker
+    (points → goal diff → goals scored → fair play) read as
+    eliminated. Materially: 8 of 32 advancing teams (~25%) are
+    misclassified for the 2026 WC. Tracked in #52.
+
+    Wiring expectation: the plugin instantiates GroupStageSoccerSource
+    for the same `config_key` as KnockoutSoccerSource for tournaments
+    that have a group stage, and KnockoutSoccerSource filters
+    GROUP_STAGE matches out of its own `fetch_upcoming` so no
+    double-emission occurs.
+    """
+
+    supports_importance = True
+
+    # ---------- fetch_upcoming: filter to GROUP_STAGE ----------
+
+    def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
+        """Only emit group-stage fixtures — knockout fixtures are owned
+        by the sibling KnockoutSoccerSource for the same competition.
+
+        Remaps `extra.fd_competition_code` from the base "WC" / "EC"
+        (which routes to LEAGUE_CONTEXTS' knockout entries) to
+        "WC_GS" / "EC_GS" (the group-stage contexts whose `advance`
+        threshold this source's terminal_outcomes resolves against).
+        """
+        rows = super().fetch_upcoming(days_ahead)
+        gs_code = self._group_stage_context_code()
+        out: List[GameRow] = []
+        for r in rows:
+            if (r.extra or {}).get("stage") != "GROUP_STAGE":
+                continue
+            if isinstance(r.extra, dict):
+                r.extra["fd_competition_code"] = gs_code
+            out.append(r)
+        return out
+
+    def _group_stage_context_code(self) -> str:
+        """LEAGUE_CONTEXTS key for this competition's group-stage entry.
+        Convention: `<base_code>_GS` (e.g., WC → WC_GS, EC → EC_GS)."""
+        return f"{self.config.fd_code}_GS"
+
+    # ---------- group membership lookup ----------
+
+    def _team_group_map(self) -> Dict[str, str]:
+        """Build {team_name: group_letter} from the full-season fixtures.
+        Cached on the instance via `_team_group_cache`. A team's group is
+        whatever group label appears on any of its GROUP_STAGE fixtures
+        (every game involves teams from the same group, so a single
+        observation suffices)."""
+        cache: Optional[Dict[str, str]] = getattr(self, "_team_group_cache", None)
+        if cache is not None:
+            return cache
+        out: Dict[str, str] = {}
+        for m in self._fetch_all_season_matches():
+            if m.get("stage") != "GROUP_STAGE":
+                continue
+            group = m.get("group")
+            if not group:
+                continue
+            for side in ("homeTeam", "awayTeam"):
+                name = (m.get(side) or {}).get("name")
+                if name and name not in out:
+                    out[name] = group
+        self._team_group_cache = out
+        return out
+
+    # ---------- importance interface ----------
+
+    @property
+    def outcome_labels(self) -> List[str]:
+        return ["advance", "eliminated"]
+
+    def initial_state(self) -> Dict[str, Any]:
+        """Group-stage-only standings snapshot. Same shape as
+        SoccerSource.initial_state plus a "_team_group" lookup so
+        terminal_outcomes can sort within each group.
+        """
+        if self._initial_state_cache is not None:
+            return self._initial_state_cache
+        team_group = self._team_group_map()
+        matches = self._fetch_all_season_matches()
+        state: Dict[str, Any] = {
+            "_applied": frozenset(),
+            "_team_group": team_group,
+        }
+        applied: List[Any] = []
+        # Seed every group-stage participant with a zero row so apply_result
+        # doesn't need to defensively create rows.
+        for team in team_group:
+            state[team] = {"played": 0, "points": 0, "gf": 0, "ga": 0}
+        # Apply FINISHED group-stage matches.
+        for m in matches:
+            if m.get("stage") != "GROUP_STAGE":
+                continue
+            if m.get("status") != "FINISHED":
+                continue
+            ft = (m.get("score") or {}).get("fullTime") or {}
+            hg = ft.get("home")
+            ag = ft.get("away")
+            if hg is None or ag is None:
+                continue
+            home = (m.get("homeTeam") or {}).get("name")
+            away = (m.get("awayTeam") or {}).get("name")
+            fd_id = m.get("id")
+            if not home or not away or fd_id is None:
+                continue
+            if home not in state or away not in state:
+                continue  # defensive — team_group_map should have covered them
+            applied.append(fd_id)
+            self._mutate_apply(state, home, away, int(hg), int(ag))
+        state["_applied"] = frozenset(applied)
+        self._initial_state_cache = state
+        return state
+
+    def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
+        """Only emit GROUP_STAGE matches the simulator hasn't applied yet."""
+        applied = state.get("_applied", frozenset())
+        out: List[GameRow] = []
+        for m in self._fetch_all_season_matches():
+            if m.get("stage") != "GROUP_STAGE":
+                continue
+            fd_id = m.get("id")
+            if fd_id is None or fd_id in applied:
+                continue
+            home = (m.get("homeTeam") or {}).get("name")
+            away = (m.get("awayTeam") or {}).get("name")
+            start = parse_iso_utc(m.get("utcDate"))
+            if not home or not away or start is None:
+                continue
+            out.append(GameRow(
+                sport_prefix=self.config.sport_prefix,
+                sport_label=self.config.sport_label,
+                home=home,
+                away=away,
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra={"fd_id": fd_id, "matchday": m.get("matchday")},
+            ))
+        return out
+
+    def terminal_outcomes(self, state: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Top-N-per-group advancement. Within each group, sort by
+        (points desc, goal_diff desc, goals_for desc) — FIFA's standard
+        group-stage tiebreaker, minus the head-to-head and fair-play
+        layers that we don't track here. Top _GROUP_ADVANCE_TOP_N teams
+        get "advance"; the rest get "eliminated".
+        """
+        from collections import defaultdict
+        team_group = state.get("_team_group", {})
+        by_group: Dict[str, List[Tuple[str, Dict[str, int]]]] = defaultdict(list)
+        for team, row in state.items():
+            if team in ("_applied", "_team_group"):
+                continue
+            group = team_group.get(team)
+            if group is None:
+                continue
+            by_group[group].append((team, row))
+
+        outcomes: Dict[str, List[str]] = {}
+        for group, teams in by_group.items():
+            teams.sort(key=lambda kv: (
+                -kv[1]["points"],
+                -(kv[1]["gf"] - kv[1]["ga"]),
+                -kv[1]["gf"],
+            ))
+            for i, (team, _row) in enumerate(teams):
+                outcomes[team] = ["advance"] if i < _GROUP_ADVANCE_TOP_N else ["eliminated"]
+        return outcomes
