@@ -293,6 +293,7 @@ def _build_weights(settings: Dict[str, Any]):
 def _build_sources(settings: Dict[str, Any]):
     from .sources import (
         KnockoutSoccerSource, MlbPlayoffSource, MlbRegularSource,
+        MlsSource,
         NbaPlayoffSource, NbaRegularSource,
         NcaaBaseballSource, NcaaSoccerSource,
         NcaafSource, NcaamSource,
@@ -399,6 +400,15 @@ def _build_sources(settings: Dict[str, Any]):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[nba] could not seed playoff strengths: %s", exc)
         sources.append(nba_po)
+
+    # MLS — ESPN schedule + Odds API closeness. V1 surfaces games with
+    # favorite + closeness signals only; no standings-based importance
+    # because conference standings bands and the MLS Cup mixed-format
+    # bracket (best-of-3 R1 + single-leg subsequent rounds) are both
+    # follow-ups. Closeness still requires the Odds API key — without
+    # it MLS games surface but with no closeness signal.
+    if settings.get("enable_mls", False):
+        sources.append(MlsSource(odds_api_key=odds_key or ""))
 
     # Phase M: NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
     # poll, no key needed. Win-count thresholds (30 / 35 / 40 / 45 / 50) drive
