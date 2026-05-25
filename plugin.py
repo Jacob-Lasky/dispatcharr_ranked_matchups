@@ -301,7 +301,7 @@ def _build_sources(settings: Dict[str, Any]):
         NcaafSource, NcaamSource,
         NflPlayoffSource, NflRegularSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
-        F1Source, NascarSource, GolfSource,
+        F1Source, NascarSource, GolfSource, UfcSource,
     )
     from .sources.soccer import COMPETITIONS
     from .scoring import LEAGUE_CONTEXTS
@@ -460,6 +460,12 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(NascarSource())
     if settings.get("enable_golf", False):
         sources.append(GolfSource())
+
+    # Phase S: UFC. Same field-event shape — each fight card is one
+    # row with home=card title ("UFC 309: Jones vs. Miocic"). PPVs
+    # (numbered UFC events) get MAJOR tier, Fight Nights get EVENT.
+    if settings.get("enable_ufc", False):
+        sources.append(UfcSource())
 
     # WNBA — ESPN unofficial API; same pair-and-seed pattern as NHL/MLB/
     # NBA. Per-stage series lengths via BestOfNSeriesSource hooks: R1

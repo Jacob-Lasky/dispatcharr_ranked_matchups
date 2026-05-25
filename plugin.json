@@ -182,6 +182,13 @@
       "help_text": "PGA Tour tour stops + the four majors (Masters / PGA Championship / US Open / The Open). Major tournaments get a higher score tier ('Major') than regular tour stops ('Event'). No API key required — ESPN unofficial."
     },
     {
+      "id": "enable_ufc",
+      "type": "boolean",
+      "label": "UFC",
+      "default": false,
+      "help_text": "Each UFC fight card surfaces as one entry in the guide (the card title carries the headliner, e.g., 'UFC 309: Jones vs. Miocic'). Numbered PPVs get a higher tier ('Major') than Fight Nights and ESPN cards ('Event'). No API key required — ESPN unofficial."
+    },
+    {
       "id": "enable_wnba",
       "type": "boolean",
       "label": "WNBA (regular season + playoffs)",
