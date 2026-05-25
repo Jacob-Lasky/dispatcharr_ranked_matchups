@@ -3038,3 +3038,316 @@ class TestMlbPlayoffSource:
         depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
         for i in range(len(depths) - 1):
             assert depths[i] < depths[i + 1], f"MLB_PO bands out of depth order: {depths}"
+
+
+# =====================================================================
+# Phase G: NBA
+# =====================================================================
+
+class TestNbaHeadlineParser:
+    """The _parse_stage_from_headline regex is the only path that maps
+    an ESPN playoff game to a bracket stage; if the regex breaks, every
+    NBA playoff game silently disappears from the bracket. These tests
+    pin every variation the live API emits."""
+
+    @staticmethod
+    def _parse(headline):
+        from dispatcharr_ranked_matchups.sources.nba import _parse_stage_from_headline
+        return _parse_stage_from_headline(headline)
+
+    def test_east_first_round(self):
+        assert self._parse("East 1st Round - Game 3") == {"stage": "R1", "matchday": 3}
+
+    def test_west_first_round(self):
+        assert self._parse("West 1st Round - Game 1") == {"stage": "R1", "matchday": 1}
+
+    def test_east_semifinals(self):
+        assert self._parse("East Semifinals - Game 7") == {"stage": "CSF", "matchday": 7}
+
+    def test_west_semifinals(self):
+        assert self._parse("West Semifinals - Game 2") == {"stage": "CSF", "matchday": 2}
+
+    def test_east_conference_finals(self):
+        assert self._parse("East Finals - Game 1") == {"stage": "CF", "matchday": 1}
+
+    def test_west_conference_finals(self):
+        assert self._parse("West Finals - Game 6") == {"stage": "CF", "matchday": 6}
+
+    def test_nba_finals(self):
+        assert self._parse("NBA Finals - Game 1") == {"stage": "FINALS", "matchday": 1}
+
+    def test_nba_finals_game_seven(self):
+        assert self._parse("NBA Finals - Game 7") == {"stage": "FINALS", "matchday": 7}
+
+    def test_play_in_returns_none(self):
+        """Play-in tournament games have headlines without a Game N
+        suffix matching the regex. The bracket source treats them as
+        not-in-bracket and skips them."""
+        assert self._parse("Play-In Tournament") is None
+        assert self._parse("East Play-In") is None
+
+    def test_no_headline_returns_none(self):
+        assert self._parse(None) is None
+        assert self._parse("") is None
+
+    def test_unrecognized_returns_none(self):
+        # Defensive — preseason headlines or odd formats should not
+        # accidentally match.
+        assert self._parse("Preseason") is None
+        assert self._parse("Game 5") is None
+
+    def test_case_insensitive(self):
+        assert self._parse("east 1st round - game 3") == {"stage": "R1", "matchday": 3}
+        assert self._parse("nba finals - game 1") == {"stage": "FINALS", "matchday": 1}
+
+
+class TestNbaAllStarFilter:
+    """ESPN labels All-Star Tournament games with season.type=2
+    (regular-season-like), polluting the regular-source team list
+    with fake teams like 'Team Chuck' / 'Team Shaq'. The
+    _extract_game_record filter must drop them via the
+    competition.type.abbreviation=='ALLSTAR' discriminator."""
+
+    @staticmethod
+    def _extract(event):
+        from dispatcharr_ranked_matchups.sources.nba import _extract_game_record
+        return _extract_game_record(event)
+
+    def test_all_star_game_filtered(self):
+        # Minimal All-Star event shape based on ESPN's actual response.
+        event = {
+            "id": "401705381",
+            "date": "2025-02-16T23:00Z",
+            "season": {"year": 2025, "type": 2, "slug": "regular-season"},
+            "competitions": [{
+                "type": {"id": "4", "abbreviation": "ALLSTAR"},
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "score": "40",
+                     "team": {"displayName": "Team Chuck"}},
+                    {"homeAway": "away", "score": "30",
+                     "team": {"displayName": "Team Kenny"}},
+                ],
+                "notes": [{"type": "event",
+                           "headline": "NBA All-Star - Semifinals"}],
+            }],
+        }
+        assert self._extract(event) is None
+
+    def test_regular_season_game_passes(self):
+        event = {
+            "id": "401705000",
+            "date": "2025-01-15T20:00Z",
+            "season": {"year": 2025, "type": 2, "slug": "regular-season"},
+            "competitions": [{
+                "type": {"id": "1", "abbreviation": "STD"},
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "score": "110",
+                     "team": {"displayName": "New York Knicks"}},
+                    {"homeAway": "away", "score": "98",
+                     "team": {"displayName": "Philadelphia 76ers"}},
+                ],
+            }],
+        }
+        rec = self._extract(event)
+        assert rec is not None
+        assert rec["home"] == "New York Knicks"
+        assert rec["away"] == "Philadelphia 76ers"
+        assert rec["status"] == "FINISHED"
+        assert rec["home_points"] == 110
+
+    def test_playoff_game_passes(self):
+        # ESPN labels playoff games competition.type.abbreviation="FINAL"
+        # (yes, even non-NBA-Finals rounds). This test pins that
+        # _extract_game_record accepts those.
+        event = {
+            "id": "401705999",
+            "date": "2025-06-05T20:00Z",
+            "season": {"year": 2025, "type": 3, "slug": "post-season"},
+            "competitions": [{
+                "type": {"id": "17", "abbreviation": "FINAL"},
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "score": "111",
+                     "team": {"displayName": "Oklahoma City Thunder"}},
+                    {"homeAway": "away", "score": "110",
+                     "team": {"displayName": "Indiana Pacers"}},
+                ],
+                "notes": [{"type": "event", "headline": "NBA Finals - Game 1"}],
+            }],
+        }
+        rec = self._extract(event)
+        assert rec is not None
+        assert rec["home"] == "Oklahoma City Thunder"
+        assert rec["season_type"] == 3
+
+
+class TestNbaRegularSource:
+    """NbaRegularSource: PointsBasedSportSource with _count_field='wins'
+    and ESPN unofficial scoreboard as the data source."""
+
+    @staticmethod
+    def _make_source():
+        from dispatcharr_ranked_matchups.sources.nba import NbaRegularSource
+        return NbaRegularSource(season_end_year=2025)
+
+    def test_identity(self):
+        src = self._make_source()
+        assert src.sport_prefix == "NBA"
+        assert src.sport_label == "NBA"
+        assert src.league_context_code == "NBA"
+        assert src._count_field == "wins"
+
+    def test_supports_importance(self):
+        assert self._make_source().supports_importance is True
+
+    def test_outcome_labels_uses_nba_thresholds(self):
+        src = self._make_source()
+        labels = src.outcome_labels
+        assert "play_in_bubble" in labels
+        assert "playoff_secured" in labels
+        assert "top_seed_pace" in labels
+        assert "elite" in labels
+
+    def test_nba_thresholds_are_monotonic(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS["NBA"]
+        cuts = [t[0] for t in ctx.thresholds]
+        for i in range(len(cuts) - 1):
+            assert cuts[i] < cuts[i + 1], f"NBA band cutoffs must be monotonic: {cuts}"
+
+    def test_record_result_credits_winner_a_win(self):
+        # NBA regular season uses raw win count; no OT bonus.
+        src = self._make_source()
+        teams = {
+            "Boston Celtics":      {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+            "Los Angeles Lakers":  {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+        }
+        src._record_result_into_state(teams, "Boston Celtics", "Los Angeles Lakers", 110, 98)
+        assert teams["Boston Celtics"]["wins"] == 1
+        assert teams["Los Angeles Lakers"]["losses"] == 1
+        assert teams["Boston Celtics"]["pf"] == 110
+        assert teams["Boston Celtics"]["pa"] == 98
+
+    def test_terminal_outcomes_buckets_by_win_count(self):
+        src = self._make_source()
+        state = {
+            "_applied": frozenset(),
+            "_teams": {
+                "Cellar":   {"wins": 25, "losses": 57, "pf": 0, "pa": 0, "games_played": 82},
+                "Bubble":   {"wins": 42, "losses": 40, "pf": 0, "pa": 0, "games_played": 82},
+                "Comfy":    {"wins": 52, "losses": 30, "pf": 0, "pa": 0, "games_played": 82},
+                "Top":      {"wins": 58, "losses": 24, "pf": 0, "pa": 0, "games_played": 82},
+                "Historic": {"wins": 68, "losses": 14, "pf": 0, "pa": 0, "games_played": 82},
+            },
+        }
+        outcomes = src.terminal_outcomes(state)
+        assert outcomes["Cellar"] == []  # below 40
+        assert set(outcomes["Bubble"]) == {"play_in_bubble"}
+        assert set(outcomes["Comfy"]) == {"play_in_bubble", "playoff_secured"}
+        assert set(outcomes["Top"]) == {"play_in_bubble", "playoff_secured", "top_seed_pace"}
+        assert set(outcomes["Historic"]) == {
+            "play_in_bubble", "playoff_secured", "top_seed_pace", "elite",
+        }
+
+
+class TestNbaPlayoffSource:
+    """NbaPlayoffSource: BestOfNSeriesSource subclass with uniform
+    SERIES_LENGTH=7 and _winner_advance_label mapping FINALS →
+    FINALS_WINNER."""
+
+    @staticmethod
+    def _make_source(bracket_games=None):
+        from dispatcharr_ranked_matchups.sources.nba import NbaPlayoffSource
+        src = NbaPlayoffSource(season_end_year=2025)
+        src._bracket_games_cache = bracket_games or []
+        return src
+
+    def test_identity(self):
+        src = self._make_source()
+        assert src.sport_prefix == "NBA"
+        assert "Playoffs" in src.sport_label
+        assert src._league_context_code() == "NBA_PO"
+
+    def test_supports_importance(self):
+        assert self._make_source().supports_importance is True
+
+    def test_ko_stages(self):
+        src = self._make_source()
+        assert src.KO_STAGES == ("R1", "CSF", "CF", "FINALS")
+
+    def test_series_lengths_uniform_seven(self):
+        src = self._make_source()
+        for stage in src.KO_STAGES:
+            assert src._series_length_for_stage(stage) == 7
+            assert src._clinching_wins_for_stage(stage) == 4
+
+    def test_winner_advance_label(self):
+        src = self._make_source()
+        assert src._winner_advance_label("FINALS") == "FINALS_WINNER"
+        # Earlier rounds default to stage_depth + 1 (returns None).
+        assert src._winner_advance_label("R1") is None
+        assert src._winner_advance_label("CSF") is None
+        assert src._winner_advance_label("CF") is None
+
+    def test_outcome_labels_uses_nba_po_thresholds(self):
+        src = self._make_source()
+        labels = src.outcome_labels
+        assert "conf_semis" in labels
+        assert "conf_finals" in labels
+        assert "nba_finals" in labels
+        assert "finals_winner" in labels
+
+    def test_set_regular_season_strengths_passes_through(self):
+        src = self._make_source()
+        assert src.estimate_strengths() == {}
+        src.set_regular_season_strengths(
+            {"Boston Celtics": {"pf_per_game": 118.0, "pa_per_game": 110.5}}
+        )
+        s = src.estimate_strengths()
+        assert s["Boston Celtics"]["pf_per_game"] == 118.0
+
+    def test_finals_winner_advance_reaches_synthetic_depth(self):
+        """A team winning the NBA Finals reaches the FINALS_WINNER
+        synthetic depth (one above FINALS), and its terminal_outcomes
+        contains every post-R1 band including finals_winner."""
+        games = [
+            {"game_id": "f1", "stage": "FINALS", "matchday": 1,
+             "home": "Champion", "away": "Finalist",
+             "home_goals": 110, "away_goals": 90,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "f2", "stage": "FINALS", "matchday": 2,
+             "home": "Champion", "away": "Finalist",
+             "home_goals": 105, "away_goals": 95,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "f3", "stage": "FINALS", "matchday": 3,
+             "home": "Finalist", "away": "Champion",
+             "home_goals": 92, "away_goals": 104,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "f4", "stage": "FINALS", "matchday": 4,
+             "home": "Finalist", "away": "Champion",
+             "home_goals": 98, "away_goals": 108,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"]["Champion"] == KNOCKOUT_ROUND_DEPTH["FINALS_WINNER"]
+        assert state["_round_reached"]["Finalist"] == KNOCKOUT_ROUND_DEPTH["FINALS"]
+        outcomes = src.terminal_outcomes(state)
+        # Champion gets every band.
+        assert set(outcomes["Champion"]) == {
+            "conf_semis", "conf_finals", "nba_finals", "finals_winner",
+        }
+        # Loser misses finals_winner.
+        assert set(outcomes["Finalist"]) == {
+            "conf_semis", "conf_finals", "nba_finals",
+        }
+
+    def test_nba_po_thresholds_are_depth_ordered(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, KNOCKOUT_ROUND_DEPTH
+        ctx = LEAGUE_CONTEXTS["NBA_PO"]
+        depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
+        for i in range(len(depths) - 1):
+            assert depths[i] < depths[i + 1], f"NBA_PO bands out of depth order: {depths}"

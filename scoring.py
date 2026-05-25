@@ -178,6 +178,14 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     "LCS":             2,  # League Championship Series
     "WS":              3,  # World Series
     "WS_WINNER":       4,  # World Series champion
+    # NBA playoffs (Phase G): 4 rounds, best-of-7 each. R1 depth 0 is
+    # already populated by NHL above; that's fine — the bracket source's
+    # `terminal_outcomes` reads per-league band cutoffs, so R1 sharing a
+    # depth label across NHL and NBA doesn't cause cross-contamination.
+    "CSF":             1,  # Conference Semifinals (4 series)
+    "CF":              2,  # Conference Finals (2 series)
+    "FINALS":          3,  # NBA Finals (1 series)
+    "FINALS_WINNER":   4,  # NBA Champion
 }
 
 
@@ -442,6 +450,41 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             ("WS_WINNER", "ws_winner",       10.0),
         ],
         boundary_summary="WC → LDS → LCS → WS → Champion",
+    ),
+    # Phase G: NBA regular season. 82-game season; play-in tournament
+    # (since 2020) opens 9th and 10th seeds onto the bracket via a
+    # mini-playoff, but the play-in is structurally between the
+    # regular season and the bracket — we treat it as separate from
+    # the 16-team bracket the playoff source models. Threshold field
+    # is `wins` (LEAGUE_CONTEXTS["NBA"].format="win_count").
+    # Modern NBA (post-2010): the play-in cutoff has hovered around
+    # 38-42 wins; 50 has been a comfortable playoff floor; 55+ tends
+    # to clinch a top-3 seed; 65+ is historically great (Warriors
+    # 73-9 era / OKC Thunder 68-14 in 2024-25).
+    "NBA": LeagueContext(
+        code="NBA", matchdays_total=82, format="win_count",
+        thresholds=[
+            (40, "play_in_bubble",   1.5),  # play-in tournament line
+            (50, "playoff_secured",  2.5),  # comfortable in
+            (55, "top_seed_pace",    4.0),  # top-3 seed pace
+            (65, "elite",            5.0),  # historic-team pace
+        ],
+        boundary_summary="40+ wins → play-in · 50+ → comfortable · 55+ → top seed · 65+ → elite",
+    ),
+    # Phase G: NBA playoffs. 4 rounds (R1 / CSF / CF / FINALS),
+    # best-of-7 each. Same structural shape as NHL Stanley Cup
+    # Playoffs — weights mirror NHL's ramp because the
+    # consequence-weight calibration is consistent across pro
+    # sports' bracket leverage.
+    "NBA_PO": LeagueContext(
+        code="NBA_PO", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("CSF",            "conf_semis",        1.0),
+            ("CF",             "conf_finals",       2.5),
+            ("FINALS",         "nba_finals",        5.0),
+            ("FINALS_WINNER",  "finals_winner",    10.0),
+        ],
+        boundary_summary="R1 → Conf Semis → Conf Finals → NBA Finals → Champion",
     ),
 }
 
