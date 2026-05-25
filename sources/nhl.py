@@ -29,8 +29,8 @@ API quirks captured here:
     stable key when iterating per-team schedules.
 
 The plugin opts into NHL via the `enable_nhl` boolean in `plugin.json`.
-Off by default: NHL coverage is new in Phase E and a user who's only
-watching football shouldn't see hockey channels appear.
+Off by default so users who only watch football don't get hockey
+channels appearing unsolicited.
 """
 
 from __future__ import annotations

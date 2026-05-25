@@ -147,7 +147,7 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         use_position_as_rank=False,  # group/knockout standings don't map cleanly
         # total_matchdays=0 — knockout, not a fixed-length season
     ),
-    # Phase H: top-flight European league competitions. All available on
+    # Top-flight European league competitions. All available on
     # Football-Data.org's free tier (verified 2026-05-25). Each is a
     # standard round-robin league; SoccerSource handles them with no
     # subclass needed. Threshold structures live in scoring.LEAGUE_CONTEXTS
@@ -186,9 +186,9 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         rank_cap=18,
         total_matchdays=34,
     ),
-    # Phase I: international tournaments. Both pure knockout (group stage
-    # not modeled in importance — see Phase I follow-up). LEAGUE_CONTEXTS
-    # routes them to KnockoutSoccerSource via format="knockout".
+    # International tournaments. Both pure knockout (group-stage
+    # importance is tracked in #20). LEAGUE_CONTEXTS routes them to
+    # KnockoutSoccerSource via format="knockout".
     "world_cup": SoccerCompetitionConfig(
         fd_code="WC",
         sport_prefix="WC",
@@ -203,11 +203,11 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         odds_sport_key="soccer_uefa_european_championship",
         use_position_as_rank=False,
     ),
-    # Phase Q: additional Football-Data.org free-tier leagues. Same
-    # config shape as Phase H's BL1/PD/SA/FL1 — pure data additions, no
-    # source code changes. UEFA Europa League and Conference League are
-    # NOT on the FD.org free tier (only Champions League is), so they're
-    # not included here despite being on the original Phase Q wishlist.
+    # Additional Football-Data.org free-tier leagues. Same config
+    # shape as the top-flight European leagues above — pure data
+    # additions, no source code changes. UEFA Europa League and
+    # Conference League are NOT on the FD.org free tier (only Champions
+    # League is), so they're not included here.
     "eredivisie": SoccerCompetitionConfig(
         fd_code="DED",
         sport_prefix="Eredivisie",
@@ -238,11 +238,11 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
 class SoccerSource(SportSource):
     """Adapter for one Football-Data.org competition."""
 
-    # Phase C: SoccerSource implements the Monte Carlo importance interface.
-    # Requires a full-season fixtures fetch (done lazily on first call).
-    # UCL etc. set use_position_as_rank=False; they have no league table, so
-    # the importance simulator can't run on them. The lazy cache populates
-    # only for the configs where LEAGUE_CONTEXTS has thresholds defined.
+    # SoccerSource implements the Monte Carlo importance interface
+    # (requires a full-season fixtures fetch, done lazily on first call).
+    # UCL etc. set use_position_as_rank=False; they have no league table,
+    # so the importance simulator can't run on them. The lazy cache
+    # populates only for configs where LEAGUE_CONTEXTS has thresholds.
     supports_importance = True
 
     # Pre-season fallback per-team strength (rolling-window estimate has no
@@ -260,8 +260,8 @@ class SoccerSource(SportSource):
         self.fd_api_key = fd_api_key
         self.odds_api_key = odds_api_key
         # Importance-mode cache (lazy). Populated by _ensure_importance_cache
-        # on first call to any of the Phase C methods. None means uninitialized;
-        # an empty list / dict means we tried and got nothing back.
+        # on first call. None means uninitialized; an empty list / dict
+        # means we tried and got nothing back.
         self._all_matches_cache: Optional[List[Dict]] = None
         self._strengths_cache: Optional[Dict[str, Dict[str, float]]] = None
         self._initial_state_cache: Optional[Dict[str, Any]] = None
@@ -555,7 +555,7 @@ class SoccerSource(SportSource):
                 return v
         return None
 
-    # ---------- Phase C: Monte Carlo importance ----------
+    # ---------- Monte Carlo importance ----------
 
     def _fetch_all_season_matches(self) -> List[Dict]:
         """All matches for the current competition season — finished AND
@@ -616,8 +616,8 @@ class SoccerSource(SportSource):
 
         Teams with zero finished matches (newly promoted, pre-season) get
         league-average defaults via `_DEFAULT_STRENGTH_*`. The pre-season
-        seed already handles position-based ranks (Phase B.2); strengths are
-        the goals-side fallback.
+        seed handles position-based ranks separately; strengths are the
+        goals-side fallback.
         """
         if self._strengths_cache is not None:
             return self._strengths_cache

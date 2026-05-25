@@ -1,10 +1,9 @@
 """NWSL source — ESPN unofficial + Odds API closeness.
 
-Same V1 minimal pattern as MlsSource (Phase J): schedule from ESPN +
-closeness from The Odds API. No standings-based importance and no
-playoff bracket — both are follow-ups. NWSL playoff format mirrors
-MLS Cup (mixed best-of-3 and single-leg rounds) and would benefit
-from the same bracket work.
+Same minimal pattern as MlsSource: schedule from ESPN + closeness
+from The Odds API. No standings-based importance and no playoff
+bracket — NWSL playoff format mirrors MLS Cup (mixed best-of-3 and
+single-leg rounds), tracked under #30.
 
 NWSL Odds API key: `soccer_usa_nwsl`. ESPN slug: `soccer/usa.nwsl`.
 """

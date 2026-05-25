@@ -68,31 +68,23 @@ descriptions) is sport-agnostic.
 
 ## Roadmap
 
-Sports / leagues on the to-do list (PRs welcome — see
-[CONTRIBUTING.md](CONTRIBUTING.md) for a step-by-step guide; for
-requests, [open an issue](../../issues/new/choose) and the form will
-collect everything needed to scope it):
+Open work is tracked in [GitHub issues](../../issues). Notable themes:
 
-- **NCAA Baseball** — no clean public API yet; options being evaluated:
-  D1Baseball.com scrape, ESPN's hidden API, or a future
-  CollegeBaseballData.com from the same author as CFBD/CBB.
-- **NCAA Soccer** — same author publishes CollegeSoccerData; needs an
-  adapter file + AP poll mapping.
-- **MLB / NBA / NFL** — would use The Odds API for spreads + a
-  rankings/standings source (TBD per sport).
-- **More European football leagues** — La Liga, Serie A, Bundesliga,
-  Ligue 1 are all on Football-Data.org's free tier. Each needs a
-  `LEAGUE_CONTEXTS` entry in `scoring.py` with the right thresholds
-  (UCL/Europa cutoff, relegation line) plus a one-line addition to the
-  `COMPETITIONS` dict in `sources/soccer.py`.
-- **Rivalry signal** — a `rivalries.json` shipped with the plugin (NCAA
-  rivalries are well-known) and/or an LLM "is this a rivalry?" call
-  cached per team-pair.
-- **Matcher v2** — soccer EPG match rate is currently low because UK
-  providers publish broadcast EPG only 24-48h ahead and team-name
-  variants ("Wrexham" / "Wrexham AFC" / "AFC Wrexham") trip the regex
-  pre-filter. Plan: team-alias dictionary, tighter time window, broader
-  fuzzy match.
+- **Rivalry signal** — the `weight_rivalry` weight is wired but no
+  source populates `is_rivalry`. See [#8](../../issues/8).
+- **Matcher v2** — soccer EPG match rate is low because UK providers
+  publish broadcast EPG only 24-48h ahead and team-name variants
+  ("Wrexham" / "Wrexham AFC" / "AFC Wrexham") trip the regex
+  pre-filter. See [#4](../../issues/4).
+- **NCAA Baseball / Softball postseason brackets** — Regional
+  double-elim and the 8-team MCWS/WCWS brackets need chronological
+  bracket inference. See [#43](../../issues/43).
+- **WC 2026 group stage importance** — group-stage games currently
+  read importance=0. See [#20](../../issues/20).
+
+PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for a step-by-step
+guide. For requests, [open an issue](../../issues/new/choose) and the
+form will collect everything needed to scope it.
 
 ## Install
 

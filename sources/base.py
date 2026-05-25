@@ -4,10 +4,10 @@ A SportSource fetches the upcoming games for one sport/league and the current
 ranks (if any) and returns GameRow records. The plugin then scores each row
 and matches it to a Dispatcharr channel via EPG.
 
-Phase C adds an OPTIONAL Monte Carlo importance interface — 7 methods plus a
-`supports_importance` flag. Sources that implement them get importance-aware
-scoring (Lahvička 2012); sources that don't keep the legacy stakes/impact
-path. The simulator inspects the flag before calling. See simulation.py.
+Sources optionally implement a Monte Carlo importance interface (Lahvička
+2012) — 7 methods plus a `supports_importance` flag. Sources that flip the
+flag MUST override all 7; the simulator (simulation.py) inspects the flag
+before calling and falls through gracefully when it's false.
 """
 
 from __future__ import annotations
@@ -30,8 +30,8 @@ class GameRow:
     rank_away: Optional[int]
     start_time: datetime        # when the game starts (UTC)
     venue: Optional[str] = None
-    spread: Optional[float] = None      # absolute pre-game spread (Phase 3+)
-    # B.3 close-game signal: bookmaker-implied coinflip-ness in [0, 1].
+    spread: Optional[float] = None      # absolute pre-game spread
+    # Close-game signal: bookmaker-implied coinflip-ness in [0, 1].
     # 1.0 = pick'em (both teams equally likely to win); 0.0 = blowout.
     # Soccer populates this from the h2h moneyline market (devigged
     # probabilities, then 2 * min(p_home, p_away)). NCAAF / NCAAM still
@@ -40,7 +40,7 @@ class GameRow:
     # is None on every GameRow. DO NOT set both — keeps the contract
     # "closeness wins if present, fall back to spread otherwise" honest.
     closeness: Optional[float] = None
-    is_rivalry: bool = False             # known rivalry (Phase 3+)
+    is_rivalry: bool = False             # known rivalry
     extra: dict = field(default_factory=dict)  # source-specific metadata
 
 
@@ -48,12 +48,11 @@ class GameRow:
 class MatchResult:
     """One sampled match outcome. Used by the Monte Carlo importance simulator.
 
-    For soccer / NCAAF / NCAAM we always have integer goals/points; ties
-    (draws) are encoded as home_goals == away_goals (legal in soccer,
-    vanishingly rare in NCAAF — sources that ban draws should never sample
-    one). Sub-game state (penalty shootouts in cup knockouts, OT in CFB) is
-    encoded in `extra` per source; the simulator core only reads the goal
-    counts.
+    Integer goals/points; ties (draws) are encoded as home_goals == away_goals
+    (legal in soccer, vanishingly rare in NCAAF — sources that ban draws
+    should never sample one). Sub-game state (penalty shootouts in cup
+    knockouts, OT in CFB) is encoded in `extra` per source; the simulator
+    core only reads the goal counts.
     """
     home_goals: int
     away_goals: int
@@ -63,14 +62,10 @@ class MatchResult:
 class SportSource(ABC):
     """Adapter contract."""
 
-    # ---------- Phase C: Monte Carlo importance opt-in ----------
-    # Sources that implement the 7 importance methods below set this to True.
-    # The simulator (simulation.py) checks this flag before calling the
-    # methods; falsy → caller skips importance for this source's games and
-    # falls back to legacy stakes/impact signals.
-    #
-    # Class-level default is False so existing sources (NCAAFSource,
-    # NCAAMSource, etc.) opt out without needing a code change.
+    # Monte Carlo importance opt-in. Sources that implement the 7 importance
+    # methods below flip this to True; the simulator (simulation.py) checks
+    # the flag before calling the methods and contributes zero importance
+    # points for this source's games when it's false.
     supports_importance: bool = False
 
     @property
@@ -88,7 +83,7 @@ class SportSource(ABC):
         """Return upcoming games in the next `days_ahead` days. Empty list during
         offseason. Caller does not need to filter by date."""
 
-    # ---------- Phase C: Monte Carlo importance interface ----------
+    # ---------- Monte Carlo importance interface ----------
     # All 7 default to NotImplementedError. Sources that flip
     # `supports_importance = True` MUST override all of them; the simulator
     # calls each one per sim iteration.

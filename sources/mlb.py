@@ -34,7 +34,7 @@ API quirks captured here:
     endpoint — use full name as the canonical key.
 
 The plugin opts into MLB via the `enable_mlb` boolean in `plugin.json`.
-Off by default; baseball coverage is new in Phase F.
+Off by default.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 """Liga MX source — ESPN unofficial + Odds API closeness.
 
-Same V1 minimal pattern as MlsSource (Phase J): schedule + closeness
-only, no standings-based importance or Liguilla playoff bracket.
+Same minimal pattern as MlsSource: schedule + closeness only. No
+standings-based importance or Liguilla playoff bracket (#30).
 
 Liga MX runs two seasons per calendar year (Apertura ≈ Jul-Dec,
 Clausura ≈ Jan-May), each followed by a 12-team Liguilla playoff.

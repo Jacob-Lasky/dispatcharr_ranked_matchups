@@ -274,9 +274,8 @@ def _parse_favorites(raw: str) -> List[str]:
 def _build_weights(settings: Dict[str, Any]):
     # Source of truth for default values is scoring.Weights's dataclass
     # declaration. Do NOT duplicate the numbers here — when a default
-    # changes (e.g. Phase A bumped favorite 4.0 -> 6.0), the duplicate
-    # ALWAYS gets missed and the runtime silently uses the old value
-    # until somebody runs the tests.
+    # changes, the duplicate ALWAYS gets missed and the runtime silently
+    # uses the old value until somebody runs the tests.
     from .scoring import Weights
     d = Weights()
     return Weights(
@@ -335,7 +334,7 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(_make_soccer("championship"))
     if settings.get("enable_ucl", False) and fd_key:
         sources.append(_make_soccer("ucl"))
-    # Phase H: top-flight European leagues. Same FD.org key as EPL etc.;
+    # Top-flight European leagues. Same FD.org key as EPL etc.;
     # _make_soccer routes each to SoccerSource because their LEAGUE_CONTEXTS
     # entries default to format="league".
     if settings.get("enable_bundesliga", False) and fd_key:
@@ -346,7 +345,7 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(_make_soccer("serie_a"))
     if settings.get("enable_ligue_1", False) and fd_key:
         sources.append(_make_soccer("ligue_1"))
-    # Phase I: international tournaments. _make_soccer dispatches to
+    # International tournaments. _make_soccer dispatches to
     # KnockoutSoccerSource via the format="knockout" route. Group-stage
     # importance isn't modeled in V1; group games still surface via
     # fetch_upcoming with favorite + closeness signal only.
@@ -355,7 +354,7 @@ def _build_sources(settings: Dict[str, Any]):
     if settings.get("enable_euros", False) and fd_key:
         sources.append(_make_soccer("euros"))
 
-    # Phase Q: additional FD.org free-tier leagues. Same _make_soccer
+    # Additional FD.org free-tier leagues. Same _make_soccer
     # router; LEAGUE_CONTEXTS uses format="league" so dispatch goes
     # to SoccerSource (not KnockoutSoccerSource).
     if settings.get("enable_eredivisie", False) and fd_key:
@@ -453,7 +452,7 @@ def _build_sources(settings: Dict[str, Any]):
     if settings.get("enable_liga_mx", False):
         sources.append(LigaMxSource(odds_api_key=odds_key or ""))
 
-    # Phase R: field events (racing + golf). No two-team head-to-head;
+    # Field events (racing + golf). No two-team head-to-head;
     # each row is one race or tournament. Low event volume (~1/week)
     # means "surface if toggled" is the right product — no importance
     # ranking needed.
@@ -464,13 +463,13 @@ def _build_sources(settings: Dict[str, Any]):
     if settings.get("enable_golf", False):
         sources.append(GolfSource())
 
-    # Phase S: UFC. Same field-event shape — each fight card is one
+    # UFC. Same field-event shape — each fight card is one
     # row with home=card title ("UFC 309: Jones vs. Miocic"). PPVs
     # (numbered UFC events) get MAJOR tier, Fight Nights get EVENT.
     if settings.get("enable_ufc", False):
         sources.append(UfcSource())
 
-    # Phase T: Tennis. ESPN's tennis scoreboard returns whole
+    # Tennis. ESPN's tennis scoreboard returns whole
     # tournaments (one entry per active event), not individual
     # matches — so tennis fits the FieldEventSource model. Grand
     # Slams + year-end Finals get MAJOR; regular tour stops get
@@ -507,14 +506,15 @@ def _build_sources(settings: Dict[str, Any]):
             logger.warning("[ncaaw_basketball] could not seed playoff strengths: %s", exc)
         sources.append(ncaaw_po)
 
-    # Phase M / Phase O Phase 1: NCAA Division I baseball. Free ESPN
-    # unofficial API + D1Baseball poll. Regular-season win-count thresholds
-    # (30 / 35 / 40 / 45 / 50) drive the in-season importance signal.
-    # Phase O Phase 1 adds postseason coverage for the cleanly-labeled
-    # best-of-3 stages (Super Regional, MCWS Finals). Same pair-and-seed
-    # pattern as MLB: the playoff source borrows regular-season strengths
-    # from the regular source so postseason Poisson sampling reflects
-    # per-team scoring skill rather than the league-average prior.
+    # NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
+    # poll. Regular-season win-count thresholds (30 / 35 / 40 / 45 / 50)
+    # drive the in-season importance signal. Postseason coverage is
+    # currently the cleanly-labeled best-of-3 stages (Super Regional,
+    # MCWS Finals); Regional double-elim + 8-team MCWS bracket are
+    # tracked in #43. Same pair-and-seed pattern as MLB: the playoff
+    # source borrows regular-season strengths from the regular source
+    # so postseason Poisson sampling reflects per-team scoring skill
+    # rather than the league-average prior.
     if settings.get("enable_ncaa_baseball", False):
         ncbsb_reg = NcaaBaseballRegularSource()
         sources.append(ncbsb_reg)
@@ -525,11 +525,10 @@ def _build_sources(settings: Dict[str, Any]):
             logger.warning("[ncaa_baseball] could not seed playoff strengths: %s", exc)
         sources.append(ncbsb_po)
 
-    # Phase N / Phase O Phase 1: NCAA Division I softball. Same structure
-    # as NCAA baseball — regular-season win-count + best-of-3 postseason
-    # (Super Regional, WCWS Finals) coverage. Phase 2 (filed) will model
-    # the Regional double-elim + 8-team WCWS bracket via chronological
-    # inference.
+    # NCAA Division I softball. Same structure as NCAA baseball — regular-
+    # season win-count + best-of-3 postseason (Super Regional, WCWS Finals)
+    # coverage. Regional double-elim + 8-team WCWS bracket are tracked in
+    # #43.
     if settings.get("enable_ncaa_softball", False):
         ncsbl_reg = NcaaSoftballRegularSource()
         sources.append(ncsbl_reg)
@@ -540,7 +539,7 @@ def _build_sources(settings: Dict[str, Any]):
             logger.warning("[ncaa_softball] could not seed playoff strengths: %s", exc)
         sources.append(ncsbl_po)
 
-    # Phase O: NCAA D1 men's + women's soccer. One source class
+    # NCAA D1 men's + women's soccer. One source class
     # parametrized on gender — same structure / endpoints / threshold
     # semantics for both, only the ESPN URL slug differs. Standings
     # points (3 W / 1 D / 0 L) drive the importance signal because
@@ -567,7 +566,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     if not sources:
         return {"status": "error", "message": "No sport sources enabled."}
 
-    # 1. Fetch. Keep the (source, game) association — Phase C compute_match_importance
+    # 1. Fetch. Keep the (source, game) association — compute_match_importance
     # needs the source object per game to run the season-replay simulator. Plain
     # game rows lose the link to which adapter produced them, and reconstructing
     # it from extra["fd_competition_code"] only works for soccer.
@@ -594,16 +593,15 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         _write_cache(cache)
         return {"status": "ok", "message": msg}
 
-    # 2. Score. The Lahvička Monte Carlo importance signal (Phase C)
-    # replaced the legacy stakes / impact_on_favorites / late_mult signal
-    # family in C.4 — the structural importance value covers all three:
+    # 2. Score. The Lahvička Monte Carlo importance signal covers three
+    # related concerns structurally:
     #   - stakes for the playing teams → home + away queries in the batch
     #   - impact_on_favorites for non-playing favorites → favorite queries
     #     in the same batch (one season replay per match shared across all
     #     queries via monte_carlo_importance_batch)
     #   - late-season amplification → emerges naturally from the
     #     contingency table getting sharper as elimination drops more
-    #     outcomes out of contention. No multiplier hack needed.
+    #     outcomes out of contention.
     from .scoring import (
         match_favorites, LEAGUE_CONTEXTS, build_impact_narratives,
         compute_match_importance,
@@ -645,13 +643,12 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             favs_with_standings, standings_table,
         )
 
-        # Phase C Monte Carlo importance. Queries cover the two playing
-        # teams' outcome bands AND any in-league favorites' outcome
-        # bands (so a non-favorite game that swings a favorite's
-        # relegation chance gets credit structurally — the impact_on_
-        # favorites case from issue #11). weight_importance=0 disables
-        # the per-game cost entirely. Catches any exception so a flaky
-        # source can't take down the entire refresh.
+        # Monte Carlo importance. Queries cover the two playing teams'
+        # outcome bands AND any in-league favorites' outcome bands
+        # (so a non-favorite game that swings a favorite's relegation
+        # chance gets credit structurally). weight_importance=0
+        # disables the per-game cost entirely. Catches any exception
+        # so a flaky source can't take down the entire refresh.
         importance_pts: float = 0.0
         importance_notes: List[str] = []
         importance_thresholds_hit: List[str] = []
@@ -919,7 +916,7 @@ def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) 
     """Resolve the starting channel number for our virtual channels.
 
     `virtual_channel_base` setting:
-      - Positive int → use that as the base (legacy: 9000)
+      - Positive int → use that as the base.
       - 0 (sentinel) → auto: pick (highest existing non-virtual channel) + 1,
         so virtuals slot in just after the user's real channels.
       - Anything unparseable → treat as auto.
@@ -945,28 +942,23 @@ def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) 
 def _resolve_park_base(target_base: int, num_games: int) -> int:
     """Pick a parking range that's guaranteed past every target number we'll
     write. Parking + writing happens in one transaction within our own group,
-    so we only need to clear our own target range — +1000 slack is safety
-    margin against future-us reusing the parking range for something else."""
+    so we only need to clear our own target range; +1000 slack keeps the
+    parking range comfortably out of any plausible target_base growth."""
     return target_base + max(num_games, 0) + 1000
 
 
 def _build_signals_score_from_payload(g: Dict[str, Any]):
     """Reconstruct GameSignals + GameScore from cache.json payload.
 
-    Phase C.4 retired GameSignals.stakes_a/_b, stakes_thresholds_hit,
-    season_progress, and impact_on_favorites — the Monte Carlo importance
-    signal subsumes all four. A cache.json written before C.4 still
-    contains those keys; they're ignored here. The reader degrades
-    gracefully: missing importance_thresholds_hit (pre-C.4) falls back to
-    the legacy `stakes_thresholds_hit` if present, so the first post-C.4
-    apply against a stale cache still gets a tagline.
+    Cache files written by older versions of this plugin used a different
+    key for the tagline thresholds (`stakes_thresholds_hit` instead of
+    `importance_thresholds_hit`) and may carry retired fields that the
+    current GameSignals doesn't accept (stakes_a/_b, season_progress,
+    impact_on_favorites). Reading both keys gives a one-cycle migration
+    window so the first apply against a stale cache still produces a
+    tagline; the retired fields are simply ignored.
     """
     from .scoring import GameSignals, GameScore
-    # Pre-C.4 caches stored thresholds under `stakes_thresholds_hit`; the
-    # post-C.4 key is `importance_thresholds_hit`. Reading both supports a
-    # one-cycle migration window where apply runs against a refresh that
-    # was generated by the previous code. After the first post-C.4
-    # refresh writes a fresh cache, the legacy key disappears.
     thresholds_hit = (
         g.get("importance_thresholds_hit")
         or g.get("stakes_thresholds_hit")
@@ -981,8 +973,9 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         spread=g.get("spread"),
         closeness=g.get("closeness"),
         tournament_stage=g.get("tournament_stage"),
-        # Phase C: pre-weight importance roundtrip. Missing from pre-C.3
-        # caches → defaults (0.0 / []) preserve graceful degradation.
+        # Cache files predating this signal default to 0.0 / [] — graceful
+        # degradation: the importance block in score_game just contributes
+        # nothing for that entry.
         importance_points=float(g.get("importance_points") or 0.0),
         importance_notes=list(g.get("importance_notes") or []),
         importance_thresholds_hit=list(thresholds_hit),
@@ -1007,13 +1000,13 @@ def _close_game_descriptor(
     closeness: Optional[float], spread: Optional[float]
 ) -> Optional[str]:
     """Map the close-game signal to a human-readable label. Prefers the
-    B.3 closeness measure (devigged probabilities, [0,1]) when present;
-    falls back to the legacy point-spread thresholds otherwise.
+    closeness measure (devigged probabilities, [0,1]) when present; falls
+    back to point-spread thresholds otherwise.
 
     Soccer's `closeness >= 0.7` (each side ≥35% of a 3-way market) is the
     coinflip-magnitude analog of NCAAF's `spread <= 3`. The two bands
-    were calibrated so that a Phase-A EPL toss-up and a Phase-A NCAAF
-    toss-up produce the same label.
+    are calibrated so an EPL toss-up and an NCAAF toss-up produce the
+    same label.
     """
     if closeness is not None:
         if closeness >= 0.7:
@@ -1356,9 +1349,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         for cache_idx, g in enumerate(games):
             # channel_ids is the full list of matched provider channels (e.g.
             # multiple regional/quality variants of the same fixture). Falls
-            # back to legacy single channel_id for cache entries written by
-            # an older plugin version. Primary (first) drives the channel
-            # logo and EPG context.
+            # back to the single-channel `channel_id` key for cache entries
+            # written by an older plugin version. Primary (first) drives
+            # the channel logo and EPG context.
             source_ids = list(g.get("channel_ids") or [])
             if not source_ids:
                 primary_id = g.get("channel_id")

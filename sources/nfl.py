@@ -6,7 +6,7 @@ Two source classes:
     7 / 9 / 11 / 13 wins.
   - `NflPlayoffSource(BestOfNSeriesSource)`: single-game elimination
     bracket, SERIES_LENGTH=1 per stage. Stages: WC -> DIV -> CONF ->
-    SB. Same architectural shape as March Madness (Phase L).
+    SB. Same architectural shape as the NCAA March Madness bracket.
 
 API patterns:
   - /scoreboard?dates=YYYYMMDD for per-day games.

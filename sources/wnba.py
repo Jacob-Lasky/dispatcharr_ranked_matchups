@@ -1,6 +1,6 @@
 """WNBA source — ESPN's unofficial `site.api.espn.com` API. No key required.
 
-Two source classes mirroring the NBA pattern (Phase G), with WNBA-specific
+Two source classes mirroring the NBA pattern, with WNBA-specific
 adjustments:
 
   - `WnbaRegularSource(PointsBasedSportSource)`: 40-game regular season,

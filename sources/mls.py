@@ -1,8 +1,8 @@
 """MLS source — ESPN's unofficial `site.api.espn.com` for the schedule
-+ The Odds API for closeness. No standings-based importance simulation
-in V1; MLS games surface with `favorite + closeness` scoring only.
++ The Odds API for closeness. MLS games surface with `favorite +
+closeness` scoring only; standings-based importance is filed as #30.
 
-V1 scope (Phase J)
+Scope:
 
   - `fetch_upcoming` returns the next-N-day MLS schedule (regular
     season AND playoffs, undifferentiated). Game records carry
@@ -11,8 +11,8 @@ V1 scope (Phase J)
   - **No** `supports_importance` flag. MLS Cup playoff bracket is
     structurally awkward (best-of-3 first round, single-leg subsequent
     rounds — neither BestOfNSeriesSource nor AggregateLegSource fits
-    cleanly) and conference-standings importance needs its own
-    bands. Both are filed as Phase J follow-ups.
+    cleanly); conference-standings importance needs its own bands.
+    Both are tracked in #30.
   - The Odds API sport key is `soccer_usa_mls`. The Odds API team
     names ("LA Galaxy") often drop the FC/SC tag ESPN includes
     ("LA Galaxy" → "LA Galaxy", but "New York Red Bulls" vs ESPN's
@@ -136,17 +136,16 @@ def _h2h_to_closeness(
 
 
 class MlsSource(SportSource):
-    """MLS schedule + closeness signal. V1 omits standings-based
-    importance and the MLS Cup playoff bracket — see follow-up issues
-    filed under Phase J.
+    """MLS schedule + closeness signal. Standings-based importance and
+    MLS Cup playoff bracket modeling are tracked in #30.
 
     Class attrs `_ESPN_SLUG`, `_ODDS_SPORT_KEY`, `_FD_CODE`,
-    `_SPORT_PREFIX`, `_SPORT_LABEL` parameterize the league. Phase Q
-    NwslSource and LigaMxSource subclass this and override these
-    five attrs — the rest of the fetch/closeness machinery is shared.
+    `_SPORT_PREFIX`, `_SPORT_LABEL` parameterize the league. NwslSource
+    and LigaMxSource subclass this and override these five attrs — the
+    rest of the fetch/closeness machinery is shared.
     """
 
-    # NOT supports_importance: the importance simulator skips MLS in V1.
+    # NOT supports_importance: the importance simulator skips MLS.
     # Importance comes from `favorite` + `closeness` only.
 
     # Per-league configuration (subclasses override):
@@ -224,12 +223,12 @@ class MlsSource(SportSource):
                 closeness = self._lookup_closeness(closeness_by_pair, home, away)
                 # ESPN exposes the season/playoff stage in
                 # `event.season.slug`. Carry it through as
-                # `extra.season_slug` so future importance work can
-                # route on it without re-fetching. MLS values:
-                # "regular-season", "mls-cup", "mls-cup-playoffs".
-                # NWSL: "regular-season", "nwsl-playoffs", etc.
-                # Liga MX: "torneo-apertura", "torneo-clausura",
-                # "liguilla" (the Apertura/Clausura playoff).
+                # `extra.season_slug` for downstream consumers (the
+                # importance simulator filed under #30 will route on
+                # it). MLS values: "regular-season", "mls-cup",
+                # "mls-cup-playoffs". NWSL: "regular-season",
+                # "nwsl-playoffs", etc. Liga MX: "torneo-apertura",
+                # "torneo-clausura", "liguilla".
                 season_slug = ((event.get("season") or {}).get("slug") or "")
                 out.append(GameRow(
                     sport_prefix=self.sport_prefix,

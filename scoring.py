@@ -5,15 +5,14 @@ sum of per-signal contributions, each visible in the cache. When the user says
 "this game should be ranked higher", they can see exactly which signal needs
 to be tuned.
 
-Signals (Phase 1 — rank + favorites only):
+Signals:
   - rank_pair: both teams ranked → score from sum_of_ranks (lower = higher score)
   - one_ranked: one team ranked, one unranked → score from the ranked team's rank
   - favorite: at least one favorite team involved → flat boost
-
-Signals added in Phase 3:
   - close_game: tight betting spread → score inversely proportional to spread
   - rivalry: known rivalry game → flat boost
   - narrative: LLM-judged narrative score (playoff race, history, stakes)
+  - importance: Lahvička Monte Carlo standings leverage (see compute_match_importance)
 """
 
 from __future__ import annotations
@@ -55,15 +54,12 @@ class Weights:
     rivalry: float = 2.0
     tournament: float = 1.5      # knockout-stage cup games
     narrative: float = 0.0       # LLM narrative score (disabled by default)
-    # Phase C: Lahvička Monte Carlo importance. Per-game raw points are
+    # Lahvička Monte Carlo importance. Per-game raw points are
     # sum_over_(team,outcome) of leverage × consequence_weight (leverage in
     # [0,1] from Kendall tau-c, weight from LEAGUE_CONTEXTS thresholds —
-    # relegation=5, UCL=4, title=5, etc.). C.4 calibration target: 3.0.
-    # That matches the typical "high-leverage relegation game" magnitude
-    # (0.5 leverage × 5 weight × 2 teams = 5 raw, times 3.0 weight = 15
-    # raw — the same order as a Phase-A relegation six-pointer with the
-    # legacy stakes signal). Replaces the legacy stakes + impact_favorite
-    # + _late_season_multiplier signal family (Phase C.4 cutover).
+    # relegation=5, UCL=4, title=5, etc.). 3.0 calibrates such that a
+    # typical high-leverage relegation six-pointer reads ~15 raw points
+    # (0.5 leverage × 5 weight × 2 teams = 5, × 3.0 = 15).
     importance: float = 3.0
 
 
@@ -88,18 +84,13 @@ class GameSignals:
     is_rivalry: bool = False
     narrative_score: Optional[float] = None  # 0-10 from LLM (last)
 
-    # Phase C: Lahvička Monte Carlo importance, pre-weight. The plugin's
-    # _action_refresh calls compute_match_importance for sources that
-    # support it (currently SoccerSource only) and stashes the result here.
-    # Sources that don't support importance leave the points at 0.0 and
-    # score_game's importance block falls through without contributing.
-    #
+    # Lahvička Monte Carlo importance, pre-weight. Sources that don't
+    # implement compute_match_importance leave these at 0 / empty; the
+    # importance block in score_game then contributes nothing.
     # `importance_thresholds_hit` is the deduped list of outcome bands
     # with nonzero leverage on any queried team (the playing teams plus
     # in-league favorites). pick_tagline uses it for editorial taglines
-    # ("relegation race" / "title race"). Replaces the pre-C.4
-    # stakes_thresholds_hit field which was derived from the legacy
-    # proximity heuristic.
+    # ("relegation race" / "title race").
     importance_points: float = 0.0
     importance_notes: List[str] = field(default_factory=list)
     importance_thresholds_hit: List[str] = field(default_factory=list)
@@ -153,9 +144,9 @@ class LeagueContext:
 KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     # UEFA cup soccer (UCL / UEL / UECL):
     "PLAYOFFS":        0,  # UCL play-off round (pos 9-24 entrants)
-    # International tournaments (Phase I) use LAST_32 as the entry-level
-    # knockout round in the new 48-team World Cup 2026 format. Same depth
-    # as PLAYOFFS because both are "before LAST_16"; no competition uses
+    # International tournaments use LAST_32 as the entry-level knockout
+    # round in the 48-team World Cup 2026 format. Same depth as
+    # PLAYOFFS because both are "before LAST_16"; no competition uses
     # both stages, so they don't collide in the bracket cascade.
     "LAST_32":         0,
     "LAST_16":         1,
@@ -169,31 +160,30 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     "CONF_FINAL":      2,  # Conference finals (2 series)
     "CUP_FINAL":       3,  # Stanley Cup Final (1 series)
     "CUP_WINNER":      4,  # Stanley Cup champion
-    # MLB postseason (Phase F): Wild Card best-of-3 (6 series across both
-    # leagues), Division Series best-of-5 (4 series), LCS best-of-7 (2
-    # series), World Series best-of-7. WC and LDS depths differ — a team
-    # that wins the WC reaches LDS, etc.
+    # MLB postseason: Wild Card best-of-3 (6 series across both leagues),
+    # Division Series best-of-5 (4 series), LCS best-of-7 (2 series),
+    # World Series best-of-7. WC and LDS depths differ — a team that
+    # wins the WC reaches LDS, etc.
     "WC":              0,  # Wild Card Series (entry round)
     "LDS":             1,  # Division Series
     "LCS":             2,  # League Championship Series
     "WS":              3,  # World Series
     "WS_WINNER":       4,  # World Series champion
-    # NBA playoffs (Phase G): 4 rounds, best-of-7 each. R1 depth 0 is
-    # already populated by NHL above; that's fine — the bracket source's
-    # `terminal_outcomes` reads per-league band cutoffs, so R1 sharing a
-    # depth label across NHL and NBA doesn't cause cross-contamination.
+    # NBA playoffs: 4 rounds, best-of-7 each. R1 depth 0 is shared with
+    # NHL above — terminal_outcomes reads per-league band cutoffs so
+    # there's no cross-contamination.
     "CSF":             1,  # Conference Semifinals (4 series)
     "CF":              2,  # Conference Finals (2 series)
     "FINALS":          3,  # NBA Finals (1 series) / WNBA Finals (1 series)
     "FINALS_WINNER":   4,  # NBA Champion
-    # WNBA playoffs (Phase K): 3 rounds, mixed series lengths.
-    # R1 (depth 0) and FINALS (depth 3) reuse the labels already in
-    # this table — terminal_outcomes reads per-league bands so no
-    # cross-contamination. SF needs its own depth between R1 and FINALS.
+    # WNBA playoffs: 3 rounds, mixed series lengths. R1 (depth 0) and
+    # FINALS (depth 3) reuse labels already above — terminal_outcomes
+    # reads per-league bands so no cross-contamination. SF needs its
+    # own depth between R1 and FINALS.
     "SF":              1,  # WNBA Semifinals (between R1 and FINALS)
     "WNBA_WINNER":     4,  # WNBA Champion (same synthetic depth as FINALS_WINNER)
-    # NCAA Women's March Madness (Phase L): 6 rounds, all single-game
-    # elimination. SERIES_LENGTH=1 per stage; first to 1 win clinches.
+    # NCAA Women's March Madness: 6 rounds, all single-game elimination.
+    # SERIES_LENGTH=1 per stage; first to 1 win clinches.
     "R64":             0,  # 1st Round (32 games)
     "R32":             1,  # 2nd Round (16 games)
     "S16":             2,  # Sweet 16 (8 games)
@@ -201,39 +191,29 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     "F4":              4,  # Final Four (2 games)
     "NCG":             5,  # National Championship Game
     "NCG_WINNER":      6,  # National Champion
-    # NFL playoffs (Phase P): 4 rounds, single-game elimination.
-    # SERIES_LENGTH=1 per stage; clinches at 1 win. The "WC" label
-    # entry above (depth 0) is shared between MLB Wild Card Series
-    # and NFL Wild Card Playoffs — both happen to be at depth 0 in
-    # their respective brackets, and terminal_outcomes reads
-    # per-league bands so there's no cross-contamination (same
-    # pattern as R1 shared across NHL and NBA, FINALS shared across
-    # NBA and WNBA).
+    # NFL playoffs: 4 rounds, single-game elimination. The "WC" label
+    # above (depth 0) is shared with MLB Wild Card Series — both happen
+    # to be at depth 0 in their respective brackets, and
+    # terminal_outcomes reads per-league bands.
     "DIV":             1,  # Divisional Playoffs
     "CONF":            2,  # Conference Championship
     "SB":              3,  # Super Bowl
     "SB_WINNER":       4,  # Super Bowl Champion
-    # NCAA Baseball College World Series (Phase O Phase 1: super-regional
-    # + finals only — both are cleanly-labeled best-of-3 in ESPN data).
-    # DO NOT treat the BSB_REG / MCWS depths as reachable yet: Phase 1
-    # only emits BSB_SR and MCWS_F ties, so a team caps at MCWS_F depth
-    # (advancing winners → MCWS_W). The intermediate depths exist in
-    # this table so the LEAGUE_CONTEXTS thresholds can label them with
-    # forward-compatible names; Phase 2 (#43) wires the regional
-    # double-elim and 8-team MCWS bracket via chronological inference
-    # so those depths actually fire.
-    "BSB_REG":         0,  # Regional (16 sites × 4 teams, double-elim; Phase 2)
+    # NCAA Baseball College World Series. Only the cleanly-labeled
+    # best-of-3 stages (BSB_SR, MCWS_F) are currently emitted as ties;
+    # BSB_REG and MCWS are forward-compat depth placeholders that #43
+    # wires up via chronological inference of the double-elim brackets.
+    "BSB_REG":         0,  # Regional (16 sites × 4 teams, double-elim; #43)
     "BSB_SR":          1,  # Super Regional (8 sites × 2 teams, best-of-3)
-    "MCWS":            2,  # 8-team double-elim in Omaha (Phase 2)
+    "MCWS":            2,  # 8-team double-elim in Omaha (#43)
     "MCWS_F":          3,  # Championship Final (best-of-3)
     "MCWS_W":          4,  # MCWS Champion
-    # NCAA Softball Women's College World Series (Phase O Phase 1):
-    # parallel to baseball above. Same Phase 1 limitation — only SB_SR
-    # and WCWS_F are emitted by the source; the intermediate stages are
-    # forward-compat placeholders for Phase 2.
-    "SB_REG":          0,  # Regional (Phase 2)
+    # NCAA Softball Women's College World Series. Parallel to baseball:
+    # only SB_SR and WCWS_F are currently emitted; SB_REG and WCWS are
+    # forward-compat placeholders for #43.
+    "SB_REG":          0,  # Regional (#43)
     "SB_SR":           1,  # Super Regional (best-of-3)
-    "WCWS":            2,  # 8-team double-elim in OKC (Phase 2)
+    "WCWS":            2,  # 8-team double-elim in OKC (#43)
     "WCWS_F":          3,  # Championship Finals (best-of-3)
     "WCWS_W":          4,  # WCWS Champion
 }
@@ -270,7 +250,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="R16 → QF → SF → Final → Champion",
     ),
-    # Phase H: top-flight European leagues. Slot semantics differ by league:
+    # Top-flight European leagues. Slot semantics differ by league:
     #   - UCL slots: Bundesliga 4, La Liga 4, Serie A 4, Ligue 1 3 (one
     #     fewer; FL1's 4th place enters UEL/UECL playoff).
     #   - Bundesliga: 16th plays relegation playoff vs Bundesliga 2's 3rd;
@@ -322,7 +302,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="Top 3 → UCL · 4-5 → Europa · bottom 3 → relegation",
     ),
-    # Phase Q: Eredivisie (Netherlands). 18 teams, 34 matchdays. Top 1
+    # Eredivisie (Netherlands). 18 teams, 34 matchdays. Top 1
     # direct UCL group stage; 2-3 UCL qualifying; 4-5 Europa/Conference
     # qualifying; bottom 1 direct relegation, 16-17 relegation playoff
     # (we use cutoff=15 to fire the relegation band for 16/17/18 like
@@ -337,7 +317,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="Top 3 → UCL · 4-5 → Europa · bottom 3 → relegation",
     ),
-    # Phase Q: Primeira Liga (Portugal). 18 teams, 34 matchdays. Same
+    # Primeira Liga (Portugal). 18 teams, 34 matchdays. Same
     # slot semantics as Eredivisie — 2 direct UCL spots, 3rd UCL
     # qualifying, 4-5 Europa, bottom 3 relegation.
     "PPL": LeagueContext(
@@ -350,7 +330,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="Top 3 → UCL · 4-5 → Europa · bottom 3 → relegation",
     ),
-    # Phase Q: Brazilian Série A. 20 teams, 38 matchdays. Different
+    # Brazilian Série A. 20 teams, 38 matchdays. Different
     # slot semantics from Euro leagues — continental qualifications
     # are for Copa Libertadores (top 6 in modern era) and Copa
     # Sudamericana (7-12). No UCL line. Bottom 4 relegated to Série B.
@@ -364,7 +344,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="Top 6 → Libertadores · 7-12 → Sudamericana · bottom 4 → relegation",
     ),
-    # Phase I: international tournaments.
+    # International tournaments.
     #
     # World Cup 2026 onward uses the 48-team format: 12 groups of 4, top
     # 2 + best 8 third-place advance to a LAST_32 round. Pre-2026 World
@@ -406,7 +386,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="R16 → QF → SF → Final → Champion (UEFA EURO)",
     ),
-    # Phase M: NCAA Division I baseball regular season. Win-count
+    # NCAA Division I baseball regular season. Win-count
     # thresholds tuned against historical NCAA Tournament selection
     # criteria — ~35 wins is the rough at-large cutoff, 45+ wins puts
     # a team in national-seed (top 16) contention. Seasons run Feb-June
@@ -424,16 +404,15 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="30+ wins → tournament bubble · 35+ → at-large lock · 45+ → national seed",
     ),
-    # Phase O Phase 1: NCAA Baseball postseason. Only the cleanly-labeled
-    # best-of-3 stages (Super Regional, MCWS Finals) are modeled. Regional
-    # double-elim and the 8-team MCWS bracket lack game-level metadata in
-    # ESPN's data and require chronological inference (Phase 2: #43).
-    # Threshold weights match the existing MLB_PO scale: each round-deeper
-    # reach roughly doubles consequence. The "omaha_bound" band fires for
-    # teams that win their Super Regional (depth 2 reached via the
-    # _winner_advance_label hop on MCWS_F), even though Phase 1 doesn't
-    # actually model the 8-team MCWS bracket — the depth label captures
-    # the structural reality that a Super Regional winner IS Omaha-bound.
+    # NCAA Baseball postseason. The cleanly-labeled best-of-3 stages
+    # (Super Regional, MCWS Finals) are modeled. Regional double-elim
+    # and the 8-team MCWS bracket lack game-level ESPN metadata and
+    # require chronological inference — tracked in #43. Threshold
+    # weights match the MLB_PO scale: each round-deeper reach roughly
+    # doubles consequence. The "omaha_bound" band fires for Super
+    # Regional winners (depth 2 reached via the _winner_advance_label
+    # hop on BSB_SR → MCWS), capturing the structural reality that a
+    # Super Regional winner IS Omaha-bound.
     "MCWS_PO": LeagueContext(
         code="MCWS_PO", matchdays_total=0, format="knockout",
         thresholds=[
@@ -444,7 +423,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="Super Regional → Omaha → CWS Final → Champion",
     ),
-    # Phase O: NCAA Division I soccer (Men's and Women's). Standings-points
+    # NCAA Division I soccer (Men's and Women's). Standings-points
     # format (3 W / 1 D / 0 L) because draws are common in college soccer
     # and a draw-heavy team's WIN count understates their tournament
     # position. A team going 13-3-8 has 13 wins but 47 standings points
@@ -474,7 +453,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="25+ pts → bubble · 35+ → at-large lock · 45+ → top regional · 50+ → national seed (Women's)",
     ),
-    # Phase D.2 / D.3: NCAA football and men's basketball. Format is
+    # NCAA football and men's basketball. Format is
     # "win_count" — threshold cutoffs are MINIMUM win counts rather than
     # position cutoffs (the SoccerSource interpretation). The points-
     # based source's `terminal_outcomes` assigns a label when a team's
@@ -499,7 +478,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="15+ wins → NIT bubble · 20+ → NCAA bid · 25+ → elite",
     ),
-    # Phase E: NHL regular season uses STANDINGS POINTS (regulation win = 2,
+    # NHL regular season uses STANDINGS POINTS (regulation win = 2,
     # OT/SO loss = 1, regulation loss = 0) rather than raw wins because the
     # OT-loss bonus point makes a team with many OTLs look bubble-bound by
     # win count when they are actually playoff-locked. Bands chosen against
@@ -515,7 +494,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="95+ pts → playoff bubble · 100+ → comfortable · 110+ → div lead · 125+ → Presidents'",
     ),
-    # Phase E: NHL Stanley Cup Playoffs (4 rounds, best-of-7 each).
+    # NHL Stanley Cup Playoffs (4 rounds, best-of-7 each).
     # Round structure is identical across both conferences: 16 teams in,
     # 1 champion out. Weights ramp aggressively into the Cup Final because
     # a Game 6 / Game 7 SCF is the single highest-leverage game any NHL
@@ -530,7 +509,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="R1 → R2 → Conf Final → Cup Final → Champion",
     ),
-    # Phase F: MLB regular season. 162-game season; the playoff bubble has
+    # MLB regular season. 162-game season; the playoff bubble has
     # historically settled around 85-86 wins (3rd Wild Card cutoff post-
     # 2022 expansion), with division winners typically in the 90-100 win
     # range. 105+ has been a "best record in baseball" outlier most years.
@@ -545,7 +524,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="85+ wins → bubble · 90+ → comfortable · 95+ → div lead · 105+ → elite",
     ),
-    # Phase F: MLB postseason. Series lengths vary (WC=3, LDS=5, LCS=7,
+    # MLB postseason. Series lengths vary (WC=3, LDS=5, LCS=7,
     # WS=7), so the leverage ramp into the World Series is sharper than
     # NHL's Stanley Cup ramp — fewer total games means each single game
     # carries more series-decision weight. Weights tuned to put a Game 7
@@ -563,7 +542,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="WC → LDS → LCS → WS → Champion",
     ),
-    # Phase G: NBA regular season. 82-game season; play-in tournament
+    # NBA regular season. 82-game season; play-in tournament
     # (since 2020) opens 9th and 10th seeds onto the bracket via a
     # mini-playoff, but the play-in is structurally between the
     # regular season and the bracket — we treat it as separate from
@@ -583,7 +562,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="40+ wins → play-in · 50+ → comfortable · 55+ → top seed · 65+ → elite",
     ),
-    # Phase G: NBA playoffs. 4 rounds (R1 / CSF / CF / FINALS),
+    # NBA playoffs. 4 rounds (R1 / CSF / CF / FINALS),
     # best-of-7 each. Same structural shape as NHL Stanley Cup
     # Playoffs — weights mirror NHL's ramp because the
     # consequence-weight calibration is consistent across pro
@@ -598,7 +577,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="R1 → Conf Semis → Conf Finals → NBA Finals → Champion",
     ),
-    # Phase K: WNBA regular season. 40-game season; 8 of 12-13 teams
+    # WNBA regular season. 40-game season; 8 of 12-13 teams
     # make playoffs (since 2022's expansion). The playoff bubble has
     # historically settled around 19-21 wins; top seed pace is ~28-32
     # in the current era. Thresholds are tighter than NBA's because
@@ -614,7 +593,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="20+ wins → bubble · 25+ → comfortable · 30+ → top seed · 35+ → elite",
     ),
-    # Phase K: WNBA playoffs. Three rounds with variable series
+    # WNBA playoffs. Three rounds with variable series
     # lengths (R1=3, SF=5, FINALS=5 in 2024 or 7 in 2025+). Weights
     # mirror NBA's playoff ramp; bracket structure differs (no
     # conference reseeding, fewer total games).
@@ -627,7 +606,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="R1 → Semis → WNBA Finals → Champion",
     ),
-    # Phase L: NCAA Women's Basketball regular season. ~32-game D1 season;
+    # NCAA Women's Basketball regular season. ~32-game D1 season;
     # 64 teams make the NCAA Tournament. Threshold bands cover the
     # selection / seeding lines: 20 wins is the rough at-large bubble
     # for power-conf teams, 25+ is a comfortable at-large lock, 28+
@@ -642,7 +621,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="20+ wins → bubble · 25+ → at-large lock · 28+ → top-4 seed · 32+ → #1 seed",
     ),
-    # Phase L: NCAA Women's March Madness. 6 rounds, single-game
+    # NCAA Women's March Madness. 6 rounds, single-game
     # elimination at each step. Weights ramp steeper than the pro
     # bracket leagues because single-game elim concentrates leverage
     # — every game IS the series for the round.
@@ -658,7 +637,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="R64 → R32 → Sweet 16 → Elite 8 → Final Four → NCG → Champion",
     ),
-    # Phase N: NCAA Division I Softball regular season. ~55-game season,
+    # NCAA Division I Softball regular season. ~55-game season,
     # 64-team NCAA Tournament. Selection bands mirror BSB but tuned
     # slightly tighter — softball's RPI bar tends to clear at lower
     # win totals because the field is smaller / more concentrated.
@@ -675,10 +654,10 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="30+ wins → bubble · 35+ → at-large lock · 40+ → top regional · 45+ → national seed · 50+ → #1 overall",
     ),
-    # Phase O Phase 1: NCAA Softball WCWS. Parallel to MCWS_PO above.
-    # Only Super Regional + WCWS Finals (best-of-3 stages with ESPN
-    # game numbers) are modeled. Regional double-elim and 8-team WCWS
-    # bracket games are Phase 2.
+    # NCAA Softball WCWS. Parallel to MCWS_PO above. The cleanly-
+    # labeled best-of-3 stages (Super Regional + WCWS Finals) are
+    # modeled; Regional double-elim and 8-team WCWS bracket are
+    # tracked in #43.
     "WCWS_PO": LeagueContext(
         code="WCWS_PO", matchdays_total=0, format="knockout",
         thresholds=[
@@ -689,7 +668,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="Super Regional → OKC → WCWS Final → Champion",
     ),
-    # Phase P: NFL regular season. 17-game season since 2021;
+    # NFL regular season. 17-game season since 2021;
     # 14 teams make playoffs (7 per conference, including a 7th seed
     # added in 2020). 9 wins has been the modern playoff bubble line;
     # 11 wins typically locks a division; 13+ is #1-seed pace.
@@ -703,10 +682,10 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="7+ wins → bubble · 9+ → comfortable · 11+ → division · 13+ → #1 seed",
     ),
-    # Phase P: NFL playoffs. 4 rounds, single-game elimination.
+    # NFL playoffs. 4 rounds, single-game elimination.
     # Weights ramp aggressively because single-elim concentrates
     # leverage — a Wild Card upset eliminates a 12-win team in one
-    # game. Same shape as March Madness (Phase L) but 4 rounds
+    # game. Same shape as March Madness above but 4 rounds
     # instead of 6 because the field is 14 teams (7 per conference)
     # not 64.
     "NFL_PO": LeagueContext(
@@ -882,14 +861,13 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             "ROUND_OF_16": 1.5, "LAST_16": 1.5,
             "ROUND_OF_32": 1.0, "LAST_32": 1.0,
             "PLAYOFF_ROUND": 1.0, "PLAYOFFS": 1.0,
-            # Phase R: field events (F1 GP, NASCAR race, golf tour
-            # weekly events). These have no two-team head-to-head
+            # Field events (F1 GP, NASCAR race, golf tour weekly
+            # events). These have no two-team head-to-head
             # structure so the rank / favorite / closeness signals
             # don't apply — the tournament_stage band is what gets
             # them into the guide at all. "MAJOR" is for golf's four
             # majors (Masters / PGA / US Open / British Open) and
-            # any future marquee racing event we want bumped above
-            # the regular tour.
+            # marquee racing events the source flags as MAJOR.
             "EVENT": 1.5,
             "MAJOR": 4.5,
         }.get(ts, 0.0)
@@ -907,13 +885,11 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
         breakdown["narrative"] = round(narr_pts, 2)
         notes.append(f"LLM narrative score: {signals.narrative_score:.1f}/10")
 
-    # Phase C: Monte Carlo importance (Lahvička). Already pre-weighted by
+    # Monte Carlo importance (Lahvička). Already pre-weighted by
     # consequence inside compute_match_importance; multiply only by the
-    # user's weight_importance tunable here. Sources that don't support
-    # importance (NCAAFSource, NCAAMSource, knockout-only soccer) leave
-    # importance_points at 0.0 and this block falls through. Gating BOTH
-    # the points AND the weight keeps the breakdown clean when the user
-    # disables the signal via weight_importance=0 — no 0.0 stub entries.
+    # user's weight_importance tunable here. Gating BOTH the points AND
+    # the weight keeps the breakdown clean when the user disables the
+    # signal via weight_importance=0 — no 0.0 stub entries.
     if signals.importance_points > 0 and weights.importance > 0:
         imp_pts = signals.importance_points * weights.importance
         breakdown["importance"] = round(imp_pts, 2)
@@ -949,9 +925,7 @@ def compute_match_importance(
       - Every favorite in `favorites_in_league` who ISN'T already in the
         match (cross-team importance — this match's result affects the
         favorite's standings outcome, even though the favorite isn't
-        playing). Restores the impact-on-favorites signal structurally —
-        the legacy `compute_impact_on_favorites` proximity heuristic is
-        retired in Phase C.4 because Monte Carlo handles it correctly.
+        playing).
 
     Returns `(raw_points, notes, thresholds_hit)` where:
       - `raw_points` is the sum of (leverage × weight) over all queries.

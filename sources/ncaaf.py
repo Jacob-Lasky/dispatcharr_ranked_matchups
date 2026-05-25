@@ -96,7 +96,7 @@ class NcaafSource(PointsBasedSportSource):
                     "neutral": g.get("neutralSite", False),
                     "conference_game": g.get("conferenceGame", False),
                     "excitement_index": g.get("excitementIndex"),
-                    # Phase D.2: importance signal lookup key. The plugin's
+                    # Importance signal lookup key. The plugin's
                     # compute_match_importance reads this to find the
                     # LEAGUE_CONTEXTS entry that carries the win-count
                     # thresholds and consequence weights.
@@ -194,7 +194,7 @@ class NcaafSource(PointsBasedSportSource):
                     continue
         return out
 
-    # ---------- Phase D.2: Monte Carlo importance ----------
+    # ---------- Monte Carlo importance ----------
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
         """Return all FBS-classified regular-season games for the current
