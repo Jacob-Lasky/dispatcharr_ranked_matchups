@@ -91,6 +91,13 @@
       "help_text": "UEFA's quadrennial national-team tournament. Pure knockout in V1 — group-stage importance not yet modeled. R16 → QF → SF → Final → Champion. Requires Football-Data.org key."
     },
     {
+      "id": "enable_nfl",
+      "type": "boolean",
+      "label": "NFL (regular season + playoffs)",
+      "default": false,
+      "help_text": "Regular season uses win count (7+ bubble, 9+ playoff-secured, 11+ division winner, 13+ #1 seed) over the 17-game season. Playoffs are single-game elimination: Wild Card → Divisional → Conference Championship → Super Bowl → Champion. No API key required — uses ESPN's unofficial site.api.espn.com."
+    },
+    {
       "id": "enable_nhl",
       "type": "boolean",
       "label": "NHL (regular season + Stanley Cup Playoffs)",

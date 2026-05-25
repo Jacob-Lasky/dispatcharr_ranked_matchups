@@ -4053,3 +4053,264 @@ class TestNcaaSoftballSource:
             "tournament_bubble", "at_large_lock", "top_regional_seed",
             "national_seed", "no_1_overall",
         }
+
+
+# =====================================================================
+# Phase P: NFL
+# =====================================================================
+
+class TestNflHeadlineParser:
+    """NFL headlines have no Game N suffix (single-game elim per round)
+    and use AFC/NFC prefixes for the first three rounds, then bare
+    "Super Bowl LIX" (Roman numeral varies) for the championship."""
+
+    @staticmethod
+    def _parse(headline):
+        from dispatcharr_ranked_matchups.sources.nfl import _parse_stage_from_headline
+        return _parse_stage_from_headline(headline)
+
+    def test_afc_wild_card(self):
+        assert self._parse("AFC Wild Card Playoffs") == {"stage": "WC", "matchday": 1}
+
+    def test_nfc_wild_card(self):
+        assert self._parse("NFC Wild Card Playoffs") == {"stage": "WC", "matchday": 1}
+
+    def test_afc_divisional(self):
+        assert self._parse("AFC Divisional Playoffs") == {"stage": "DIV", "matchday": 1}
+
+    def test_nfc_divisional(self):
+        assert self._parse("NFC Divisional Playoffs") == {"stage": "DIV", "matchday": 1}
+
+    def test_afc_championship(self):
+        assert self._parse("AFC Championship") == {"stage": "CONF", "matchday": 1}
+
+    def test_nfc_championship(self):
+        assert self._parse("NFC Championship") == {"stage": "CONF", "matchday": 1}
+
+    def test_super_bowl_with_roman_numeral(self):
+        assert self._parse("Super Bowl LIX") == {"stage": "SB", "matchday": 1}
+
+    def test_super_bowl_no_numeral(self):
+        # Defensive — if ESPN ever drops the Roman numeral.
+        assert self._parse("Super Bowl") == {"stage": "SB", "matchday": 1}
+
+    def test_no_headline_returns_none(self):
+        assert self._parse(None) is None
+        assert self._parse("") is None
+
+    def test_unrecognized_returns_none(self):
+        assert self._parse("Pro Bowl Skills Competition") is None
+        assert self._parse("Preseason - Week 3") is None
+
+    def test_case_insensitive(self):
+        assert self._parse("afc wild card playoffs") == {"stage": "WC", "matchday": 1}
+        assert self._parse("super bowl lix") == {"stage": "SB", "matchday": 1}
+
+
+class TestNflProBowlFilter:
+    """Pro Bowl is tagged competition.type.abbreviation=ALLSTAR — same
+    trap as NBA/WNBA. Filter must drop it from regular-season fetches."""
+
+    @staticmethod
+    def _extract(event):
+        from dispatcharr_ranked_matchups.sources.nfl import _extract_game_record
+        return _extract_game_record(event)
+
+    def test_pro_bowl_filtered(self):
+        event = {
+            "id": "401706000",
+            "date": "2025-02-02T20:00Z",
+            "season": {"year": 2025, "type": 2, "slug": "regular-season"},
+            "competitions": [{
+                "type": {"id": "4", "abbreviation": "ALLSTAR"},
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "score": "76",
+                     "team": {"displayName": "NFC"}},
+                    {"homeAway": "away", "score": "63",
+                     "team": {"displayName": "AFC"}},
+                ],
+            }],
+        }
+        assert self._extract(event) is None
+
+    def test_regular_season_passes(self):
+        event = {
+            "id": "401706001",
+            "date": "2024-11-17T18:00Z",
+            "season": {"year": 2025, "type": 2, "slug": "regular-season"},
+            "competitions": [{
+                "type": {"id": "1", "abbreviation": "STD"},
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "score": "37",
+                     "team": {"displayName": "Philadelphia Eagles"}},
+                    {"homeAway": "away", "score": "20",
+                     "team": {"displayName": "Washington Commanders"}},
+                ],
+            }],
+        }
+        rec = self._extract(event)
+        assert rec is not None
+        assert rec["home"] == "Philadelphia Eagles"
+
+
+class TestNflRegularSource:
+
+    @staticmethod
+    def _make():
+        from dispatcharr_ranked_matchups.sources.nfl import NflRegularSource
+        return NflRegularSource(season_end_year=2025)
+
+    def test_identity(self):
+        src = self._make()
+        assert src.sport_prefix == "NFL"
+        assert src.sport_label == "NFL"
+        assert src.league_context_code == "NFL"
+        assert src._count_field == "wins"
+
+    def test_supports_importance(self):
+        assert self._make().supports_importance is True
+
+    def test_outcome_labels(self):
+        labels = self._make().outcome_labels
+        assert "playoff_bubble" in labels
+        assert "playoff_secured" in labels
+        assert "division_winner" in labels
+        assert "no_1_seed" in labels
+
+    def test_thresholds_monotonic(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS["NFL"]
+        cuts = [t[0] for t in ctx.thresholds]
+        for i in range(len(cuts) - 1):
+            assert cuts[i] < cuts[i + 1]
+
+    def test_terminal_outcomes_by_win_count(self):
+        src = self._make()
+        state = {
+            "_applied": frozenset(),
+            "_teams": {
+                "Cellar": {"wins":  4, "losses": 13, "pf": 0, "pa": 0, "games_played": 17},
+                "Bubble": {"wins":  8, "losses":  9, "pf": 0, "pa": 0, "games_played": 17},
+                "Comfy":  {"wins": 10, "losses":  7, "pf": 0, "pa": 0, "games_played": 17},
+                "DivWin": {"wins": 12, "losses":  5, "pf": 0, "pa": 0, "games_played": 17},
+                "Top":    {"wins": 14, "losses":  3, "pf": 0, "pa": 0, "games_played": 17},
+            },
+        }
+        outcomes = src.terminal_outcomes(state)
+        assert outcomes["Cellar"] == []
+        assert set(outcomes["Bubble"]) == {"playoff_bubble"}
+        assert set(outcomes["Comfy"]) == {"playoff_bubble", "playoff_secured"}
+        assert set(outcomes["DivWin"]) == {
+            "playoff_bubble", "playoff_secured", "division_winner",
+        }
+        assert set(outcomes["Top"]) == {
+            "playoff_bubble", "playoff_secured", "division_winner", "no_1_seed",
+        }
+
+
+class TestNflPlayoffSource:
+
+    @staticmethod
+    def _make(bracket_games=None):
+        from dispatcharr_ranked_matchups.sources.nfl import NflPlayoffSource
+        src = NflPlayoffSource(season_end_year=2025)
+        src._bracket_games_cache = bracket_games or []
+        return src
+
+    def test_identity(self):
+        src = self._make()
+        assert src.sport_prefix == "NFL"
+        assert "Playoffs" in src.sport_label
+        assert src._league_context_code() == "NFL_PO"
+
+    def test_ko_stages(self):
+        assert self._make().KO_STAGES == ("WC", "DIV", "CONF", "SB")
+
+    def test_series_length_uniform_one(self):
+        src = self._make()
+        for stage in src.KO_STAGES:
+            assert src._series_length_for_stage(stage) == 1
+            assert src._clinching_wins_for_stage(stage) == 1
+
+    def test_winner_advance_label(self):
+        src = self._make()
+        assert src._winner_advance_label("SB") == "SB_WINNER"
+        assert src._winner_advance_label("WC") is None
+        assert src._winner_advance_label("DIV") is None
+        assert src._winner_advance_label("CONF") is None
+
+    def test_outcome_labels(self):
+        labels = self._make().outcome_labels
+        assert "divisional" in labels
+        assert "conf_champ" in labels
+        assert "super_bowl" in labels
+        assert "sb_winner" in labels
+
+    def test_sb_winner_cascade(self):
+        """2024 NFL season: Eagles beat Chiefs 40-22 in Super Bowl LIX.
+        Synthesize each round's single game and confirm Eagles reaches
+        SB_WINNER, Chiefs reaches SB depth."""
+        games = [
+            # Wild Card
+            {"game_id": "wc1", "stage": "WC", "matchday": 1,
+             "home": "Philadelphia Eagles", "away": "Green Bay Packers",
+             "home_goals": 22, "away_goals": 10,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "wc2", "stage": "WC", "matchday": 1,
+             "home": "Buffalo Bills", "away": "Denver Broncos",
+             "home_goals": 31, "away_goals": 7,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            # Divisional
+            {"game_id": "div1", "stage": "DIV", "matchday": 1,
+             "home": "Philadelphia Eagles", "away": "Los Angeles Rams",
+             "home_goals": 28, "away_goals": 22,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "div2", "stage": "DIV", "matchday": 1,
+             "home": "Kansas City Chiefs", "away": "Houston Texans",
+             "home_goals": 23, "away_goals": 14,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "div3", "stage": "DIV", "matchday": 1,
+             "home": "Buffalo Bills", "away": "Baltimore Ravens",
+             "home_goals": 27, "away_goals": 25,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            # Conference Championships
+            {"game_id": "conf1", "stage": "CONF", "matchday": 1,
+             "home": "Philadelphia Eagles", "away": "Washington Commanders",
+             "home_goals": 55, "away_goals": 23,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "conf2", "stage": "CONF", "matchday": 1,
+             "home": "Kansas City Chiefs", "away": "Buffalo Bills",
+             "home_goals": 32, "away_goals": 29,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            # Super Bowl LIX: Eagles 40, Chiefs 22
+            {"game_id": "sb", "stage": "SB", "matchday": 1,
+             "home": "Philadelphia Eagles", "away": "Kansas City Chiefs",
+             "home_goals": 40, "away_goals": 22,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        src = self._make(bracket_games=games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"]["Philadelphia Eagles"] == KNOCKOUT_ROUND_DEPTH["SB_WINNER"]
+        assert state["_round_reached"]["Kansas City Chiefs"] == KNOCKOUT_ROUND_DEPTH["SB"]
+        assert state["_round_reached"]["Washington Commanders"] == KNOCKOUT_ROUND_DEPTH["CONF"]
+        assert state["_round_reached"]["Buffalo Bills"] == KNOCKOUT_ROUND_DEPTH["CONF"]
+        assert state["_round_reached"]["Los Angeles Rams"] == KNOCKOUT_ROUND_DEPTH["DIV"]
+        assert state["_round_reached"]["Green Bay Packers"] == KNOCKOUT_ROUND_DEPTH["WC"]
+
+        outcomes = src.terminal_outcomes(state)
+        assert set(outcomes["Philadelphia Eagles"]) == {
+            "divisional", "conf_champ", "super_bowl", "sb_winner",
+        }
+        assert set(outcomes["Kansas City Chiefs"]) == {
+            "divisional", "conf_champ", "super_bowl",
+        }
+
+    def test_nfl_po_thresholds_are_depth_ordered(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, KNOCKOUT_ROUND_DEPTH
+        ctx = LEAGUE_CONTEXTS["NFL_PO"]
+        depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
+        for i in range(len(depths) - 1):
+            assert depths[i] < depths[i + 1]

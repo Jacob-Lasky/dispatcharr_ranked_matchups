@@ -299,6 +299,7 @@ def _build_sources(settings: Dict[str, Any]):
         NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
         NcaaBaseballSource, NcaaSoftballSource, NcaaSoccerSource,
         NcaafSource, NcaamSource,
+        NflPlayoffSource, NflRegularSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
     )
     from .sources.soccer import COMPETITIONS
@@ -349,6 +350,22 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(_make_soccer("world_cup"))
     if settings.get("enable_euros", False) and fd_key:
         sources.append(_make_soccer("euros"))
+
+    # NFL — no API key required (ESPN unofficial). Same pair-and-seed
+    # pattern as NHL/MLB/NBA. Bracket is single-game elimination
+    # (SERIES_LENGTH=1 per stage) across 4 rounds: WC -> DIV -> CONF
+    # -> SB. Strength sharing matters most here because NFL teams
+    # play only 17 regular-season games — even fewer baseline games
+    # than WNBA.
+    if settings.get("enable_nfl", False):
+        nfl_reg = NflRegularSource()
+        sources.append(nfl_reg)
+        nfl_po = NflPlayoffSource()
+        try:
+            nfl_po.set_regular_season_strengths(nfl_reg.estimate_strengths())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[nfl] could not seed playoff strengths: %s", exc)
+        sources.append(nfl_po)
 
     # NHL — no API key required (api-web.nhle.com is free). Pair the
     # regular and playoff sources together: the playoff source borrows
