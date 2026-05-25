@@ -223,6 +223,64 @@ def _format_kickoff(start_utc: datetime, tz) -> str:
     return local.strftime("%a %b %-d, %-I:%M %p %Z")
 
 
+def _format_matchup(home: str, away: str) -> str:
+    """Team-pair string for EPG program titles. Plain `Home vs Away` —
+    deliberately omits the ★ score prefix the channel name carries, so
+    the EPG entry reads like a real broadcast EPG title rather than a
+    debug breadcrumb."""
+    return f"{home} vs {away}"
+
+
+# Default duration for the past-event EPG slot when the scheduler is
+# disabled OR has no valid scheduled_times. 12h is long enough to bridge
+# overnight on any reasonable manual refresh cadence without making the
+# past slot unbounded.
+_PAST_SLOT_DEFAULT_DURATION = timedelta(hours=12)
+
+
+def _build_program_title(state: str, matchup: str, kickoff_local: str) -> str:
+    """ProgramData.title for one of the three EPG windows on a virtual
+    channel. `state` is `"upcoming"` / `"live"` / `"past"`. Truncates
+    to 255 chars (the ProgramData column width) with ellipsis."""
+    if state == "upcoming":
+        title = f"Upcoming: {matchup}, {kickoff_local}" if kickoff_local else f"Upcoming: {matchup}"
+    elif state == "live":
+        title = f"{matchup} ᴸᶦᵛᵉ"
+    elif state == "past":
+        title = f"Past: {matchup}"
+    else:
+        raise ValueError(f"unknown EPG window state: {state!r}")
+    if len(title) > 255:
+        title = title[:252] + "..."
+    return title
+
+
+def _compute_past_slot_end(prog_end_utc: datetime, settings: Dict[str, Any]) -> datetime:
+    """End time for the post-event EPG slot — runs until the next
+    scheduled refresh fire-time, so the slot disappears the moment the
+    refresh that would replace this channel runs.
+
+    Falls back to prog_end + 12h when:
+      - auto_refresh is disabled (no scheduled refreshes coming), OR
+      - scheduled_times is empty / malformed (defensive).
+
+    Returns a UTC datetime to match the ProgramData column convention.
+    """
+    if prog_end_utc.tzinfo is None:
+        prog_end_utc = prog_end_utc.replace(tzinfo=timezone.utc)
+    if not settings.get("auto_refresh_enabled", False):
+        return prog_end_utc + _PAST_SLOT_DEFAULT_DURATION
+    tz = _resolve_tz(settings.get("local_timezone", "UTC"))
+    times = _parse_scheduled_times(settings.get("scheduled_times", ""))
+    if not times:
+        return prog_end_utc + _PAST_SLOT_DEFAULT_DURATION
+    prog_end_local = prog_end_utc.astimezone(tz)
+    next_fire = _next_fire_time(times, tz, now=prog_end_local)
+    if next_fire is None:
+        return prog_end_utc + _PAST_SLOT_DEFAULT_DURATION
+    return next_fire.astimezone(timezone.utc)
+
+
 # ---------- file helpers ----------
 
 def _read_key(path: str) -> str:
@@ -1546,24 +1604,21 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
                 now = datetime.now(timezone.utc)
                 pregame_lead = (prog_start - now).total_seconds()
-                # Pre-game title carries the full channel name so the EPG
-                # entry communicates the same at-a-glance summary as the
-                # channel itself. "Up next: " prefix differentiates from the
-                # live game program block.
-                upnext_title = f"Up next: {new_name}"
-                if len(upnext_title) > 255:
-                    upnext_title = upnext_title[:252] + "..."
-                # Live-game title gets a LIVE NOW: prefix. Safe to bake in
-                # statically because this ProgramData only shows during
-                # [prog_start, prog_end], and during that window the game is
-                # by definition in progress (kickoff already happened).
-                live_title = f"LIVE NOW: {new_name}"
-                if len(live_title) > 255:
-                    live_title = live_title[:252] + "..."
+                # ProgramData title shape mirrors how real broadcast EPGs
+                # render: "Upcoming: Home vs Away, Fri 7:30 PM EDT" pregame,
+                # "Home vs Away ᴸᶦᵛᵉ" during the window, "Past: Home vs Away"
+                # after the game ends until the next refresh. The matchup
+                # string deliberately drops the ★ score prefix the channel
+                # name carries — the EPG entry should read like a program,
+                # not a debug breadcrumb.
+                matchup = _format_matchup(g["home"], g["away"])
+                kickoff_local = g.get("kickoff_local", "")
+                upnext_title = _build_program_title("upcoming", matchup, kickoff_local)
+                live_title = _build_program_title("live", matchup, kickoff_local)
+                past_title = _build_program_title("past", matchup, kickoff_local)
+                past_end = _compute_past_slot_end(prog_end, settings)
                 # Sub-title is the condensed informative one-liner: tagline,
-                # matchday, toss-up. Replaces the previous "English Premier
-                # League" sport-label which carried no information beyond
-                # what was already in the channel-name prefix.
+                # matchday, toss-up.
                 subtitle = _build_subtitle(g, tagline)
                 if pregame_lead > 5 * 60:  # ≥ 5 min until kickoff window
                     ProgramData.objects.create(
@@ -1580,6 +1635,20 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     start_time=prog_start,
                     end_time=prog_end,
                     title=live_title,
+                    sub_title=subtitle,
+                    description=description,
+                    tvg_id=marker,
+                )
+                # Past slot — bridges game-end to the next scheduled refresh
+                # so the channel doesn't go blank in the EPG between the
+                # final whistle and the apply that drops the channel. The
+                # past slot's end_time is computed against the scheduler
+                # config (with a 12h fallback when auto-refresh is off).
+                ProgramData.objects.create(
+                    epg=epg_data,
+                    start_time=prog_end,
+                    end_time=past_end,
+                    title=past_title,
                     sub_title=subtitle,
                     description=description,
                     tvg_id=marker,

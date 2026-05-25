@@ -993,3 +993,137 @@ class TestBuildDescription:
         assert all(p >= 0 for p in positions), f"missing block: {positions}"
         # Strict order.
         assert positions == sorted(positions)
+
+
+# ---------- #49: polished EPG program titles + past slot ----------
+
+
+class TestFormatMatchup:
+    def test_basic_pair(self, plugin):
+        assert plugin._format_matchup("Auburn", "Vanderbilt") == "Auburn vs Vanderbilt"
+
+    def test_no_star_prefix(self, plugin):
+        # The matchup string explicitly omits the ★ score prefix that the
+        # channel name carries — the EPG title should read like a real
+        # program guide entry, not a debug breadcrumb.
+        result = plugin._format_matchup("Auburn", "Vanderbilt")
+        assert "★" not in result
+        assert "vs" in result
+
+
+class TestBuildProgramTitle:
+    def test_upcoming_with_kickoff(self, plugin):
+        title = plugin._build_program_title(
+            "upcoming", "Auburn vs Vanderbilt", "Fri 7:30 PM EDT",
+        )
+        assert title == "Upcoming: Auburn vs Vanderbilt, Fri 7:30 PM EDT"
+
+    def test_upcoming_without_kickoff_omits_separator(self, plugin):
+        # Empty kickoff_local string falls back to just the matchup —
+        # no trailing comma.
+        title = plugin._build_program_title("upcoming", "Auburn vs Vanderbilt", "")
+        assert title == "Upcoming: Auburn vs Vanderbilt"
+
+    def test_live_marker(self, plugin):
+        title = plugin._build_program_title("live", "Auburn vs Vanderbilt", "ignored")
+        # Unicode "ᴸᶦᵛᵉ" superscript marker matches the broadcast EPG
+        # convention. Modern EPG clients (TiviMate, Plex, Jellyfin) all
+        # render this glyph correctly.
+        assert title == "Auburn vs Vanderbilt ᴸᶦᵛᵉ"
+
+    def test_past_prefix(self, plugin):
+        title = plugin._build_program_title("past", "Auburn vs Vanderbilt", "ignored")
+        assert title == "Past: Auburn vs Vanderbilt"
+
+    def test_unknown_state_raises(self, plugin):
+        import pytest
+        with pytest.raises(ValueError):
+            plugin._build_program_title("inplay", "Auburn vs Vanderbilt", "")
+
+    def test_truncation_at_255_chars(self, plugin):
+        # ProgramData.title is varchar(255) — anything longer gets
+        # truncated with ellipsis. The Upcoming prefix + matchup + a
+        # very long team name combo must not blow the column.
+        long_team = "A" * 300
+        title = plugin._build_program_title("upcoming", f"{long_team} vs B", "")
+        assert len(title) == 255
+        assert title.endswith("...")
+
+
+class TestComputePastSlotEnd:
+    def test_uses_next_scheduled_fire_time(self, plugin):
+        from datetime import datetime, timezone
+        # Game ends Friday 22:00 UTC = Friday 18:00 ET.
+        prog_end = datetime(2026, 6, 13, 22, 0, tzinfo=timezone.utc)
+        settings = {
+            "auto_refresh_enabled": True,
+            "local_timezone": "America/New_York",
+            # Refreshes at 04:00, 10:00, 16:00, 22:00 ET.
+            "scheduled_times": "0400,1000,1600,2200",
+        }
+        past_end = plugin._compute_past_slot_end(prog_end, settings)
+        # Next fire after 18:00 ET is 22:00 ET same day = 02:00 UTC next day.
+        assert past_end == datetime(2026, 6, 14, 2, 0, tzinfo=timezone.utc)
+
+    def test_falls_back_to_12h_when_auto_refresh_disabled(self, plugin):
+        from datetime import datetime, timezone, timedelta
+        prog_end = datetime(2026, 6, 13, 22, 0, tzinfo=timezone.utc)
+        settings = {
+            "auto_refresh_enabled": False,
+            "scheduled_times": "0400,1000,1600,2200",
+        }
+        past_end = plugin._compute_past_slot_end(prog_end, settings)
+        assert past_end == prog_end + timedelta(hours=12)
+
+    def test_falls_back_to_12h_when_no_scheduled_times(self, plugin):
+        from datetime import datetime, timezone, timedelta
+        prog_end = datetime(2026, 6, 13, 22, 0, tzinfo=timezone.utc)
+        settings = {
+            "auto_refresh_enabled": True,
+            "local_timezone": "America/New_York",
+            "scheduled_times": "",
+        }
+        past_end = plugin._compute_past_slot_end(prog_end, settings)
+        assert past_end == prog_end + timedelta(hours=12)
+
+    def test_falls_back_to_12h_when_scheduled_times_malformed(self, plugin):
+        # All-garbage scheduled_times → empty list → fallback.
+        from datetime import datetime, timezone, timedelta
+        prog_end = datetime(2026, 6, 13, 22, 0, tzinfo=timezone.utc)
+        settings = {
+            "auto_refresh_enabled": True,
+            "local_timezone": "America/New_York",
+            "scheduled_times": "abcd,9999,nope",
+        }
+        past_end = plugin._compute_past_slot_end(prog_end, settings)
+        assert past_end == prog_end + timedelta(hours=12)
+
+    def test_naive_prog_end_is_normalized_to_utc(self, plugin):
+        # Defensive: caller passes a naive datetime → we attach UTC
+        # rather than raise. Naive datetimes round-trip through some
+        # pickling paths in older cache files.
+        from datetime import datetime, timedelta
+        prog_end_naive = datetime(2026, 6, 13, 22, 0)
+        settings = {"auto_refresh_enabled": False}
+        past_end = plugin._compute_past_slot_end(prog_end_naive, settings)
+        # Should be 12h later, tz-aware.
+        assert past_end.tzinfo is not None
+        # Verify the result is exactly prog_end + 12h interpreted as UTC.
+        from datetime import timezone
+        expected = datetime(2026, 6, 13, 22, 0, tzinfo=timezone.utc) + timedelta(hours=12)
+        assert past_end == expected
+
+    def test_returns_utc_aware_datetime(self, plugin):
+        # ProgramData.end_time stores UTC; the helper must return a
+        # tz-aware datetime in UTC even when the next-fire calculation
+        # ran in a non-UTC local tz.
+        from datetime import datetime, timezone
+        prog_end = datetime(2026, 6, 13, 22, 0, tzinfo=timezone.utc)
+        settings = {
+            "auto_refresh_enabled": True,
+            "local_timezone": "America/New_York",
+            "scheduled_times": "0400,1000,1600,2200",
+        }
+        past_end = plugin._compute_past_slot_end(prog_end, settings)
+        assert past_end.tzinfo is not None
+        assert past_end.utcoffset().total_seconds() == 0
