@@ -30,6 +30,7 @@ from .ncaam import NcaamSource
 from .nhl import NhlPlayoffSource, NhlRegularSource
 from .soccer import (
     COMPETITIONS as SOCCER_COMPETITIONS,
+    GroupStageSoccerSource,
     KnockoutSoccerSource,
     SoccerSource,
 )
@@ -49,5 +50,5 @@ __all__ = [
     "NcaafSource", "NcaamSource",
     "NhlRegularSource", "NhlPlayoffSource",
     "NflRegularSource", "NflPlayoffSource",
-    "SoccerSource", "KnockoutSoccerSource", "SOCCER_COMPETITIONS",
+    "SoccerSource", "KnockoutSoccerSource", "GroupStageSoccerSource", "SOCCER_COMPETITIONS",
 ]

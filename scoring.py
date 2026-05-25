@@ -30,6 +30,15 @@ from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS
 # to a clearly worst value but doesn't dominate finite scoring.
 UNRANKED = 26
 
+# Sentinel value used in the `cutoff` slot of LEAGUE_CONTEXTS thresholds
+# for group-stage contexts (WC_GS, EC_GS). The cutoff is unused by
+# compute_match_importance for group_advance format — advancement is
+# decided by top-N-per-group sort in GroupStageSoccerSource.terminal_
+# outcomes, not by a flat threshold comparator. The sentinel exists so
+# accidental code that DOES try to compare against this value raises a
+# loud TypeError instead of silently producing 0 importance.
+_GROUP_ADVANCE_SENTINEL = "_group_advance"
+
 
 @dataclass
 class Weights:
@@ -358,11 +367,6 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # WC Final / Winner outweigh UCL equivalents (5.0 / 10.0) because
     # the WC happens once every 4 years vs UCL every year, concentrating
     # consequence.
-    #
-    # NB: GROUP_STAGE importance isn't modeled in V1 — the bracket
-    # source only tracks knockout-round eligibility. Group-stage
-    # "survive and advance" games still pick up favorite + closeness
-    # signal but importance reads 0. Filed as follow-up.
     "WC": LeagueContext(
         code="WC", matchdays_total=0, format="knockout",
         thresholds=[
@@ -385,6 +389,34 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             ("WINNER",         "winner",       10.0),
         ],
         boundary_summary="R16 → QF → SF → Final → Champion (UEFA EURO)",
+    ),
+    # Group-stage advancement contexts for the two international
+    # tournaments above. GroupStageSoccerSource consumes these; the
+    # cutoff field is unused (advancement is decided by top-N-per-group
+    # sort in terminal_outcomes, not by a flat threshold). Each tuple's
+    # label + consequence_weight are what compute_match_importance reads.
+    # The `format="group_advance"` tag isn't pattern-matched anywhere
+    # yet — it's documentation that distinguishes this from "league" /
+    # "knockout" / "win_count" / "points_count" formats so a future
+    # refactor doesn't accidentally route a group-stage context into
+    # one of the threshold-cascade code paths.
+    #
+    # WC 2026 weights run higher than EURO because the WC carries more
+    # global stake; the +1 weight differential mirrors the knockout-bands
+    # gap above.
+    "WC_GS": LeagueContext(
+        code="WC_GS", matchdays_total=3, format="group_advance",
+        thresholds=[
+            (_GROUP_ADVANCE_SENTINEL, "advance", 4.0),
+        ],
+        boundary_summary="Top 2 per group → LAST_32 (FIFA World Cup group stage)",
+    ),
+    "EC_GS": LeagueContext(
+        code="EC_GS", matchdays_total=3, format="group_advance",
+        thresholds=[
+            (_GROUP_ADVANCE_SENTINEL, "advance", 3.0),
+        ],
+        boundary_summary="Top 2 per group → LAST_16 (UEFA EURO group stage)",
     ),
     # NCAA Division I baseball regular season. Win-count
     # thresholds tuned against historical NCAA Tournament selection

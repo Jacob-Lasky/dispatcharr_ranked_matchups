@@ -6167,3 +6167,358 @@ class TestDoubleEliminationSource:
         })
         for game_index in (1, 2, 3, 4, 5, 6, 7):
             assert src._is_decisive_game(tie, game_index, games_in_tie=7) is True
+
+
+# =====================================================================
+# #20: GroupStageSoccerSource
+# =====================================================================
+
+
+class TestGroupStageSoccerSource:
+    """End-to-end importance source for international-tournament group
+    stages (WC, EURO). Uses a patched `_fetch_all_season_matches` so no
+    HTTP touches the test path."""
+
+    @staticmethod
+    def _make_source(matches):
+        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
+        src = GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+        src._all_matches_cache = matches
+        src._team_group_cache = None
+        src._initial_state_cache = None
+        src._strengths_cache = None
+        return src
+
+    @staticmethod
+    def _match(fd_id, group, home, away, hg=None, ag=None, status="SCHEDULED", date="2026-06-11T19:00:00Z"):
+        return {
+            "id": fd_id,
+            "stage": "GROUP_STAGE",
+            "group": group,
+            "matchday": 1,
+            "homeTeam": {"name": home},
+            "awayTeam": {"name": away},
+            "status": status,
+            "utcDate": date,
+            "score": {"fullTime": {"home": hg, "away": ag}} if status == "FINISHED" else {},
+        }
+
+    @staticmethod
+    def _ko_match(fd_id, stage, home, away):
+        return {
+            "id": fd_id, "stage": stage,
+            "homeTeam": {"name": home}, "awayTeam": {"name": away},
+            "status": "SCHEDULED",
+            "utcDate": "2026-07-01T19:00:00Z",
+            "score": {},
+        }
+
+    # ---------- outcome_labels ----------
+
+    def test_outcome_labels_are_advance_and_eliminated(self):
+        src = self._make_source([])
+        assert src.outcome_labels == ["advance", "eliminated"]
+
+    # ---------- _team_group_map ----------
+
+    def test_team_group_map_builds_from_fixtures(self):
+        matches = [
+            self._match(1, "GROUP_A", "Mexico", "South Africa"),
+            self._match(2, "GROUP_A", "Argentina", "Chile"),
+            self._match(3, "GROUP_B", "Germany", "Scotland"),
+        ]
+        src = self._make_source(matches)
+        out = src._team_group_map()
+        assert out["Mexico"] == "GROUP_A"
+        assert out["South Africa"] == "GROUP_A"
+        assert out["Argentina"] == "GROUP_A"
+        assert out["Chile"] == "GROUP_A"
+        assert out["Germany"] == "GROUP_B"
+        assert out["Scotland"] == "GROUP_B"
+
+    def test_team_group_map_ignores_knockout_matches(self):
+        # Knockout fixtures don't carry a group field. Make sure they're
+        # filtered out — including them would put a Group A winner into
+        # "no group" classification when the knockout schedule resolves.
+        matches = [
+            self._match(1, "GROUP_A", "Mexico", "South Africa"),
+            self._ko_match(99, "LAST_32", "Mexico", "Germany"),
+        ]
+        src = self._make_source(matches)
+        out = src._team_group_map()
+        # Mexico's group stays GROUP_A despite the LAST_32 fixture.
+        assert out["Mexico"] == "GROUP_A"
+        assert "Germany" not in out  # KO-only opponent isn't in group map
+
+    # ---------- initial_state ----------
+
+    def test_initial_state_seeds_zero_rows_for_every_group_team(self):
+        matches = [
+            self._match(1, "GROUP_A", "Mexico", "South Africa"),
+            self._match(2, "GROUP_A", "Argentina", "Chile"),
+        ]
+        src = self._make_source(matches)
+        state = src.initial_state()
+        for team in ("Mexico", "South Africa", "Argentina", "Chile"):
+            assert state[team] == {"played": 0, "points": 0, "gf": 0, "ga": 0}
+        assert state["_applied"] == frozenset()
+        assert state["_team_group"]["Mexico"] == "GROUP_A"
+
+    def test_initial_state_applies_finished_group_matches(self):
+        matches = [
+            # Mexico 3-1 South Africa
+            self._match(1, "GROUP_A", "Mexico", "South Africa",
+                        hg=3, ag=1, status="FINISHED"),
+            # Argentina 2-0 Chile
+            self._match(2, "GROUP_A", "Argentina", "Chile",
+                        hg=2, ag=0, status="FINISHED"),
+            # Knockout match — must NOT be applied.
+            self._ko_match(99, "LAST_32", "Mexico", "Germany"),
+        ]
+        src = self._make_source(matches)
+        state = src.initial_state()
+        assert state["Mexico"] == {"played": 1, "points": 3, "gf": 3, "ga": 1}
+        assert state["South Africa"] == {"played": 1, "points": 0, "gf": 1, "ga": 3}
+        assert state["Argentina"] == {"played": 1, "points": 3, "gf": 2, "ga": 0}
+        assert state["Chile"] == {"played": 1, "points": 0, "gf": 0, "ga": 2}
+        assert state["_applied"] == frozenset({1, 2})
+
+    def test_initial_state_skips_knockout_matches(self):
+        matches = [
+            self._match(1, "GROUP_A", "Mexico", "South Africa",
+                        hg=3, ag=1, status="FINISHED"),
+            # A FINISHED knockout match must NOT update group standings.
+            {
+                "id": 99, "stage": "LAST_32",
+                "homeTeam": {"name": "Mexico"}, "awayTeam": {"name": "Germany"},
+                "status": "FINISHED",
+                "utcDate": "2026-07-01T19:00:00Z",
+                "score": {"fullTime": {"home": 10, "away": 0}},
+            },
+        ]
+        src = self._make_source(matches)
+        state = src.initial_state()
+        assert state["Mexico"]["points"] == 3  # ONLY the group match counts
+        assert state["Mexico"]["gf"] == 3
+        # Germany isn't in the group map → no row at all.
+        assert "Germany" not in state
+
+    # ---------- remaining_matches ----------
+
+    def test_remaining_matches_filters_to_group_stage(self):
+        matches = [
+            # Scheduled group matches
+            self._match(1, "GROUP_A", "Mexico", "South Africa"),
+            self._match(2, "GROUP_A", "Argentina", "Chile"),
+            # Knockout — should NOT be in remaining_matches
+            self._ko_match(99, "LAST_32", "Mexico", "Germany"),
+        ]
+        src = self._make_source(matches)
+        state = src.initial_state()
+        rem = src.remaining_matches(state)
+        assert {m.extra["fd_id"] for m in rem} == {1, 2}
+
+    def test_remaining_matches_excludes_already_applied(self):
+        matches = [
+            self._match(1, "GROUP_A", "Mexico", "South Africa",
+                        hg=3, ag=1, status="FINISHED"),
+            self._match(2, "GROUP_A", "Argentina", "Chile"),
+        ]
+        src = self._make_source(matches)
+        state = src.initial_state()
+        rem = src.remaining_matches(state)
+        assert {m.extra["fd_id"] for m in rem} == {2}
+
+    # ---------- terminal_outcomes ----------
+
+    def test_terminal_outcomes_top_2_per_group_advance(self):
+        # Group A finished: Mexico 9pts, Argentina 6pts, Chile 3pts, SA 0pts.
+        # Top 2 (Mexico, Argentina) advance; Chile + SA eliminated.
+        matches = [
+            self._match(1, "GROUP_A", "Mexico", "South Africa", 3, 0, "FINISHED"),
+            self._match(2, "GROUP_A", "Argentina", "Chile", 2, 0, "FINISHED"),
+            self._match(3, "GROUP_A", "Mexico", "Chile", 2, 1, "FINISHED"),
+            self._match(4, "GROUP_A", "Argentina", "South Africa", 4, 0, "FINISHED"),
+            self._match(5, "GROUP_A", "Mexico", "Argentina", 1, 0, "FINISHED"),
+            self._match(6, "GROUP_A", "Chile", "South Africa", 2, 1, "FINISHED"),
+        ]
+        src = self._make_source(matches)
+        state = src.initial_state()
+        outcomes = src.terminal_outcomes(state)
+        assert outcomes["Mexico"] == ["advance"]
+        assert outcomes["Argentina"] == ["advance"]
+        assert outcomes["Chile"] == ["eliminated"]
+        assert outcomes["South Africa"] == ["eliminated"]
+
+    def test_terminal_outcomes_ties_break_on_goal_diff_then_goals_for(self):
+        # 2 teams tied on points (3 each): GD decides.
+        # Mexico 1-0 SA, SA 0-1 Argentina, Mexico 0-3 Argentina, Argentina 2-0 Chile,
+        # Chile 2-1 Mexico, SA 1-1 Chile
+        # Standings:
+        #   Argentina: 3 wins = 9pts, GF=6, GA=0, GD=+6
+        #   Mexico:    1W 2L  = 3pts, GF=2, GA=6, GD=-4
+        #   Chile:     1W 1D 1L = 4pts, GF=3, GA=3, GD=0
+        #   SA:        0W 1D 2L = 1pt,  GF=1, GA=3, GD=-2
+        # Final order: Argentina > Chile > SA > Mexico
+        matches = [
+            self._match(1, "GROUP_A", "Mexico", "South Africa", 1, 0, "FINISHED"),
+            self._match(2, "GROUP_A", "South Africa", "Argentina", 0, 1, "FINISHED"),
+            self._match(3, "GROUP_A", "Mexico", "Argentina", 0, 3, "FINISHED"),
+            self._match(4, "GROUP_A", "Argentina", "Chile", 2, 0, "FINISHED"),
+            self._match(5, "GROUP_A", "Chile", "Mexico", 2, 1, "FINISHED"),
+            self._match(6, "GROUP_A", "South Africa", "Chile", 1, 1, "FINISHED"),
+        ]
+        src = self._make_source(matches)
+        state = src.initial_state()
+        outcomes = src.terminal_outcomes(state)
+        assert outcomes["Argentina"] == ["advance"]
+        assert outcomes["Chile"] == ["advance"]
+        assert outcomes["South Africa"] == ["eliminated"]
+        assert outcomes["Mexico"] == ["eliminated"]
+
+    def test_terminal_outcomes_handles_multiple_groups_independently(self):
+        # Group A: Mexico/Argentina advance; Chile/SA eliminated.
+        # Group B: Germany/France advance; Brazil/Spain eliminated.
+        matches = [
+            self._match(1, "GROUP_A", "Mexico", "South Africa", 3, 0, "FINISHED"),
+            self._match(2, "GROUP_A", "Argentina", "Chile", 2, 0, "FINISHED"),
+            self._match(3, "GROUP_B", "Germany", "Spain", 4, 0, "FINISHED"),
+            self._match(4, "GROUP_B", "France", "Brazil", 2, 1, "FINISHED"),
+        ]
+        src = self._make_source(matches)
+        state = src.initial_state()
+        outcomes = src.terminal_outcomes(state)
+        # Group A
+        assert outcomes["Mexico"] == ["advance"]
+        assert outcomes["Argentina"] == ["advance"]
+        assert outcomes["Chile"] == ["eliminated"]
+        assert outcomes["South Africa"] == ["eliminated"]
+        # Group B
+        assert outcomes["Germany"] == ["advance"]
+        assert outcomes["France"] == ["advance"]
+        assert outcomes["Brazil"] == ["eliminated"]
+        assert outcomes["Spain"] == ["eliminated"]
+
+    def test_terminal_outcomes_empty_state_returns_empty(self):
+        src = self._make_source([])
+        state = src.initial_state()
+        outcomes = src.terminal_outcomes(state)
+        assert outcomes == {}
+
+    # ---------- apply_result threads through immutably ----------
+
+    def test_apply_result_does_not_mutate_input_state(self):
+        from dispatcharr_ranked_matchups.sources.base import GameRow, MatchResult
+        matches = [self._match(1, "GROUP_A", "Mexico", "South Africa")]
+        src = self._make_source(matches)
+        state = src.initial_state()
+        snap_mex = dict(state["Mexico"])
+        snap_sa = dict(state["South Africa"])
+        snap_applied = set(state["_applied"])
+
+        match = GameRow(
+            sport_prefix="WC", sport_label="FIFA World Cup",
+            home="Mexico", away="South Africa",
+            rank_home=None, rank_away=None,
+            start_time=None, extra={"fd_id": 1},
+        )
+        result = MatchResult(home_goals=3, away_goals=1)
+        new_state = src.apply_result(state, match, result)
+        # Original untouched.
+        assert state["Mexico"] == snap_mex
+        assert state["South Africa"] == snap_sa
+        assert set(state["_applied"]) == snap_applied
+        # New state has the result.
+        assert new_state["Mexico"]["points"] == 3
+        assert new_state["Mexico"]["gf"] == 3
+        assert 1 in new_state["_applied"]
+
+
+class TestKnockoutSoccerSourceSkipsGroupStage:
+    """Once GroupStageSoccerSource owns group-stage fixtures, the sibling
+    KnockoutSoccerSource MUST filter them out of its own fetch_upcoming
+    so the plugin doesn't double-emit group games as both a knockout
+    and a group-stage GameRow."""
+
+    def test_fetch_upcoming_drops_group_stage_extras(self):
+        # Build a fake KnockoutSoccerSource and monkey-patch the parent
+        # SoccerSource.fetch_upcoming to return a mix of stages.
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        from dispatcharr_ranked_matchups.sources.soccer import (
+            KnockoutSoccerSource, SoccerSource,
+        )
+
+        rows = [
+            GameRow(sport_prefix="WC", sport_label="FIFA World Cup",
+                    home="Mexico", away="SA", rank_home=None, rank_away=None,
+                    start_time=None, extra={"fd_id": 1, "stage": "GROUP_STAGE"}),
+            GameRow(sport_prefix="WC", sport_label="FIFA World Cup",
+                    home="Brazil", away="Germany", rank_home=None, rank_away=None,
+                    start_time=None, extra={"fd_id": 2, "stage": "LAST_32"}),
+            GameRow(sport_prefix="WC", sport_label="FIFA World Cup",
+                    home="France", away="Spain", rank_home=None, rank_away=None,
+                    start_time=None, extra={"fd_id": 3, "stage": "FINAL"}),
+        ]
+        src = KnockoutSoccerSource("world_cup", fd_api_key="x")
+        # Monkey-patch the parent's fetch_upcoming to return our fixture.
+        original = SoccerSource.fetch_upcoming
+        try:
+            SoccerSource.fetch_upcoming = lambda self, days_ahead=7: list(rows)
+            out = src.fetch_upcoming()
+        finally:
+            SoccerSource.fetch_upcoming = original
+        out_ids = {r.extra["fd_id"] for r in out}
+        # The GROUP_STAGE row must be filtered out; the two KO rows pass through.
+        assert out_ids == {2, 3}
+
+    def test_filter_no_op_for_competitions_without_group_stage(self):
+        # UCL fixtures don't carry stage="GROUP_STAGE" — the filter is a
+        # safe no-op, ALL rows pass through.
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        from dispatcharr_ranked_matchups.sources.soccer import (
+            KnockoutSoccerSource, SoccerSource,
+        )
+        rows = [
+            GameRow(sport_prefix="UCL", sport_label="UEFA Champions League",
+                    home="A", away="B", rank_home=None, rank_away=None,
+                    start_time=None, extra={"fd_id": 1, "stage": "LAST_16"}),
+            GameRow(sport_prefix="UCL", sport_label="UEFA Champions League",
+                    home="C", away="D", rank_home=None, rank_away=None,
+                    start_time=None, extra={"fd_id": 2, "stage": "QUARTER_FINALS"}),
+        ]
+        src = KnockoutSoccerSource("ucl", fd_api_key="x")
+        original = SoccerSource.fetch_upcoming
+        try:
+            SoccerSource.fetch_upcoming = lambda self, days_ahead=7: list(rows)
+            out = src.fetch_upcoming()
+        finally:
+            SoccerSource.fetch_upcoming = original
+        assert {r.extra["fd_id"] for r in out} == {1, 2}
+
+
+class TestGroupStageContextCodes:
+    """LEAGUE_CONTEXTS entries for WC_GS / EC_GS must exist with the
+    `advance` outcome label so the GroupStageSoccerSource's
+    fetch_upcoming-remapped `fd_competition_code` routes correctly."""
+
+    def test_wc_gs_context_has_advance_threshold(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS.get("WC_GS")
+        assert ctx is not None, "WC_GS missing from LEAGUE_CONTEXTS"
+        labels = [t[1] for t in ctx.thresholds]
+        assert "advance" in labels
+
+    def test_ec_gs_context_has_advance_threshold(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS.get("EC_GS")
+        assert ctx is not None, "EC_GS missing from LEAGUE_CONTEXTS"
+        labels = [t[1] for t in ctx.thresholds]
+        assert "advance" in labels
+
+    def test_wc_gs_weight_is_higher_than_ec_gs(self):
+        # WC carries more global stake than EURO; the group-stage
+        # advance weight should mirror the knockout-bands weighting.
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        wc_weight = next(w for _, lbl, w in LEAGUE_CONTEXTS["WC_GS"].thresholds if lbl == "advance")
+        ec_weight = next(w for _, lbl, w in LEAGUE_CONTEXTS["EC_GS"].thresholds if lbl == "advance")
+        assert wc_weight > ec_weight

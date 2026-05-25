@@ -349,7 +349,7 @@ def _build_weights(settings: Dict[str, Any]):
 
 def _build_sources(settings: Dict[str, Any]):
     from .sources import (
-        KnockoutSoccerSource, MlbPlayoffSource, MlbRegularSource,
+        GroupStageSoccerSource, KnockoutSoccerSource, MlbPlayoffSource, MlbRegularSource,
         MlsSource, NwslSource, LigaMxSource,
         NbaPlayoffSource, NbaRegularSource,
         WnbaPlayoffSource, WnbaRegularSource,
@@ -403,14 +403,23 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(_make_soccer("serie_a"))
     if settings.get("enable_ligue_1", False) and fd_key:
         sources.append(_make_soccer("ligue_1"))
-    # International tournaments. _make_soccer dispatches to
-    # KnockoutSoccerSource via the format="knockout" route. Group-stage
-    # importance isn't modeled in V1; group games still surface via
-    # fetch_upcoming with favorite + closeness signal only.
+    # International tournaments. Each toggle fans out to TWO sources
+    # sharing the same FD.org competition fetch:
+    #   - KnockoutSoccerSource via _make_soccer (KO_STAGES bracket); its
+    #     fetch_upcoming filters GROUP_STAGE out so it doesn't double
+    #     up with the group-stage source.
+    #   - GroupStageSoccerSource for the per-group "advance / eliminated"
+    #     importance signal (top 2 per group).
     if settings.get("enable_world_cup", False) and fd_key:
         sources.append(_make_soccer("world_cup"))
+        sources.append(GroupStageSoccerSource(
+            "world_cup", fd_api_key=fd_key, odds_api_key=odds_key,
+        ))
     if settings.get("enable_euros", False) and fd_key:
         sources.append(_make_soccer("euros"))
+        sources.append(GroupStageSoccerSource(
+            "euros", fd_api_key=fd_key, odds_api_key=odds_key,
+        ))
 
     # Additional FD.org free-tier leagues. Same _make_soccer
     # router; LEAGUE_CONTEXTS uses format="league" so dispatch goes
