@@ -2242,3 +2242,160 @@ class TestPointsBasedSourceCountField:
         from dispatcharr_ranked_matchups.sources.ncaaf import NcaafSource
         # CFBD source inherits PointsBasedSportSource without overriding.
         assert NcaafSource._count_field == "wins"
+
+
+# =====================================================================
+# Phase M: NCAA Baseball
+# =====================================================================
+
+class TestNcaaBaseballSource:
+    """Phase M: D1 baseball via ESPN unofficial API + D1Baseball.com poll.
+    Tests cover the canonical-game-record extraction (the tricky part is
+    homeAway / completed / score parsing), team-name canonicalization
+    (location > nickname), and the LEAGUE_CONTEXTS bands.
+    """
+
+    @staticmethod
+    def _make_source():
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import NcaaBaseballSource
+        # Pin season_year so test isn't dependent on calendar.
+        return NcaaBaseballSource(season_year=2026)
+
+    @staticmethod
+    def _competitor(team_loc, team_name, score, home_away="home", winner=None):
+        return {
+            "homeAway": home_away,
+            "score": str(score) if score is not None else None,
+            "winner": winner,
+            "team": {"location": team_loc, "name": team_name, "abbreviation": team_loc[:4].upper()},
+        }
+
+    @staticmethod
+    def _event(eid, date, hp, ap, completed=True, state="post"):
+        return {
+            "id": eid,
+            "date": date,
+            "competitions": [{
+                "status": {"type": {"completed": completed, "state": state}},
+                "competitors": [
+                    TestNcaaBaseballSource._competitor("UCLA", "Bruins", hp, "home", hp > ap if hp is not None else None),
+                    TestNcaaBaseballSource._competitor("Texas", "Longhorns", ap, "away", ap > hp if ap is not None else None),
+                ],
+            }],
+        }
+
+    # ---------- supports_importance + identity ----------
+
+    def test_supports_importance(self):
+        src = self._make_source()
+        assert src.supports_importance is True
+
+    def test_sport_prefix_label(self):
+        src = self._make_source()
+        assert src.sport_prefix == "NCAABSB"
+        assert src.sport_label == "NCAA Baseball"
+
+    def test_count_field_is_wins(self):
+        # Inherits the PointsBasedSportSource default — D1 baseball has
+        # no OT/SO bonus point complication like NHL.
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import NcaaBaseballSource
+        assert NcaaBaseballSource._count_field == "wins"
+
+    # ---------- _extract_game_record ----------
+
+    def test_extract_finished_game(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import _extract_game_record
+        evt = self._event("1001", "2026-04-01T19:00Z", hp=7, ap=3)
+        rec = _extract_game_record(evt)
+        assert rec is not None
+        assert rec["id"] == "1001"
+        assert rec["home"] == "UCLA"  # location (school), not "Bruins" (mascot)
+        assert rec["away"] == "Texas"
+        assert rec["home_points"] == 7
+        assert rec["away_points"] == 3
+        assert rec["status"] == "FINISHED"
+
+    def test_extract_in_progress_demotes_to_scheduled(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import _extract_game_record
+        evt = self._event("1002", "2026-04-01T19:00Z", hp=4, ap=2,
+                          completed=False, state="in")
+        rec = _extract_game_record(evt)
+        # In-progress score is unstable — must not seed wins/losses.
+        assert rec is not None
+        assert rec["status"] == "SCHEDULED"
+        assert rec["home_points"] is None
+        assert rec["away_points"] is None
+
+    def test_extract_pregame_scheduled(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import _extract_game_record
+        evt = {
+            "id": "1003",
+            "date": "2026-05-25T22:00Z",
+            "competitions": [{
+                "status": {"type": {"completed": False, "state": "pre"}},
+                "competitors": [
+                    self._competitor("UCLA", "Bruins", None, "home"),
+                    self._competitor("Texas", "Longhorns", None, "away"),
+                ],
+            }],
+        }
+        rec = _extract_game_record(evt)
+        assert rec is not None
+        assert rec["status"] == "SCHEDULED"
+
+    def test_extract_finished_with_missing_score_demotes(self):
+        # Defensive: if ESPN reports completed but no score (data hiccup),
+        # demote to SCHEDULED rather than recording a 0-0 W/L into state.
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import _extract_game_record
+        evt = self._event("1004", "2026-04-01T19:00Z", hp=None, ap=None)
+        rec = _extract_game_record(evt)
+        assert rec is not None
+        assert rec["status"] == "SCHEDULED"
+
+    def test_extract_missing_competitor_returns_none(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import _extract_game_record
+        # Only 1 competitor (corrupt event)
+        evt = {
+            "id": "1005",
+            "date": "2026-04-01T19:00Z",
+            "competitions": [{
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [self._competitor("UCLA", "Bruins", 7, "home")],
+            }],
+        }
+        rec = _extract_game_record(evt)
+        assert rec is None
+
+    def test_team_canonical_name_prefers_location_over_mascot(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import _team_canonical_name
+        # EPG provider titles use the school name ("UCLA at Texas")
+        # not the mascot ("Bruins at Longhorns") — pick location.
+        assert _team_canonical_name({"location": "UCLA", "name": "Bruins"}) == "UCLA"
+
+    def test_team_canonical_name_falls_back_to_nickname(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import _team_canonical_name
+        # Edge case: non-D1 opponent in early-season scrimmage missing location.
+        assert _team_canonical_name({"location": "", "name": "Wildcats"}) == "Wildcats"
+        assert _team_canonical_name({"name": "Wildcats"}) == "Wildcats"
+
+    # ---------- LEAGUE_CONTEXTS ----------
+
+    def test_bsb_in_league_contexts(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS["BSB"]
+        assert ctx.format == "win_count"
+        labels = {label for _cut, label, _w in ctx.thresholds}
+        assert "tournament_bubble" in labels
+        assert "at_large_lock" in labels
+        assert "regional_top_seed" in labels
+        assert "national_seed" in labels
+        assert "overall_one_seed" in labels
+
+    def test_bsb_thresholds_strictly_monotonic(self):
+        # Each band's cutoff must be strictly greater than the prior so
+        # the cascade fires cleanly. A team with 50 wins satisfies every
+        # lower-cutoff band.
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        cuts = [cut for cut, _label, _w in LEAGUE_CONTEXTS["BSB"].thresholds]
+        for i in range(len(cuts) - 1):
+            assert cuts[i] < cuts[i + 1], f"BSB band cutoffs must be monotonic: {cuts}"

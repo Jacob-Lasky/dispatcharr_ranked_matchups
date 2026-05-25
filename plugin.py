@@ -292,7 +292,7 @@ def _build_weights(settings: Dict[str, Any]):
 
 def _build_sources(settings: Dict[str, Any]):
     from .sources import (
-        KnockoutSoccerSource, NcaafSource, NcaamSource,
+        KnockoutSoccerSource, NcaaBaseballSource, NcaafSource, NcaamSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
     )
     from .sources.soccer import COMPETITIONS
@@ -364,6 +364,13 @@ def _build_sources(settings: Dict[str, Any]):
             # source — it can still run on the default prior.
             logger.warning("[nhl] could not seed playoff strengths: %s", exc)
         sources.append(nhl_po)
+
+    # Phase M: NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
+    # poll, no key needed. Win-count thresholds (30 / 35 / 40 / 45 / 50) drive
+    # the importance signal. CWS postseason bracket isn't modeled yet — postseason
+    # games still surface via favorite + rank-pair signal.
+    if settings.get("enable_ncaa_baseball", False):
+        sources.append(NcaaBaseballSource())
     return sources
 
 
