@@ -771,3 +771,225 @@ class TestOwnedTvgIdQ:
                 out.extend(self._all_leaves(child))
             return out
         return [shape]
+
+
+class TestBuildDescription:
+    """_build_description is the sole production EPG-description renderer
+    after the build_why_text deletion (PR #42, issue #15). It's a pure
+    function (Dict + str + bool → str), so we can pin every output block
+    here without touching Django.
+
+    Six blocks, joined by blank lines:
+      1. Placeholder note (when placeholder=True).
+      2. Headline: "A/An {tagline} — {spread_desc}." (each piece optional).
+      3. Matchday + league boundary summary.
+      4. Favorite-impact narratives.
+      5. Favorite-is-playing line ("X is your favorite." / "Your favorites: ...").
+      6. Source channel line ("Source: ...").
+    """
+
+    @staticmethod
+    def _g(**overrides):
+        """Build a minimal game dict. Pass keyword overrides to add
+        specific cache fields per test."""
+        g = {}
+        g.update(overrides)
+        return g
+
+    # ---------- block 1: placeholder ----------
+
+    def test_empty_input_returns_empty_string(self, plugin):
+        # No tagline, no placeholder, no extra fields → no sections.
+        assert plugin._build_description(self._g(), "", False) == ""
+
+    def test_placeholder_note_appears_first(self, plugin):
+        out = plugin._build_description(self._g(), "", placeholder=True)
+        # Leading underscore = markdown italic — the renderer relies on
+        # the placeholder note being italic, not plain text.
+        assert out.startswith("_Channel match pending")
+        assert "next refresh" in out
+
+    def test_placeholder_false_omits_note(self, plugin):
+        out = plugin._build_description(self._g(), "title race", placeholder=False)
+        assert "Channel match pending" not in out
+
+    # ---------- block 2: headline ----------
+
+    def test_headline_with_consonant_tagline_uses_A(self, plugin):
+        out = plugin._build_description(self._g(), "title race", False)
+        assert out.startswith("A title race.")
+
+    def test_headline_with_vowel_tagline_uses_An(self, plugin):
+        # All five vowels.
+        for vowel_tagline in ["a-game decider", "elite matchup",
+                              "in-form clash", "opener", "underdog story"]:
+            out = plugin._build_description(self._g(), vowel_tagline, False)
+            assert out.startswith(f"An {vowel_tagline}.")
+
+    def test_headline_vowel_check_is_case_insensitive(self, plugin):
+        # "Elite" must read as vowel-starting just like "elite".
+        out = plugin._build_description(self._g(), "Elite matchup", False)
+        assert out.startswith("An Elite matchup.")
+
+    def test_no_tagline_skips_headline(self, plugin):
+        # Empty tagline + no spread = no headline section at all.
+        out = plugin._build_description(self._g(), "", False)
+        assert "A " not in out and "An " not in out
+
+    def test_headline_with_closeness_toss_up(self, plugin):
+        # closeness >= 0.7 → "toss-up". Em-dash separates the two parts.
+        out = plugin._build_description(self._g(closeness=0.8), "title race", False)
+        assert "A title race — toss-up." in out
+
+    def test_headline_with_only_spread_no_tagline(self, plugin):
+        # spread alone (no tagline) still produces a headline line
+        # because the spread descriptor is part of the headline block.
+        out = plugin._build_description(self._g(spread=2.0), "", False)
+        assert "toss-up." in out
+        assert not out.startswith("A ")  # no article without a tagline
+
+    def test_headline_terminates_with_period(self, plugin):
+        out = plugin._build_description(self._g(), "title race", False)
+        # The period is intentional — without it, EPG clients sometimes
+        # run the headline into the following block.
+        assert out.split("\n\n", 1)[0].endswith(".")
+
+    # ---------- block 3: matchday + league boundary ----------
+
+    def test_matchday_line_uses_explicit_totals(self, plugin):
+        g = self._g(extra={"matchday": 7, "matchdays_total": 38})
+        out = plugin._build_description(g, "", False)
+        assert "Matchday 7 of 38." in out
+
+    def test_matchday_line_falls_back_to_league_ctx_total(self, plugin):
+        # When `matchdays_total` isn't in extra but fd_competition_code
+        # resolves to a LEAGUE_CONTEXTS entry with a known total, that
+        # total fills in. PL is 38.
+        g = self._g(extra={"matchday": 5, "fd_competition_code": "PL"})
+        out = plugin._build_description(g, "", False)
+        assert "Matchday 5 of 38." in out
+
+    def test_league_boundary_summary_appears(self, plugin):
+        # PL's boundary_summary is the threshold mnemonic users see.
+        g = self._g(extra={"fd_competition_code": "PL"})
+        out = plugin._build_description(g, "", False)
+        # Boundary summary content comes from LEAGUE_CONTEXTS["PL"]
+        # ("Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation").
+        assert "UCL" in out and "relegation" in out
+
+    def test_matchday_without_total_omits_line(self, plugin):
+        # If neither extra.matchdays_total nor league_ctx.matchdays_total
+        # are available, no matchday line is emitted (we don't want
+        # "Matchday 7" floating without context).
+        g = self._g(extra={"matchday": 7})
+        out = plugin._build_description(g, "", False)
+        assert "Matchday 7" not in out
+
+    # ---------- block 4: impact narratives ----------
+
+    def test_impact_narratives_in_extra(self, plugin):
+        g = self._g(extra={"impact_narratives": [
+            "City fans: every dropped point closes the title race.",
+            "Arsenal supporters: this is a four-point swing.",
+        ]})
+        out = plugin._build_description(g, "", False)
+        assert "every dropped point" in out
+        assert "four-point swing" in out
+
+    def test_impact_narratives_top_level_fallback(self, plugin):
+        # Older cache entries kept narratives at the top level; the
+        # fallback path keeps them rendering.
+        g = self._g(impact_narratives=["Top-level narrative."])
+        out = plugin._build_description(g, "", False)
+        assert "Top-level narrative." in out
+
+    def test_extra_narratives_win_over_top_level(self, plugin):
+        # When both are present, the canonical (extra) location wins.
+        # Top-level fallback exists only for old-shape cache files.
+        g = self._g(
+            extra={"impact_narratives": ["From extra."]},
+            impact_narratives=["From top level."],
+        )
+        out = plugin._build_description(g, "", False)
+        assert "From extra." in out
+        assert "From top level." not in out
+
+    def test_empty_narratives_list_omits_section(self, plugin):
+        g = self._g(extra={"impact_narratives": []})
+        out = plugin._build_description(g, "title race", False)
+        # Only the headline survives.
+        assert out == "A title race."
+
+    # ---------- block 5: favorite-is-playing ----------
+
+    def test_single_favorite_singular_form(self, plugin):
+        g = self._g(favorites_matched=["Wrexham"])
+        out = plugin._build_description(g, "", False)
+        assert "Wrexham is your favorite." in out
+
+    def test_multiple_favorites_plural_form(self, plugin):
+        g = self._g(favorites_matched=["Wrexham", "Barcelona"])
+        out = plugin._build_description(g, "", False)
+        assert "Your favorites: Wrexham, Barcelona." in out
+        # Singular form must NOT appear when there are multiple.
+        assert "is your favorite" not in out
+
+    def test_no_favorites_omits_line(self, plugin):
+        g = self._g(favorites_matched=[])
+        out = plugin._build_description(g, "title race", False)
+        assert "favorite" not in out
+
+    # ---------- block 6: source channel ----------
+
+    def test_source_channel_line(self, plugin):
+        g = self._g(channel_name_current="ESPN")
+        out = plugin._build_description(g, "", False)
+        assert "Source: ESPN." in out
+
+    def test_no_source_channel_omits_line(self, plugin):
+        g = self._g()
+        out = plugin._build_description(g, "", False)
+        assert "Source:" not in out
+
+    # ---------- structure: ordering + separator ----------
+
+    def test_blocks_are_separated_by_blank_lines(self, plugin):
+        # Every present block is joined by `\n\n` (a blank line between
+        # them so EPG clients render paragraph breaks). With three
+        # blocks present we expect exactly two blank-line separators.
+        g = self._g(
+            extra={"matchday": 7, "matchdays_total": 38},
+            favorites_matched=["Wrexham"],
+        )
+        out = plugin._build_description(g, "title race", False)
+        # 3 sections (headline, matchday, favorite) → 2 separators.
+        assert out.count("\n\n") == 2
+
+    def test_all_six_blocks_in_documented_order(self, plugin):
+        # Build a game that exercises every block, then assert each
+        # marker substring appears in the order the docstring says.
+        g = self._g(
+            extra={
+                "matchday": 5,
+                "matchdays_total": 38,
+                "impact_narratives": ["Impact narrative here."],
+                "fd_competition_code": "PL",
+            },
+            closeness=0.8,
+            favorites_matched=["Wrexham"],
+            channel_name_current="ESPN",
+        )
+        out = plugin._build_description(g, "title race", placeholder=True)
+        # Use .find() to pin order — earlier marker must have lower index.
+        pos_placeholder = out.find("Channel match pending")
+        pos_headline = out.find("A title race")
+        pos_matchday = out.find("Matchday 5")
+        pos_narrative = out.find("Impact narrative here.")
+        pos_favorite = out.find("is your favorite")
+        pos_source = out.find("Source: ESPN")
+        # All blocks present.
+        positions = [pos_placeholder, pos_headline, pos_matchday,
+                     pos_narrative, pos_favorite, pos_source]
+        assert all(p >= 0 for p in positions), f"missing block: {positions}"
+        # Strict order.
+        assert positions == sorted(positions)
