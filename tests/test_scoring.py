@@ -9,7 +9,6 @@ from dispatcharr_ranked_matchups.scoring import (
     TEAM_SUFFIX_TOKENS,
     _compress_to_10,
     build_impact_narratives,
-    build_why_text,
     compute_match_importance,
     format_channel_name,
     match_favorites,
@@ -266,33 +265,6 @@ class TestFormatChannelName:
         assert "5vUR" in name
 
 
-class TestBuildWhyText:
-    def test_empty_falls_back(self):
-        why = build_why_text(None, None, [], {})
-        assert why == "interesting matchup"
-
-    def test_top_5_phrase(self):
-        why = build_why_text(2, 5, [], {"rank_pair": 5.0})
-        assert "top-5" in why
-
-    def test_importance_stakes_phrase(self):
-        # Phase C.4: build_why_text reads importance_thresholds and emits a
-        # "title / UCL stakes" phrase. The legacy late-season qualifier
-        # was dropped — the importance signal naturally weights late-season
-        # leverage, so an explicit "(final stretch ×2)" annotation is
-        # redundant noise.
-        why = build_why_text(
-            None, None, [],
-            {"importance": 5.0},
-            importance_thresholds=["title", "UCL"],
-        )
-        assert "title / UCL stakes" in why
-
-    def test_toss_up_phrase(self):
-        why = build_why_text(None, None, [], {"close_game": 3.0}, spread=0.5)
-        assert "toss-up" in why
-
-
 class TestStripTeamSuffix:
     def test_strips_fc(self):
         assert strip_team_suffix("Brentford FC") == "Brentford"
@@ -483,26 +455,6 @@ class TestPickTagline:
             rank_a=None, rank_b=None, rank_source="poll",
         )
         assert tag == "toss-up"
-
-
-class TestBuildWhyTextRankSource:
-    def test_poll_keeps_top_n_label(self):
-        why = build_why_text(
-            rank_home=2, rank_away=4,
-            favorites_matched=[], score_breakdown={"rank_pair": 5.0},
-            rank_source="poll",
-        )
-        assert "top-5" in why
-
-    def test_standings_drops_top_n_label(self):
-        # For EPL etc, "both top-5" is meaningless when there are 20 teams.
-        why = build_why_text(
-            rank_home=2, rank_away=4,
-            favorites_matched=[], score_breakdown={"rank_pair": 5.0},
-            rank_source="standings",
-        )
-        assert "top-5" not in why
-        assert "both ranked" not in why
 
 
 class TestLeagueContexts:
