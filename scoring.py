@@ -201,6 +201,18 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     "F4":              4,  # Final Four (2 games)
     "NCG":             5,  # National Championship Game
     "NCG_WINNER":      6,  # National Champion
+    # NFL playoffs (Phase P): 4 rounds, single-game elimination.
+    # SERIES_LENGTH=1 per stage; clinches at 1 win. The "WC" label
+    # entry above (depth 0) is shared between MLB Wild Card Series
+    # and NFL Wild Card Playoffs — both happen to be at depth 0 in
+    # their respective brackets, and terminal_outcomes reads
+    # per-league bands so there's no cross-contamination (same
+    # pattern as R1 shared across NHL and NBA, FINALS shared across
+    # NBA and WNBA).
+    "DIV":             1,  # Divisional Playoffs
+    "CONF":            2,  # Conference Championship
+    "SB":              3,  # Super Bowl
+    "SB_WINNER":       4,  # Super Bowl Champion
 }
 
 
@@ -577,6 +589,36 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             (50, "no_1_overall",         5.0),
         ],
         boundary_summary="30+ wins → bubble · 35+ → at-large lock · 40+ → top regional · 45+ → national seed · 50+ → #1 overall",
+    ),
+    # Phase P: NFL regular season. 17-game season since 2021;
+    # 14 teams make playoffs (7 per conference, including a 7th seed
+    # added in 2020). 9 wins has been the modern playoff bubble line;
+    # 11 wins typically locks a division; 13+ is #1-seed pace.
+    "NFL": LeagueContext(
+        code="NFL", matchdays_total=17, format="win_count",
+        thresholds=[
+            (7,  "playoff_bubble",  1.5),  # 7-seed line late season
+            (9,  "playoff_secured", 2.5),  # comfortable in
+            (11, "division_winner", 4.0),  # division-clinching pace
+            (13, "no_1_seed",       5.0),  # #1 seed contention
+        ],
+        boundary_summary="7+ wins → bubble · 9+ → comfortable · 11+ → division · 13+ → #1 seed",
+    ),
+    # Phase P: NFL playoffs. 4 rounds, single-game elimination.
+    # Weights ramp aggressively because single-elim concentrates
+    # leverage — a Wild Card upset eliminates a 12-win team in one
+    # game. Same shape as March Madness (Phase L) but 4 rounds
+    # instead of 6 because the field is 14 teams (7 per conference)
+    # not 64.
+    "NFL_PO": LeagueContext(
+        code="NFL_PO", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("DIV",       "divisional",   1.5),
+            ("CONF",      "conf_champ",   3.5),
+            ("SB",        "super_bowl",   6.0),
+            ("SB_WINNER", "sb_winner",   10.0),
+        ],
+        boundary_summary="WC → Divisional → Conf Championship → Super Bowl → Champion",
     ),
 }
 
