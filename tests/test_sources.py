@@ -4691,3 +4691,87 @@ class TestUfcSource:
         games = UfcSource().fetch_upcoming(days_ahead=7)
         assert len(games) == 1
         assert games[0].extra.get("stage") == "EVENT"
+
+
+# =====================================================================
+# Phase T: Tennis (ATP + WTA)
+# =====================================================================
+
+class TestTennisSources:
+    """ESPN's tennis scoreboard returns whole tournaments (each entry
+    spans 1-2 weeks for a Slam, or 5-7 days for tour stops), not
+    individual matches — same FieldEventSource shape as racing + UFC."""
+
+    def test_atp_identity(self):
+        from dispatcharr_ranked_matchups.sources.field_event import AtpSource
+        src = AtpSource()
+        assert src.sport_prefix == "ATP"
+        assert "ATP" in src.sport_label
+        assert src.ESPN_SLUG == "tennis/atp"
+
+    def test_wta_identity(self):
+        from dispatcharr_ranked_matchups.sources.field_event import WtaSource
+        src = WtaSource()
+        assert src.sport_prefix == "WTA"
+        assert "WTA" in src.sport_label
+        assert src.ESPN_SLUG == "tennis/wta"
+
+    def test_no_importance(self):
+        from dispatcharr_ranked_matchups.sources.field_event import (
+            AtpSource, WtaSource,
+        )
+        assert AtpSource().supports_importance is False
+        assert WtaSource().supports_importance is False
+
+    def test_grand_slams_detected_as_major(self):
+        from dispatcharr_ranked_matchups.sources.field_event import AtpSource
+        src = AtpSource()
+        assert src.MAJOR_REGEX is not None
+        # All four Grand Slams + variants.
+        assert src.MAJOR_REGEX.search("Wimbledon")
+        assert src.MAJOR_REGEX.search("Australian Open")
+        assert src.MAJOR_REGEX.search("French Open")
+        assert src.MAJOR_REGEX.search("Roland Garros")
+        assert src.MAJOR_REGEX.search("U.S. Open")
+        assert src.MAJOR_REGEX.search("US Open")
+
+    def test_year_end_finals_detected_as_major(self):
+        from dispatcharr_ranked_matchups.sources.field_event import (
+            AtpSource, WtaSource,
+        )
+        assert AtpSource().MAJOR_REGEX is not None
+        assert WtaSource().MAJOR_REGEX is not None
+        assert AtpSource().MAJOR_REGEX.search("ATP Finals")
+        assert WtaSource().MAJOR_REGEX.search("WTA Finals")
+
+    def test_regular_tour_stops_not_major(self):
+        from dispatcharr_ranked_matchups.sources.field_event import AtpSource
+        src = AtpSource()
+        assert src.MAJOR_REGEX is not None
+        assert not src.MAJOR_REGEX.search("Nordea Open")
+        assert not src.MAJOR_REGEX.search("EFG Swiss Open Gstaad")
+        assert not src.MAJOR_REGEX.search("Bitpanda Hamburg Open")
+
+    def test_atp_emits_slam_with_major_tier(self, monkeypatch):
+        import dispatcharr_ranked_matchups.sources.field_event as field_mod
+        espn_response = {
+            "events": [{
+                "id": "401901000",
+                "name": "Wimbledon",
+                "shortName": "Wimbledon",
+                "date": "2026-06-29T04:00Z",
+                "competitions": [{"competitors": []}],
+            }, {
+                "id": "401901001",
+                "name": "Nordea Open",
+                "shortName": "Nordea Open",
+                "date": "2026-07-13T04:00Z",
+                "competitions": [{"competitors": []}],
+            }],
+        }
+        monkeypatch.setattr(field_mod, "_http_get", lambda *a, **kw: espn_response)
+        from dispatcharr_ranked_matchups.sources.field_event import AtpSource
+        games = AtpSource().fetch_upcoming(days_ahead=60)
+        by_name = {g.home: g for g in games}
+        assert by_name["Wimbledon"].extra.get("stage") == "MAJOR"
+        assert by_name["Nordea Open"].extra.get("stage") == "EVENT"

@@ -302,6 +302,7 @@ def _build_sources(settings: Dict[str, Any]):
         NflPlayoffSource, NflRegularSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
         F1Source, NascarSource, GolfSource, UfcSource,
+        AtpSource, WtaSource,
     )
     from .sources.soccer import COMPETITIONS
     from .scoring import LEAGUE_CONTEXTS
@@ -466,6 +467,16 @@ def _build_sources(settings: Dict[str, Any]):
     # (numbered UFC events) get MAJOR tier, Fight Nights get EVENT.
     if settings.get("enable_ufc", False):
         sources.append(UfcSource())
+
+    # Phase T: Tennis. ESPN's tennis scoreboard returns whole
+    # tournaments (one entry per active event), not individual
+    # matches — so tennis fits the FieldEventSource model. Grand
+    # Slams + year-end Finals get MAJOR; regular tour stops get
+    # EVENT.
+    if settings.get("enable_atp", False):
+        sources.append(AtpSource())
+    if settings.get("enable_wta", False):
+        sources.append(WtaSource())
 
     # WNBA — ESPN unofficial API; same pair-and-seed pattern as NHL/MLB/
     # NBA. Per-stage series lengths via BestOfNSeriesSource hooks: R1
