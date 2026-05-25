@@ -291,7 +291,10 @@ def _build_weights(settings: Dict[str, Any]):
 
 
 def _build_sources(settings: Dict[str, Any]):
-    from .sources import KnockoutSoccerSource, NcaafSource, NcaamSource, SoccerSource
+    from .sources import (
+        KnockoutSoccerSource, NcaafSource, NcaamSource,
+        NhlPlayoffSource, NhlRegularSource, SoccerSource,
+    )
     from .sources.soccer import COMPETITIONS
     from .scoring import LEAGUE_CONTEXTS
     sources = []
@@ -321,6 +324,27 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(_make_soccer("championship"))
     if settings.get("enable_ucl", False) and fd_key:
         sources.append(_make_soccer("ucl"))
+
+    # NHL — no API key required (api-web.nhle.com is free). Pair the
+    # regular and playoff sources together: the playoff source borrows
+    # regular-season strength estimates from the regular source so a
+    # 70-game per-team baseline informs playoff-game sampling instead
+    # of the league-average prior. If the user enables only one of the
+    # two, the playoff source falls back to the 3.0/3.0 prior.
+    if settings.get("enable_nhl", False):
+        nhl_reg = NhlRegularSource()
+        sources.append(nhl_reg)
+        nhl_po = NhlPlayoffSource()
+        try:
+            # Seed playoff strengths from the regular-season fetch so
+            # Cup-Final importance reflects per-team scoring skill
+            # (not just the league-average prior).
+            nhl_po.set_regular_season_strengths(nhl_reg.estimate_strengths())
+        except Exception as exc:  # noqa: BLE001
+            # Don't let a strengths-seeding hiccup gate the playoff
+            # source — it can still run on the default prior.
+            logger.warning("[nhl] could not seed playoff strengths: %s", exc)
+        sources.append(nhl_po)
     return sources
 
 

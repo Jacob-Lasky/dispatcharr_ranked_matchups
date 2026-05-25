@@ -945,16 +945,16 @@ class TestKnockoutSoccerSource:
         matches = self._semi_finals_matches(sf_finished=True)
         matches.append(self._final_match("A", "C"))
         src = self._make_source(matches)
-        bracket = src._build_bracket(matches)
+        bracket = src._build_bracket(src._fetch_bracket_games())
         assert len(bracket["SEMI_FINALS"]) == 2  # two ties, two legs each
         assert len(bracket["FINAL"]) == 1
         # Each SF tie should have 2 legs ordered by matchday.
         for tie in bracket["SEMI_FINALS"]:
-            assert len(tie["legs"]) == 2
-            assert tie["legs"][0]["matchday"] == 1
-            assert tie["legs"][1]["matchday"] == 2
+            assert len(tie["games"]) == 2
+            assert tie["games"][0]["matchday"] == 1
+            assert tie["games"][1]["matchday"] == 2
             assert tie["teams"] == frozenset(
-                {leg["home"] for leg in tie["legs"]} | {leg["away"] for leg in tie["legs"]}
+                {leg["home"] for leg in tie["games"]} | {leg["away"] for leg in tie["games"]}
             )
 
     def test_build_bracket_wires_feeds_from_for_final(self):
@@ -964,7 +964,7 @@ class TestKnockoutSoccerSource:
         matches = self._semi_finals_matches(sf_finished=True)
         matches.append(self._final_match("A", "C"))
         src = self._make_source(matches)
-        bracket = src._build_bracket(matches)
+        bracket = src._build_bracket(src._fetch_bracket_games())
         final_tie = bracket["FINAL"][0]
         feeds_from = final_tie["feeds_from"]
         assert set(feeds_from.keys()) == {"A", "C"}
@@ -983,7 +983,7 @@ class TestKnockoutSoccerSource:
         matches = self._semi_finals_matches(sf_finished=False)
         matches.append(self._final_match("A", "C"))
         src = self._make_source(matches)
-        bracket = src._build_bracket(matches)
+        bracket = src._build_bracket(src._fetch_bracket_games())
         # SF ties are entry-level (no PLAYOFFS data in this test bracket).
         for sf_tie in bracket["SEMI_FINALS"]:
             assert sf_tie["is_entry_tie"] is True
@@ -1010,59 +1010,61 @@ class TestKnockoutSoccerSource:
         # Wrap penalties into the score dict per the FD.org shape.
         m["score"]["penalties"] = leg["penalties"]
         src = self._make_source([m])
-        bracket = src._build_bracket([m])
+        bracket = src._build_bracket(src._fetch_bracket_games())
         # The leg should have home_goals = 1 + 1 (pen boost) = 2; away unchanged.
-        leg_parsed = bracket["SEMI_FINALS"][0]["legs"][0]
+        leg_parsed = bracket["SEMI_FINALS"][0]["games"][0]
         assert leg_parsed["home_goals"] == 2
         assert leg_parsed["away_goals"] == 1
 
-    # ---------- _record_leg_into_tie ----------
+    # ---------- _record_game_into_tie ----------
 
-    def test_record_leg_into_tie_two_leg_aggregate(self):
+    def test_record_game_into_tie_two_leg_aggregate(self):
         src = self._make_source([])
         tie = {
             "stage": "SEMI_FINALS",
             "teams": frozenset({"A", "B"}),
             "leg1": None, "leg2": None,
-            "aggregate_winner": None, "aggregate_loser": None,
+            "winner": None, "loser": None,
         }
         # Leg 1: A home, A 2-0
-        src._record_leg_into_tie(tie, "A", "B", 2, 0, leg_index=1)
+        src._record_game_into_tie(tie, "A", "B", 2, 0, game_index=1)
         # Tie should be incomplete until leg 2 arrives.
-        assert tie["aggregate_winner"] is None
+        assert tie["winner"] is None
         # Leg 2: B home, A 1-1 (so B 1, A 1 in this leg)
-        src._record_leg_into_tie(tie, "B", "A", 1, 1, leg_index=2)
+        src._record_game_into_tie(tie, "B", "A", 1, 1, game_index=2)
         # A aggregate = 2 (home) + 1 (away leg 2) = 3; B aggregate = 0 + 1 = 1.
-        assert tie["aggregate_winner"] == "A"
-        assert tie["aggregate_loser"] == "B"
+        assert tie["winner"] == "A"
+        assert tie["loser"] == "B"
 
-    def test_record_leg_into_tie_single_leg_final(self):
+    def test_record_game_into_tie_single_leg_final(self):
         src = self._make_source([])
         tie = {
             "stage": "FINAL",
             "teams": frozenset({"A", "C"}),
             "leg1": None, "leg2": None,
-            "aggregate_winner": None, "aggregate_loser": None,
+            "winner": None, "loser": None,
         }
         # Single leg FINAL: A wins 2-1.
-        src._record_leg_into_tie(tie, "A", "C", 2, 1, leg_index=1)
+        src._record_game_into_tie(tie, "A", "C", 2, 1, game_index=1)
         # Single-leg tie completes after one record.
-        assert tie["aggregate_winner"] == "A"
-        assert tie["aggregate_loser"] == "C"
+        assert tie["winner"] == "A"
+        assert tie["loser"] == "C"
 
     # ---------- _advance_round_reached ----------
 
     def test_advance_round_reached_winner_loser_at_correct_depth(self):
         # SF winner advances to FINAL depth; loser stays at SEMI_FINALS depth.
+        src = self._make_source([])
         round_reached: dict = {}
-        KnockoutSoccerSource._advance_round_reached(round_reached, "A", "B", "SEMI_FINALS")
+        src._advance_round_reached(round_reached, "A", "B", "SEMI_FINALS")
         from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
         assert round_reached["A"] == KNOCKOUT_ROUND_DEPTH["FINAL"]  # advanced INTO FINAL
         assert round_reached["B"] == KNOCKOUT_ROUND_DEPTH["SEMI_FINALS"]
 
     def test_advance_round_reached_final_winner_becomes_winner(self):
+        src = self._make_source([])
         round_reached: dict = {}
-        KnockoutSoccerSource._advance_round_reached(round_reached, "A", "C", "FINAL")
+        src._advance_round_reached(round_reached, "A", "C", "FINAL")
         from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
         assert round_reached["A"] == KNOCKOUT_ROUND_DEPTH["WINNER"]
         assert round_reached["C"] == KNOCKOUT_ROUND_DEPTH["FINAL"]
@@ -1613,3 +1615,484 @@ class TestNcaamFullSeasonFilter:
         assert captured[0] == ("2025-11-01", "2025-12-31")
         assert captured[1] == ("2026-01-01", "2026-02-15")
         assert captured[2] == ("2026-02-16", "2026-04-30")
+
+
+# =====================================================================
+# Phase E: BestOfNSeriesSource — base bracket-state-machine tests
+# =====================================================================
+
+class TestBestOfNSeriesSource:
+    """Phase E refactor: best-of-N series base for NHL / NBA / MLB playoff
+    sources. Exercises the series state machine, immutability, and the
+    inherited terminal_outcomes cascade.
+
+    Uses a concrete minimal subclass that takes a pre-baked list of game
+    records so no HTTP touches the test path.
+    """
+
+    @staticmethod
+    def _make_source(games, series_length=7):
+        """Concrete BestOfNSeriesSource for testing. Inherits the bracket
+        machinery and trivially returns the pre-baked games list. Override
+        the LEAGUE_CONTEXTS hook so terminal_outcomes finds a context."""
+        from dispatcharr_ranked_matchups.sources.bracket import BestOfNSeriesSource
+
+        class _TestSrc(BestOfNSeriesSource):
+            KO_STAGES = ("R1", "R2", "CONF_FINAL", "CUP_FINAL")
+            SERIES_LENGTH = series_length
+
+            @property
+            def sport_prefix(self):
+                return "TEST"
+
+            @property
+            def sport_label(self):
+                return "Test Series"
+
+            def fetch_upcoming(self, days_ahead=7):
+                return []
+
+            def _league_context_code(self):
+                return "NHL_PO"
+
+            def _winner_advance_label(self, stage):
+                if stage == "CUP_FINAL":
+                    return "CUP_WINNER"
+                return None
+
+            def _fetch_bracket_games(self):
+                return list(games)
+
+        return _TestSrc()
+
+    @staticmethod
+    def _series_games(stage, top, bot, scores=None, series_letter="a"):
+        """Synthesize per-game records for a best-of-7 series. `scores`
+        is a list of (home_score, away_score) tuples; missing entries
+        become SCHEDULED. NHL home pattern (2-2-1-1-1): top hosts games
+        1, 2, 5, 7; bot hosts 3, 4, 6.
+        """
+        scores = scores or []
+        out = []
+        home_top = [True, True, False, False, True, False, True]
+        for i in range(7):
+            home = top if home_top[i] else bot
+            away = bot if home_top[i] else top
+            score = scores[i] if i < len(scores) else None
+            if score is None:
+                out.append({
+                    "game_id": f"{series_letter}-g{i+1}",
+                    "stage": stage,
+                    "matchday": i + 1,
+                    "home": home, "away": away,
+                    "home_goals": None, "away_goals": None,
+                    "status": "SCHEDULED",
+                    "start_time": None,
+                    "extra": {},
+                })
+            else:
+                out.append({
+                    "game_id": f"{series_letter}-g{i+1}",
+                    "stage": stage,
+                    "matchday": i + 1,
+                    "home": home, "away": away,
+                    "home_goals": score[0], "away_goals": score[1],
+                    "status": "FINISHED",
+                    "start_time": None,
+                    "extra": {},
+                })
+        return out
+
+    # ---------- series_clinching_wins ----------
+
+    def test_series_clinching_wins_best_of_seven(self):
+        src = self._make_source([], series_length=7)
+        assert src.series_clinching_wins == 4
+
+    def test_series_clinching_wins_best_of_five(self):
+        src = self._make_source([], series_length=5)
+        assert src.series_clinching_wins == 3
+
+    # ---------- new tie record shape ----------
+
+    def test_new_tie_record_initializes_zero_wins_per_team(self):
+        src = self._make_source([])
+        tie = src._new_tie_record({"teams": frozenset({"A", "B"}), "stage": "R1"})
+        assert tie["series_wins"] == {"A": 0, "B": 0}
+        assert tie["winner"] is None
+        assert tie["loser"] is None
+        assert tie["games_recorded"] == frozenset()
+
+    # ---------- record_game_into_tie ----------
+
+    def test_record_game_advances_winner_count(self):
+        src = self._make_source([])
+        tie = src._new_tie_record({"teams": frozenset({"A", "B"}), "stage": "R1"})
+        # A wins as home in game 1
+        src._record_game_into_tie(tie, "A", "B", 3, 1, game_index=1)
+        assert tie["series_wins"]["A"] == 1
+        assert tie["series_wins"]["B"] == 0
+        assert tie["winner"] is None
+
+    def test_record_game_resolves_series_at_four_wins(self):
+        src = self._make_source([])
+        tie = src._new_tie_record({"teams": frozenset({"A", "B"}), "stage": "R1"})
+        # A wins games 1-4; series clinched after game 4.
+        src._record_game_into_tie(tie, "A", "B", 3, 1, game_index=1)
+        assert tie["winner"] is None
+        src._record_game_into_tie(tie, "A", "B", 2, 0, game_index=2)
+        assert tie["winner"] is None
+        src._record_game_into_tie(tie, "B", "A", 1, 4, game_index=3)
+        assert tie["winner"] is None
+        src._record_game_into_tie(tie, "B", "A", 2, 5, game_index=4)
+        assert tie["winner"] == "A"
+        assert tie["loser"] == "B"
+
+    def test_record_game_ignored_after_series_resolved(self):
+        src = self._make_source([])
+        tie = src._new_tie_record({"teams": frozenset({"A", "B"}), "stage": "R1"})
+        # Series ends 4-0.
+        for i in range(4):
+            src._record_game_into_tie(tie, "A", "B", 3, 1, game_index=i + 1)
+        wins_after_clinch = dict(tie["series_wins"])
+        # An extra game should be a no-op (defense against simulator double-applying).
+        src._record_game_into_tie(tie, "A", "B", 1, 0, game_index=5)
+        assert tie["series_wins"] == wins_after_clinch
+
+    # ---------- initial_state from real-shape games ----------
+
+    def test_initial_state_pre_populates_finished_series(self):
+        # R1: A vs B, A wins 4-2. NHL home pattern: A hosts games 1, 2, 5, 7;
+        # B hosts 3, 4, 6. Scores are (home_score, away_score), so when B
+        # hosts and A wins, the row reads home < away.
+        r1_games = self._series_games(
+            "R1", "A", "B",
+            scores=[
+                (3, 1),  # G1 A-home: A wins  (A: 1, B: 0)
+                (2, 0),  # G2 A-home: A wins  (A: 2, B: 0)
+                (1, 4),  # G3 B-home: A wins  (A: 3, B: 0)
+                (3, 1),  # G4 B-home: B wins  (A: 3, B: 1)
+                (1, 3),  # G5 A-home: B wins  (A: 3, B: 2)
+                (1, 4),  # G6 B-home: A wins  (A: 4, B: 2) — A clinches
+            ],
+            series_letter="a",
+        )
+        src = self._make_source(r1_games)
+        state = src.initial_state()
+        tk = ("R1", frozenset({"A", "B"}))
+        tie = state["_tie_results"][tk]
+        assert tie["winner"] == "A"
+        assert tie["loser"] == "B"
+        assert tie["series_wins"]["A"] == 4
+        assert tie["series_wins"]["B"] == 2
+        # round_reached: winner depth = 1 (R2 entry); loser depth = 0 (R1).
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"]["A"] == KNOCKOUT_ROUND_DEPTH["R2"]
+        assert state["_round_reached"]["B"] == KNOCKOUT_ROUND_DEPTH["R1"]
+        # 6 games applied; the 7th game record (a placeholder game 7) is
+        # SCHEDULED, so not in _applied.
+        assert state["_applied"] == frozenset({"a-g1", "a-g2", "a-g3", "a-g4", "a-g5", "a-g6"})
+
+    def test_remaining_matches_emits_next_unplayed_in_active_series(self):
+        # R1 series at 2-1 after game 3; games 4-7 are SCHEDULED.
+        r1_games = self._series_games(
+            "R1", "A", "B",
+            scores=[(3, 1), (1, 2), (4, 2)],  # A leads 2-1
+            series_letter="a",
+        )
+        src = self._make_source(r1_games)
+        state = src.initial_state()
+        remaining = src.remaining_matches(state)
+        # Expected: games 4 through 7 emitted (since series can still
+        # extend to game 7).
+        assert len(remaining) == 4
+        matchdays = sorted(g.extra["matchday"] for g in remaining)
+        assert matchdays == [4, 5, 6, 7]
+
+    def test_remaining_matches_stops_emitting_once_series_clinched(self):
+        # Series at 4-0 after game 4; nothing should remain even if games 5-7 are scheduled.
+        # Games 1/2 at A (home_score>away_score = A wins); games 3/4 at B
+        # (home_score<away_score = A wins as away).
+        r1_games = self._series_games(
+            "R1", "A", "B",
+            scores=[(3, 1), (2, 0), (1, 4), (2, 5)],  # A sweeps 4-0
+            series_letter="a",
+        )
+        src = self._make_source(r1_games)
+        state = src.initial_state()
+        remaining = src.remaining_matches(state)
+        # Series is over, no games remain for this tie.
+        assert len(remaining) == 0
+
+    # ---------- apply_result immutability + advancement ----------
+
+    def test_apply_result_does_not_mutate_input_state(self):
+        r1_games = self._series_games(
+            "R1", "A", "B",
+            scores=[(3, 1), (1, 2)],  # tied 1-1 after game 2
+            series_letter="a",
+        )
+        src = self._make_source(r1_games)
+        state = src.initial_state()
+        original_wins = dict(state["_tie_results"][("R1", frozenset({"A", "B"}))]["series_wins"])
+
+        # Sample a game 3 result via the synthesized GameRow.
+        remaining = src.remaining_matches(state)
+        target = next(g for g in remaining if g.extra["matchday"] == 3)
+        from dispatcharr_ranked_matchups.sources.base import MatchResult
+        result = MatchResult(home_goals=4, away_goals=1)  # B-host -> B beats A
+        new_state = src.apply_result(state, target, result)
+
+        # Input state untouched.
+        assert state["_tie_results"][("R1", frozenset({"A", "B"}))]["series_wins"] == original_wins
+        # New state advanced: B now has 2 wins, A still 1.
+        new_wins = new_state["_tie_results"][("R1", frozenset({"A", "B"}))]["series_wins"]
+        # target.home == B, away == A; B won 4-1; B is target.home so increments B.
+        assert new_wins[target.home] == 2
+        assert new_wins[target.away] == 1
+
+    def test_apply_result_advances_round_reached_on_series_clinch(self):
+        # 3-0 series, sample game 4 with away (A) winning to clinch.
+        # Game 3 (B-home): A wins as away → home_score < away_score.
+        r1_games = self._series_games(
+            "R1", "A", "B",
+            scores=[(3, 1), (2, 0), (1, 4)],  # A leads 3-0
+            series_letter="a",
+        )
+        src = self._make_source(r1_games)
+        state = src.initial_state()
+        # Before clinch: A reached depth 0 (R1), nothing advanced yet.
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"].get("A", -1) == -1  # haven't won the series yet
+
+        # Game 4 hosted by B; A beats them on the road to clinch.
+        remaining = src.remaining_matches(state)
+        g4 = next(g for g in remaining if g.extra["matchday"] == 4)
+        from dispatcharr_ranked_matchups.sources.base import MatchResult
+        # Whoever is away wins (that's A). Game 4 is hosted by B per the
+        # 2-2-1-1-1 pattern. So home=B, away=A, A wins.
+        assert g4.home == "B"
+        assert g4.away == "A"
+        result = MatchResult(home_goals=1, away_goals=3)  # A wins on the road
+        new_state = src.apply_result(state, g4, result)
+        assert new_state["_round_reached"]["A"] == KNOCKOUT_ROUND_DEPTH["R2"]
+        assert new_state["_round_reached"]["B"] == KNOCKOUT_ROUND_DEPTH["R1"]
+
+    # ---------- terminal_outcomes label cascade ----------
+
+    def test_terminal_outcomes_cascades_via_round_reached(self):
+        # A sweeps 4-0. Games 1/2 at A; games 3/4 at B (A wins as away).
+        r1_games = self._series_games(
+            "R1", "A", "B",
+            scores=[(3, 1), (2, 0), (1, 4), (2, 5)],  # A 4-0
+            series_letter="a",
+        )
+        src = self._make_source(r1_games)
+        state = src.initial_state()
+        # A reached depth 1 (R2). LEAGUE_CONTEXTS["NHL_PO"] cutoffs:
+        # R2=1, CONF_FINAL=2, CUP_FINAL=3, CUP_WINNER=4.
+        # A's depth=1 ≥ R2 cutoff (1) so "round_2" fires; nothing else.
+        outcomes = src.terminal_outcomes(state)
+        assert "round_2" in outcomes["A"]
+        assert "conf_final" not in outcomes["A"]
+        assert "cup_final" not in outcomes["A"]
+        # B at depth 0 (R1) — no bands fire (cutoffs all >= 1).
+        assert outcomes["B"] == []
+
+
+# =====================================================================
+# Phase E: NhlRegularSource — standings_points + OT/SO classification
+# =====================================================================
+
+class TestNhlRegularSource:
+    """NhlRegularSource uses standings points (not raw wins) as the
+    importance threshold field. Verifies the W/OTL/L → 2/1/0 standings_
+    points mapping plus the OT/SO classification in sample_result.
+    """
+
+    @staticmethod
+    def _make_source(games):
+        from dispatcharr_ranked_matchups.sources.nhl import NhlRegularSource
+        src = NhlRegularSource(season="20252026")
+        src._all_games_cache = games
+        return src
+
+    @staticmethod
+    def _game(gid, home, away, hp, ap, status="FINISHED", last_period="REG"):
+        return {
+            "id": gid,
+            "home": home, "away": away,
+            "home_points": hp if status == "FINISHED" else None,
+            "away_points": ap if status == "FINISHED" else None,
+            "status": status,
+            "start_time": None,
+            "extra": {"last_period_type": last_period},
+        }
+
+    # ---------- standings_points credit ----------
+
+    def test_regulation_win_credits_two_points_to_winner_zero_to_loser(self):
+        src = self._make_source([self._game(1, "A", "B", 4, 2, last_period="REG")])
+        state = src.initial_state()
+        assert state["_teams"]["A"]["standings_points"] == 2
+        assert state["_teams"]["B"]["standings_points"] == 0
+
+    def test_ot_loss_credits_one_point_to_loser(self):
+        src = self._make_source([self._game(1, "A", "B", 4, 3, last_period="OT")])
+        state = src.initial_state()
+        assert state["_teams"]["A"]["standings_points"] == 2
+        assert state["_teams"]["B"]["standings_points"] == 1
+
+    def test_shootout_loss_credits_one_point_to_loser(self):
+        src = self._make_source([self._game(1, "A", "B", 4, 3, last_period="SO")])
+        state = src.initial_state()
+        assert state["_teams"]["A"]["standings_points"] == 2
+        assert state["_teams"]["B"]["standings_points"] == 1
+
+    def test_missing_last_period_defaults_to_regulation(self):
+        # Defensive: api-web sometimes omits gameOutcome for very early
+        # postponed games; we treat the absence as REG (loser gets 0).
+        g = self._game(1, "A", "B", 4, 3)
+        g["extra"] = {}  # no last_period_type
+        src = self._make_source([g])
+        state = src.initial_state()
+        assert state["_teams"]["B"]["standings_points"] == 0
+
+    # ---------- sample_result OT/SO tagging ----------
+
+    def test_sample_result_tags_period_type(self):
+        import random
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        from datetime import datetime, timezone
+        src = self._make_source([])
+        # Force a regulation tie via skewed strengths -> very low lambda.
+        # Easier: monkey-patch the random calls directly.
+        strengths = {"A": {"pf_per_game": 3.0, "pa_per_game": 3.0},
+                     "B": {"pf_per_game": 3.0, "pa_per_game": 3.0}}
+        gr = GameRow(
+            sport_prefix="NHL", sport_label="NHL",
+            home="A", away="B", rank_home=None, rank_away=None,
+            start_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        # Try multiple seeds: at least one out of 30 should land on a
+        # regulation tie via Poisson(3) which has substantial mass on
+        # ties. Confirm that when a tie is sampled, the extra is tagged.
+        seen_periods = set()
+        for seed in range(60):
+            rng = random.Random(seed)
+            res = src.sample_result({}, gr, strengths, rng)
+            lp = (res.extra or {}).get("last_period_type")
+            assert lp in ("REG", "OT", "SO")
+            seen_periods.add(lp)
+        # OT should appear; SO is rarer (10%) so may or may not.
+        assert "REG" in seen_periods
+        assert "OT" in seen_periods
+
+    # ---------- terminal_outcomes uses points_count ----------
+
+    def test_terminal_outcomes_uses_standings_points_for_buckets(self):
+        # Synthesize a team with exactly 100 standings points across
+        # 50 wins (REG) → 100 standings_points.
+        games = []
+        for i in range(50):
+            games.append(self._game(i, "A", "B", 4, 2, last_period="REG"))
+        src = self._make_source(games)
+        state = src.initial_state()
+        # A has 100 standings_points. NHL bands: 95 / 100 / 110 / 125.
+        outcomes = src.terminal_outcomes(state)
+        assert "playoff_bubble" in outcomes["A"]      # 100 >= 95
+        assert "playoff_secured" in outcomes["A"]     # 100 >= 100
+        assert "division_pace" not in outcomes["A"]   # 100 < 110
+        # B has 0 standings_points; no bands.
+        assert outcomes["B"] == []
+
+
+# =====================================================================
+# Phase E: NhlPlayoffSource — bracket inference + round_reached cascade
+# =====================================================================
+
+class TestNhlPlayoffSource:
+    """NhlPlayoffSource inherits BestOfNSeriesSource. These tests cover
+    the NHL-specific bits: _NHL_ROUND_TO_STAGE mapping, _winner_advance_
+    label for CUP_FINAL → CUP_WINNER, and terminal_outcomes label set.
+    """
+
+    @staticmethod
+    def _make_source(bracket_games):
+        from dispatcharr_ranked_matchups.sources.nhl import NhlPlayoffSource
+        src = NhlPlayoffSource(season="20252026")
+        src._bracket_games_cache = bracket_games
+        return src
+
+    def test_supports_importance(self):
+        src = self._make_source([])
+        assert src.supports_importance is True
+
+    def test_outcome_labels_uses_nhl_po_thresholds(self):
+        src = self._make_source([])
+        labels = src.outcome_labels
+        assert "round_2" in labels
+        assert "conf_final" in labels
+        assert "cup_final" in labels
+        assert "cup_winner" in labels
+
+    def test_winner_advance_label_for_cup_final(self):
+        src = self._make_source([])
+        assert src._winner_advance_label("CUP_FINAL") == "CUP_WINNER"
+        # Earlier rounds advance to stage_depth + 1 (None signals default).
+        assert src._winner_advance_label("R1") is None
+        assert src._winner_advance_label("CONF_FINAL") is None
+
+    def test_cup_final_winner_reaches_cup_winner_depth(self):
+        # CUP_FINAL series ends 4-0 for Champion. Games 1/2 hosted by
+        # Champion (top seed); games 3/4 hosted by Finalist. Champion
+        # wins as away in games 3/4 → home_score < away_score.
+        cf_games = TestBestOfNSeriesSource._series_games(
+            "CUP_FINAL", "ChampionTeam", "FinalistTeam",
+            scores=[(4, 1), (3, 0), (0, 3), (2, 5)],
+            series_letter="cf",
+        )
+        src = self._make_source(cf_games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        # Winner reached CUP_WINNER depth.
+        assert state["_round_reached"]["ChampionTeam"] == KNOCKOUT_ROUND_DEPTH["CUP_WINNER"]
+        # Loser stuck at CUP_FINAL depth.
+        assert state["_round_reached"]["FinalistTeam"] == KNOCKOUT_ROUND_DEPTH["CUP_FINAL"]
+        # terminal_outcomes: ChampionTeam gets all four bands.
+        outcomes = src.terminal_outcomes(state)
+        assert set(outcomes["ChampionTeam"]) == {"round_2", "conf_final", "cup_final", "cup_winner"}
+        # FinalistTeam gets everything except cup_winner.
+        assert set(outcomes["FinalistTeam"]) == {"round_2", "conf_final", "cup_final"}
+
+    def test_set_regular_season_strengths_passes_through(self):
+        src = self._make_source([])
+        # Default: no regular-season strengths seeded.
+        assert src.estimate_strengths() == {}
+        # After seeding: should return what was passed.
+        src.set_regular_season_strengths({"Avalanche": {"pf_per_game": 3.5, "pa_per_game": 2.4}})
+        s = src.estimate_strengths()
+        assert s["Avalanche"]["pf_per_game"] == 3.5
+
+
+# =====================================================================
+# Phase E: PointsBasedSportSource _count_field generalization
+# =====================================================================
+
+class TestPointsBasedSourceCountField:
+    """The _count_field class attr lets subclasses choose between
+    "wins" (CFB/CBB/NBA/MLB) and "standings_points" (NHL) for
+    terminal_outcomes bucketing."""
+
+    def test_default_count_field_is_wins(self):
+        from dispatcharr_ranked_matchups.sources.points_based import PointsBasedSportSource
+        assert PointsBasedSportSource._count_field == "wins"
+
+    def test_nhl_regular_overrides_count_field(self):
+        from dispatcharr_ranked_matchups.sources.nhl import NhlRegularSource
+        assert NhlRegularSource._count_field == "standings_points"
+
+    def test_ncaaf_keeps_wins_count_field(self):
+        from dispatcharr_ranked_matchups.sources.ncaaf import NcaafSource
+        # CFBD source inherits PointsBasedSportSource without overriding.
+        assert NcaafSource._count_field == "wins"

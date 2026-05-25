@@ -50,8 +50,11 @@ downstream is sport-agnostic.
 | `simulation.py` | Sport-agnostic Monte Carlo importance per Lahvička (2012). `monte_carlo_importance()` for single (team, outcome); `monte_carlo_importance_batch()` shares one set of N season simulations across K queries. `kendall_tau_c()` is the ordinal-association measure. |
 | `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` → Dispatcharr channel via EPG `ProgramData`. Two-stage: regex (both team keywords in EPG title) → Claude batched fallback. |
 | `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Phase C importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. |
+| `sources/bracket.py` | `BracketSportSource` shared state machine for all knockout/playoff sports (bracket inference, `_round_reached`, `terminal_outcomes` cascade). Two concrete tie shapes: `AggregateLegSource` (two-leg, used by `KnockoutSoccerSource`) and `BestOfNSeriesSource` (best-of-N series, used by `NhlPlayoffSource` and future NBA/MLB playoff sources). |
+| `sources/points_based.py` | Shared Monte Carlo for round-robin point-scoring sports (NCAAF, NCAAM, NHL regular). Subclasses set `_count_field` to choose between `"wins"` (CFB/CBB) and `"standings_points"` (NHL) for terminal_outcomes bucketing. |
 | `sources/ncaaf.py` | CFBD `/rankings`, `/games`, `/lines` calls. CFBD uses **camelCase** (homeTeam, awayTeam) — easy gotcha. |
-| `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. `SoccerSource` is league-shaped (PL, ELC); `KnockoutSoccerSource` (Phase D.1) is bracket-shaped (UCL) with two-leg aggregates, ET/penalty sampling, and feeds_from-via-participant inference so the simulator can substitute different bracket paths. Routed by `LEAGUE_CONTEXTS[fd_code].format`. |
+| `sources/nhl.py` | api-web.nhle.com (official, no key). `NhlRegularSource` uses standings points (regulation win = 2, OT/SO loss = 1, regulation loss = 0). `NhlPlayoffSource` is a best-of-7 BracketSportSource. The two cross-feed: NhlPlayoffSource borrows regular-season strengths via `set_regular_season_strengths()` so cup-final sampling uses the 82-game baseline. |
+| `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. `SoccerSource` is league-shaped (PL, ELC); `KnockoutSoccerSource` (Phase D.1) is bracket-shaped (UCL) — multi-inherits from `AggregateLegSource` (bracket state machine) + `SoccerSource` (FD.org fetch / strengths) with the MRO `K → AggregateLegSource → BracketSportSource → SoccerSource → SportSource`. Routed by `LEAGUE_CONTEXTS[fd_code].format`. |
 
 State (gitignored, lives in `<plugin_dir>/`):
 - `cache.json` — last refresh result (curated game list with score breakdowns)
@@ -87,7 +90,7 @@ differentiation in the typical 4-15 range.
 | `rank_pair` | Both teams ranked / one ranked | 1.0 |
 | `favorite` | One of user's favorite teams plays | 6.0 (flat, Phase A) |
 | `close_game` | Coinflip-ness in [0, 1]: devigged h2h moneyline probabilities for soccer, normalized point spread for NCAAF / NCAAM | 3.0 (Phase B.3) |
-| **`importance`** | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands (title / UCL / Europa / relegation / promotion for leagues; round_of_16 / quarterfinal / semifinal / final / winner for UCL knockouts). Locked-in outcomes contribute 0 (mathematical elimination respected). | **3.0 (Phase C.3 / D.1)** |
+| **`importance`** | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands. Soccer leagues (PL/ELC): title/UCL/Europa/relegation/promotion (format=`league`). UCL knockouts: round_of_16/QF/SF/F/winner (format=`knockout`). NCAAF/NCAAM: win-count bands (format=`win_count`). NHL regular season: standings-point bands (95+/100+/110+/125+, format=`points_count`). NHL Stanley Cup Playoffs: R2/Conf Final/Cup Final/Champion (format=`knockout`). Locked-in outcomes contribute 0 (mathematical elimination respected). | **3.0 (Phase C.3 / D.1 / E)** |
 | `tournament_stage` | Knockout cup game flat boost (R16 / QF / SF / FINAL). For UCL the importance signal already encodes round depth via consequence weights, so this is mostly redundant; kept for non-UCL cups not in LEAGUE_CONTEXTS yet. | 1.5 |
 | `narrative` | LLM-judged narrative score | 0.0 (off by default) |
 
@@ -128,8 +131,17 @@ Shared CFBD key already covers basketball (same Bearer token).
 For league-based sports (where standings position is the "rank"), populate
 `extra["fd_competition_code"]` to a code in `scoring.LEAGUE_CONTEXTS` so
 the `importance` signal knows your thresholds and consequence weights.
-NCAAF and NCAAM use codes `"CFB"` / `"CBB"` with `format="win_count"` —
-cutoffs are minimum win counts rather than position cutoffs.
+Four formats exist for the threshold cutoffs:
+- `format="league"` (PL, ELC): int league position (1=top, lower=better).
+- `format="knockout"` (CL, NHL_PO): str round id (e.g., `LAST_16`, `CUP_FINAL`).
+- `format="win_count"` (CFB, CBB): int MINIMUM win count.
+- `format="points_count"` (NHL): int MINIMUM standings points — needed
+  for sports with OT/SO bonus points where raw wins mislead.
+
+`PointsBasedSportSource` subclasses set `_count_field` to choose between
+`"wins"` (default; CFB/CBB/NBA/MLB) and `"standings_points"` (NHL). The
+state's `_teams[team][<_count_field>]` is what `terminal_outcomes`
+buckets against the threshold cutoff.
 
 ## Known gotchas / lessons learned
 

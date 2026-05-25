@@ -49,6 +49,13 @@
       "help_text": "Knockout/group stage. Position-as-rank doesn't apply cleanly so favorites + odds carry the signal."
     },
     {
+      "id": "enable_nhl",
+      "type": "boolean",
+      "label": "NHL (regular season + Stanley Cup Playoffs)",
+      "default": false,
+      "help_text": "Regular season uses standings points (95+ bubble, 100+ playoff-secured, 110+ division pace, 125+ Presidents' Trophy). Playoffs are best-of-7 each round. No API key required — official api-web.nhle.com."
+    },
+    {
       "id": "_section_keys",
       "type": "info",
       "label": "API Keys",

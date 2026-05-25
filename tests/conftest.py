@@ -11,8 +11,10 @@ import importlib.util
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PARENT = os.path.dirname(REPO_ROOT)
 
-# Register the package under its directory name so absolute imports work.
-PKG_NAME = os.path.basename(REPO_ROOT)
+# Register the package under the canonical name so absolute imports
+# work even when the repo lives in a worktree whose directory name
+# isn't `dispatcharr_ranked_matchups` (e.g., `dispatcharr_ranked_matchups-phase-e`).
+PKG_NAME = "dispatcharr_ranked_matchups"
 if PKG_NAME not in sys.modules:
     spec = importlib.util.spec_from_file_location(
         PKG_NAME,
