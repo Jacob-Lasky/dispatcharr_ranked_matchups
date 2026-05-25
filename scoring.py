@@ -169,6 +169,15 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     "CONF_FINAL":      2,  # Conference finals (2 series)
     "CUP_FINAL":       3,  # Stanley Cup Final (1 series)
     "CUP_WINNER":      4,  # Stanley Cup champion
+    # MLB postseason (Phase F): Wild Card best-of-3 (6 series across both
+    # leagues), Division Series best-of-5 (4 series), LCS best-of-7 (2
+    # series), World Series best-of-7. WC and LDS depths differ — a team
+    # that wins the WC reaches LDS, etc.
+    "WC":              0,  # Wild Card Series (entry round)
+    "LDS":             1,  # Division Series
+    "LCS":             2,  # League Championship Series
+    "WS":              3,  # World Series
+    "WS_WINNER":       4,  # World Series champion
 }
 
 
@@ -400,6 +409,39 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             ("CUP_WINNER", "cup_winner",   10.0),
         ],
         boundary_summary="R1 → R2 → Conf Final → Cup Final → Champion",
+    ),
+    # Phase F: MLB regular season. 162-game season; the playoff bubble has
+    # historically settled around 85-86 wins (3rd Wild Card cutoff post-
+    # 2022 expansion), with division winners typically in the 90-100 win
+    # range. 105+ has been a "best record in baseball" outlier most years.
+    # Threshold field is `wins` (LEAGUE_CONTEXTS["MLB"].format="win_count").
+    "MLB": LeagueContext(
+        code="MLB", matchdays_total=162, format="win_count",
+        thresholds=[
+            (85,  "playoff_bubble",   1.5),  # 3rd wild card cutoff
+            (90,  "playoff_secured",  2.5),  # comfortable in
+            (95,  "division_pace",    4.0),  # division-winner pace
+            (105, "elite",            5.0),  # best-record-in-baseball pace
+        ],
+        boundary_summary="85+ wins → bubble · 90+ → comfortable · 95+ → div lead · 105+ → elite",
+    ),
+    # Phase F: MLB postseason. Series lengths vary (WC=3, LDS=5, LCS=7,
+    # WS=7), so the leverage ramp into the World Series is sharper than
+    # NHL's Stanley Cup ramp — fewer total games means each single game
+    # carries more series-decision weight. Weights tuned to put a Game 7
+    # World Series at the top of the season's importance distribution
+    # while keeping Wild Card games meaningful (otherwise a single-elim
+    # WC game would read as low-stakes despite being a season-on-the-
+    # line moment).
+    "MLB_PO": LeagueContext(
+        code="MLB_PO", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("LDS",       "division_series",  1.0),
+            ("LCS",       "championship",     2.5),
+            ("WS",        "world_series",     5.0),
+            ("WS_WINNER", "ws_winner",       10.0),
+        ],
+        boundary_summary="WC → LDS → LCS → WS → Champion",
     ),
 }
 

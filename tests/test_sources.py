@@ -1849,15 +1849,18 @@ class TestBestOfNSeriesSource:
                 })
         return out
 
-    # ---------- series_clinching_wins ----------
+    # ---------- _clinching_wins_for_stage (uniform-length) ----------
 
-    def test_series_clinching_wins_best_of_seven(self):
+    def test_clinching_wins_uniform_best_of_seven(self):
         src = self._make_source([], series_length=7)
-        assert src.series_clinching_wins == 4
+        # Uniform sport: every stage returns ceil(7/2) = 4.
+        for stage in src.KO_STAGES:
+            assert src._clinching_wins_for_stage(stage) == 4
 
-    def test_series_clinching_wins_best_of_five(self):
+    def test_clinching_wins_uniform_best_of_five(self):
         src = self._make_source([], series_length=5)
-        assert src.series_clinching_wins == 3
+        for stage in src.KO_STAGES:
+            assert src._clinching_wins_for_stage(stage) == 3
 
     # ---------- new tie record shape ----------
 
@@ -2736,3 +2739,302 @@ class TestNhlCupFinalPlaceholder:
             cup_teams.add(g.away)
         assert cup_teams == {"Colorado", "Carolina"}, \
             f"CUP_FINAL should be CF winners (Colorado vs Carolina), got {cup_teams}"
+
+
+# =====================================================================
+# Phase F: MLB
+# =====================================================================
+
+class TestBestOfNSeriesPerStageLength:
+    """Phase F refactor: BestOfNSeriesSource grows _series_length_for_stage
+    so MLB's mixed series lengths (WC=3, LDS=5, LCS=7, WS=7) can coexist
+    in one source. NHL keeps the uniform-7 contract for free because the
+    default implementation returns the class-level SERIES_LENGTH.
+    """
+
+    def test_default_per_stage_returns_class_series_length(self):
+        from dispatcharr_ranked_matchups.sources.bracket import BestOfNSeriesSource
+
+        class _Default(BestOfNSeriesSource):
+            KO_STAGES = ("R1", "R2", "CONF_FINAL", "CUP_FINAL")
+            SERIES_LENGTH = 7
+            @property
+            def sport_prefix(self): return "X"
+            @property
+            def sport_label(self): return "X"
+            def fetch_upcoming(self, days_ahead=7): return []
+            def _league_context_code(self): return "NHL_PO"
+            def _fetch_bracket_games(self): return []
+
+        src = _Default()
+        # Uniform-length sport: every stage answers the class value.
+        for stage in src.KO_STAGES:
+            assert src._series_length_for_stage(stage) == 7
+            assert src._clinching_wins_for_stage(stage) == 4
+
+    def test_subclass_can_override_per_stage(self):
+        from dispatcharr_ranked_matchups.sources.bracket import BestOfNSeriesSource
+
+        class _Mixed(BestOfNSeriesSource):
+            KO_STAGES = ("WC", "LDS", "LCS", "WS")
+            SERIES_LENGTH = 7
+            _STAGE_LENGTHS = {"WC": 3, "LDS": 5, "LCS": 7, "WS": 7}
+            @property
+            def sport_prefix(self): return "X"
+            @property
+            def sport_label(self): return "X"
+            def fetch_upcoming(self, days_ahead=7): return []
+            def _league_context_code(self): return "MLB_PO"
+            def _fetch_bracket_games(self): return []
+            def _series_length_for_stage(self, stage):
+                return self._STAGE_LENGTHS.get(stage, self.SERIES_LENGTH)
+
+        src = _Mixed()
+        assert src._series_length_for_stage("WC") == 3
+        assert src._series_length_for_stage("LDS") == 5
+        assert src._series_length_for_stage("LCS") == 7
+        assert src._series_length_for_stage("WS") == 7
+        # clinching wins = ceil(N/2)
+        assert src._clinching_wins_for_stage("WC") == 2
+        assert src._clinching_wins_for_stage("LDS") == 3
+        assert src._clinching_wins_for_stage("LCS") == 4
+        assert src._clinching_wins_for_stage("WS") == 4
+
+    def test_per_stage_clinching_resolves_short_series_early(self):
+        """A best-of-3 series resolves at 2 wins. Verify the record path
+        terminates correctly when the per-stage clinching count is smaller
+        than the class-level fallback (which would still return 4 for
+        SERIES_LENGTH=7).
+        """
+        from dispatcharr_ranked_matchups.sources.bracket import BestOfNSeriesSource
+
+        class _Mixed(BestOfNSeriesSource):
+            KO_STAGES = ("WC", "LDS")
+            SERIES_LENGTH = 7
+            @property
+            def sport_prefix(self): return "X"
+            @property
+            def sport_label(self): return "X"
+            def fetch_upcoming(self, days_ahead=7): return []
+            def _league_context_code(self): return "MLB_PO"
+            def _fetch_bracket_games(self): return []
+            def _series_length_for_stage(self, stage):
+                return 3 if stage == "WC" else 7
+
+        src = _Mixed()
+        tie = src._new_tie_record({"teams": frozenset({"A", "B"}), "stage": "WC"})
+        # A wins games 1 and 2 → series clinched at 2 wins.
+        src._record_game_into_tie(tie, "A", "B", 3, 1, game_index=1)
+        assert tie["winner"] is None
+        src._record_game_into_tie(tie, "A", "B", 4, 2, game_index=2)
+        assert tie["winner"] == "A"
+        assert tie["loser"] == "B"
+
+
+class TestMlbRegularSource:
+    """MlbRegularSource: PointsBasedSportSource with _count_field='wins'
+    and statsapi.mlb.com schedule endpoint as the data source."""
+
+    @staticmethod
+    def _make_source():
+        from dispatcharr_ranked_matchups.sources.mlb import MlbRegularSource
+        return MlbRegularSource(season=2026)
+
+    def test_identity(self):
+        src = self._make_source()
+        assert src.sport_prefix == "MLB"
+        assert src.sport_label == "MLB"
+        assert src.league_context_code == "MLB"
+        assert src._count_field == "wins"
+
+    def test_supports_importance(self):
+        assert self._make_source().supports_importance is True
+
+    def test_outcome_labels_uses_mlb_thresholds(self):
+        src = self._make_source()
+        labels = src.outcome_labels
+        assert "playoff_bubble" in labels
+        assert "playoff_secured" in labels
+        assert "division_pace" in labels
+        assert "elite" in labels
+
+    def test_mlb_thresholds_are_monotonic(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS["MLB"]
+        cuts = [t[0] for t in ctx.thresholds]
+        for i in range(len(cuts) - 1):
+            assert cuts[i] < cuts[i + 1], f"MLB band cutoffs must be monotonic: {cuts}"
+
+    def test_record_result_credits_winner_a_win(self):
+        # MLB regular season uses raw win count; no OT bonus.
+        src = self._make_source()
+        teams = {
+            "Cleveland Guardians": {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+            "Detroit Tigers":      {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0},
+        }
+        src._record_result_into_state(teams, "Cleveland Guardians", "Detroit Tigers", 5, 3)
+        assert teams["Cleveland Guardians"]["wins"] == 1
+        assert teams["Detroit Tigers"]["losses"] == 1
+        assert teams["Cleveland Guardians"]["pf"] == 5
+        assert teams["Cleveland Guardians"]["pa"] == 3
+
+    def test_terminal_outcomes_buckets_by_win_count(self):
+        src = self._make_source()
+        # Construct a state with teams at different win counts.
+        state = {
+            "_applied": frozenset(),
+            "_teams": {
+                "Cellar":   {"wins": 70, "losses": 92, "pf": 0, "pa": 0, "games_played": 162},
+                "Bubble":   {"wins": 86, "losses": 76, "pf": 0, "pa": 0, "games_played": 162},
+                "Comfy":    {"wins": 92, "losses": 70, "pf": 0, "pa": 0, "games_played": 162},
+                "DivLead":  {"wins": 98, "losses": 64, "pf": 0, "pa": 0, "games_played": 162},
+                "Elite":    {"wins": 108, "losses": 54, "pf": 0, "pa": 0, "games_played": 162},
+            },
+        }
+        outcomes = src.terminal_outcomes(state)
+        assert outcomes["Cellar"] == []  # below 85
+        assert set(outcomes["Bubble"]) == {"playoff_bubble"}
+        assert set(outcomes["Comfy"]) == {"playoff_bubble", "playoff_secured"}
+        assert set(outcomes["DivLead"]) == {"playoff_bubble", "playoff_secured", "division_pace"}
+        assert set(outcomes["Elite"]) == {"playoff_bubble", "playoff_secured", "division_pace", "elite"}
+
+
+class TestMlbPlayoffSource:
+    """MlbPlayoffSource: BestOfNSeriesSource subclass with per-stage
+    series lengths (WC=3, LDS=5, LCS=7, WS=7) and _winner_advance_label
+    mapping WS → WS_WINNER."""
+
+    @staticmethod
+    def _make_source(bracket_games=None):
+        from dispatcharr_ranked_matchups.sources.mlb import MlbPlayoffSource
+        src = MlbPlayoffSource(season=2025)
+        src._bracket_games_cache = bracket_games or []
+        return src
+
+    def test_identity(self):
+        src = self._make_source()
+        assert src.sport_prefix == "MLB"
+        assert "Postseason" in src.sport_label
+        assert src._league_context_code() == "MLB_PO"
+
+    def test_supports_importance(self):
+        assert self._make_source().supports_importance is True
+
+    def test_ko_stages(self):
+        src = self._make_source()
+        assert src.KO_STAGES == ("WC", "LDS", "LCS", "WS")
+
+    def test_series_lengths_per_stage(self):
+        src = self._make_source()
+        assert src._series_length_for_stage("WC") == 3
+        assert src._series_length_for_stage("LDS") == 5
+        assert src._series_length_for_stage("LCS") == 7
+        assert src._series_length_for_stage("WS") == 7
+
+    def test_winner_advance_label(self):
+        src = self._make_source()
+        assert src._winner_advance_label("WS") == "WS_WINNER"
+        # Earlier rounds default to stage_depth + 1 (returns None).
+        assert src._winner_advance_label("WC") is None
+        assert src._winner_advance_label("LDS") is None
+        assert src._winner_advance_label("LCS") is None
+
+    def test_outcome_labels_uses_mlb_po_thresholds(self):
+        src = self._make_source()
+        labels = src.outcome_labels
+        assert "division_series" in labels
+        assert "championship" in labels
+        assert "world_series" in labels
+        assert "ws_winner" in labels
+
+    def test_set_regular_season_strengths_passes_through(self):
+        src = self._make_source()
+        assert src.estimate_strengths() == {}
+        src.set_regular_season_strengths({"NYY": {"pf_per_game": 5.1, "pa_per_game": 3.9}})
+        s = src.estimate_strengths()
+        assert s["NYY"]["pf_per_game"] == 5.1
+
+    def test_wc_series_resolves_in_two_wins(self):
+        """Wild Card best-of-3: clinches at 2 wins. Synthesize a 2-0 sweep
+        and verify the winner reaches LDS depth."""
+        games = [
+            {"game_id": "wc1", "stage": "WC", "matchday": 1,
+             "home": "Detroit", "away": "Cleveland",
+             "home_goals": 5, "away_goals": 2,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "wc2", "stage": "WC", "matchday": 2,
+             "home": "Detroit", "away": "Cleveland",
+             "home_goals": 4, "away_goals": 1,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        # Detroit clinched, reaches LDS depth (one above WC).
+        assert state["_round_reached"]["Detroit"] == KNOCKOUT_ROUND_DEPTH["LDS"]
+        # Cleveland eliminated, capped at WC depth.
+        assert state["_round_reached"]["Cleveland"] == KNOCKOUT_ROUND_DEPTH["WC"]
+
+    def test_ws_winner_advance_reaches_synthetic_depth(self):
+        """A team winning the World Series reaches the WS_WINNER synthetic
+        depth (one above WS), and its terminal_outcomes contains every
+        post-WC band including ws_winner."""
+        games = [
+            {"game_id": "ws1", "stage": "WS", "matchday": 1,
+             "home": "Dodgers", "away": "Yankees",
+             "home_goals": 6, "away_goals": 3,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "ws2", "stage": "WS", "matchday": 2,
+             "home": "Dodgers", "away": "Yankees",
+             "home_goals": 4, "away_goals": 2,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "ws3", "stage": "WS", "matchday": 3,
+             "home": "Yankees", "away": "Dodgers",
+             "home_goals": 1, "away_goals": 4,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "ws4", "stage": "WS", "matchday": 4,
+             "home": "Yankees", "away": "Dodgers",
+             "home_goals": 2, "away_goals": 7,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"]["Dodgers"] == KNOCKOUT_ROUND_DEPTH["WS_WINNER"]
+        assert state["_round_reached"]["Yankees"] == KNOCKOUT_ROUND_DEPTH["WS"]
+        outcomes = src.terminal_outcomes(state)
+        # Champion gets every band.
+        assert set(outcomes["Dodgers"]) == {
+            "division_series", "championship", "world_series", "ws_winner",
+        }
+        # Loser misses ws_winner.
+        assert set(outcomes["Yankees"]) == {
+            "division_series", "championship", "world_series",
+        }
+
+    def test_fetch_bracket_games_maps_series_description_to_stage(self):
+        """The _SERIES_DESC_TO_STAGE table covers every postseason series
+        description statsapi.mlb.com emits. Verify the mapping for one
+        game of each kind, including both AL and NL variants."""
+        from dispatcharr_ranked_matchups.sources.mlb import _SERIES_DESC_TO_STAGE
+        # The mapping covers WC/LDS/LCS for both leagues and the unified WS.
+        expected = {
+            "AL Wild Card Series": "WC",
+            "NL Wild Card Series": "WC",
+            "AL Division Series": "LDS",
+            "NL Division Series": "LDS",
+            "AL Championship Series": "LCS",
+            "NL Championship Series": "LCS",
+            "World Series": "WS",
+        }
+        assert _SERIES_DESC_TO_STAGE == expected
+
+    def test_mlb_po_thresholds_are_depth_ordered(self):
+        """MLB_PO threshold stages must appear in KNOCKOUT_ROUND_DEPTH in
+        increasing depth order — otherwise the terminal_outcomes cascade
+        would emit out-of-order bands."""
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, KNOCKOUT_ROUND_DEPTH
+        ctx = LEAGUE_CONTEXTS["MLB_PO"]
+        depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
+        for i in range(len(depths) - 1):
+            assert depths[i] < depths[i + 1], f"MLB_PO bands out of depth order: {depths}"

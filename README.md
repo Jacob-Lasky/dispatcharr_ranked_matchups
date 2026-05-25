@@ -55,6 +55,7 @@ first in any IPTV client.
 | NCAA Men's Basketball | [CollegeBasketballData.com](https://collegebasketballdata.com/) (same key as CFBD) | Yes |
 | EPL / EFL Championship / UCL / Bundesliga / La Liga / Serie A / Ligue 1 / FIFA World Cup / UEFA EURO | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, 12 free comps) |
 | NHL (regular + Stanley Cup Playoffs) | [api-web.nhle.com](https://api-web.nhle.com/) (official, undocumented) | Yes (no key required) |
+| MLB (regular + postseason) | [statsapi.mlb.com](https://statsapi.mlb.com/) (official, undocumented) | Yes (no key required) |
 | NCAA Baseball (D1 regular season) | [site.api.espn.com](https://site.api.espn.com/) (unofficial) + D1Baseball.com poll | Yes (no key required) |
 | NCAA Soccer — Men's + Women's (D1 regular season) | [site.api.espn.com](https://site.api.espn.com/) (unofficial) + United Soccer Coaches Top 25 | Yes (no key required) |
 | Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |
