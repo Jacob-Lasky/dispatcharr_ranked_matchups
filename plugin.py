@@ -297,7 +297,9 @@ def _build_sources(settings: Dict[str, Any]):
         NbaPlayoffSource, NbaRegularSource,
         WnbaPlayoffSource, WnbaRegularSource,
         NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
-        NcaaBaseballSource, NcaaSoftballSource, NcaaSoccerSource,
+        NcaaBaseballRegularSource, NcaaBaseballPlayoffSource,
+        NcaaSoftballRegularSource, NcaaSoftballPlayoffSource,
+        NcaaSoccerSource,
         NcaafSource, NcaamSource,
         NflPlayoffSource, NflRegularSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
@@ -505,19 +507,38 @@ def _build_sources(settings: Dict[str, Any]):
             logger.warning("[ncaaw_basketball] could not seed playoff strengths: %s", exc)
         sources.append(ncaaw_po)
 
-    # Phase M: NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
-    # poll, no key needed. Win-count thresholds (30 / 35 / 40 / 45 / 50) drive
-    # the importance signal. CWS postseason bracket isn't modeled yet — postseason
-    # games still surface via favorite + rank-pair signal.
+    # Phase M / Phase O Phase 1: NCAA Division I baseball. Free ESPN
+    # unofficial API + D1Baseball poll. Regular-season win-count thresholds
+    # (30 / 35 / 40 / 45 / 50) drive the in-season importance signal.
+    # Phase O Phase 1 adds postseason coverage for the cleanly-labeled
+    # best-of-3 stages (Super Regional, MCWS Finals). Same pair-and-seed
+    # pattern as MLB: the playoff source borrows regular-season strengths
+    # from the regular source so postseason Poisson sampling reflects
+    # per-team scoring skill rather than the league-average prior.
     if settings.get("enable_ncaa_baseball", False):
-        sources.append(NcaaBaseballSource())
+        ncbsb_reg = NcaaBaseballRegularSource()
+        sources.append(ncbsb_reg)
+        ncbsb_po = NcaaBaseballPlayoffSource()
+        try:
+            ncbsb_po.set_regular_season_strengths(ncbsb_reg.estimate_strengths())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ncaa_baseball] could not seed playoff strengths: %s", exc)
+        sources.append(ncbsb_po)
 
-    # Phase N: NCAA Division I softball. Same structure as NCAA baseball
-    # (free ESPN unofficial, no key, win-count thresholds). WCWS bracket
-    # is double-elimination and not modeled in V1 — postseason games
-    # still surface via favorite + rank-pair signal.
+    # Phase N / Phase O Phase 1: NCAA Division I softball. Same structure
+    # as NCAA baseball — regular-season win-count + best-of-3 postseason
+    # (Super Regional, WCWS Finals) coverage. Phase 2 (filed) will model
+    # the Regional double-elim + 8-team WCWS bracket via chronological
+    # inference.
     if settings.get("enable_ncaa_softball", False):
-        sources.append(NcaaSoftballSource())
+        ncsbl_reg = NcaaSoftballRegularSource()
+        sources.append(ncsbl_reg)
+        ncsbl_po = NcaaSoftballPlayoffSource()
+        try:
+            ncsbl_po.set_regular_season_strengths(ncsbl_reg.estimate_strengths())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ncaa_softball] could not seed playoff strengths: %s", exc)
+        sources.append(ncsbl_po)
 
     # Phase O: NCAA D1 men's + women's soccer. One source class
     # parametrized on gender — same structure / endpoints / threshold

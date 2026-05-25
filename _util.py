@@ -36,6 +36,41 @@ def stable_hash_int(s: str) -> int:
     return int(digest[:16], 16)
 
 
+def extract_game_number_after_marker(headline: str, marker: str) -> Optional[int]:
+    """Extract the integer game number that immediately follows `marker` in
+    `headline`. Strips an "(if necessary)" trailer that ESPN attaches to
+    Game-3 placeholders on best-of-3 series. Returns None on any parse
+    failure so the caller can skip the event gracefully.
+
+    Shared between NCAA Baseball / Softball playoff sources where ESPN
+    encodes the game index in headlines like
+    "...Super Regional - Game 3 (if necessary)" or
+    "...Championship Final - Game 2".
+
+    Example:
+        >>> extract_game_number_after_marker(
+        ...     "NCAA Baseball Championship - Auburn Super Regional - Game 3 (if necessary)",
+        ...     "Super Regional - Game ",
+        ... )
+        3
+    """
+    if not headline or marker not in headline:
+        return None
+    tail = headline.split(marker, 1)[1].strip()
+    digits = []
+    for ch in tail:
+        if ch.isdigit():
+            digits.append(ch)
+        else:
+            break
+    if not digits:
+        return None
+    try:
+        return int("".join(digits))
+    except ValueError:
+        return None
+
+
 def poisson_sample(lam: float, rng: random.Random) -> int:
     """Draw one Poisson(lam) sample via Knuth's algorithm. Pure-Python (no
     numpy dependency, the plugin runs in Dispatcharr's lean container).
