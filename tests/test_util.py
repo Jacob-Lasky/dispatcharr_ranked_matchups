@@ -1,8 +1,12 @@
-"""Tests for _util.parse_iso_utc and stable_hash_int."""
+"""Tests for _util.parse_iso_utc, stable_hash_int, extract_game_number_after_marker."""
 
 from datetime import datetime, timezone
 
-from dispatcharr_ranked_matchups._util import parse_iso_utc, stable_hash_int
+from dispatcharr_ranked_matchups._util import (
+    extract_game_number_after_marker,
+    parse_iso_utc,
+    stable_hash_int,
+)
 
 
 class TestParseIsoUtc:
@@ -48,3 +52,51 @@ class TestStableHashInt:
         # caught by this assertion.
         # md5("test") = 098f6bcd4621d373cade4e832627b4f6
         assert stable_hash_int("test") == int("098f6bcd4621d373", 16)
+
+
+class TestExtractGameNumberAfterMarker:
+    """Shared helper extracted from NCAA Baseball / Softball playoff
+    sources. Pulls the integer game number that follows a marker string
+    in an ESPN headline, stripping the "(if necessary)" trailer."""
+
+    def test_simple_game_number(self):
+        assert extract_game_number_after_marker(
+            "Super Regional - Game 1", "Super Regional - Game "
+        ) == 1
+
+    def test_two_digit_game_number(self):
+        # Not currently observed in NCAA postseason (games are best-of-3
+        # or best-of-7 max), but the parser must handle multi-digit
+        # numbers if ESPN ever emits them.
+        assert extract_game_number_after_marker(
+            "Super Regional - Game 10", "Super Regional - Game "
+        ) == 10
+
+    def test_strips_if_necessary_trailer(self):
+        assert extract_game_number_after_marker(
+            "Super Regional - Game 3 (if necessary)", "Super Regional - Game "
+        ) == 3
+
+    def test_empty_headline(self):
+        assert extract_game_number_after_marker("", "Super Regional - Game ") is None
+
+    def test_marker_not_present(self):
+        # If the marker substring isn't in the headline, return None
+        # — caller is expected to try a different marker or skip.
+        assert extract_game_number_after_marker(
+            "Some other headline", "Super Regional - Game "
+        ) is None
+
+    def test_non_digit_after_marker(self):
+        # If the marker is followed by something non-numeric, return
+        # None rather than guess. ESPN has not been observed to do this,
+        # but graceful-degrade is the contract.
+        assert extract_game_number_after_marker(
+            "Super Regional - Game X", "Super Regional - Game "
+        ) is None
+
+    def test_marker_at_end_of_string(self):
+        # No digits to consume → None.
+        assert extract_game_number_after_marker(
+            "Super Regional - Game ", "Super Regional - Game "
+        ) is None

@@ -213,6 +213,29 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     "CONF":            2,  # Conference Championship
     "SB":              3,  # Super Bowl
     "SB_WINNER":       4,  # Super Bowl Champion
+    # NCAA Baseball College World Series (Phase O Phase 1: super-regional
+    # + finals only — both are cleanly-labeled best-of-3 in ESPN data).
+    # DO NOT treat the BSB_REG / MCWS depths as reachable yet: Phase 1
+    # only emits BSB_SR and MCWS_F ties, so a team caps at MCWS_F depth
+    # (advancing winners → MCWS_W). The intermediate depths exist in
+    # this table so the LEAGUE_CONTEXTS thresholds can label them with
+    # forward-compatible names; Phase 2 (#43) wires the regional
+    # double-elim and 8-team MCWS bracket via chronological inference
+    # so those depths actually fire.
+    "BSB_REG":         0,  # Regional (16 sites × 4 teams, double-elim; Phase 2)
+    "BSB_SR":          1,  # Super Regional (8 sites × 2 teams, best-of-3)
+    "MCWS":            2,  # 8-team double-elim in Omaha (Phase 2)
+    "MCWS_F":          3,  # Championship Final (best-of-3)
+    "MCWS_W":          4,  # MCWS Champion
+    # NCAA Softball Women's College World Series (Phase O Phase 1):
+    # parallel to baseball above. Same Phase 1 limitation — only SB_SR
+    # and WCWS_F are emitted by the source; the intermediate stages are
+    # forward-compat placeholders for Phase 2.
+    "SB_REG":          0,  # Regional (Phase 2)
+    "SB_SR":           1,  # Super Regional (best-of-3)
+    "WCWS":            2,  # 8-team double-elim in OKC (Phase 2)
+    "WCWS_F":          3,  # Championship Finals (best-of-3)
+    "WCWS_W":          4,  # WCWS Champion
 }
 
 
@@ -400,6 +423,26 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             (50, "overall_one_seed",  5.0),  # #1 overall seed conversation
         ],
         boundary_summary="30+ wins → tournament bubble · 35+ → at-large lock · 45+ → national seed",
+    ),
+    # Phase O Phase 1: NCAA Baseball postseason. Only the cleanly-labeled
+    # best-of-3 stages (Super Regional, MCWS Finals) are modeled. Regional
+    # double-elim and the 8-team MCWS bracket lack game-level metadata in
+    # ESPN's data and require chronological inference (Phase 2: #43).
+    # Threshold weights match the existing MLB_PO scale: each round-deeper
+    # reach roughly doubles consequence. The "omaha_bound" band fires for
+    # teams that win their Super Regional (depth 2 reached via the
+    # _winner_advance_label hop on MCWS_F), even though Phase 1 doesn't
+    # actually model the 8-team MCWS bracket — the depth label captures
+    # the structural reality that a Super Regional winner IS Omaha-bound.
+    "MCWS_PO": LeagueContext(
+        code="MCWS_PO", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("BSB_SR",  "super_regional",  1.5),
+            ("MCWS",    "omaha_bound",     3.0),
+            ("MCWS_F",  "cws_final",       5.0),
+            ("MCWS_W",  "cws_champion",   10.0),
+        ],
+        boundary_summary="Super Regional → Omaha → CWS Final → Champion",
     ),
     # Phase O: NCAA Division I soccer (Men's and Women's). Standings-points
     # format (3 W / 1 D / 0 L) because draws are common in college soccer
@@ -631,6 +674,20 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             (50, "no_1_overall",         5.0),
         ],
         boundary_summary="30+ wins → bubble · 35+ → at-large lock · 40+ → top regional · 45+ → national seed · 50+ → #1 overall",
+    ),
+    # Phase O Phase 1: NCAA Softball WCWS. Parallel to MCWS_PO above.
+    # Only Super Regional + WCWS Finals (best-of-3 stages with ESPN
+    # game numbers) are modeled. Regional double-elim and 8-team WCWS
+    # bracket games are Phase 2.
+    "WCWS_PO": LeagueContext(
+        code="WCWS_PO", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("SB_SR",  "super_regional",  1.5),
+            ("WCWS",   "okc_bound",       3.0),
+            ("WCWS_F", "wcws_final",      5.0),
+            ("WCWS_W", "wcws_champion",  10.0),
+        ],
+        boundary_summary="Super Regional → OKC → WCWS Final → Champion",
     ),
     # Phase P: NFL regular season. 17-game season since 2021;
     # 14 teams make playoffs (7 per conference, including a 7th seed

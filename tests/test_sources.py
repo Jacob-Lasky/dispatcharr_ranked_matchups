@@ -2251,7 +2251,7 @@ class TestPointsBasedSourceCountField:
 # Phase M: NCAA Baseball
 # =====================================================================
 
-class TestNcaaBaseballSource:
+class TestNcaaBaseballRegularSource:
     """Phase M: D1 baseball via ESPN unofficial API + D1Baseball.com poll.
     Tests cover the canonical-game-record extraction (the tricky part is
     homeAway / completed / score parsing), team-name canonicalization
@@ -2260,9 +2260,9 @@ class TestNcaaBaseballSource:
 
     @staticmethod
     def _make_source():
-        from dispatcharr_ranked_matchups.sources.ncaa_baseball import NcaaBaseballSource
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import NcaaBaseballRegularSource
         # Pin season_year so test isn't dependent on calendar.
-        return NcaaBaseballSource(season_year=2026)
+        return NcaaBaseballRegularSource(season_year=2026)
 
     @staticmethod
     def _competitor(team_loc, team_name, score, home_away="home", winner=None):
@@ -2281,8 +2281,8 @@ class TestNcaaBaseballSource:
             "competitions": [{
                 "status": {"type": {"completed": completed, "state": state}},
                 "competitors": [
-                    TestNcaaBaseballSource._competitor("UCLA", "Bruins", hp, "home", hp > ap if hp is not None else None),
-                    TestNcaaBaseballSource._competitor("Texas", "Longhorns", ap, "away", ap > hp if ap is not None else None),
+                    TestNcaaBaseballRegularSource._competitor("UCLA", "Bruins", hp, "home", hp > ap if hp is not None else None),
+                    TestNcaaBaseballRegularSource._competitor("Texas", "Longhorns", ap, "away", ap > hp if ap is not None else None),
                 ],
             }],
         }
@@ -2301,8 +2301,8 @@ class TestNcaaBaseballSource:
     def test_count_field_is_wins(self):
         # Inherits the PointsBasedSportSource default — D1 baseball has
         # no OT/SO bonus point complication like NHL.
-        from dispatcharr_ranked_matchups.sources.ncaa_baseball import NcaaBaseballSource
-        assert NcaaBaseballSource._count_field == "wins"
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import NcaaBaseballRegularSource
+        assert NcaaBaseballRegularSource._count_field == "wins"
 
     # ---------- _extract_game_record ----------
 
@@ -2402,6 +2402,210 @@ class TestNcaaBaseballSource:
         cuts = [cut for cut, _label, _w in LEAGUE_CONTEXTS["BSB"].thresholds]
         for i in range(len(cuts) - 1):
             assert cuts[i] < cuts[i + 1], f"BSB band cutoffs must be monotonic: {cuts}"
+
+
+# =====================================================================
+# Phase O Phase 1: NcaaBaseballPlayoffSource
+# =====================================================================
+
+class TestNcaaBaseballPlayoffSource:
+    """NcaaBaseballPlayoffSource: BestOfNSeriesSource subclass that ships
+    the cleanly-labeled best-of-3 stages (Super Regional + MCWS Finals).
+    Regional double-elim and 8-team MCWS bracket are Phase 2 — those
+    headlines lack game-number metadata so chronological inference is
+    needed and that's a separate design.
+    """
+
+    @staticmethod
+    def _make_source(bracket_games=None):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            NcaaBaseballPlayoffSource,
+        )
+        src = NcaaBaseballPlayoffSource(season_year=2026)
+        src._bracket_games_cache = bracket_games or []
+        return src
+
+    def test_identity(self):
+        src = self._make_source()
+        assert src.sport_prefix == "NCAABSB"
+        assert "Postseason" in src.sport_label
+        assert src._league_context_code() == "MCWS_PO"
+
+    def test_supports_importance(self):
+        assert self._make_source().supports_importance is True
+
+    def test_ko_stages(self):
+        src = self._make_source()
+        # Phase 1: only the cleanly-labeled stages are emitted.
+        # Phase 2 will extend KO_STAGES with REGIONAL + MCWS bracket.
+        assert src.KO_STAGES == ("BSB_SR", "MCWS_F")
+
+    def test_series_length_is_three(self):
+        # Both Super Regional and MCWS Finals are best-of-3.
+        src = self._make_source()
+        assert src.SERIES_LENGTH == 3
+        assert src._series_length_for_stage("BSB_SR") == 3
+        assert src._series_length_for_stage("MCWS_F") == 3
+
+    def test_winner_advance_label(self):
+        src = self._make_source()
+        # MCWS Final winner → MCWS_W synthetic depth.
+        assert src._winner_advance_label("MCWS_F") == "MCWS_W"
+        # Super Regional advances via default stage_depth + 1 rule
+        # (which lands at MCWS depth — the unmodeled 8-team bracket).
+        assert src._winner_advance_label("BSB_SR") is None
+
+    def test_outcome_labels_uses_mcws_po_thresholds(self):
+        src = self._make_source()
+        labels = src.outcome_labels
+        assert "super_regional" in labels
+        assert "omaha_bound" in labels
+        assert "cws_final" in labels
+        assert "cws_champion" in labels
+
+    def test_set_regular_season_strengths_passes_through(self):
+        src = self._make_source()
+        assert src.estimate_strengths() == {}
+        src.set_regular_season_strengths(
+            {"LSU": {"pf_per_game": 8.4, "pa_per_game": 4.1}}
+        )
+        s = src.estimate_strengths()
+        assert s["LSU"]["pf_per_game"] == 8.4
+
+    def test_super_regional_resolves_in_two_wins(self):
+        """Super Regional best-of-3: clinches at 2 wins. Build a 2-0
+        sweep; verify winner reaches MCWS depth, loser caps at BSB_SR."""
+        games = [
+            {"game_id": "sr1", "stage": "BSB_SR", "matchday": 1,
+             "home": "LSU", "away": "Tennessee",
+             "home_goals": 7, "away_goals": 3,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "sr2", "stage": "BSB_SR", "matchday": 2,
+             "home": "LSU", "away": "Tennessee",
+             "home_goals": 5, "away_goals": 2,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        # LSU wins → advances via default stage_depth + 1 = MCWS depth.
+        assert state["_round_reached"]["LSU"] == KNOCKOUT_ROUND_DEPTH["MCWS"]
+        # Tennessee loses → caps at BSB_SR depth.
+        assert state["_round_reached"]["Tennessee"] == KNOCKOUT_ROUND_DEPTH["BSB_SR"]
+
+    def test_mcws_finals_winner_reaches_synthetic_depth(self):
+        """Best-of-3 Finals, winner reaches MCWS_W depth."""
+        games = [
+            {"game_id": "f1", "stage": "MCWS_F", "matchday": 1,
+             "home": "LSU", "away": "Florida",
+             "home_goals": 4, "away_goals": 2,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "f2", "stage": "MCWS_F", "matchday": 2,
+             "home": "LSU", "away": "Florida",
+             "home_goals": 1, "away_goals": 6,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "f3", "stage": "MCWS_F", "matchday": 3,
+             "home": "Florida", "away": "LSU",
+             "home_goals": 2, "away_goals": 9,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"]["LSU"] == KNOCKOUT_ROUND_DEPTH["MCWS_W"]
+        assert state["_round_reached"]["Florida"] == KNOCKOUT_ROUND_DEPTH["MCWS_F"]
+        outcomes = src.terminal_outcomes(state)
+        # Champion gets every band.
+        assert set(outcomes["LSU"]) == {
+            "super_regional", "omaha_bound", "cws_final", "cws_champion",
+        }
+        # Finalist loser missed cws_champion only.
+        assert set(outcomes["Florida"]) == {
+            "super_regional", "omaha_bound", "cws_final",
+        }
+
+
+class TestBaseballPlayoffHeadlineParser:
+    """The Phase 1 headline parser maps ESPN's exact headline text to
+    (stage, game_index). Regression-pin against the 2025-2026 observed
+    headlines so an ESPN copy change is caught at unit-test time, not
+    at refresh time on Selection Monday."""
+
+    @staticmethod
+    def _parse(headline):
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _parse_baseball_playoff_headline,
+        )
+        return _parse_baseball_playoff_headline(headline)
+
+    def test_super_regional_game_1(self):
+        assert self._parse(
+            "NCAA Baseball Championship - Auburn Super Regional - Game 1"
+        ) == ("BSB_SR", 1)
+
+    def test_super_regional_game_3_if_necessary(self):
+        # The "(if necessary)" trailer must be stripped — ESPN attaches
+        # it to Game 3 placeholders that haven't been confirmed.
+        assert self._parse(
+            "NCAA Baseball Championship - Auburn Super Regional - Game 3 (if necessary)"
+        ) == ("BSB_SR", 3)
+
+    def test_mcws_final_game_1(self):
+        # Note baseball uses "Final" (singular), softball uses "Finals" (plural).
+        assert self._parse(
+            "Men's College World Series Championship Final - Game 1"
+        ) == ("MCWS_F", 1)
+
+    def test_regional_returns_none(self):
+        # Regionals carry no game number → Phase 2 territory.
+        # Parser must return (None, None) so caller skips the event.
+        assert self._parse(
+            "NCAA Baseball Championship - Auburn Regional"
+        ) == (None, None)
+
+    def test_mcws_bracket_double_elim_returns_none(self):
+        # 8-team bracket games carry the generic "Double Elimination Round"
+        # headline with no game number → Phase 2 territory.
+        assert self._parse(
+            "Men's College World Series - Double Elimination Round"
+        ) == (None, None)
+
+    def test_mcws_elimination_game_returns_none(self):
+        # MCWS losers-bracket games ESPN tags as "Elimination Game" —
+        # still Phase 2 (no game number).
+        assert self._parse(
+            "Men's College World Series - Elimination Game"
+        ) == (None, None)
+
+    def test_empty_headline(self):
+        assert self._parse("") == (None, None)
+
+
+class TestNcaaBaseballPostseasonFilter:
+    """The regular-season source MUST filter out season.type=3 events
+    so postseason game wins don't inflate the regular-season win count
+    that drives the BSB threshold bands."""
+
+    def test_is_postseason_event(self):
+        """ESPN spreads NCAA Baseball/Softball postseason across multiple
+        season.type values (3=Regional, 4=Super Regional, 5=MCWS/WCWS
+        bracket, 6=Finals). All four must read as postseason. Regular
+        season is 2, preseason 1, both must read as NOT postseason."""
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
+            _is_postseason_event,
+        )
+        # Postseason: all stage values.
+        assert _is_postseason_event({"season": {"type": 3}}) is True
+        assert _is_postseason_event({"season": {"type": 4}}) is True
+        assert _is_postseason_event({"season": {"type": 5}}) is True
+        assert _is_postseason_event({"season": {"type": 6}}) is True
+        # Non-postseason.
+        assert _is_postseason_event({"season": {"type": 2}}) is False
+        assert _is_postseason_event({"season": {"type": 1}}) is False
+        # Defensive: missing / malformed.
+        assert _is_postseason_event({}) is False
+        assert _is_postseason_event({"season": {}}) is False
+        assert _is_postseason_event({"season": {"type": None}}) is False
 
 
 # =====================================================================
@@ -3980,14 +4184,14 @@ class TestNcaawBasketballPlayoffSource:
 # Phase N: NCAA Softball
 # =====================================================================
 
-class TestNcaaSoftballSource:
+class TestNcaaSoftballRegularSource:
     """V1: regular-season importance only. WCWS bracket (double-elim)
     is filed as a follow-up — same scope deferral as NCAA Baseball's CWS."""
 
     @staticmethod
     def _make():
-        from dispatcharr_ranked_matchups.sources.ncaa_softball import NcaaSoftballSource
-        return NcaaSoftballSource(season_year=2025)
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import NcaaSoftballRegularSource
+        return NcaaSoftballRegularSource(season_year=2025)
 
     def test_identity(self):
         src = self._make()
@@ -4053,6 +4257,149 @@ class TestNcaaSoftballSource:
             "tournament_bubble", "at_large_lock", "top_regional_seed",
             "national_seed", "no_1_overall",
         }
+
+
+# =====================================================================
+# Phase O Phase 1: NcaaSoftballPlayoffSource
+# =====================================================================
+
+class TestNcaaSoftballPlayoffSource:
+    """NcaaSoftballPlayoffSource: best-of-3 Super Regional + WCWS Finals.
+    Sibling of NcaaBaseballPlayoffSource with one twist — softball
+    headlines use "Finals" (plural) where baseball uses "Final"
+    (singular)."""
+
+    @staticmethod
+    def _make_source(bracket_games=None):
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            NcaaSoftballPlayoffSource,
+        )
+        src = NcaaSoftballPlayoffSource(season_year=2026)
+        src._bracket_games_cache = bracket_games or []
+        return src
+
+    def test_identity(self):
+        src = self._make_source()
+        assert src.sport_prefix == "NCAASBL"
+        assert "Postseason" in src.sport_label
+        assert src._league_context_code() == "WCWS_PO"
+
+    def test_ko_stages(self):
+        src = self._make_source()
+        assert src.KO_STAGES == ("SB_SR", "WCWS_F")
+
+    def test_series_length_is_three(self):
+        src = self._make_source()
+        assert src._series_length_for_stage("SB_SR") == 3
+        assert src._series_length_for_stage("WCWS_F") == 3
+
+    def test_winner_advance_label(self):
+        src = self._make_source()
+        assert src._winner_advance_label("WCWS_F") == "WCWS_W"
+        assert src._winner_advance_label("SB_SR") is None
+
+    def test_outcome_labels_uses_wcws_po_thresholds(self):
+        src = self._make_source()
+        labels = src.outcome_labels
+        assert "super_regional" in labels
+        assert "okc_bound" in labels
+        assert "wcws_final" in labels
+        assert "wcws_champion" in labels
+
+    def test_set_regular_season_strengths_passes_through(self):
+        src = self._make_source()
+        assert src.estimate_strengths() == {}
+        src.set_regular_season_strengths(
+            {"Oklahoma": {"pf_per_game": 7.2, "pa_per_game": 2.8}}
+        )
+        s = src.estimate_strengths()
+        assert s["Oklahoma"]["pf_per_game"] == 7.2
+
+    def test_wcws_finals_winner_reaches_synthetic_depth(self):
+        games = [
+            {"game_id": "f1", "stage": "WCWS_F", "matchday": 1,
+             "home": "Texas Tech", "away": "Texas",
+             "home_goals": 3, "away_goals": 2,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "f2", "stage": "WCWS_F", "matchday": 2,
+             "home": "Texas Tech", "away": "Texas",
+             "home_goals": 5, "away_goals": 1,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        src = self._make_source(games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"]["Texas Tech"] == KNOCKOUT_ROUND_DEPTH["WCWS_W"]
+        assert state["_round_reached"]["Texas"] == KNOCKOUT_ROUND_DEPTH["WCWS_F"]
+
+
+class TestSoftballPlayoffHeadlineParser:
+    """The softball headline parser is a near-mirror of the baseball one
+    except for the "Finals" (plural) vs "Final" (singular) Championship
+    label. Regression-pin against the 2025-2026 observed headlines."""
+
+    @staticmethod
+    def _parse(headline):
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import (
+            _parse_softball_playoff_headline,
+        )
+        return _parse_softball_playoff_headline(headline)
+
+    def test_super_regional_game_1(self):
+        assert self._parse(
+            "NCAA Softball Championship - Lincoln Super Regional - Game 1"
+        ) == ("SB_SR", 1)
+
+    def test_super_regional_game_3_if_necessary(self):
+        assert self._parse(
+            "NCAA Softball Championship - Lincoln Super Regional - Game 3 (if necessary)"
+        ) == ("SB_SR", 3)
+
+    def test_wcws_finals_game_1(self):
+        # Plural "Finals" for softball — distinct from baseball's "Final".
+        assert self._parse(
+            "Women's College World Series Championship Finals - Game 1"
+        ) == ("WCWS_F", 1)
+
+    def test_wcws_finals_singular_form_returns_none(self):
+        # Guard against accidentally accepting baseball's pattern.
+        assert self._parse(
+            "Women's College World Series Championship Final - Game 1"
+        ) == (None, None)
+
+    def test_regional_returns_none(self):
+        assert self._parse(
+            "NCAA Softball Championship - Tuscaloosa Regional"
+        ) == (None, None)
+
+    def test_wcws_bracket_double_elim_returns_none(self):
+        assert self._parse(
+            "Women's College World Series - Double Elimination Round"
+        ) == (None, None)
+
+    def test_wcws_elimination_game_returns_none(self):
+        # WCWS losers-bracket games — observed in live 2026 data
+        # (May 30+). Must skip; no game number → Phase 2.
+        assert self._parse(
+            "Women's College World Series - Elimination Game"
+        ) == (None, None)
+
+    def test_wcws_elimination_game_if_necessary_returns_none(self):
+        # ESPN appends " If Necessary" to placeholder losers-bracket
+        # games in the 8-team WCWS bracket. Observed live 2026-06-01.
+        assert self._parse(
+            "Women's College World Series - Elimination Game If Necessary"
+        ) == (None, None)
+
+    def test_regional_elimination_game_returns_none(self):
+        # Regional losers-bracket games carry "Elimination Game" too —
+        # also Phase 2 territory.
+        assert self._parse(
+            "NCAA Softball Championship - Athens Regional - Elimination Game"
+        ) == (None, None)
+
+    def test_empty_headline(self):
+        assert self._parse("") == (None, None)
 
 
 # =====================================================================
