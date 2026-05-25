@@ -98,6 +98,13 @@
       "help_text": "Regular season uses standings points (95+ bubble, 100+ playoff-secured, 110+ division pace, 125+ Presidents' Trophy). Playoffs are best-of-7 each round. No API key required — official api-web.nhle.com."
     },
     {
+      "id": "enable_ncaa_baseball",
+      "type": "boolean",
+      "label": "NCAA Baseball (D1)",
+      "default": false,
+      "help_text": "D1 baseball regular season. ESPN unofficial API + D1Baseball.com Top 25 poll. Bands: 30+ wins tournament bubble, 35+ at-large lock, 40+ top regional seed, 45+ national seed, 50+ #1 overall contention. CWS postseason bracket not yet modeled (favorites + rank signal still surface postseason matchups). No API key required."
+    },
+    {
       "id": "_section_keys",
       "type": "info",
       "label": "API Keys",

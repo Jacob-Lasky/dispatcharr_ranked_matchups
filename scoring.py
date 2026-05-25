@@ -297,6 +297,24 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="R16 → QF → SF → Final → Champion (UEFA EURO)",
     ),
+    # Phase M: NCAA Division I baseball regular season. Win-count
+    # thresholds tuned against historical NCAA Tournament selection
+    # criteria — ~35 wins is the rough at-large cutoff, 45+ wins puts
+    # a team in national-seed (top 16) contention. Seasons run Feb-June
+    # with ~55 regular-season games + conference tournament; matchdays_total
+    # is approximate because non-conference scheduling varies by team.
+    # CWS postseason bracket is not modeled in V1 (filed as follow-up).
+    "BSB": LeagueContext(
+        code="BSB", matchdays_total=55, format="win_count",
+        thresholds=[
+            (30, "tournament_bubble", 1.0),  # bid uncertainty
+            (35, "at_large_lock",     2.0),  # likely tournament bid
+            (40, "regional_top_seed", 3.0),  # top regional seed contender
+            (45, "national_seed",     4.0),  # top-16 / national seed
+            (50, "overall_one_seed",  5.0),  # #1 overall seed conversation
+        ],
+        boundary_summary="30+ wins → tournament bubble · 35+ → at-large lock · 45+ → national seed",
+    ),
     # Phase D.2 / D.3: NCAA football and men's basketball. Format is
     # "win_count" — threshold cutoffs are MINIMUM win counts rather than
     # position cutoffs (the SoccerSource interpretation). The points-
