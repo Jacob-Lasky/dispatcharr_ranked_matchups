@@ -295,6 +295,7 @@ def _build_sources(settings: Dict[str, Any]):
         KnockoutSoccerSource, MlbPlayoffSource, MlbRegularSource,
         MlsSource,
         NbaPlayoffSource, NbaRegularSource,
+        WnbaPlayoffSource, WnbaRegularSource,
         NcaaBaseballSource, NcaaSoccerSource,
         NcaafSource, NcaamSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
@@ -409,6 +410,20 @@ def _build_sources(settings: Dict[str, Any]):
     # it MLS games surface but with no closeness signal.
     if settings.get("enable_mls", False):
         sources.append(MlsSource(odds_api_key=odds_key or ""))
+
+    # WNBA — ESPN unofficial API; same pair-and-seed pattern as NHL/MLB/
+    # NBA. Per-stage series lengths via BestOfNSeriesSource hooks: R1
+    # best-of-3, SF best-of-5, FINALS best-of-5 in 2024 / best-of-7
+    # in 2025+.
+    if settings.get("enable_wnba", False):
+        wnba_reg = WnbaRegularSource()
+        sources.append(wnba_reg)
+        wnba_po = WnbaPlayoffSource()
+        try:
+            wnba_po.set_regular_season_strengths(wnba_reg.estimate_strengths())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[wnba] could not seed playoff strengths: %s", exc)
+        sources.append(wnba_po)
 
     # Phase M: NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
     # poll, no key needed. Win-count thresholds (30 / 35 / 40 / 45 / 50) drive

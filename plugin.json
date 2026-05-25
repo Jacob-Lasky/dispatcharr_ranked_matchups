@@ -119,6 +119,13 @@
       "help_text": "MLS games surface with favorite + closeness scoring only in V1 — no standings-based importance yet (conference structure and the mixed-format MLS Cup bracket are follow-ups). Uses ESPN's unofficial site.api.espn.com for the schedule. The Odds API key enables closeness via the soccer_usa_mls market; without it, MLS games appear but with no closeness signal."
     },
     {
+      "id": "enable_wnba",
+      "type": "boolean",
+      "label": "WNBA (regular season + playoffs)",
+      "default": false,
+      "help_text": "Regular season uses win count (20+ bubble, 25+ playoff-secured, 30+ top-seed pace, 35+ elite) over the 40-game season. Playoffs have mixed series lengths: R1 best-of-3, Semifinals best-of-5, Finals best-of-5 in 2024 / best-of-7 in 2025+. No API key required — uses ESPN's unofficial site.api.espn.com."
+    },
+    {
       "id": "enable_ncaa_baseball",
       "type": "boolean",
       "label": "NCAA Baseball (D1)",
