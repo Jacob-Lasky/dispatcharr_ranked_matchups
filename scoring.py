@@ -315,6 +315,36 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="30+ wins → tournament bubble · 35+ → at-large lock · 45+ → national seed",
     ),
+    # Phase O: NCAA Division I soccer (Men's and Women's). Standings-points
+    # format (3 W / 1 D / 0 L) because draws are common in college soccer
+    # and a draw-heavy team's WIN count understates their tournament
+    # position. A team going 13-3-8 has 13 wins but 47 standings points
+    # and is well above the tournament bubble. Bands tuned against the
+    # United Soccer Coaches Top 25 historical NCAA Tournament cutoffs:
+    # ~25 points is the bubble; 45+ puts a team in top-regional / seed
+    # contention. Postseason College Cup bracket is not modeled in V1
+    # (single-elimination — filed as follow-up; reuses the existing
+    # KnockoutSoccerSource machinery once API bracket data is parsed).
+    "NCAA_MSOC": LeagueContext(
+        code="NCAA_MSOC", matchdays_total=20, format="points_count",
+        thresholds=[
+            (25, "tournament_bubble", 1.0),
+            (35, "at_large_lock",     2.0),
+            (45, "top_regional",      3.0),
+            (50, "national_seed",     4.0),
+        ],
+        boundary_summary="25+ pts → bubble · 35+ → at-large lock · 45+ → top regional · 50+ → national seed (Men's)",
+    ),
+    "NCAA_WSOC": LeagueContext(
+        code="NCAA_WSOC", matchdays_total=20, format="points_count",
+        thresholds=[
+            (25, "tournament_bubble", 1.0),
+            (35, "at_large_lock",     2.0),
+            (45, "top_regional",      3.0),
+            (50, "national_seed",     4.0),
+        ],
+        boundary_summary="25+ pts → bubble · 35+ → at-large lock · 45+ → top regional · 50+ → national seed (Women's)",
+    ),
     # Phase D.2 / D.3: NCAA football and men's basketball. Format is
     # "win_count" — threshold cutoffs are MINIMUM win counts rather than
     # position cutoffs (the SoccerSource interpretation). The points-

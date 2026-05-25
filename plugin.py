@@ -292,7 +292,8 @@ def _build_weights(settings: Dict[str, Any]):
 
 def _build_sources(settings: Dict[str, Any]):
     from .sources import (
-        KnockoutSoccerSource, NcaaBaseballSource, NcaafSource, NcaamSource,
+        KnockoutSoccerSource, NcaaBaseballSource, NcaaSoccerSource,
+        NcaafSource, NcaamSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
     )
     from .sources.soccer import COMPETITIONS
@@ -371,6 +372,16 @@ def _build_sources(settings: Dict[str, Any]):
     # games still surface via favorite + rank-pair signal.
     if settings.get("enable_ncaa_baseball", False):
         sources.append(NcaaBaseballSource())
+
+    # Phase O: NCAA D1 men's + women's soccer. One source class
+    # parametrized on gender — same structure / endpoints / threshold
+    # semantics for both, only the ESPN URL slug differs. Standings
+    # points (3 W / 1 D / 0 L) drive the importance signal because
+    # draws are common in college soccer.
+    if settings.get("enable_ncaa_mens_soccer", False):
+        sources.append(NcaaSoccerSource(gender="m"))
+    if settings.get("enable_ncaa_womens_soccer", False):
+        sources.append(NcaaSoccerSource(gender="w"))
     return sources
 
 

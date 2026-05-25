@@ -105,6 +105,20 @@
       "help_text": "D1 baseball regular season. ESPN unofficial API + D1Baseball.com Top 25 poll. Bands: 30+ wins tournament bubble, 35+ at-large lock, 40+ top regional seed, 45+ national seed, 50+ #1 overall contention. CWS postseason bracket not yet modeled (favorites + rank signal still surface postseason matchups). No API key required."
     },
     {
+      "id": "enable_ncaa_mens_soccer",
+      "type": "boolean",
+      "label": "NCAA Men's Soccer (D1)",
+      "default": false,
+      "help_text": "D1 men's soccer regular season. ESPN unofficial API + United Soccer Coaches Top 25 poll. Standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. College Cup bracket not yet modeled. No API key required."
+    },
+    {
+      "id": "enable_ncaa_womens_soccer",
+      "type": "boolean",
+      "label": "NCAA Women's Soccer (D1)",
+      "default": false,
+      "help_text": "D1 women's soccer regular season. ESPN unofficial API + United Soccer Coaches Top 25 poll. Standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. College Cup bracket not yet modeled. No API key required."
+    },
+    {
       "id": "_section_keys",
       "type": "info",
       "label": "API Keys",
