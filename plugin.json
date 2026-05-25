@@ -189,6 +189,20 @@
       "help_text": "Each UFC fight card surfaces as one entry in the guide (the card title carries the headliner, e.g., 'UFC 309: Jones vs. Miocic'). Numbered PPVs get a higher tier ('Major') than Fight Nights and ESPN cards ('Event'). No API key required — ESPN unofficial."
     },
     {
+      "id": "enable_atp",
+      "type": "boolean",
+      "label": "ATP Tour (men's tennis)",
+      "default": false,
+      "help_text": "Each active ATP tournament surfaces as one entry. The four Grand Slams (Wimbledon / Australian Open / French Open / US Open) and the year-end ATP Finals get the 'Major' tier; regular tour stops get 'Event'. No API key required — ESPN unofficial."
+    },
+    {
+      "id": "enable_wta",
+      "type": "boolean",
+      "label": "WTA Tour (women's tennis)",
+      "default": false,
+      "help_text": "Same Grand Slam roster as ATP. Each active WTA tournament surfaces as one entry; Slams and the year-end WTA Finals get 'Major', regular tour stops get 'Event'. No API key required — ESPN unofficial."
+    },
+    {
       "id": "enable_wnba",
       "type": "boolean",
       "label": "WNBA (regular season + playoffs)",

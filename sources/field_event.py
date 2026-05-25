@@ -228,3 +228,40 @@ class UfcSource(FieldEventSource):
     SPORT_LABEL = "UFC"
     FD_COMPETITION_CODE = "UFC"
     MAJOR_REGEX = _UFC_PPV_RE
+
+
+# Tennis Grand Slams + marquee year-end events. ESPN's tennis
+# scoreboard returns whole tournaments (each entry spans 1-2 weeks),
+# not individual matches — so tennis fits the FieldEventSource model
+# the same way racing and golf do. The four Slams plus the year-end
+# Finals get the MAJOR tier; regular tour events stay EVENT.
+_TENNIS_MAJOR_RE: Pattern[str] = re.compile(
+    r"\b(?:wimbledon|australian\s+open|french\s+open|roland\s+garros|"
+    r"u\.?s\.?\s+open|atp\s+finals|wta\s+finals)\b",
+    re.IGNORECASE,
+)
+
+
+class AtpSource(FieldEventSource):
+    """ATP Tour — men's professional tennis. One entry per active
+    tournament. Grand Slams (Wimbledon / Australian Open / French
+    Open / US Open) and ATP Finals get MAJOR; regular tour stops
+    stay EVENT."""
+
+    ESPN_SLUG = "tennis/atp"
+    SPORT_PREFIX = "ATP"
+    SPORT_LABEL = "ATP Tour"
+    FD_COMPETITION_CODE = "ATP"
+    MAJOR_REGEX = _TENNIS_MAJOR_RE
+
+
+class WtaSource(FieldEventSource):
+    """WTA Tour — women's professional tennis. Same shape and same
+    Grand Slam roster as ATP (the Slams are shared events). MAJOR
+    detection is identical."""
+
+    ESPN_SLUG = "tennis/wta"
+    SPORT_PREFIX = "WTA"
+    SPORT_LABEL = "WTA Tour"
+    FD_COMPETITION_CODE = "WTA"
+    MAJOR_REGEX = _TENNIS_MAJOR_RE
