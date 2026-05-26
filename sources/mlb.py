@@ -42,7 +42,7 @@ from __future__ import annotations
 import logging
 import random
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -83,6 +83,23 @@ _MLB_SERIES_LENGTHS: Dict[str, int] = {
     "LCS": 7,
     "WS": 7,
 }
+
+# MLB World Series 2-3-2 home pattern: top seed (AL/NL winner with the
+# better regular-season record) hosts games 1, 2, 6, 7; the other side
+# hosts games 3, 4, 5. NHL uses 2-2-1-1-1 — different sport, different
+# home rotation, same shape of pattern array (True = top-seed home).
+MLB_WS_HOME_PATTERN: Tuple[bool, ...] = (True, True, False, False, False, True, True)
+
+# Sentinel team names for the synthesized WS placeholder tie. Same
+# pattern as nhl.py's CUP_FINAL sentinels (#17). The mlb postseason
+# endpoint omits the WS series from its response until both LCS series
+# resolve — so during LCS week the WS cascade reads 0 leverage even on
+# an LCS Game-7. The placeholder lets the importance simulator
+# propagate counterfactual LCS winners into WS → WS_WINNER. DO NOT
+# change these strings without also updating _build_bracket's
+# placeholder-detection branch — the names are the join key. See #27.
+_WS_TOP_SENTINEL = "LCS_AL_WINNER"
+_WS_BOT_SENTINEL = "LCS_NL_WINNER"
 
 
 def _http_get(url: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
@@ -458,5 +475,108 @@ class MlbPlayoffSource(BestOfNSeriesSource):
                     },
                 })
 
+        # Issue #27 fix: synthesize a WS placeholder tie when both LCS
+        # series have published games (= participants are known) but the
+        # endpoint hasn't yet populated the World Series. statsapi.mlb.com
+        # only emits the WS series after both LCS resolve, which leaves
+        # the ws_winner band reading 0 leverage during LCS week — exactly
+        # when LCS-Game-7 leverage should be maxing out. Mirrors the NHL
+        # CUP_FINAL fix in #17.
+        lcs_pair_set: set = set()
+        for g in out:
+            if g["stage"] == "LCS":
+                # frozenset because home/away can swap mid-series
+                lcs_pair_set.add(frozenset((g["home"], g["away"])))
+        ws_emitted = sum(1 for g in out if g["stage"] == "WS")
+        if len(lcs_pair_set) == 2 and ws_emitted == 0:
+            out.extend(self._synth_ws_placeholder_games())
+
         self._bracket_games_cache = out
         return out
+
+    # ---------- WS placeholder synthesis (#27) ----------
+
+    def _synth_ws_placeholder_games(self) -> List[Dict[str, Any]]:
+        """Emit 7 SCHEDULED WS games with sentinel team names following
+        MLB's 2-3-2 home pattern. Game IDs are negative ints to guarantee
+        non-collision with real statsapi gamePks (positive 6-digit ints
+        like 778411).
+
+        The sentinels are stable across refreshes within one importance
+        run — they're matched by _build_bracket below to wire feeds_from
+        to the two LCS series.
+        """
+        games: List[Dict[str, Any]] = []
+        for matchday in range(1, len(MLB_WS_HOME_PATTERN) + 1):
+            top_home = MLB_WS_HOME_PATTERN[matchday - 1]
+            home = _WS_TOP_SENTINEL if top_home else _WS_BOT_SENTINEL
+            away = _WS_BOT_SENTINEL if top_home else _WS_TOP_SENTINEL
+            games.append({
+                "game_id": -(200000 + matchday),  # synthetic, non-colliding
+                "stage": "WS",
+                "matchday": matchday,
+                "home": home,
+                "away": away,
+                "home_goals": None,
+                "away_goals": None,
+                "status": "SCHEDULED",
+                "start_time": None,
+                "extra": {
+                    "is_placeholder": True,
+                    "series_description": "synthetic-ws",
+                },
+            })
+        return games
+
+    def _build_bracket(self, games: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        """Override the shared bracket build to wire feeds_from on the
+        WS placeholder tie (whose participants are sentinel names, which
+        the participant-set inference in the base class can't match
+        against the actual LCS participants). Same shape as
+        NhlPlayoffSource._build_bracket — see #17 and #27.
+        """
+        bracket = super()._build_bracket(games)
+        lcs_ties = bracket.get("LCS", [])
+        ws_ties = bracket.get("WS", [])
+        if len(lcs_ties) != 2 or len(ws_ties) != 1:
+            return bracket
+        ws_tie = ws_ties[0]
+        teams = ws_tie.get("teams") or frozenset()
+        if not (
+            _WS_TOP_SENTINEL in teams
+            and _WS_BOT_SENTINEL in teams
+        ):
+            return bracket  # not a placeholder, leave alone
+
+        # Wire feeds_from: each sentinel resolves to the winner of its
+        # corresponding LCS series. Bracket order from _build_bracket is
+        # deterministic per frozenset insertion order; we treat LCS[0] as
+        # the "top" feeder and LCS[1] as the "bottom" feeder. Without
+        # league-affiliation data this assignment is arbitrary — what
+        # matters for importance computation is that BOTH sentinels are
+        # cascaded into the WS_WINNER depth, not which league each one
+        # came from.
+        ws_tie["feeds_from"] = {
+            _WS_TOP_SENTINEL: ("LCS", 0),
+            _WS_BOT_SENTINEL: ("LCS", 1),
+        }
+        ws_tie["is_entry_tie"] = False
+        return bracket
+
+    def _source_team_for(self, sim_team: str, tie_meta: Dict[str, Any]) -> str:
+        """For the WS placeholder, sentinel team names need to map to
+        the resolved LCS winners by position. Return the FIRST game's
+        source-published home so the home/away swap logic in
+        BracketSportSource._emit_remaining_games_for_tie compares against
+        a consistent "team_a is sentinel-A" mapping rather than against
+        the resolved team name (which would never match a sentinel).
+
+        Non-placeholder cases get the same behavior for free: games[0].home
+        IS team_a's source name in those cases too. Same shape as
+        NhlPlayoffSource._source_team_for.
+        """
+        del sim_team  # mapping derived from tie_meta, not sim_team identity
+        games = tie_meta.get("games") or []
+        if not games:
+            return ""
+        return games[0].get("home") or ""

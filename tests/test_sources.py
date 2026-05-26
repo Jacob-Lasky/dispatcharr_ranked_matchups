@@ -6522,3 +6522,209 @@ class TestGroupStageContextCodes:
         wc_weight = next(w for _, lbl, w in LEAGUE_CONTEXTS["WC_GS"].thresholds if lbl == "advance")
         ec_weight = next(w for _, lbl, w in LEAGUE_CONTEXTS["EC_GS"].thresholds if lbl == "advance")
         assert wc_weight > ec_weight
+
+
+class TestMlbWsPlaceholder:
+    """Issue #27: synthesize a WS placeholder tie when both LCS series
+    have published games but the postseason endpoint hasn't yet
+    populated the World Series (which only happens after both LCS
+    resolve). Without the placeholder, ws_winner leverage reads 0
+    during LCS week — exactly when LCS-Game-7 leverage should max.
+    Mirrors NhlPlayoffSource's #17 fix.
+    """
+
+    @staticmethod
+    def _two_lcs_in_progress_games():
+        """7-game LCS pair × 2, all SCHEDULED + no WS games yet —
+        mimics live shape during LCS week."""
+        games = []
+        # AL LCS: Yankees vs Astros
+        # NL LCS: Dodgers vs Phillies
+        # 2-3-2 home pattern for both
+        pattern = (True, True, False, False, False, True, True)
+        for series_idx, (top, bot) in enumerate(
+            [("New York Yankees", "Houston Astros"), ("Los Angeles Dodgers", "Philadelphia Phillies")]
+        ):
+            for matchday in range(1, 8):
+                top_home = pattern[matchday - 1]
+                games.append({
+                    "game_id": 700000 + series_idx * 10 + matchday,
+                    "stage": "LCS",
+                    "matchday": matchday,
+                    "home": top if top_home else bot,
+                    "away": bot if top_home else top,
+                    "home_goals": None, "away_goals": None,
+                    "status": "SCHEDULED",
+                    "start_time": None,
+                    "extra": {"series_description": f"LCS-{series_idx}"},
+                })
+        return games
+
+    def test_synth_emits_7_games_with_mlb_home_pattern(self):
+        from dispatcharr_ranked_matchups.sources.mlb import (
+            MlbPlayoffSource, _WS_TOP_SENTINEL, _WS_BOT_SENTINEL, MLB_WS_HOME_PATTERN,
+        )
+        src = MlbPlayoffSource(season=2025)
+        games = src._synth_ws_placeholder_games()
+        assert len(games) == 7
+        assert all(g["stage"] == "WS" for g in games)
+        assert all(g["status"] == "SCHEDULED" for g in games)
+        assert all(g["game_id"] < 0 for g in games), \
+            "placeholder game IDs must be negative to avoid colliding with real gamePks"
+        # 2-3-2 verification: game 1 → top home, game 3 → bottom home, game 6 → top home.
+        for matchday in range(1, 8):
+            top_home = MLB_WS_HOME_PATTERN[matchday - 1]
+            expected_home = _WS_TOP_SENTINEL if top_home else _WS_BOT_SENTINEL
+            assert games[matchday - 1]["home"] == expected_home, \
+                f"game {matchday}: expected home {expected_home}, got {games[matchday - 1]['home']}"
+            assert games[matchday - 1]["matchday"] == matchday
+
+    def test_placeholder_fires_when_two_lcs_no_ws(self):
+        from dispatcharr_ranked_matchups.sources.mlb import (
+            MlbPlayoffSource, _WS_TOP_SENTINEL, _WS_BOT_SENTINEL,
+        )
+        src = MlbPlayoffSource(season=2025)
+        bracket_games = self._two_lcs_in_progress_games()
+        bracket_games.extend(src._synth_ws_placeholder_games())
+        src._bracket_games_cache = bracket_games
+        state = src.initial_state()
+        ws_ties = state["_bracket"].get("WS", [])
+        assert len(ws_ties) == 1
+        teams = set(ws_ties[0]["teams"])
+        assert teams == {_WS_TOP_SENTINEL, _WS_BOT_SENTINEL}
+
+    def test_placeholder_feeds_from_wired_to_lcs(self):
+        from dispatcharr_ranked_matchups.sources.mlb import (
+            MlbPlayoffSource, _WS_TOP_SENTINEL, _WS_BOT_SENTINEL,
+        )
+        src = MlbPlayoffSource(season=2025)
+        bracket_games = self._two_lcs_in_progress_games()
+        bracket_games.extend(src._synth_ws_placeholder_games())
+        src._bracket_games_cache = bracket_games
+        state = src.initial_state()
+        ws_tie = state["_bracket"]["WS"][0]
+        feeds = ws_tie["feeds_from"]
+        assert feeds[_WS_TOP_SENTINEL] == ("LCS", 0)
+        assert feeds[_WS_BOT_SENTINEL] == ("LCS", 1)
+        assert ws_tie["is_entry_tie"] is False
+
+    def test_placeholder_blocks_remaining_until_lcs_resolves(self):
+        from dispatcharr_ranked_matchups.sources.mlb import MlbPlayoffSource
+        src = MlbPlayoffSource(season=2025)
+        bracket_games = self._two_lcs_in_progress_games()
+        bracket_games.extend(src._synth_ws_placeholder_games())
+        src._bracket_games_cache = bracket_games
+        state = src.initial_state()
+        remaining = src.remaining_matches(state)
+        ws_remaining = [g for g in remaining if g.extra.get("stage") == "WS"]
+        assert len(ws_remaining) == 0, "WS must be blocked while LCS unresolved"
+
+
+class TestMlbWsPlaceholderGating:
+    """Verifies the placeholder ONLY synthesizes in the LCS-in-progress
+    window. False positives during pre-LCS or post-LCS would either
+    short-circuit valid data or produce wrong game counts."""
+
+    def test_no_synthesis_when_only_one_lcs_series_started(self, monkeypatch):
+        # Only one LCS series has games (other still in LDS), so the
+        # placeholder should NOT fire — we don't know both participants yet.
+        from dispatcharr_ranked_matchups.sources.mlb import MlbPlayoffSource
+        src = MlbPlayoffSource(season=2025)
+        # Stub _http_get to return a payload with 1 LCS series
+        from dispatcharr_ranked_matchups.sources import mlb as mlb_mod
+        fake = {"dates": [{"games": [
+            {
+                "gamePk": 700001, "seriesDescription": "AL Championship Series",
+                "seriesGameNumber": 1,
+                "teams": {
+                    "home": {"team": {"name": "Yankees"}, "score": None},
+                    "away": {"team": {"name": "Astros"}, "score": None},
+                },
+                "status": {"abstractGameState": "Preview"},
+                "gameDate": "2025-10-12T20:00:00Z",
+            },
+        ]}]}
+        monkeypatch.setattr(mlb_mod, "_http_get", lambda url: fake)
+        out = src._fetch_bracket_games()
+        # 1 LCS series + 0 WS placeholders.
+        assert sum(1 for g in out if g["stage"] == "WS") == 0
+        assert sum(1 for g in out if g["stage"] == "LCS") == 1
+
+    def test_no_synthesis_when_ws_already_published(self, monkeypatch):
+        # Both LCS resolved AND WS published — real data, no placeholder.
+        from dispatcharr_ranked_matchups.sources.mlb import MlbPlayoffSource
+        from dispatcharr_ranked_matchups.sources import mlb as mlb_mod
+        src = MlbPlayoffSource(season=2025)
+        fake = {"dates": [{"games": [
+            # 1 game in each LCS (enough to register as 2 distinct LCS series)
+            {
+                "gamePk": 700001, "seriesDescription": "AL Championship Series",
+                "seriesGameNumber": 1,
+                "teams": {
+                    "home": {"team": {"name": "Yankees"}, "score": 5},
+                    "away": {"team": {"name": "Astros"}, "score": 2},
+                },
+                "status": {"abstractGameState": "Final"},
+                "gameDate": "2025-10-12T20:00:00Z",
+            },
+            {
+                "gamePk": 700002, "seriesDescription": "NL Championship Series",
+                "seriesGameNumber": 1,
+                "teams": {
+                    "home": {"team": {"name": "Dodgers"}, "score": 4},
+                    "away": {"team": {"name": "Phillies"}, "score": 1},
+                },
+                "status": {"abstractGameState": "Final"},
+                "gameDate": "2025-10-12T20:00:00Z",
+            },
+            # WS game already published
+            {
+                "gamePk": 700100, "seriesDescription": "World Series",
+                "seriesGameNumber": 1,
+                "teams": {
+                    "home": {"team": {"name": "Yankees"}, "score": None},
+                    "away": {"team": {"name": "Dodgers"}, "score": None},
+                },
+                "status": {"abstractGameState": "Preview"},
+                "gameDate": "2025-10-25T20:00:00Z",
+            },
+        ]}]}
+        monkeypatch.setattr(mlb_mod, "_http_get", lambda url: fake)
+        out = src._fetch_bracket_games()
+        # 1 real WS game; 0 placeholders.
+        ws_games = [g for g in out if g["stage"] == "WS"]
+        assert len(ws_games) == 1
+        assert ws_games[0]["game_id"] > 0, "Real WS game, should not be synthetic (negative ID)"
+
+    def test_synthesis_fires_when_lcs_in_progress(self, monkeypatch):
+        # Both LCS have published games, no WS yet — synthesizer should fire.
+        from dispatcharr_ranked_matchups.sources.mlb import MlbPlayoffSource
+        from dispatcharr_ranked_matchups.sources import mlb as mlb_mod
+        src = MlbPlayoffSource(season=2025)
+        fake = {"dates": [{"games": [
+            {
+                "gamePk": 700001, "seriesDescription": "AL Championship Series",
+                "seriesGameNumber": 1,
+                "teams": {
+                    "home": {"team": {"name": "Yankees"}, "score": None},
+                    "away": {"team": {"name": "Astros"}, "score": None},
+                },
+                "status": {"abstractGameState": "Preview"},
+                "gameDate": "2025-10-12T20:00:00Z",
+            },
+            {
+                "gamePk": 700002, "seriesDescription": "NL Championship Series",
+                "seriesGameNumber": 1,
+                "teams": {
+                    "home": {"team": {"name": "Dodgers"}, "score": None},
+                    "away": {"team": {"name": "Phillies"}, "score": None},
+                },
+                "status": {"abstractGameState": "Preview"},
+                "gameDate": "2025-10-12T20:00:00Z",
+            },
+        ]}]}
+        monkeypatch.setattr(mlb_mod, "_http_get", lambda url: fake)
+        out = src._fetch_bracket_games()
+        ws_games = [g for g in out if g["stage"] == "WS"]
+        assert len(ws_games) == 7, "should synth a 7-game WS placeholder"
+        assert all(g["game_id"] < 0 for g in ws_games), "all synthesized (negative IDs)"
