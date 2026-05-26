@@ -467,7 +467,7 @@ def _build_sources(settings: Dict[str, Any]):
         NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
         NcaaBaseballRegularSource, NcaaBaseballPlayoffSource, NcaaBaseballPlayoffBracketSource,
         NcaaSoftballRegularSource, NcaaSoftballPlayoffSource, NcaaSoftballPlayoffBracketSource,
-        NcaaSoccerSource,
+        NcaaSoccerSource, NcaaSoccerCupSource,
         NcaafSource, NcaamSource,
         NflPlayoffSource, NflRegularSource,
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
@@ -756,10 +756,35 @@ def _build_sources(settings: Dict[str, Any]):
     # semantics for both, only the ESPN URL slug differs. Standings
     # points (3 W / 1 D / 0 L) drive the importance signal because
     # draws are common in college soccer.
+    #
+    # Issue #24: NcaaSoccerCupSource (College Cup bracket) pairs with
+    # the regular-season source like NHL/MLB/NBA/WNBA — playoff
+    # source borrows regular-season strength estimates via
+    # `set_regular_season_strengths`. Without the seed, College Cup
+    # samples fall back to the 1.5/1.5 league-average prior; with it,
+    # the 20-game regular season informs scoring rates for each team.
     if settings.get("enable_ncaa_mens_soccer", False):
-        sources.append(NcaaSoccerSource(gender="m"))
+        ncaa_msoc_reg = NcaaSoccerSource(gender="m")
+        sources.append(ncaa_msoc_reg)
+        ncaa_msoc_cup = NcaaSoccerCupSource(gender="m")
+        try:
+            ncaa_msoc_cup.set_regular_season_strengths(
+                ncaa_msoc_reg.estimate_strengths(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ncaa_mens_soccer] could not seed cup strengths: %s", exc)
+        sources.append(ncaa_msoc_cup)
     if settings.get("enable_ncaa_womens_soccer", False):
-        sources.append(NcaaSoccerSource(gender="w"))
+        ncaa_wsoc_reg = NcaaSoccerSource(gender="w")
+        sources.append(ncaa_wsoc_reg)
+        ncaa_wsoc_cup = NcaaSoccerCupSource(gender="w")
+        try:
+            ncaa_wsoc_cup.set_regular_season_strengths(
+                ncaa_wsoc_reg.estimate_strengths(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ncaa_womens_soccer] could not seed cup strengths: %s", exc)
+        sources.append(ncaa_wsoc_cup)
     return sources
 
 
