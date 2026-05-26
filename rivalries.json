@@ -1,0 +1,148 @@
+{
+  "_comment": "Per-sport-prefix list of known rivalry pairs. Names match case-insensitive substring against home/away team names from each source, so 'Manchester City' here matches 'Manchester City FC' from Football-Data.org. Order within a pair doesn't matter. See #8.",
+  "CFB": [
+    ["Alabama", "Auburn"],
+    ["Ohio State", "Michigan"],
+    ["USC", "Notre Dame"],
+    ["Texas", "Oklahoma"],
+    ["Florida", "Georgia"],
+    ["Army", "Navy"],
+    ["Florida", "Florida State"],
+    ["Clemson", "South Carolina"],
+    ["Oregon", "Oregon State"],
+    ["Iowa", "Iowa State"],
+    ["BYU", "Utah"],
+    ["Virginia", "Virginia Tech"],
+    ["NC State", "North Carolina"],
+    ["Penn State", "Pitt"],
+    ["Wisconsin", "Minnesota"],
+    ["Tennessee", "Kentucky"],
+    ["Mississippi", "Mississippi State"],
+    ["Indiana", "Purdue"],
+    ["Cal", "Stanford"],
+    ["Texas", "Texas A&M"]
+  ],
+  "CBB": [
+    ["Duke", "North Carolina"],
+    ["Kentucky", "Louisville"],
+    ["Kansas", "Kansas State"],
+    ["Indiana", "Purdue"],
+    ["Michigan", "Michigan State"],
+    ["UCLA", "USC"],
+    ["Georgetown", "Syracuse"],
+    ["Cincinnati", "Xavier"],
+    ["Arizona", "Arizona State"],
+    ["Villanova", "Georgetown"]
+  ],
+  "EPL": [
+    ["Liverpool", "Manchester United"],
+    ["Arsenal", "Tottenham"],
+    ["Manchester City", "Manchester United"],
+    ["Chelsea", "Tottenham"],
+    ["Liverpool", "Everton"],
+    ["Arsenal", "Chelsea"],
+    ["Newcastle", "Sunderland"],
+    ["Aston Villa", "Birmingham"],
+    ["West Ham", "Tottenham"],
+    ["Crystal Palace", "Brighton"],
+    ["Leeds", "Manchester United"]
+  ],
+  "EFL": [
+    ["Sheffield United", "Sheffield Wednesday"],
+    ["Nottingham Forest", "Derby County"],
+    ["Bristol City", "Bristol Rovers"],
+    ["Cardiff", "Swansea"],
+    ["Norwich", "Ipswich"]
+  ],
+  "BL1": [
+    ["Bayern Munich", "Borussia Dortmund"],
+    ["Borussia Dortmund", "Schalke"],
+    ["Hamburger", "Werder Bremen"],
+    ["Bayern Munich", "1860 Munich"]
+  ],
+  "LaLiga": [
+    ["Real Madrid", "Barcelona"],
+    ["Real Madrid", "Atletico"],
+    ["Sevilla", "Real Betis"],
+    ["Espanyol", "Barcelona"],
+    ["Athletic Club", "Real Sociedad"]
+  ],
+  "SerieA": [
+    ["Inter", "AC Milan"],
+    ["Roma", "Lazio"],
+    ["Juventus", "Inter"],
+    ["Juventus", "Torino"],
+    ["Napoli", "Roma"],
+    ["Genoa", "Sampdoria"]
+  ],
+  "Ligue1": [
+    ["Paris Saint-Germain", "Marseille"],
+    ["Paris SG", "Marseille"],
+    ["Lyon", "Saint-Etienne"],
+    ["Lyon", "Marseille"],
+    ["Lens", "Lille"]
+  ],
+  "NFL": [
+    ["Green Bay Packers", "Chicago Bears"],
+    ["Pittsburgh Steelers", "Baltimore Ravens"],
+    ["Pittsburgh Steelers", "Cleveland Browns"],
+    ["Dallas Cowboys", "Washington"],
+    ["Dallas Cowboys", "Philadelphia Eagles"],
+    ["New England Patriots", "New York Jets"],
+    ["Kansas City Chiefs", "Las Vegas Raiders"],
+    ["Denver Broncos", "Las Vegas Raiders"],
+    ["Minnesota Vikings", "Green Bay Packers"],
+    ["San Francisco 49ers", "Seattle Seahawks"],
+    ["New York Giants", "Philadelphia Eagles"],
+    ["Cincinnati Bengals", "Cleveland Browns"]
+  ],
+  "NBA": [
+    ["Boston Celtics", "Los Angeles Lakers"],
+    ["Golden State Warriors", "Cleveland Cavaliers"],
+    ["Boston Celtics", "Philadelphia 76ers"],
+    ["New York Knicks", "Boston Celtics"],
+    ["Chicago Bulls", "Detroit Pistons"],
+    ["Los Angeles Lakers", "Los Angeles Clippers"],
+    ["Miami Heat", "New York Knicks"],
+    ["San Antonio Spurs", "Houston Rockets"]
+  ],
+  "NHL": [
+    ["Montreal Canadiens", "Boston Bruins"],
+    ["Montreal Canadiens", "Toronto Maple Leafs"],
+    ["New York Rangers", "New York Islanders"],
+    ["New York Rangers", "Philadelphia Flyers"],
+    ["Pittsburgh Penguins", "Philadelphia Flyers"],
+    ["Pittsburgh Penguins", "Washington Capitals"],
+    ["Detroit Red Wings", "Chicago Blackhawks"],
+    ["Detroit Red Wings", "Toronto Maple Leafs"],
+    ["Edmonton Oilers", "Calgary Flames"],
+    ["Vancouver Canucks", "Calgary Flames"]
+  ],
+  "MLB": [
+    ["New York Yankees", "Boston Red Sox"],
+    ["Los Angeles Dodgers", "San Francisco Giants"],
+    ["Chicago Cubs", "Chicago White Sox"],
+    ["Chicago Cubs", "St. Louis Cardinals"],
+    ["New York Yankees", "New York Mets"],
+    ["Los Angeles Dodgers", "San Diego Padres"],
+    ["Cleveland Guardians", "Detroit Tigers"],
+    ["Houston Astros", "Texas Rangers"],
+    ["Baltimore Orioles", "Washington Nationals"]
+  ],
+  "MLS": [
+    ["LA Galaxy", "Los Angeles FC"],
+    ["Seattle Sounders", "Portland Timbers"],
+    ["New York Red Bulls", "New York City FC"],
+    ["DC United", "New York Red Bulls"],
+    ["Atlanta United", "Orlando City"],
+    ["Toronto FC", "Montreal Impact"],
+    ["Sporting Kansas City", "FC Dallas"]
+  ],
+  "LigaMX": [
+    ["Club America", "Chivas"],
+    ["Club America", "Cruz Azul"],
+    ["Pumas", "Cruz Azul"],
+    ["Monterrey", "Tigres"],
+    ["Toluca", "Club America"]
+  ]
+}

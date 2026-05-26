@@ -759,6 +759,14 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                     g.home, g.away, e,
                 )
 
+        # Rivalry detection: source-set is_rivalry takes precedence (no adapter
+        # currently does this, but the door is open); otherwise we consult the
+        # static rivalries.json list. See #8.
+        from .rivalries import is_rivalry as _is_known_rivalry
+        rivalry_flag = bool(g.is_rivalry) or _is_known_rivalry(
+            g.home, g.away, g.sport_prefix,
+        )
+
         signals = GameSignals(
             rank_a=g.rank_home,
             rank_b=g.rank_away,
@@ -767,6 +775,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             favorite_match=match_favorites(g.home, g.away, favorites),
             spread=g.spread,
             closeness=g.closeness,
+            is_rivalry=rivalry_flag,
             tournament_stage=extra.get("stage"),
             importance_points=importance_pts,
             importance_notes=importance_notes,
@@ -838,6 +847,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "score_breakdown": score.breakdown,
             "score_notes": score.notes,
             "favorites_matched": signals.favorite_match,
+            "is_rivalry": signals.is_rivalry,
             "tournament_stage": signals.tournament_stage,
             "importance_points": signals.importance_points,
             "importance_notes": signals.importance_notes,
@@ -1052,6 +1062,13 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         or g.get("stakes_thresholds_hit")
         or []
     )
+    # is_rivalry: cache shape may or may not carry it explicitly (older caches
+    # won't), but the score_breakdown will have a "rivalry" key when the
+    # signal fired during the original refresh. Reading the breakdown is the
+    # cheapest single-source-of-truth; no need to re-walk rivalries.json here.
+    breakdown_peek = g.get("score_breakdown") or {}
+    rivalry_from_cache = bool(g.get("is_rivalry")) or ("rivalry" in breakdown_peek)
+
     signals = GameSignals(
         rank_a=g.get("rank_home"),
         rank_b=g.get("rank_away"),
@@ -1060,6 +1077,7 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         favorite_match=g.get("favorites_matched", []),
         spread=g.get("spread"),
         closeness=g.get("closeness"),
+        is_rivalry=rivalry_from_cache,
         tournament_stage=g.get("tournament_stage"),
         # Cache files predating this signal default to 0.0 / [] — graceful
         # degradation: the importance block in score_game just contributes
