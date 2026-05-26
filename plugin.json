@@ -497,17 +497,17 @@
     {
       "id": "refresh",
       "label": "Refresh curated list",
-      "description": "Pull games from enabled sport sources, score, EPG-match to Dispatcharr channels, write cache.json. No DB writes to channels."
+      "description": "Pull games from enabled sport sources, score, EPG-match to Dispatcharr channels, write cache.json. No DB writes to channels. Queued via Celery (~25s); button returns immediately with a task id, click 'Show current state' to watch progress."
     },
     {
       "id": "apply",
       "label": "Apply to Dispatcharr",
-      "description": "Use cache to update target channel profile membership and (if enabled) rename matched channels. Honors dry_run."
+      "description": "Use cache to update target channel profile membership and (if enabled) rename matched channels. Honors dry_run. Synchronous (~17s)."
     },
     {
       "id": "auto_pipeline",
       "label": "Refresh + apply now",
-      "description": "Run refresh then apply end-to-end. The daily scheduler invokes this; this button lets you trigger it on demand."
+      "description": "Run refresh then apply end-to-end. The daily scheduler invokes this; this button lets you trigger it on demand. Queued via Celery (~40s); button returns immediately with a task id, click 'Show current state' to watch progress."
     },
     {
       "id": "show_status",
