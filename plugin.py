@@ -522,10 +522,20 @@ def _build_sources(settings: Dict[str, Any]):
     #   - GroupStageSoccerSource for the per-group "advance / eliminated"
     #     importance signal (top 2 per group).
     if settings.get("enable_world_cup", False) and fd_key:
-        sources.append(_make_soccer("world_cup"))
-        sources.append(GroupStageSoccerSource(
+        wc_knockout = _make_soccer("world_cup")
+        wc_groups = GroupStageSoccerSource(
             "world_cup", fd_api_key=fd_key, odds_api_key=odds_key,
-        ))
+        )
+        # Wire the cross-source chain (#53): while wc_knockout's
+        # _fetch_bracket_games returns empty (pre-tournament FD.org
+        # state), group-game importance routes through
+        # monte_carlo_importance_batch_chain so R16+ leverage fires.
+        # Once FD publishes real LAST_32 teams, the chain toggles off
+        # automatically.
+        if isinstance(wc_knockout, KnockoutSoccerSource):
+            wc_groups.set_paired_knockout_source(wc_knockout)
+        sources.append(wc_knockout)
+        sources.append(wc_groups)
     if settings.get("enable_euros", False) and fd_key:
         sources.append(_make_soccer("euros"))
         sources.append(GroupStageSoccerSource(

@@ -692,6 +692,132 @@ class TestComputeMatchImportance:
         assert "title" in notes[2]        # 0.50
 
 
+class TestComputeMatchImportanceChainRouting:
+    """#53: when the source declares a non-None `cross_source_chain`,
+    compute_match_importance routes to `monte_carlo_importance_batch_
+    chain` instead of the regular batch. WC_GS LEAGUE_CONTEXT now
+    carries downstream cascade labels (R16/QF/SF/F/winner), so the
+    chain's per-team merged outcomes get correct weights applied.
+    """
+
+    def _wc_gs_ctx(self):
+        return LEAGUE_CONTEXTS["WC_GS"]
+
+    def test_wc_gs_thresholds_carry_downstream_cascade(self):
+        # Pin the data-model assumption that powers the chain weighting:
+        # WC_GS must include the downstream knockout labels.
+        ctx = self._wc_gs_ctx()
+        labels = {label for _, label, _ in ctx.thresholds}
+        assert "advance" in labels
+        assert {"last_32", "round_of_16", "quarterfinal",
+                "semifinal", "final", "winner"} <= labels
+
+    def test_routes_to_chain_when_cross_source_chain_returns_tuple(
+        self, monkeypatch,
+    ):
+        # Patch BOTH simulator entry points to record which one was
+        # called. The chain function must fire; the regular batch must
+        # not.
+        from dispatcharr_ranked_matchups import simulation
+        called: Dict[str, int] = {"batch": 0, "chain": 0}
+
+        def fake_batch(source, match, queries, n_sims, rng=None):
+            called["batch"] += 1
+            return {q: 0.0 for q in queries}
+
+        def fake_chain(source, match, queries, downstream, seed_fn,
+                       n_sims, rng=None):
+            called["chain"] += 1
+            return {q: 0.0 for q in queries}
+
+        monkeypatch.setattr(simulation, "monte_carlo_importance_batch", fake_batch)
+        monkeypatch.setattr(
+            simulation, "monte_carlo_importance_batch_chain", fake_chain,
+        )
+
+        class FakeDownstream:
+            supports_importance = True
+
+        class FakeGroupSource:
+            supports_importance = True
+
+            def cross_source_chain(self):
+                return (FakeDownstream(), lambda state: state)
+
+        compute_match_importance(
+            FakeGroupSource(), _FakeMatch("Mexico", "South Africa"),
+            self._wc_gs_ctx(), n_sims=10,
+        )
+        assert called["chain"] == 1
+        assert called["batch"] == 0
+
+    def test_routes_to_batch_when_cross_source_chain_returns_none(
+        self, monkeypatch,
+    ):
+        # Same shape as above but cross_source_chain returns None
+        # (chain inactive). Regular batch must fire.
+        from dispatcharr_ranked_matchups import simulation
+        called: Dict[str, int] = {"batch": 0, "chain": 0}
+
+        def fake_batch(source, match, queries, n_sims, rng=None):
+            called["batch"] += 1
+            return {q: 0.0 for q in queries}
+
+        def fake_chain(*args, **kwargs):
+            called["chain"] += 1
+            return {q: 0.0 for q in kwargs.get("queries", [])}
+
+        monkeypatch.setattr(simulation, "monte_carlo_importance_batch", fake_batch)
+        monkeypatch.setattr(
+            simulation, "monte_carlo_importance_batch_chain", fake_chain,
+        )
+
+        class FakeSource:
+            supports_importance = True
+
+            def cross_source_chain(self):
+                return None
+
+        compute_match_importance(
+            FakeSource(), _FakeMatch("Mexico", "South Africa"),
+            self._wc_gs_ctx(), n_sims=10,
+        )
+        assert called["batch"] == 1
+        assert called["chain"] == 0
+
+    def test_routes_to_batch_when_source_lacks_cross_source_chain(
+        self, monkeypatch,
+    ):
+        # Sources without the cross_source_chain method (EPL, NCAAF,
+        # etc.) take the regular batch path unconditionally.
+        from dispatcharr_ranked_matchups import simulation
+        called: Dict[str, int] = {"batch": 0, "chain": 0}
+
+        def fake_batch(source, match, queries, n_sims, rng=None):
+            called["batch"] += 1
+            return {q: 0.0 for q in queries}
+
+        def fake_chain(*args, **kwargs):
+            called["chain"] += 1
+            return {q: 0.0 for q in kwargs.get("queries", [])}
+
+        monkeypatch.setattr(simulation, "monte_carlo_importance_batch", fake_batch)
+        monkeypatch.setattr(
+            simulation, "monte_carlo_importance_batch_chain", fake_chain,
+        )
+
+        class NoChainSource:
+            supports_importance = True
+            # No cross_source_chain method at all.
+
+        compute_match_importance(
+            NoChainSource(), _FakeMatch("Wrexham", "Hull"),
+            LEAGUE_CONTEXTS["ELC"], n_sims=10,
+        )
+        assert called["batch"] == 1
+        assert called["chain"] == 0
+
+
 class TestScoreGameImportanceBranch:
     def test_importance_points_zero_no_breakdown_entry(self):
         s = GameSignals(rank_a=1, rank_b=2, importance_points=0.0)
