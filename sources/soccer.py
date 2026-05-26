@@ -24,7 +24,7 @@ import logging
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 import requests
 
@@ -1138,6 +1138,16 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
 _GROUP_ADVANCE_TOP_N = 2
 
 
+class GroupStandings(NamedTuple):
+    """Positional output of `GroupStageSoccerSource._compute_group_standings`.
+    Tuple-unpackable for legacy call sites; field-accessible for new ones.
+    See the helper's docstring for field semantics.
+    """
+    by_group: Dict[str, List[Tuple[str, Dict[str, int]]]]
+    best_third_order: List[Tuple[str, Dict[str, int]]]
+    n_best_third_advance: int
+
+
 class GroupStageSoccerSource(SoccerSource):
     """Group-stage Monte Carlo importance for international tournaments
     (WC, EURO). Sibling to KnockoutSoccerSource for the same competition:
@@ -1296,25 +1306,45 @@ class GroupStageSoccerSource(SoccerSource):
             ))
         return out
 
-    def terminal_outcomes(self, state: Dict[str, Any]) -> Dict[str, List[str]]:
-        """Two-stage advancement: top-2 per group always advance, then
-        for formats that admit best-3rd-place advancement (WC 2026,
-        EURO since 2016) the top-N third-place teams across all groups
-        also advance.
+    @staticmethod
+    def _fifa_tiebreaker_key(row: Dict[str, int]) -> Tuple[int, int, int]:
+        """FIFA's group-stage tiebreaker chain (points, goal diff, goals
+        for), negated for descending sort. The same chain governs the
+        within-group ranking AND the cross-group best-3rd-place ranking
+        (the latter appends alphabetical team name as last-resort). DO
+        NOT inline this tuple at call sites; the two rankings must agree
+        or terminal_outcomes' "advance" labels and the bracket-seed
+        slot assignments diverge.
+        """
+        return (-row["points"], -(row["gf"] - row["ga"]), -row["gf"])
 
-        Within each group, sort by (points desc, goal_diff desc,
-        goals_for desc) — FIFA's group-stage tiebreaker minus
-        head-to-head and fair-play layers we don't track. Top
-        _GROUP_ADVANCE_TOP_N get "advance"; the third-place team is
-        held back for the global best-3rd ranking; everyone below 3rd
-        is eliminated.
+    def _compute_group_standings(self, state: Dict[str, Any]) -> "GroupStandings":
+        """Compute per-group standings + cross-group best-3rd ranking.
 
-        Best-3rd ranking uses the same tiebreaker chain (points → GD →
-        GF) with an alphabetical fallback for true ties — FIFA falls
-        back to fair-play points then drawing of lots, neither of which
-        we track. See #52.
+        Returns a `GroupStandings` with three fields:
+          - `by_group`: `{group_key: [(team, row), ...]}` sorted by
+            `_fifa_tiebreaker_key`. Position within the list IS the
+            team's finishing position (0 = 1st in group). The minus-
+            head-to-head and minus-fair-play caveats from
+            `terminal_outcomes` apply equally here.
+          - `best_third_order`: every group's 3rd-placer, cross-group
+            sorted by `_fifa_tiebreaker_key` plus alphabetical-name as
+            the deterministic last-resort. Front of list is the
+            strongest 3rd-placer. Includes ALL groups; the caller
+            decides how many to promote.
+          - `n_best_third_advance`: how many of `best_third_order` get
+            promoted to advance status per
+            `LEAGUE_CONTEXTS[<gs_code>].best_third_place_count`,
+            defaulting to 0 when no context is registered.
+
+        Single source of truth for `terminal_outcomes` (collapses
+        positions to advance/eliminated labels) and `_build_bracket_seed`
+        (positions to LAST_32 slot assignments per the tournament's
+        published bracket, #53).
         """
         from collections import defaultdict
+        from ..scoring import LEAGUE_CONTEXTS
+
         team_group = state.get("_team_group", {})
         by_group: Dict[str, List[Tuple[str, Dict[str, int]]]] = defaultdict(list)
         for team, row in state.items():
@@ -1325,46 +1355,47 @@ class GroupStageSoccerSource(SoccerSource):
                 continue
             by_group[group].append((team, row))
 
-        # How many third-place teams advance? Read from LEAGUE_CONTEXTS
-        # via the source's group-stage code so EURO (4) and WC (8) get
-        # their format-specific count without per-source if/else.
-        from ..scoring import LEAGUE_CONTEXTS
-        gs_code = self._group_stage_context_code()
-        ctx = LEAGUE_CONTEXTS.get(gs_code)
+        third_placers: List[Tuple[str, Dict[str, int]]] = []
+        for teams in by_group.values():
+            teams.sort(key=lambda kv: self._fifa_tiebreaker_key(kv[1]))
+            if len(teams) > _GROUP_ADVANCE_TOP_N:
+                third_placers.append(teams[_GROUP_ADVANCE_TOP_N])
+
+        third_placers.sort(key=lambda kv: (*self._fifa_tiebreaker_key(kv[1]), kv[0]))
+
+        ctx = LEAGUE_CONTEXTS.get(self._group_stage_context_code())
         n_best_third = ctx.best_third_place_count if ctx else 0
 
+        return GroupStandings(
+            by_group=dict(by_group),
+            best_third_order=third_placers,
+            n_best_third_advance=n_best_third,
+        )
+
+    def terminal_outcomes(self, state: Dict[str, Any]) -> Dict[str, List[str]]:
+        """Two-stage advancement: top-2 per group always advance, then
+        for formats that admit best-3rd-place advancement (WC 2026,
+        EURO since 2016) the top-N third-place teams across all groups
+        also advance.
+
+        Standings + tiebreaker logic lives in `_compute_group_standings`;
+        this method is the label translation layer (positions to
+        "advance"/"eliminated"). See the helper's docstring for the
+        FIFA tiebreaker chain and the caveats around head-to-head and
+        fair-play (#52).
+        """
+        standings = self._compute_group_standings(state)
+        promoted_thirds = {
+            team for team, _ in standings.best_third_order[:standings.n_best_third_advance]
+        }
+
         outcomes: Dict[str, List[str]] = {}
-        # Hold the 3rd-place team from each group for the global ranking.
-        third_placers: List[Tuple[str, Dict[str, int]]] = []
-        for group, teams in by_group.items():
-            teams.sort(key=lambda kv: (
-                -kv[1]["points"],
-                -(kv[1]["gf"] - kv[1]["ga"]),
-                -kv[1]["gf"],
-            ))
-            for i, (team, row) in enumerate(teams):
+        for teams in standings.by_group.values():
+            for i, (team, _row) in enumerate(teams):
                 if i < _GROUP_ADVANCE_TOP_N:
                     outcomes[team] = ["advance"]
-                elif i == _GROUP_ADVANCE_TOP_N:
-                    # 3rd place — eliminate provisionally; promoted below
-                    # if it ranks high enough in the cross-group sort.
-                    outcomes[team] = ["eliminated"]
-                    third_placers.append((team, row))
+                elif i == _GROUP_ADVANCE_TOP_N and team in promoted_thirds:
+                    outcomes[team] = ["advance"]
                 else:
                     outcomes[team] = ["eliminated"]
-
-        # Promote the top-N 3rd-place teams. Alphabetical name as
-        # deterministic tiebreaker — FIFA uses fair-play points / drawing
-        # of lots here, neither of which we model. Deterministic
-        # tiebreaker keeps replay results stable.
-        if n_best_third > 0 and third_placers:
-            third_placers.sort(key=lambda kv: (
-                -kv[1]["points"],
-                -(kv[1]["gf"] - kv[1]["ga"]),
-                -kv[1]["gf"],
-                kv[0],
-            ))
-            for team, _row in third_placers[:n_best_third]:
-                outcomes[team] = ["advance"]
-
         return outcomes
