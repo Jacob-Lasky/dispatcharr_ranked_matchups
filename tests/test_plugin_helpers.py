@@ -1129,6 +1129,81 @@ class TestComputePastSlotEnd:
         assert past_end.utcoffset().total_seconds() == 0
 
 
+class TestCurationPresets:
+    def test_manual_preset_uses_individual_weights(self, plugin):
+        settings = {
+            "curation_preset": "manual",
+            "weight_rank": 99.0, "weight_favorite": 99.0,
+        }
+        w = plugin._build_weights(settings)
+        assert w.rank == 99.0
+        assert w.favorite == 99.0
+
+    def test_manual_preset_default_when_setting_blank(self, plugin):
+        # No curation_preset key at all → manual path.
+        w = plugin._build_weights({"weight_rank": 99.0})
+        assert w.rank == 99.0
+
+    def test_high_curation_preset_overrides_individuals(self, plugin):
+        # Even with manual weights set, preset values win.
+        w = plugin._build_weights({
+            "curation_preset": "high_curation",
+            "weight_rank": 99.0, "weight_favorite": 99.0,
+        })
+        assert w.rank == 1.5
+        assert w.favorite == 4.0
+
+    def test_balanced_preset_matches_default_weights(self, plugin):
+        # Balanced preset == scoring.Weights() defaults — DRY check that
+        # prevents the preset drifting silently as defaults change.
+        from dispatcharr_ranked_matchups.scoring import Weights
+        d = Weights()
+        w = plugin._build_weights({"curation_preset": "balanced"})
+        assert w.rank == d.rank
+        assert w.spread == d.spread
+        assert w.favorite == d.favorite
+        assert w.rivalry == d.rivalry
+        assert w.tournament == d.tournament
+        assert w.narrative == d.narrative
+        assert w.importance == d.importance
+
+    def test_high_coverage_preset_lower_rank_higher_favorite(self, plugin):
+        w = plugin._build_weights({"curation_preset": "high_coverage"})
+        assert w.rank == 0.7
+        assert w.favorite == 8.0
+
+    def test_unknown_preset_falls_back_to_manual(self, plugin):
+        # Defensive: unrecognized preset name shouldn't crash, just use individuals.
+        w = plugin._build_weights({
+            "curation_preset": "best_in_show_only",
+            "weight_rank": 42.0,
+        })
+        assert w.rank == 42.0
+
+    def test_case_insensitive_preset_name(self, plugin):
+        w = plugin._build_weights({"curation_preset": "HIGH_CURATION"})
+        assert w.rank == 1.5
+
+    # ---------- max_games resolution ----------
+
+    def test_resolve_max_games_manual_reads_setting(self, plugin):
+        assert plugin._resolve_max_games({
+            "curation_preset": "manual", "max_games": 7,
+        }) == 7
+
+    def test_resolve_max_games_preset_wins(self, plugin):
+        # User set max_games=999 but picked high_curation — preset wins.
+        assert plugin._resolve_max_games({
+            "curation_preset": "high_curation", "max_games": 999,
+        }) == 10
+        assert plugin._resolve_max_games({"curation_preset": "balanced"}) == 25
+        assert plugin._resolve_max_games({"curation_preset": "high_coverage"}) == 50
+
+    def test_resolve_max_games_default(self, plugin):
+        # No setting at all → default 25.
+        assert plugin._resolve_max_games({}) == 25
+
+
 class TestIsCatchupMatchday:
     def _table(self, max_played):
         # Synthetic table where most teams played `max_played` and a couple

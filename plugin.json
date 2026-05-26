@@ -316,11 +316,24 @@
       "help_text": "Substring-matched against home/away team names (with team-qualifier whitelist for soccer suffixes like 'FC', 'AFC', 'City', 'United'). Always shown regardless of rank, with a flat score boost. Teams in playoff races still get the 'impact-on-favorite' signal automatically when they sit near a favorite's position."
     },
     {
+      "id": "curation_preset",
+      "type": "select",
+      "label": "Curation preset",
+      "default": "manual",
+      "options": [
+        {"value": "manual", "label": "Manual (use individual weights + max_games below)"},
+        {"value": "high_curation", "label": "High curation (~10 games, only the best)"},
+        {"value": "balanced", "label": "Balanced (~25 games, default v0 behavior)"},
+        {"value": "high_coverage", "label": "High coverage (~50 games, include smaller stakes)"}
+      ],
+      "help_text": "Bundles weight + max_games tuning into one knob so you don't have to tune 9 sliders. Picking anything other than 'manual' overrides the individual weight_* settings and max_games below with the preset's values. Stick with 'manual' if you've hand-tuned weights."
+    },
+    {
       "id": "max_games",
       "type": "number",
       "label": "Max curated games per refresh",
       "default": 25,
-      "help_text": "Top-N games by score across all enabled sports (20-50 is a sensible range; lower = tighter curation, higher = more coverage). Favorites guaranteed inclusion above this cap."
+      "help_text": "Top-N games by score across all enabled sports (20-50 is a sensible range; lower = tighter curation, higher = more coverage). Favorites guaranteed inclusion above this cap. IGNORED when curation_preset is anything other than 'manual'."
     },
     {
       "id": "lookahead_days",
