@@ -1143,6 +1143,108 @@ def _league_context_for(g: Dict[str, Any]):
     return LEAGUE_CONTEXTS.get(fd_code) if fd_code else None
 
 
+_ORDINAL_SUFFIXES = ("th", "st", "nd", "rd")
+
+
+def _ordinal(n: int) -> str:
+    """1 → '1st', 2 → '2nd', 4 → '4th', 11 → '11th', 23 → '23rd'.
+
+    DO NOT use `min(n%10, 3)` to index the suffixes — that clamps 4..9 to
+    "rd", yielding "4rd"/"5rd"/etc. The teen rule (11-13 are "th", not
+    "st"/"nd"/"rd") handles n%100 in [11..13]; everything else uses the
+    last digit, defaulting to "th" for 0 and 4..9.
+    """
+    last_two = n % 100
+    if 11 <= last_two <= 13:
+        return f"{n}th"
+    last = n % 10
+    suffix = _ORDINAL_SUFFIXES[last] if last <= 3 else "th"
+    return f"{n}{suffix}"
+
+
+def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
+    """One-line standings summary for league fixtures.
+
+    Format: "<home> <pos>, <pts> pts. <away> <pos>, <pts> pts — <gap>."
+    where <gap> is computed for the away team relative to the home team.
+
+    Returns None if there's no standings table (knockout / non-soccer), if
+    neither playing team appears in the table (e.g. cold-start with
+    promoted teams), or if essential fields are missing.
+
+    Surfaces the position+points data the soccer source already cached
+    under extra.standings_table — see #10.
+    """
+    extra = g.get("extra") or {}
+    table = extra.get("standings_table") or []
+    if not table:
+        return None
+
+    home_name = g.get("home", "")
+    away_name = g.get("away", "")
+    if not home_name or not away_name:
+        return None
+
+    # Exact-name lookup against the FD.org table. The home/away names in
+    # the GameRow come from the SAME FD.org fixture payload as the table,
+    # so they match byte-for-byte — no fuzzy matching needed.
+    by_name = {entry.get("name"): entry for entry in table if entry.get("name")}
+    home_entry = by_name.get(home_name)
+    away_entry = by_name.get(away_name)
+    if not home_entry and not away_entry:
+        return None
+
+    def _format(name: str, entry: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not entry:
+            return None
+        pos = entry.get("position")
+        pts = entry.get("points")
+        if pos is None or pts is None:
+            return None
+        return f"{name} {_ordinal(int(pos))}, {int(pts)} pts"
+
+    home_str = _format(home_name, home_entry)
+    away_str = _format(away_name, away_entry)
+    if not home_str and not away_str:
+        return None
+    if not home_str:
+        return away_str + "."
+    if not away_str:
+        return home_str + "."
+
+    # Both teams in the table — add a gap descriptor for the away team
+    # relative to the home team. Reads naturally: "...69 pts — 1 pt behind."
+    home_pts = int(home_entry["points"])
+    away_pts = int(away_entry["points"])
+    diff = away_pts - home_pts
+    if diff > 0:
+        unit = "pt" if diff == 1 else "pts"
+        gap = f"{diff} {unit} ahead"
+    elif diff < 0:
+        n = -diff
+        unit = "pt" if n == 1 else "pts"
+        gap = f"{n} {unit} behind"
+    else:
+        # Tied on points — goal difference is the actual league
+        # tiebreaker, so surface it when both entries have GD cached
+        # (older caches predating #10 won't have it; fall through to the
+        # bare "level on points" framing in that case).
+        home_gd = home_entry.get("goal_difference")
+        away_gd = away_entry.get("goal_difference")
+        if home_gd is not None and away_gd is not None:
+            gd_diff = away_gd - home_gd
+            if gd_diff > 0:
+                gap = f"level on points, {gd_diff} GD ahead"
+            elif gd_diff < 0:
+                gap = f"level on points, {-gd_diff} GD behind"
+            else:
+                gap = "level on points and goal difference"
+        else:
+            gap = "level on points"
+
+    return f"{home_str}. {away_str} — {gap}."
+
+
 def _build_description(
     g: Dict[str, Any],
     tagline: str,
@@ -1154,9 +1256,10 @@ def _build_description(
       1. Placeholder note (only if EPG hasn't matched a source yet)
       2. Headline: tagline + spread descriptor ("A title race — toss-up.")
       3. Matchday + league boundary summary (where applicable)
-      4. Favorite-impact narratives (rooting framing, both deltas)
-      5. "Favorite is your team" line if the favorite is playing this game
-      6. Source channel line (only if matched)
+      4. Standings posture line (league fixtures only — see #10)
+      5. Favorite-impact narratives (rooting framing, both deltas)
+      6. "Favorite is your team" line if the favorite is playing this game
+      7. Source channel line (only if matched)
 
     Deliberately dropped: kickoff time (already shown by EPG client time
     blocks), score breakdown (already in channel name as ★X.X), spread's
@@ -1208,11 +1311,20 @@ def _build_description(
     if matchday_line_parts:
         sections.append(" ".join(matchday_line_parts))
 
-    # 4. Favorite-impact narratives.
+    # 4. Standings posture (league fixtures only — knockout cups have no
+    # standings table, so this renders None and is skipped). Comes BEFORE
+    # the favorite-impact narratives so the reader gets the raw "where are
+    # they in the table?" before the editorial "why should you care?"
+    # framing.
+    standings_line = _build_standings_posture_line(g)
+    if standings_line:
+        sections.append(standings_line)
+
+    # 5. Favorite-impact narratives.
     for narrative in impact_narratives:
         sections.append(narrative)
 
-    # 5. Favorite is playing in this game.
+    # 6. Favorite is playing in this game.
     if favorites_matched:
         labels = ", ".join(favorites_matched)
         if len(favorites_matched) == 1:
@@ -1220,7 +1332,7 @@ def _build_description(
         else:
             sections.append(f"Your favorites: {labels}.")
 
-    # 6. Source channel.
+    # 7. Source channel.
     src_name = g.get("channel_name_current")
     if src_name:
         sections.append(f"Source: {src_name}.")
