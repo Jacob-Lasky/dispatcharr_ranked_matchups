@@ -9485,3 +9485,148 @@ class TestFdCacheBatching:
         wc._fetch_all_season_matches()
         ec._fetch_all_season_matches()
         assert len(call_log) == 2
+
+
+class TestTierFixturesChunkingForLongWindows:
+    """FD.org's /v4/matches endpoint caps each call's window at 10 days
+    with HTTP 400 ("Specified period must not exceed 10 days"). The
+    per-competition /v4/competitions/<code>/matches endpoint, which the
+    tier-wide refactor replaced, did NOT have this cap. Plugin configs
+    with `lookahead_days > 10` were valid before the refactor; the
+    chunking behavior here preserves that contract.
+
+    Without chunking, `lookahead_days=17` (for example, to capture
+    WC kickoff on 2026-06-11 from a 2026-05-26 refresh) would return
+    HTTP 400, every soccer source would see 0 fixtures, and the chain
+    feature would silently regress to "no WC games scored" for the
+    entire pre-tournament window. That's exactly the failure mode the
+    batching was meant to fix.
+    """
+
+    def setup_method(self):
+        from dispatcharr_ranked_matchups.sources import soccer
+        soccer._clear_fd_caches()
+
+    def teardown_method(self):
+        from dispatcharr_ranked_matchups.sources import soccer
+        soccer._clear_fd_caches()
+
+    def test_window_within_cap_makes_one_call(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        call_log = []
+
+        class FakeResponse:
+            def raise_for_status(self): pass
+            def json(self): return {"matches": []}
+
+        def fake_get(url, **kwargs):
+            call_log.append(kwargs.get("params"))
+            return FakeResponse()
+
+        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
+        src._fetch_fixtures(days_ahead=7)
+        assert len(call_log) == 1, "7-day window should be one call, not chunked"
+
+    def test_window_exceeding_cap_splits_into_chunks(self, monkeypatch):
+        # 17-day lookahead exceeds the 10-day cap → must split into 2
+        # calls. This is the WC-kickoff-capture scenario.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        call_log = []
+
+        class FakeResponse:
+            def __init__(self, code_prefix):
+                self._code_prefix = code_prefix
+            def raise_for_status(self): pass
+            def json(self):
+                return {"matches": [
+                    {"competition": {"code": self._code_prefix}, "id": len(call_log)},
+                ]}
+
+        def fake_get(url, **kwargs):
+            params = kwargs.get("params") or {}
+            call_log.append(params)
+            # Return a chunk-id'd match so we can verify both chunks
+            # merged into the result.
+            code = f"CHUNK_{len(call_log)}"
+            return FakeResponse(code)
+
+        monkeypatch.setattr(soccer.requests, "get", fake_get)
+
+        out = soccer._fetch_tier_fixtures("testkey", days_ahead=17)
+        # Two chunks: [today, today+10] and [today+11, today+17].
+        assert len(call_log) == 2
+        # Both chunks' matches present in the merged result.
+        assert "CHUNK_1" in out
+        assert "CHUNK_2" in out
+        # No overlap on the boundary day: chunk2.dateFrom must be
+        # AFTER chunk1.dateTo, not equal to it.
+        from datetime import datetime as _dt
+        chunk1_to = _dt.strptime(call_log[0]["dateTo"], "%Y-%m-%d")
+        chunk2_from = _dt.strptime(call_log[1]["dateFrom"], "%Y-%m-%d")
+        assert chunk2_from > chunk1_to, (
+            f"chunk2 starts {chunk2_from.date()} but chunk1 ended "
+            f"{chunk1_to.date()} — boundary overlap would double-fetch "
+            "the boundary day"
+        )
+
+    def test_chunk_size_respects_max_window_days(self, monkeypatch):
+        # Each chunk's window must be <= _FD_TIER_MAX_WINDOW_DAYS.
+        # Otherwise FD will 400 us right back where we started.
+        from dispatcharr_ranked_matchups.sources import soccer
+        from datetime import datetime as _dt
+
+        call_log = []
+
+        class FakeResponse:
+            def raise_for_status(self): pass
+            def json(self): return {"matches": []}
+
+        def fake_get(url, **kwargs):
+            call_log.append(kwargs.get("params") or {})
+            return FakeResponse()
+
+        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        soccer._fetch_tier_fixtures("testkey", days_ahead=25)
+
+        for params in call_log:
+            d_from = _dt.strptime(params["dateFrom"], "%Y-%m-%d")
+            d_to = _dt.strptime(params["dateTo"], "%Y-%m-%d")
+            span_days = (d_to - d_from).days
+            assert span_days <= soccer._FD_TIER_MAX_WINDOW_DAYS, (
+                f"chunk {params} spans {span_days} days, exceeds the "
+                f"{soccer._FD_TIER_MAX_WINDOW_DAYS}-day FD.org cap"
+            )
+
+    def test_partial_failure_returns_chunks_fetched_so_far(self, monkeypatch):
+        # If chunk 1 succeeds and chunk 2 hits 429, the chunk-1 data
+        # is still cached and returned. Better than throwing away
+        # everything when a quota hit lands mid-burst.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        call_count = {"n": 0}
+
+        class FakeResponse:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"matches": [
+                    {"competition": {"code": "PL"}, "id": call_count["n"]},
+                ]}
+
+        def fake_get(url, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return FakeResponse()
+            # Chunk 2: simulate 429.
+            raise soccer.requests.RequestException("simulated 429")
+
+        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        out = soccer._fetch_tier_fixtures("testkey", days_ahead=20)
+
+        # First chunk landed; second 429'd.
+        assert call_count["n"] == 2
+        # First chunk's data is still in the result.
+        assert "PL" in out
+        assert len(out["PL"]) == 1
