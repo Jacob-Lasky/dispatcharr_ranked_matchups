@@ -42,6 +42,16 @@ except ImportError:  # py < 3.9 fallback (won't hit on Dispatcharr's Python 3.13
 
 from ._util import parse_iso_utc, stable_hash_int
 
+# Eager-import tasks so the background-thread launchers and inflight Redis
+# helpers are available before any action handler runs. tasks.py used to
+# define Celery @shared_tasks but Dispatcharr's worker_ready -> discover_plugins
+# wiring fires AFTER the worker's consumer freezes its task strategies dict,
+# so plugin-defined Celery tasks are visible to inspect() but rejected by
+# the consumer (see tasks.py docstring for the full diagnosis). The threads
+# live in the uwsgi worker process and write progress to a Redis key the
+# show_status action reads.
+from . import tasks  # noqa: F401, E402
+
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # DO NOT derive PLUGIN_KEY from __package__. Dispatcharr's loader wraps every
@@ -2274,14 +2284,67 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- auto pipeline ----------
 
-def _action_auto_pipeline(settings: Dict[str, Any]) -> Dict[str, Any]:
+def _action_auto_pipeline_sync(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Synchronous in-process auto_pipeline (refresh then apply).
+
+    DO NOT call this from the HTTP `Plugin.run("auto_pipeline", ...)`
+    dispatch -- the action runs ~40s end-to-end on a populated install
+    and the browser / axios client drops the response well before that,
+    producing a false "failed to run plugin action" toast (#84). The HTTP
+    dispatch goes through `_action_auto_pipeline_async` which queues a
+    Celery task that calls this function inside a Celery worker.
+
+    The scheduler (`_scheduler_loop`) DOES call this directly: scheduler
+    runs already happen out-of-request, the Redis lock prevents racing
+    a thread-driven HTTP run, and keeping the sync path means crash
+    semantics stay simple (a hung action is visible in the worker
+    process, not orphaned in a thread).
+
+    The caller is responsible for setting and clearing the inflight Redis
+    key (Celery task and scheduler do this around the call). This helper
+    only transitions the phase between refresh and apply so both entry
+    points get the same fine-grained progress in show_status."""
     r1 = _action_refresh(settings)
     if r1.get("status") != "ok":
         return r1
+    tasks._update_inflight_phase("apply")
     r2 = _action_apply(settings)
     return {
         "status": r2.get("status", "ok"),
         "message": f"refresh: {r1.get('message')} | apply: {r2.get('message')}",
+    }
+
+
+def _action_auto_pipeline_async(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """HTTP-facing auto_pipeline. Spawns a daemon thread to run
+    refresh + apply in the background and returns immediately with
+    `{status: queued, task_id}`. The UI polls show_status to learn
+    when cache.json mtime advances and apply completes."""
+    task_id = tasks.run_auto_pipeline_background(settings)
+    return {
+        "status": "queued",
+        "task_id": task_id,
+        "message": (
+            f"Auto pipeline queued (task {task_id}). "
+            f"Run 'Show current state' to watch progress; "
+            f"refresh + apply runs in the background."
+        ),
+    }
+
+
+def _action_refresh_async(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """HTTP-facing refresh. Spawns a daemon thread and returns
+    immediately. Refresh alone runs ~25s which is borderline-over the
+    30s browser fetch default; queueing it keeps the UI honest."""
+    task_id = tasks.run_refresh_background(settings)
+    return {
+        "status": "queued",
+        "task_id": task_id,
+        "message": (
+            f"Refresh queued (task {task_id}). "
+            f"Run 'Show current state' to watch progress; "
+            f"cache.json mtime advances when complete."
+        ),
     }
 
 
@@ -2290,10 +2353,31 @@ def _action_auto_pipeline(settings: Dict[str, Any]) -> Dict[str, Any]:
 def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     del settings  # interface-required (Plugin.run dispatch), not read here
     cache = _read_cache()
+    inflight = tasks.read_inflight()
+    inflight_line: Optional[str] = None
+    if inflight:
+        kind = inflight.get("kind", "?")
+        phase = inflight.get("phase", "?")
+        started_at = inflight.get("started_at", "?")
+        tid = inflight.get("task_id", "")
+        tid_short = tid[:8] if isinstance(tid, str) and len(tid) > 8 else tid
+        inflight_line = (
+            f"[in flight] {kind} ({phase}) since {started_at}"
+            f"{f' task={tid_short}' if tid_short else ''}. "
+            f"cache.json below reflects the LAST completed run; mtime "
+            f"advances when refresh completes."
+        )
     games = cache.get("games", [])
     if not games:
-        return {"status": "ok", "message": "Cache empty. Run refresh."}
-    lines = [
+        msg = "Cache empty. Run refresh."
+        if inflight_line:
+            msg = inflight_line + "\n" + msg
+        return {"status": "ok", "message": msg}
+    lines = []
+    if inflight_line:
+        lines.append(inflight_line)
+        lines.append("")
+    lines += [
         f"Refreshed: {cache.get('refreshed_at')}",
         f"Sources: {' | '.join(cache.get('summary', []))}",
         f"Total games: {len(games)}",
@@ -2397,8 +2481,20 @@ def _scheduler_loop(plugin_ref):
                 continue
             try:
                 logger.info("[ranked_matchups] scheduler firing auto_pipeline")
-                result = _action_auto_pipeline(settings)
-                logger.info("[ranked_matchups] auto_pipeline: %s", result.get("message"))
+                # Publish inflight to the same Redis key the Celery tasks use
+                # so the UI's show_status surfaces scheduled runs identically
+                # to HTTP-queued runs. The task_id slot gets "scheduler-<pid>"
+                # so it's distinguishable from a Celery UUID.
+                tasks._set_inflight(
+                    "scheduled_auto_pipeline",
+                    f"scheduler-{os.getpid()}",
+                    "refresh",
+                )
+                try:
+                    result = _action_auto_pipeline_sync(settings)
+                    logger.info("[ranked_matchups] auto_pipeline: %s", result.get("message"))
+                finally:
+                    tasks._clear_inflight()
             finally:
                 _release_scheduler_lock()
         except Exception:
@@ -2495,12 +2591,16 @@ class Plugin:
         if params:
             settings.update(params)
         try:
+            # refresh + auto_pipeline run too long for browsers / axios
+            # default fetch timeouts (~30s). Dispatch via Celery and return
+            # immediately with a task id; UI polls show_status for progress.
+            # See #84 and tasks.py. apply stays synchronous (~17s, fits).
             if action == "refresh":
-                return _action_refresh(settings)
+                return _action_refresh_async(settings)
             if action == "apply":
                 return _action_apply(settings)
             if action == "auto_pipeline":
-                return _action_auto_pipeline(settings)
+                return _action_auto_pipeline_async(settings)
             if action == "show_status":
                 return _action_show_status(settings)
             return {"status": "error", "message": f"Unknown action: {action!r}"}
