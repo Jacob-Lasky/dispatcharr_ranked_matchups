@@ -90,7 +90,7 @@ class TestBuildLlmContext:
         assert "Tottenham Hotspur FC" in ctx
         assert "Everton FC" in ctx
         assert "Today 11:00 AM EDT" in ctx
-        # Away listed first, "at" home — broadcast convention.
+        # Away listed first, "at" home: broadcast convention.
         assert "Everton FC at Tottenham Hotspur FC" in ctx
 
     def test_includes_competition_and_matchday(self):

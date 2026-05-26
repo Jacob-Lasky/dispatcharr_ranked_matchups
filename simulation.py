@@ -1,7 +1,7 @@
 """Sport-agnostic Monte Carlo match importance per Lahvička (2012).
 
 For each (target_match, team, outcome) tuple, this module estimates the
-*importance* of the match — the strength of association between the match's
+*importance* of the match: the strength of association between the match's
 W/D/L result and whether `team` reaches `outcome` at season end.
 
 The algorithm, mirrored from the SOTA section of TUNING_REPORT.md:
@@ -71,7 +71,7 @@ def kendall_tau_c(table: Sequence[Sequence[int]]) -> float:
     don't contribute.
 
     Returns 0.0 if the table has fewer than 2 non-trivial rows/cols or zero
-    total observations (degenerate cases — caller already had no signal).
+    total observations (degenerate cases: caller already had no signal).
     """
     rows = len(table)
     if rows < 2:
@@ -132,7 +132,7 @@ def monte_carlo_importance(
     in or eliminated); higher means more association.
 
     Caller is responsible for matching `target_team` and `target_outcome` to
-    `source.outcome_labels` — passing an outcome the source doesn't track
+    `source.outcome_labels`: passing an outcome the source doesn't track
     returns 0 (the team will never be in that bucket; tau-c degenerates).
     """
     if not getattr(source, "supports_importance", False):
@@ -180,7 +180,7 @@ def monte_carlo_importance(
 
 def _same_match(a: "GameRow", b: "GameRow") -> bool:
     """Match-identity check for the simulator's "skip target on second pass"
-    deduplication. Compares the (home, away, start_time, fd_id) tuple — using
+    deduplication. Compares the (home, away, start_time, fd_id) tuple: using
     `is` would only catch reference identity, which breaks once
     `remaining_matches` materializes fresh GameRow instances every call.
     """
@@ -210,7 +210,7 @@ def monte_carlo_importance_batch(
     target match, sharing one set of N season simulations.
 
     A naive loop over `monte_carlo_importance(team, outcome)` re-runs N sims
-    per query. Batching reuses the simulated seasons — for K queries this
+    per query. Batching reuses the simulated seasons: for K queries this
     drops the cost from K*N to N seasons regardless of K. Critical for
     in-loop scoring where score_game needs importance per (home/away) team
     per outcome band (typically K=8 for EPL: 2 teams × 4 outcome bands).
@@ -237,7 +237,7 @@ def monte_carlo_importance_batch(
     for _ in range(n_sims):
         target_result = source.sample_result(base_state, target_match, strengths, rng)
         state = source.apply_result(base_state, target_match, target_result)
-        # Same drain-until-empty loop as monte_carlo_importance — see there
+        # Same drain-until-empty loop as monte_carlo_importance: see there
         # for the reasoning. Identical behavior for league sources;
         # essential for knockout sources where downstream bracket matches
         # only become eligible after their feeder ties resolve.
@@ -294,11 +294,11 @@ def monte_carlo_importance_batch_chain(
         for the query column; it's still a smell). Today the
         GroupStageSoccerSource emits `advance` / `eliminated` and the
         KnockoutSoccerSource emits `round_of_16` / `quarterfinal` /
-        `semifinal` / `final` / `winner` — disjoint by design.
+        `semifinal` / `final` / `winner`: disjoint by design.
       - `seed_fn` returns a state dict consumable by
         `downstream.remaining_matches` / `sample_result` / `apply_result`
         / `terminal_outcomes`. The downstream's own `initial_state` is
-        NOT called by the chain — the seed is the entry point.
+        NOT called by the chain: the seed is the entry point.
       - Strength estimation is shared (one call to
         `primary.estimate_strengths()` covers both phases). Today the
         SoccerSource subclasses both inherit identical

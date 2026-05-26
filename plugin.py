@@ -84,7 +84,7 @@ EPG_POST_HOURS = 4    # 4 hours after game starts (default; covers OT)
 
 # Per-sport match-window override (used by _build_epg_lookup to constrain
 # the regex pre-filter's time bucket). The ProgramData slot we emit for
-# our virtual channel still uses the defaults above — those control
+# our virtual channel still uses the defaults above: those control
 # user-facing display, not match recall. See #4.
 #
 # Soccer leagues / international tournaments. Soccer games run ~95-120 min
@@ -119,7 +119,7 @@ TVG_ID_PREFIX = "ranked_matchups:"
 
 # Legacy tvg_id values earlier versions of this plugin wrote. The rename
 # cleanup pass needs these to recognize leftover EPGData rows on a renamed-from
-# EPGSource — a TVG_ID_PREFIX-only check misses sources whose only remaining
+# EPGSource: a TVG_ID_PREFIX-only check misses sources whose only remaining
 # rows are legacy-shaped, leaving the orphan visible in the UI with
 # status='error' forever after a target-group rename.
 # Add to this tuple when the tvg_id scheme changes; never remove an entry.
@@ -143,17 +143,17 @@ def _owned_tvg_id_q(field_prefix: str = ""):
     )
 
 # Default starting channel number when the user hasn't configured one. Sentinel
-# 0 means "auto" — pick the first channel number after the highest existing
+# 0 means "auto": pick the first channel number after the highest existing
 # non-virtual channel, so we slot in cleanly without colliding with real
 # channels.
 DEFAULT_VIRTUAL_CHANNEL_BASE = 0
 
 # Default fallback when DEFAULT_VIRTUAL_CHANNEL_BASE is sentinel-0 AND there
-# are zero existing channels (fresh install) — picked high enough not to
+# are zero existing channels (fresh install): picked high enough not to
 # collide with auto-channel-sync ranges.
 _AUTO_BASE_FALLBACK = 9000
 
-# EPGSource fields. DO NOT use source_type="dummy" — Dispatcharr's
+# EPGSource fields. DO NOT use source_type="dummy": Dispatcharr's
 # EPGGridAPIView treats every channel attached to a dummy source as needing
 # joke filler ("Rush Hour - X's alternative to traffic", "What's For Dinner?
 # Debate", etc.) and overlays it in the web UI on top of our real ProgramData.
@@ -204,7 +204,7 @@ def _stream_sort_key(stream_stats, name):
          Sub-sort by -height (1080p before 720p) then -bitrate.
       1. No probe data at all (Dispatcharr never crawled this stream).
          Sub-sort by name-keyword bucket (UHD > FHD > HD > unknown > SD).
-      2. Probe ran and got 0x0 — typically a dead/broken stream. Sort last
+      2. Probe ran and got 0x0: typically a dead/broken stream. Sort last
          even if the name claims UHD, because the probe data overrides
          marketing.
     """
@@ -267,7 +267,7 @@ def _format_kickoff(start_utc: datetime, tz) -> str:
 
 
 def _format_matchup(home: str, away: str) -> str:
-    """Team-pair string for EPG program titles. Plain `Home vs Away` —
+    """Team-pair string for EPG program titles. Plain `Home vs Away`:
     deliberately omits the ★ score prefix the channel name carries, so
     the EPG entry reads like a real broadcast EPG title rather than a
     debug breadcrumb."""
@@ -299,7 +299,7 @@ def _build_program_title(state: str, matchup: str, kickoff_local: str) -> str:
 
 
 def _compute_past_slot_end(prog_end_utc: datetime, settings: Dict[str, Any]) -> datetime:
-    """End time for the post-event EPG slot — runs until the next
+    """End time for the post-event EPG slot: runs until the next
     scheduled refresh fire-time, so the slot disappears the moment the
     refresh that would replace this channel runs.
 
@@ -370,7 +370,7 @@ def _dedup_series_games(games: List[Any], sources: List[Any]) -> Tuple[List[Any]
     """Collapse a best-of-N playoff series to its next-scheduled game.
 
     NHL / NBA / MLB / NCAA-tournament source `fetch_upcoming` calls
-    return every scheduled game in a series — including future entries
+    return every scheduled game in a series: including future entries
     whose date is a placeholder for "Game 5/6/7 IF NEEDED". The user
     sees that as 4-7 redundant virtual channels for the same matchup.
     Group rows by `(sport_prefix, frozenset({home, away}))` and keep
@@ -378,12 +378,12 @@ def _dedup_series_games(games: List[Any], sources: List[Any]) -> Tuple[List[Any]
     `(deduped_games, deduped_sources, n_dropped)` preserving the
     parallel-index relationship between games and sources.
 
-    DO NOT key on `(sport_prefix, home, away)` with order preserved —
+    DO NOT key on `(sport_prefix, home, away)` with order preserved:
     NHL playoff Games 2 and 4 swap home-ice (the lower-seed gets
     "Carolina at Montreal" alternating with "Montreal at Carolina")
     and a strict ordered key would treat them as distinct.
 
-    League sources also flow through this — same team-pair appearing
+    League sources also flow through this: same team-pair appearing
     twice in a 7-day lookahead is genuinely rare (would have to be a
     midweek + weekend cup pairing, or a replay), and "show only the
     next one" is the same UX as for playoffs. If a future scenario
@@ -429,7 +429,7 @@ def _parse_favorites(raw: str) -> List[str]:
 # - "high_curation": narrow to ~10 high-leverage games; weights emphasize
 #   structural importance + rank, downweight favorites/spread so they don't
 #   dominate the list when the user wants tight curation.
-# - "balanced": ~25 games with default weights — mirrors the v0 default.
+# - "balanced": ~25 games with default weights: mirrors the v0 default.
 # - "high_coverage": ~50 games with permissive weights so smaller-stakes
 #   matchups still show up even on quiet days.
 #
@@ -444,7 +444,7 @@ _CURATION_PRESETS: Dict[str, Dict[str, float]] = {
         "max_games": 10,
     },
     "balanced": {
-        # Mirrors Weights() dataclass defaults — kept here for the SAME
+        # Mirrors Weights() dataclass defaults: kept here for the SAME
         # reason _build_weights pulls from Weights(): if defaults change,
         # the "balanced" preset SHOULD track them. DRY check pinned by tests.
         "rank": 1.0, "spread": 3.0, "favorite": 6.0, "rivalry": 2.0,
@@ -461,7 +461,7 @@ _CURATION_PRESETS: Dict[str, Dict[str, float]] = {
 
 def _build_weights(settings: Dict[str, Any]):
     # Source of truth for default values is scoring.Weights's dataclass
-    # declaration. Do NOT duplicate the numbers here — when a default
+    # declaration. Do NOT duplicate the numbers here: when a default
     # changes, the duplicate ALWAYS gets missed and the runtime silently
     # uses the old value until somebody runs the tests.
     from .scoring import Weights
@@ -540,7 +540,7 @@ def _build_sources(settings: Dict[str, Any]):
         """Pick the right SoccerSource subclass for a given competition based
         on its LEAGUE_CONTEXTS format. League-format (PL, ELC, BL1, etc.)
         uses SoccerSource. Knockout-format (CL, EL, etc.) uses
-        KnockoutSoccerSource — a different state machine for bracket shape.
+        KnockoutSoccerSource: a different state machine for bracket shape.
         """
         cfg = COMPETITIONS.get(comp_key)
         ctx = LEAGUE_CONTEXTS.get(cfg.fd_code) if cfg else None
@@ -602,11 +602,11 @@ def _build_sources(settings: Dict[str, Any]):
     if settings.get("enable_brazilian_serie_a", False) and fd_key:
         sources.append(_make_soccer("brazilian_serie_a"))
 
-    # NFL — no API key required (ESPN unofficial). Same pair-and-seed
+    # NFL: no API key required (ESPN unofficial). Same pair-and-seed
     # pattern as NHL/MLB/NBA. Bracket is single-game elimination
     # (SERIES_LENGTH=1 per stage) across 4 rounds: WC -> DIV -> CONF
     # -> SB. Strength sharing matters most here because NFL teams
-    # play only 17 regular-season games — even fewer baseline games
+    # play only 17 regular-season games: even fewer baseline games
     # than WNBA.
     if settings.get("enable_nfl", False):
         nfl_reg = NflRegularSource()
@@ -618,7 +618,7 @@ def _build_sources(settings: Dict[str, Any]):
             logger.warning("[nfl] could not seed playoff strengths: %s", exc)
         sources.append(nfl_po)
 
-    # NHL — no API key required (api-web.nhle.com is free). Pair the
+    # NHL: no API key required (api-web.nhle.com is free). Pair the
     # regular and playoff sources together: the playoff source borrows
     # regular-season strength estimates from the regular source so a
     # 70-game per-team baseline informs playoff-game sampling instead
@@ -635,11 +635,11 @@ def _build_sources(settings: Dict[str, Any]):
             nhl_po.set_regular_season_strengths(nhl_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             # Don't let a strengths-seeding hiccup gate the playoff
-            # source — it can still run on the default prior.
+            # source: it can still run on the default prior.
             logger.warning("[nhl] could not seed playoff strengths: %s", exc)
         sources.append(nhl_po)
 
-    # MLB — no API key required (statsapi.mlb.com is free). Same pair-and-
+    # MLB: no API key required (statsapi.mlb.com is free). Same pair-and-
     # seed pattern as NHL: the playoff source borrows regular-season
     # strength estimates from the regular source so postseason game-
     # sampling reflects per-team scoring skill instead of the 4.5/4.5
@@ -654,7 +654,7 @@ def _build_sources(settings: Dict[str, Any]):
             logger.warning("[mlb] could not seed playoff strengths: %s", exc)
         sources.append(mlb_po)
 
-    # NBA — no API key required. ESPN unofficial API is used (stats.nba.com
+    # NBA: no API key required. ESPN unofficial API is used (stats.nba.com
     # is WAF-blocked from most homelab egress); same pair-and-seed pattern
     # as NHL/MLB: the playoff source borrows regular-season strength
     # estimates from the regular source so a 60-game per-team baseline
@@ -671,7 +671,7 @@ def _build_sources(settings: Dict[str, Any]):
             logger.warning("[nba] could not seed playoff strengths: %s", exc)
         sources.append(nba_po)
 
-    # MLS — issue #30 part A: register MlsEastSource + MlsWestSource
+    # MLS: issue #30 part A: register MlsEastSource + MlsWestSource
     # for per-conference standings importance (playoff seeding is per-
     # conference, not aggregate league). The closeness-only MlsSource
     # stays as the base class for NwslSource / LigaMxSource but is NOT
@@ -684,7 +684,7 @@ def _build_sources(settings: Dict[str, Any]):
     # then single-leg CSF / CF / MLS Cup Final. Per-stage series length
     # via `_series_length_for_stage` (same hook MLB uses for its
     # WC/LDS/LCS/WS mix). Strengths are merged across both conferences
-    # before seeding the cup source — the MLS Cup Final is cross-
+    # before seeding the cup source: the MLS Cup Final is cross-
     # conference, so per-team scoring rates need to be in one dict.
     if settings.get("enable_mls", False):
         mls_east = MlsEastSource(odds_api_key=odds_key or "")
@@ -701,19 +701,19 @@ def _build_sources(settings: Dict[str, Any]):
             logger.warning("[mls_cup] could not seed playoff strengths: %s", exc)
         sources.append(mls_cup)
 
-    # NWSL — same V1 minimal pattern as MLS (schedule + closeness).
+    # NWSL: same V1 minimal pattern as MLS (schedule + closeness).
     # Subclasses MlsSource with NWSL-specific endpoint and Odds API
     # key. No importance / playoff bracket in V1.
     if settings.get("enable_nwsl", False):
         sources.append(NwslSource(odds_api_key=odds_key or ""))
 
-    # Liga MX — Mexican top-flight. Same V1 minimal pattern.
+    # Liga MX: Mexican top-flight. Same V1 minimal pattern.
     if settings.get("enable_liga_mx", False):
         sources.append(LigaMxSource(odds_api_key=odds_key or ""))
 
     # Field events (racing + golf). No two-team head-to-head;
     # each row is one race or tournament. Low event volume (~1/week)
-    # means "surface if toggled" is the right product — no importance
+    # means "surface if toggled" is the right product: no importance
     # ranking needed.
     if settings.get("enable_f1", False):
         sources.append(F1Source())
@@ -722,7 +722,7 @@ def _build_sources(settings: Dict[str, Any]):
     if settings.get("enable_golf", False):
         sources.append(GolfSource())
 
-    # UFC. Same field-event shape — each fight card is one
+    # UFC. Same field-event shape: each fight card is one
     # row with home=card title ("UFC 309: Jones vs. Miocic"). PPVs
     # (numbered UFC events) get MAJOR tier, Fight Nights get EVENT.
     if settings.get("enable_ufc", False):
@@ -730,7 +730,7 @@ def _build_sources(settings: Dict[str, Any]):
 
     # Tennis. ESPN's tennis scoreboard returns whole
     # tournaments (one entry per active event), not individual
-    # matches — so tennis fits the FieldEventSource model. Grand
+    # matches: so tennis fits the FieldEventSource model. Grand
     # Slams + year-end Finals get MAJOR; regular tour stops get
     # EVENT.
     if settings.get("enable_atp", False):
@@ -738,7 +738,7 @@ def _build_sources(settings: Dict[str, Any]):
     if settings.get("enable_wta", False):
         sources.append(WtaSource())
 
-    # WNBA — ESPN unofficial API; same pair-and-seed pattern as NHL/MLB/
+    # WNBA: ESPN unofficial API; same pair-and-seed pattern as NHL/MLB/
     # NBA. Per-stage series lengths via BestOfNSeriesSource hooks: R1
     # best-of-3, SF best-of-5, FINALS best-of-5 in 2024 / best-of-7
     # in 2025+.
@@ -752,7 +752,7 @@ def _build_sources(settings: Dict[str, Any]):
             logger.warning("[wnba] could not seed playoff strengths: %s", exc)
         sources.append(wnba_po)
 
-    # NCAA Women's Basketball + March Madness — no API key required.
+    # NCAA Women's Basketball + March Madness: no API key required.
     # Single-game-elim bracket (SERIES_LENGTH=1 per stage). Pair-and-
     # seed strength sharing identical to NHL/MLB/NBA/WNBA.
     if settings.get("enable_ncaaw_basketball", False):
@@ -793,7 +793,7 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(ncbsb_br)
 
     # NCAA Division I softball. Same two-playoff-source fan-out as
-    # baseball above — NcaaSoftballPlayoffSource owns the best-of-3
+    # baseball above: NcaaSoftballPlayoffSource owns the best-of-3
     # stages (SB_SR + WCWS_F), NcaaSoftballPlayoffBracketSource owns
     # the Regional + 8-team WCWS bracket (SB_REG + WCWS).
     if settings.get("enable_ncaa_softball", False):
@@ -812,13 +812,13 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(ncsbl_br)
 
     # NCAA D1 men's + women's soccer. One source class
-    # parametrized on gender — same structure / endpoints / threshold
+    # parametrized on gender: same structure / endpoints / threshold
     # semantics for both, only the ESPN URL slug differs. Standings
     # points (3 W / 1 D / 0 L) drive the importance signal because
     # draws are common in college soccer.
     #
     # Issue #24: NcaaSoccerCupSource (College Cup bracket) pairs with
-    # the regular-season source like NHL/MLB/NBA/WNBA — playoff
+    # the regular-season source like NHL/MLB/NBA/WNBA: playoff
     # source borrows regular-season strength estimates via
     # `set_regular_season_strengths`. Without the seed, College Cup
     # samples fall back to the 1.5/1.5 league-average prior; with it,
@@ -871,7 +871,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     if not sources:
         return {"status": "error", "message": "No sport sources enabled."}
 
-    # 1. Fetch. Keep the (source, game) association — compute_match_importance
+    # 1. Fetch. Keep the (source, game) association: compute_match_importance
     # needs the source object per game to run the season-replay simulator. Plain
     # game rows lose the link to which adapter produced them, and reconstructing
     # it from extra["fd_competition_code"] only works for soccer.
@@ -906,7 +906,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # appear after the prior one is removed by a later refresh. Group
     # by (sport_prefix, frozenset of teams) and keep the chronologically
     # earliest start_time in each group; the rest are dropped from this
-    # refresh. League sources are unaffected — same team-pair appearing
+    # refresh. League sources are unaffected: same team-pair appearing
     # twice in a 7-day window is rare and means a real fixture/replay.
     all_games, game_sources, deduped_count = _dedup_series_games(
         all_games, game_sources,
@@ -942,7 +942,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # build_impact_narratives (which writes the natural-language
         # "rooting against X" prose for the EPG description). The
         # importance signal pulls its standings from the simulator's
-        # initial_state, not this table — they're built from the same
+        # initial_state, not this table: they're built from the same
         # FD.org payload so they agree.
         standings_table = extra.get("standings_table") or []
         favs_with_standings: List[Dict[str, Any]] = []
@@ -1041,7 +1041,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     def _sort_key(item):
         # Favorites-first within today's bucket: even a lukewarm Tottenham
         # game should beat a 9.5-rated title-race contender for THIS user.
-        # The favorite-weight bump alone wasn't enough — Man City still
+        # The favorite-weight bump alone wasn't enough: Man City still
         # dominated the top-5 because their stakes+rank pile was bigger
         # than weight_favorite=6 could overcome. Adding favorite-match as
         # a hard sort key guarantees slots 1..N_favorites belong to the
@@ -1068,7 +1068,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         scored = sorted(favs + keep_non_favs, key=_sort_key)
 
     # 4. EPG match each game to a Dispatcharr channel.
-    # _build_epg_lookup excludes ALL our virtual channels by tvg_id prefix —
+    # _build_epg_lookup excludes ALL our virtual channels by tvg_id prefix:
     # covers both the current target group and any orphans from a renamed group.
     epg_lookup = _build_epg_lookup()
     api_key = _resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH)
@@ -1135,7 +1135,7 @@ def _build_epg_lookup():
     """Return a callable: GameRow -> List[ChannelCandidate]. Closure over ORM.
 
     Excludes any channel that is one of OUR virtual channels (see
-    _owned_tvg_id_q) — covers the configured target group AND any old groups
+    _owned_tvg_id_q): covers the configured target group AND any old groups
     left over from a prior target_group_name. Without this, the matcher
     self-matches against our prior-run channels because their EPG titles
     literally contain the team names.
@@ -1143,7 +1143,7 @@ def _build_epg_lookup():
     Pre-filters at the DB level: only fetches programs that are TEAM-relevant
     (program title contains a team keyword OR program's channel has a team
     keyword in its name). Prime-time windows can carry 4000+ programs across
-    a Dispatcharr instance — fetching all of them and filtering in Python had
+    a Dispatcharr instance: fetching all of them and filtering in Python had
     a 2000-row hard cap that silently dropped real matches (regression
     against the old uncapped path was ch_id=111919 'EPL 07ⓧ: ... vs Brentford
     FC' getting omitted from the candidate list for the live game window).
@@ -1154,7 +1154,7 @@ def _build_epg_lookup():
     from django.db.models import Q
 
     def lookup(game) -> List[ChannelCandidate]:
-        # Per-sport match window — soccer needs a tighter window to avoid
+        # Per-sport match window: soccer needs a tighter window to avoid
         # false-matching pre-game preview shows earlier in the day; NCAAF
         # / NFL keep the wide default for long pre-game shows + OT. See #4.
         pre_min, post_hours = _epg_match_window(game.sport_prefix)
@@ -1177,7 +1177,7 @@ def _build_epg_lookup():
         )
 
         # Path B: channels whose NAME mentions any team keyword. Include
-        # them even without EPG entries in window — provider channels often
+        # them even without EPG entries in window: provider channels often
         # advertise the match in the channel NAME but have no program data
         # (e.g. 'AU (STAN 01) | Manchester United v Brentford ...'). Tier-1
         # strict still discriminates by 'both teams in channel name', so
@@ -1332,7 +1332,7 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         closeness=g.get("closeness"),
         is_rivalry=rivalry_from_cache,
         tournament_stage=g.get("tournament_stage"),
-        # Cache files predating this signal default to 0.0 / [] — graceful
+        # Cache files predating this signal default to 0.0 / []: graceful
         # degradation: the importance block in score_game just contributes
         # nothing for that entry.
         importance_points=float(g.get("importance_points") or 0.0),
@@ -1419,7 +1419,7 @@ def _league_context_for(g: Dict[str, Any]):
 
 # A fixture's matchday is "catch-up" when it's at least this many rounds
 # behind the league's current matchday (= max playedGames across the table).
-# 1 isn't enough — normal weekly scheduling routinely puts midweek games at
+# 1 isn't enough: normal weekly scheduling routinely puts midweek games at
 # matchday N-1 vs weekend games at matchday N. 2 catches genuine
 # rescheduled-postponed fixtures (FA Cup, weather) without false-firing.
 _CATCHUP_MATCHDAY_GAP = 2
@@ -1452,7 +1452,7 @@ _ORDINAL_SUFFIXES = ("th", "st", "nd", "rd")
 def _ordinal(n: int) -> str:
     """1 → '1st', 2 → '2nd', 4 → '4th', 11 → '11th', 23 → '23rd'.
 
-    DO NOT use `min(n%10, 3)` to index the suffixes — that clamps 4..9 to
+    DO NOT use `min(n%10, 3)` to index the suffixes: that clamps 4..9 to
     "rd", yielding "4rd"/"5rd"/etc. The teen rule (11-13 are "th", not
     "st"/"nd"/"rd") handles n%100 in [11..13]; everything else uses the
     last digit, defaulting to "th" for 0 and 4..9.
@@ -1468,7 +1468,7 @@ def _ordinal(n: int) -> str:
 def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
     """One-line standings summary for league fixtures.
 
-    Format: "<home> <pos>, <pts> pts. <away> <pos>, <pts> pts — <gap>."
+    Format: "<home> <pos>, <pts> pts. <away> <pos>, <pts> pts: <gap>."
     where <gap> is computed for the away team relative to the home team.
 
     Returns None if there's no standings table (knockout / non-soccer), if
@@ -1476,7 +1476,7 @@ def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
     promoted teams), or if essential fields are missing.
 
     Surfaces the position+points data the soccer source already cached
-    under extra.standings_table — see #10.
+    under extra.standings_table: see #10.
     """
     extra = g.get("extra") or {}
     table = extra.get("standings_table") or []
@@ -1490,7 +1490,7 @@ def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
 
     # Exact-name lookup against the FD.org table. The home/away names in
     # the GameRow come from the SAME FD.org fixture payload as the table,
-    # so they match byte-for-byte — no fuzzy matching needed.
+    # so they match byte-for-byte: no fuzzy matching needed.
     by_name = {entry.get("name"): entry for entry in table if entry.get("name")}
     home_entry = by_name.get(home_name)
     away_entry = by_name.get(away_name)
@@ -1515,8 +1515,8 @@ def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
     if not away_str:
         return home_str + "."
 
-    # Both teams in the table — add a gap descriptor for the away team
-    # relative to the home team. Reads naturally: "...69 pts — 1 pt behind."
+    # Both teams in the table: add a gap descriptor for the away team
+    # relative to the home team. Reads naturally: "...69 pts: 1 pt behind."
     home_pts = int(home_entry["points"])
     away_pts = int(away_entry["points"])
     diff = away_pts - home_pts
@@ -1528,7 +1528,7 @@ def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
         unit = "pt" if n == 1 else "pts"
         gap = f"{n} {unit} behind"
     else:
-        # Tied on points — goal difference is the actual league
+        # Tied on points: goal difference is the actual league
         # tiebreaker, so surface it when both entries have GD cached
         # (older caches predating #10 won't have it; fall through to the
         # bare "level on points" framing in that case).
@@ -1545,7 +1545,7 @@ def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
         else:
             gap = "level on points"
 
-    return f"{home_str}. {away_str} — {gap}."
+    return f"{home_str}. {away_str}: {gap}."
 
 
 def _build_description(
@@ -1557,9 +1557,9 @@ def _build_description(
 
     Layout (each block separated by a blank line):
       1. Placeholder note (only if EPG hasn't matched a source yet)
-      2. Headline: tagline + spread descriptor ("A title race — toss-up.")
+      2. Headline: tagline + spread descriptor ("A title race: toss-up.")
       3. Matchday + league boundary summary (where applicable)
-      4. Standings posture line (league fixtures only — see #10)
+      4. Standings posture line (league fixtures only: see #10)
       5. Favorite-impact narratives (rooting framing, both deltas)
       6. "Favorite is your team" line if the favorite is playing this game
       7. Source channel line (only if matched)
@@ -1567,7 +1567,7 @@ def _build_description(
     Deliberately dropped: kickoff time (already shown by EPG client time
     blocks), score breakdown (already in channel name as ★X.X), spread's
     raw line value (just say "toss-up"), late-season multiplier
-    annotation (uniform across all current league games — adds no signal).
+    annotation (uniform across all current league games: adds no signal).
     """
     extra = g.get("extra") or {}
     favorites_matched = g.get("favorites_matched") or []
@@ -1596,7 +1596,7 @@ def _build_description(
     if spread_desc:
         headline_parts.append(spread_desc)
     if headline_parts:
-        sections.append(" — ".join(headline_parts) + ".")
+        sections.append(": ".join(headline_parts) + ".")
 
     # 3. Matchday line + league boundary reminder. Both are league-based
     # ("why is this a race"). Matchday tells you where in the season we
@@ -1609,7 +1609,7 @@ def _build_description(
     matchday_line_parts: List[str] = []
     if matchday and matchdays_total:
         # "Catch-up matchday X of Y" when fixture is meaningfully behind
-        # the league's current pacing — see _is_catchup_matchday and #3.
+        # the league's current pacing: see _is_catchup_matchday and #3.
         # Without the label, an end-of-season "Matchday 40 of 46" reads as
         # if the team has 6 games left when really it's a postponement
         # being replayed late and they have 1.
@@ -1620,7 +1620,7 @@ def _build_description(
     if matchday_line_parts:
         sections.append(" ".join(matchday_line_parts))
 
-    # 4. Standings posture (league fixtures only — knockout cups have no
+    # 4. Standings posture (league fixtures only: knockout cups have no
     # standings table, so this renders None and is skipped). Comes BEFORE
     # the favorite-impact narratives so the reader gets the raw "where are
     # they in the table?" before the editorial "why should you care?"
@@ -1656,7 +1656,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
       1. Get-or-create a virtual Channel in 'Top Matchups' ChannelGroup,
          linked to the same streams as the source channel (so playback works).
       2. Get-or-create an EPGData entry on our 'Top Matchups' EPGSource
-         (source_type=xmltv, is_active=False — we write programs directly,
+         (source_type=xmltv, is_active=False: we write programs directly,
          and we mustn't be source_type=dummy or Dispatcharr's UI overlays
          joke-filler descriptions on top of ours).
          Then replace its ProgramData for the game's airtime with title=matchup
@@ -1681,7 +1681,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     dry_run = bool(settings.get("dry_run", True))
 
     # 1. Ensure target ChannelGroup. Also detect any old groups/sources we own
-    # (from a previous target_group_name) and clean them up — fixes the case
+    # (from a previous target_group_name) and clean them up: fixes the case
     # where the user renames "Top Matchups" → "!Top Matchups" between runs.
     target_group = ChannelGroup.objects.filter(name=group_name).first()
 
@@ -1715,14 +1715,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     target_group.id, group_name)
 
     # Migrate any virtual channels in old groups INTO the target group, in
-    # place. DO NOT delete + recreate — Channel.id is the stable handle that
+    # place. DO NOT delete + recreate: Channel.id is the stable handle that
     # ChannelProfileMembership, IPTV-client playlist caches, and the user's
     # pinned-channel state all key off. A delete-then-create cycle silently
     # orphans every one of those: profile memberships are gone (Dispatcharr
     # auto-adds new channels to existing profiles ONLY at profile-creation
     # time, never on channel-creation), and IPTV clients that cached the old
     # tvg-id render an empty slot for the renamed channel until the user
-    # manually refreshes — exactly what bit us during the #1 live-verify.
+    # manually refreshes: exactly what bit us during the #1 live-verify.
     #
     # The .update() bypasses Django's post_save signal (mirroring the same
     # signal-bypass pattern at apps/channels/signals.py:60 / our epg_data
@@ -1835,7 +1835,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # Optional Claude-rewritten EPG descriptions. Default off; when on, prose
     # replaces the deterministic `_build_description` output for non-placeholder
     # games. Failures fall back silently. cache.json (scores, breakdown,
-    # score_notes) is untouched — only ProgramData.description changes.
+    # score_notes) is untouched: only ProgramData.description changes.
     from . import llm_descriptions
     llm_enabled = bool(settings.get("llm_descriptions_enabled", False))
     llm_api_key = ""
@@ -1860,7 +1860,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # team-name pair, download to /data/logos/ranked_matchups_<hash>.jpg, and
     # point Channel.logo at it. On any miss (no event indexed, network failure,
     # field-event source, dry_run) we fall through to the source channel's
-    # logo — preserving the v0 behavior for the long tail. Per-marker thumb
+    # logo: preserving the v0 behavior for the long tail. Per-marker thumb
     # URLs cached on disk to keep API hits to once per fixture per ~14 days.
     from . import logos as matchup_logos
     matchup_logos_enabled = bool(settings.get("enable_matchup_logos", True))
@@ -2071,7 +2071,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 if changed and not dry_run:
                     existing.save(update_fields=["name", "logo", "channel_number"])
                 if not dry_run:
-                    # Compare by ORDERED list, not set — when our sort key
+                    # Compare by ORDERED list, not set: when our sort key
                     # changes (e.g. probe-aware quality re-ranks an existing
                     # set of streams) we need to rewrite the ChannelStream
                     # rows to flip their order, even if the membership is
@@ -2126,14 +2126,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     epg_data.name = new_name
                     epg_data.save(update_fields=["name"])
                 if vc.epg_data_id != epg_data.id:
-                    # DO NOT use vc.save(update_fields=["epg_data"]) —
+                    # DO NOT use vc.save(update_fields=["epg_data"]):
                     # apps/channels/signals.py post_save fires
                     # parse_programs_for_tvg_id which unconditionally deletes
                     # ProgramData for the tvg_id (apps/epg/tasks.py:1308) before
                     # attempting an EPG-source refetch. Our EPGSource has no
                     # URL/file (we write programs directly), so the refetch
                     # fails and the rows stay deleted until the next plugin
-                    # tick — wiping the EPG grid for 0–3 minutes per new
+                    # tick: wiping the EPG grid for 0–3 minutes per new
                     # channel attach. .update() bypasses the post_save signal,
                     # mirroring the pattern at apps/channels/signals.py:60.
                     Channel.objects.filter(pk=vc.pk).update(epg_data_id=epg_data.id)
@@ -2147,7 +2147,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 # "Home vs Away ᴸᶦᵛᵉ" during the window, "Past: Home vs Away"
                 # after the game ends until the next refresh. The matchup
                 # string deliberately drops the ★ score prefix the channel
-                # name carries — the EPG entry should read like a program,
+                # name carries: the EPG entry should read like a program,
                 # not a debug breadcrumb.
                 matchup = _format_matchup(g["home"], g["away"])
                 kickoff_local = g.get("kickoff_local", "")
@@ -2177,7 +2177,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     description=description,
                     tvg_id=marker,
                 )
-                # Past slot — bridges game-end to the next scheduled refresh
+                # Past slot: bridges game-end to the next scheduled refresh
                 # so the channel doesn't go blank in the EPG between the
                 # final whistle and the apply that drops the channel. The
                 # past slot's end_time is computed against the scheduler
@@ -2223,7 +2223,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     # Persist the LLM-description cache (prune entries whose marker is no
     # longer in this refresh; keep file bounded to live games). Save outside
-    # the atomic block — sidecar JSON file is independent of the DB.
+    # the atomic block: sidecar JSON file is independent of the DB.
     if llm_enabled and not dry_run:
         pruned = llm_descriptions.prune_cache(llm_cache, seen_markers)
         llm_descriptions.write_cache(LLM_DESCRIPTIONS_CACHE_PATH, pruned)
@@ -2232,7 +2232,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # from /data/logos/. Both prune to the live marker set so disk usage
     # doesn't grow unbounded across many refresh cycles. Logo rows pointing
     # at deleted files are left for Dispatcharr's own cleanup_unused_logos
-    # endpoint — deleting them here would race with concurrent UI reads.
+    # endpoint: deleting them here would race with concurrent UI reads.
     stale_logo_files_swept = 0
     if matchup_logos_enabled and not dry_run and thumb_cache is not None:
         thumb_cache.prune(seen_markers)
@@ -2247,7 +2247,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             f"moved (same Channel.id) from {deleted_old_groups} old group(s), "
             f"{deleted_old_sources} old EPGSource(s) deleted."
         )
-    # `placeholders` is a *subset* of (created + updated) — placeholder games
+    # `placeholders` is a *subset* of (created + updated): placeholder games
     # go through the same upsert path as matched ones, so they're already
     # counted there. Report as "(placeholders=N included)" to avoid the
     # "10 created + 3 placeholders == 13?" misread.

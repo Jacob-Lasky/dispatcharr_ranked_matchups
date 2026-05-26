@@ -6,13 +6,13 @@ team-name pairs. At plugin import, the JSON is read once and indexed by sport;
 appears in either order in the list for that sport.
 
 Substring matching (in both directions per token) handles source-side name
-variations — Football-Data.org returns "Manchester City FC" but our list
+variations: Football-Data.org returns "Manchester City FC" but our list
 stores the bare "Manchester City"; ESPN returns "Boston Celtics" while we
 store the same. See #8.
 
 To extend: edit `rivalries.json`. The match runs once per refresh per game, so
 even a 10,000-entry list would barely register on the profile. No LLM-judged
-path here — that's a deferred follow-up if the static list proves too narrow.
+path here: that's a deferred follow-up if the static list proves too narrow.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def _load_rivalries() -> Dict[str, List[Tuple[str, str]]]:
     """Load and normalize the rivalries map. Returns {sport_prefix: [(a, b), ...]}.
 
     Failure modes (file missing, JSON corrupt) log a warning and return an
-    empty map so the plugin still works — rivalries are an enhancement, not
+    empty map so the plugin still works: rivalries are an enhancement, not
     a hard dependency.
     """
     try:
@@ -76,8 +76,8 @@ def is_rivalry(home: str, away: str, sport_prefix: str) -> bool:
 
     Match is case-insensitive substring in both directions: the rivalry entry
     'Manchester City' matches 'Manchester City FC' (rivalry-string is a
-    substring of team-string). The reverse — entry 'Manchester City FC FC FC'
-    matching team 'Manchester City' — also matches, which is a feature for
+    substring of team-string). The reverse: entry 'Manchester City FC FC FC'
+    matching team 'Manchester City': also matches, which is a feature for
     occasional source-side abbreviations.
     """
     pairs = _RIVALRIES_BY_SPORT.get(sport_prefix)
@@ -85,7 +85,7 @@ def is_rivalry(home: str, away: str, sport_prefix: str) -> bool:
         return False
     h, a = _normalize(home), _normalize(away)
     for rival_a, rival_b in pairs:
-        # Order in the JSON pair is incidental — match against both orderings.
+        # Order in the JSON pair is incidental: match against both orderings.
         if _name_matches(h, rival_a) and _name_matches(a, rival_b):
             return True
         if _name_matches(h, rival_b) and _name_matches(a, rival_a):
@@ -98,7 +98,7 @@ def _name_matches(team_name: str, rivalry_name: str) -> bool:
 
     Both arguments must already be normalized via _normalize. We allow either
     direction so e.g. 'manchester city' (rivalry) matches 'manchester city fc'
-    (team) AND 'paris sg' (team) matches 'paris saint-germain' (rivalry — if
+    (team) AND 'paris sg' (team) matches 'paris saint-germain' (rivalry: if
     the file stored the longer form).
     """
     return rivalry_name in team_name or team_name in rivalry_name

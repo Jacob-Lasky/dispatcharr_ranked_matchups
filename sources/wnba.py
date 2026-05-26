@@ -1,14 +1,14 @@
-"""WNBA source — ESPN's unofficial `site.api.espn.com` API. No key required.
+"""WNBA source: ESPN's unofficial `site.api.espn.com` API. No key required.
 
 Two source classes mirroring the NBA pattern, with WNBA-specific
 adjustments:
 
   - `WnbaRegularSource(PointsBasedSportSource)`: 40-game regular season,
     raw wins as the threshold field. LEAGUE_CONTEXTS["WNBA"] thresholds
-    at 20 (playoff bubble — 8 of 13 teams make playoffs) / 25
+    at 20 (playoff bubble: 8 of 13 teams make playoffs) / 25
     (comfortable) / 30 (top-seed pace) / 35 (elite).
   - `WnbaPlayoffSource(BestOfNSeriesSource)`: variable series lengths
-    via `_series_length_for_stage` — R1 best-of-3, Semifinals best-of-5,
+    via `_series_length_for_stage`: R1 best-of-3, Semifinals best-of-5,
     Finals best-of-5 (≤2024) or best-of-7 (≥2025 when the WNBA expanded
     the championship series). The stage labels are R1 / SF / FINALS;
     cross-conference seeding (no East/West split in the playoffs since
@@ -103,7 +103,7 @@ def _default_season_year() -> int:
 
 
 # Headline parser. WNBA exposes playoff stage in `competition.notes[0].
-# headline`. Unlike NBA, there's no East/West prefix — the league
+# headline`. Unlike NBA, there's no East/West prefix: the league
 # uses cross-conference reseeding since 2022.
 _HEADLINE_RE = re.compile(
     r"^(?:(?P<round>First\s+Round)|WNBA\s+(?P<wnba>Semifinals|Finals))\s*-\s*Game\s+(?P<game>\d+)",

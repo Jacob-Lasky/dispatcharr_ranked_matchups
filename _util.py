@@ -29,7 +29,7 @@ def parse_iso_utc(s: Optional[str]) -> Optional[datetime]:
 
 def stable_hash_int(s: str) -> int:
     """Process-stable hash of a string. Python's builtin hash() is salted by
-    PYTHONHASHSEED — same input gives different output across restarts. This
+    PYTHONHASHSEED: same input gives different output across restarts. This
     uses md5 truncated to 16 hex chars (~64 bits) which is plenty for marker
     uniqueness and is identical across processes / restarts."""
     digest = hashlib.md5(s.encode("utf-8")).hexdigest()
@@ -77,7 +77,7 @@ def poisson_sample(lam: float, rng: random.Random) -> int:
 
     Shared by every points-based / goals-based sport source. Soccer uses
     lam ~ 1.4 (goals/match). NCAAF / NCAAM use lam ~ 28 / 75 (points/team).
-    Knuth's algorithm is O(lam) — for lam > ~50 a normal-approximation
+    Knuth's algorithm is O(lam): for lam > ~50 a normal-approximation
     would be measurably faster, but the per-refresh sim cost is dominated
     by season iteration, not the inner Poisson, so we keep one
     implementation for simplicity. Swap in a normal approx here if profiling
@@ -98,7 +98,7 @@ def poisson_sample(lam: float, rng: random.Random) -> int:
 # matcher._team_keywords need to know these to match against shortened forms.
 TEAM_SUFFIX_TOKENS = ("afc", "fc", "cf", "sc")
 
-# Common second-word soccer suffixes that look distinctive but aren't —
+# Common second-word soccer suffixes that look distinctive but aren't:
 # 'United' alone false-matches Manchester/West Ham/Newcastle/Leeds/Sheffield;
 # 'City' alone false-matches Manchester/Leicester/Hull/Cardiff/Swansea/etc.
 # matcher._team_keywords excludes these from the last-word fallback so

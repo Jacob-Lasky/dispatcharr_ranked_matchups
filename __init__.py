@@ -1,4 +1,4 @@
-"""Dispatcharr Ranked Matchups — interestingness curator for sports channels."""
+"""Dispatcharr Ranked Matchups: interestingness curator for sports channels."""
 
 from .plugin import Plugin
 

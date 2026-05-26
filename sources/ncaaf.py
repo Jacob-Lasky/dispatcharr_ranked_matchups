@@ -1,9 +1,9 @@
 """NCAA Football source via CollegeFootballData.com.
 
 Free tier: 1k req/day. We make 3 calls per refresh:
-  1) /rankings — current AP Top-25 (nested polls→ranks shape)
-  2) /games   — schedule for the upcoming window (param: ?year=)
-  3) /lines   — betting lines per week
+  1) /rankings: current AP Top-25 (nested polls→ranks shape)
+  2) /games  : schedule for the upcoming window (param: ?year=)
+  3) /lines  : betting lines per week
 
 Offseason (Feb-Aug) /games returns no upcoming results; fetch_upcoming
 returns []. CFBD identifies a season by its START year (?year=2024 means
@@ -202,7 +202,7 @@ class NcaafSource(PointsBasedSportSource):
         /games call covers the whole season; cached per source instance
         in the base class.
 
-        Filters to games where at least one side is FBS-classified — keeps
+        Filters to games where at least one side is FBS-classified: keeps
         FBS vs FCS cupcake matchups (they count toward FBS wins) but
         drops pure FCS-vs-FCS scheduling. CFBD's typical /games?year=
         response is ~3700 rows; after FBS filter, ~750-900 remain. That

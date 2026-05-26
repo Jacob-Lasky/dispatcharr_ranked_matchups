@@ -1,10 +1,10 @@
-"""NCAA College Cup source — single-game-elim bracket via ESPN.
+"""NCAA College Cup source: single-game-elim bracket via ESPN.
 
 Issue #24: NCAA Men's + Women's D1 Soccer Tournament. Both genders use
 the same structural shape (single-leg elimination across multiple
 rounds); only ESPN's URL slug, the LEAGUE_CONTEXTS code, and the
 gender-specific round labels differ. One source class parametrized on
-gender, mirroring NcaaSoccerSource (regular season) — same pattern.
+gender, mirroring NcaaSoccerSource (regular season): same pattern.
 
 Bracket shape (6 rounds, both genders):
 
@@ -24,20 +24,20 @@ cup---semifinal" / "college-cup---championship"; W's uses "semifinals" /
 "college-cup"). Both map to the same canonical R64/R32/S16/E8/F4/NCG
 stage labels, which match `KNOCKOUT_ROUND_DEPTH` entries already in use
 by NCAA Women's Basketball March Madness (also a 6-round single-game
-elim bracket — the depth dict is shared and the cascade is identical).
+elim bracket: the depth dict is shared and the cascade is identical).
 
 Field size note: Men's NCAA Soccer Tournament uses a 48-team field with
 16 byes (top 16 seeds play their first match in the second round), so
 "first-round" has only 16 games (32 of 48 teams), then "second-round"
 has 16 games (32 teams: 16 byes + 16 R1 winners). Treating the entry
-round as R64 is correct conceptually — the cascade only cares about
+round as R64 is correct conceptually: the cascade only cares about
 depth ordering, and a team that played and lost R1 has reached the
 "R64" entry tier even though the tier isn't full. Women's bracket is
 a full 64-team field with no byes.
 
 Strength sharing: `set_regular_season_strengths` lets the plugin seed
 playoff sampling with per-team Poisson rates from the regular-season
-NcaaSoccerSource — the College Cup samples then reflect actual scoring
+NcaaSoccerSource: the College Cup samples then reflect actual scoring
 skill from the 20-game regular season instead of the 1.5/1.5 league-
 average prior. Without the seed the source falls back to the prior.
 
@@ -83,17 +83,17 @@ _DEFAULT_GOALS_AGAINST = 1.5
 # Stage labels are reused from NCAAW Basketball (R64/R32/S16/E8/F4/NCG)
 # because the depth ordering in KNOCKOUT_ROUND_DEPTH already supports
 # them and the cascade behaves identically for single-game elim brackets.
-# Gender-specific keys for the last two rounds — both M's and W's map
+# Gender-specific keys for the last two rounds: both M's and W's map
 # to the same canonical labels via slug aliases.
 SLUG_TO_STAGE: Dict[str, str] = {
     "first-round":                  "R64",
     "second-round":                 "R32",
     "third-round":                  "S16",
     "quarterfinals":                "E8",
-    # College Cup Semifinals — gender split:
+    # College Cup Semifinals: gender split:
     "college-cup---semifinal":      "F4",  # M's slug
     "semifinals":                   "F4",  # W's slug
-    # National Championship Game — gender split:
+    # National Championship Game: gender split:
     "college-cup---championship":   "NCG", # M's slug
     "college-cup":                  "NCG", # W's slug (the final, not the full event)
 }
@@ -162,7 +162,7 @@ def _pick_decisive_event(bucket: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     finished = [r for r in bucket if r.get("status") == "FINISHED"]
     if not finished:
-        # All scheduled — keep the latest by start_time (most recent
+        # All scheduled: keep the latest by start_time (most recent
         # info is the canonical one).
         return max(bucket, key=lambda r: r.get("start_time") or datetime.min.replace(tzinfo=timezone.utc))
     non_tie = [
@@ -176,7 +176,7 @@ def _pick_decisive_event(bucket: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
-    """Prefer `team.location` (school) over `team.name` (mascot) — the
+    """Prefer `team.location` (school) over `team.name` (mascot): the
     EPG side of the matcher uses school names like "Washington at
     Stanford" rather than mascots like "Huskies at Cardinal". Same
     canonicalizer as NcaaSoccerSource so the cross-source team-name
@@ -192,12 +192,12 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
     """NCAA D1 soccer College Cup bracket, parametrized on gender.
 
     Six single-game elim rounds (R64 → R32 → S16 → E8 → F4 → NCG).
-    SERIES_LENGTH = 1 so each "series" clinches at ceil(1/2) = 1 win —
+    SERIES_LENGTH = 1 so each "series" clinches at ceil(1/2) = 1 win:
     the BestOfNSeriesSource state machine handles round_reached and
     terminal_outcomes for free at this length.
 
     Field-size asymmetry: M's has 48 teams (16 byes at entry), W's has
-    64 teams (no byes). The bracket source doesn't care — both genders
+    64 teams (no byes). The bracket source doesn't care: both genders
     surface the same 6 stage labels via slug aliases in `SLUG_TO_STAGE`.
     """
 
@@ -251,7 +251,7 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
 
     def _winner_advance_label(self, stage: str) -> Optional[str]:
         # Champion is the synthetic depth above NCG (final game). Mirror
-        # the NCAAW Basketball NCG → NCG_WINNER mapping — same depth
+        # the NCAAW Basketball NCG → NCG_WINNER mapping: same depth
         # entry in KNOCKOUT_ROUND_DEPTH (already at depth 6).
         if stage == "NCG":
             return "NCG_WINNER"
@@ -272,7 +272,7 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
     ) -> None:
         """Hook for the plugin to share regular-season strength
         estimates with the College Cup source. Without this, every
-        bracket team gets the league-average 1.5/1.5 prior — accurate
+        bracket team gets the league-average 1.5/1.5 prior: accurate
         enough for early-round importance but loses the team-skill
         signal that a 20-game regular season provides."""
         self._team_strengths_from_regular = strengths
@@ -287,7 +287,7 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
             "pa_per_game": _DEFAULT_GOALS_AGAINST,
         }
 
-    # ---------- sample_result (force a winner — bracket games) ----------
+    # ---------- sample_result (force a winner: bracket games) ----------
 
     def sample_result(
         self,
@@ -296,12 +296,12 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
         strengths: Dict[str, Dict[str, float]],
         rng: random.Random,
     ) -> MatchResult:
-        """Bracket games CANNOT end in a draw — NCAA postseason soccer
+        """Bracket games CANNOT end in a draw: NCAA postseason soccer
         goes to OT then PKs if needed. Sample Poisson goals; on a tied
         regulation result, coin-flip the +1 boost so the bracket
         cascade gets a clean winner. Distinct from NcaaSoccerSource
         regular-season sample_result which allows draws (1 standings
-        point each) — bracket scenarios have no draw outcome at all.
+        point each): bracket scenarios have no draw outcome at all.
         """
         del state  # interface-required, per-game classification only
         h = self._strength_for(strengths, match.home)
@@ -312,7 +312,7 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
         away_goals = _poisson(lam_away, rng)
         if home_goals == away_goals:
             # OT / PKs in real life; coin-flip the +1 here. Strength
-            # asymmetry already biased the Poisson means — no further
+            # asymmetry already biased the Poisson means: no further
             # bias added (PK shootouts are roughly coin-flips empirically
             # at the NCAA level).
             if rng.random() < 0.5:
@@ -324,7 +324,7 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Emit upcoming tournament games (any stage). Per-day sweep —
+        """Emit upcoming tournament games (any stage). Per-day sweep:
         ESPN's date-range syntax silently caps at 25 events, same trap
         as ncaa_baseball.py / ncaa_soccer.py. Postseason games carry
         a `season.slug` of one of the SLUG_TO_STAGE keys; non-tournament
@@ -373,7 +373,7 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
     def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
         """Pull the November-December tournament window and emit one
         canonical record per bracket game. Filters out non-tournament
-        events via SLUG_TO_STAGE membership — regular-season games
+        events via SLUG_TO_STAGE membership: regular-season games
         won't carry a slug like 'quarterfinals', so they fall out
         naturally.
 

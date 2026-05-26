@@ -4,7 +4,7 @@ sports (NCAAF, NCAAM, future NHL/NBA/MLB regular seasons).
 The model: each team has a per-game points-scored and points-allowed average
 derived from FINISHED games. `sample_result` draws Poisson(lam_home),
 Poisson(lam_away) where lam_home blends home-team's offense + away-team's
-defense, and lam_away mirrors. OT/overtime/extra-innings are abstracted —
+defense, and lam_away mirrors. OT/overtime/extra-innings are abstracted:
 draws are post-resolved by giving +1 to a random side so `_classify_target_
 result` produces W/L rather than D (NCAA games never end in regulation ties
 that affect win-count outcomes; the simulator's tau-c just needs a binary
@@ -13,7 +13,7 @@ W/L).
 Terminal outcomes are win-count bands (e.g., "11+ wins" for elite CFB
 seasons, "bowl_eligible" at 6+, "25+ wins" for NCAAM elite). The
 LEAGUE_CONTEXTS entry's thresholds list is `(min_wins, label, weight)`
-tuples — `cutoff` is interpreted as a win-count threshold rather than a
+tuples: `cutoff` is interpreted as a win-count threshold rather than a
 position cutoff (the SoccerSource interpretation).
 
 The base assumes `_fetch_full_season_games()` returns a flat list of
@@ -306,7 +306,7 @@ class PointsBasedSportSource(SportSource):
         `last_period_type` from sample_result, used to compute standings
         points). Default ignores it; NHL subclasses override the method
         to bake in the OT-loss-point logic. DO NOT use a @staticmethod
-        decorator — subclasses need `self` for overriding.
+        decorator: subclasses need `self` for overriding.
         """
         del result_extra  # base ignores; NHL subclass reads
         h = teams[home]
@@ -323,7 +323,7 @@ class PointsBasedSportSource(SportSource):
         elif home_pts < away_pts:
             a["wins"] += 1
             h["losses"] += 1
-        # Tie: no W/L update (shouldn't happen — sample_result enforces a
+        # Tie: no W/L update (shouldn't happen: sample_result enforces a
         # winner via coin-flip, and FD.org doesn't publish tied finals for
         # NCAA football/basketball).
 
@@ -332,7 +332,7 @@ class PointsBasedSportSource(SportSource):
 
         For format="win_count" sports (CFB, CBB, NBA, MLB): _count_field
         defaults to "wins". 11 wins satisfies "11+ wins" AND "10+ wins"
-        AND "8+ wins" AND "bowl_eligible" — the caller sums leverage ×
+        AND "8+ wins" AND "bowl_eligible": the caller sums leverage ×
         consequence over the band set per the cross-sport calibration.
 
         For format="points_count" sports (NHL): _count_field is

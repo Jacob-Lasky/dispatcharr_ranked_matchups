@@ -1,6 +1,6 @@
 """Tests for the SportsDB matchup-thumbnail resolver (logos.py).
 
-Network-dependent paths are exercised via monkey-patched urlopen — no live
+Network-dependent paths are exercised via monkey-patched urlopen: no live
 HTTP. The cache-file and stale-sweep paths use tmp_path fixtures.
 """
 from __future__ import annotations
@@ -136,7 +136,7 @@ class TestHintMatches:
 
     def test_mismatch_rejected(self):
         ev = {"strLeague": "NCAA Division I Basketball Mens", "strSport": "Basketball"}
-        # CFB hint requires "NCAA" in league — basketball league DOES contain
+        # CFB hint requires "NCAA" in league: basketball league DOES contain
         # "NCAA", so it would pass. The date filter is the real discriminator.
         # Use a non-NCAA league to confirm rejection.
         ev2 = {"strLeague": "MLB", "strSport": "Baseball"}
@@ -211,7 +211,7 @@ class TestResolveThumbUrl:
         assert url == "https://r2.thesportsdb.com/images/media/event/thumb/foo.jpg"
 
     def test_date_mismatch_rejected(self, monkeypatch):
-        # SportsDB returns a match for a different date — the date filter
+        # SportsDB returns a match for a different date: the date filter
         # rejects it so we don't grab the wrong leg of a season series.
         payload = {"event": [{
             "dateEvent": "2024-12-15",  # 17 months off

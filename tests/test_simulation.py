@@ -3,7 +3,7 @@
 The simulator (`simulation.monte_carlo_importance`) is tested against an
 in-memory FakeSource that implements the 7-method interface
 deterministically. SoccerSource's implementation is tested separately in
-test_sources.py — this file isolates the simulator from any source-specific
+test_sources.py: this file isolates the simulator from any source-specific
 fetching, so failures here are unambiguously bugs in the algorithm, not in
 HTTP plumbing or strength estimation.
 """
@@ -157,7 +157,7 @@ class FakeSource(SportSource):
 
 
 def _poisson(lam: float, rng: random.Random) -> int:
-    """Same as SoccerSource._poisson — duplicated here to keep the test file
+    """Same as SoccerSource._poisson: duplicated here to keep the test file
     independent of soccer.py's module-private helper."""
     L = math.exp(-lam)
     k = 0
@@ -179,7 +179,7 @@ def _make_round_robin() -> Tuple[FakeSource, GameRow]:
     Match #3 (Alpha vs Delta) is the target match used by most tests.
     For an Alpha-vs-Delta game, Alpha winning strongly increases the
     chance Alpha finishes champion AND that Delta finishes wooden spoon
-    — strong importance signal.
+   : strong importance signal.
     """
     base = datetime(2026, 1, 1, tzinfo=timezone.utc)
     teams = ["Alpha", "Beta", "Gamma", "Delta"]
@@ -271,7 +271,7 @@ class TestMonteCarloImportance:
         )
         # Not asserting a tight bound (depends on strength config), but
         # importance for a powerhouse playing the weakest team should be
-        # at least *some* signal — far from zero.
+        # at least *some* signal: far from zero.
         assert imp > 0.05
 
     def test_uninvolved_team_outcome_yields_low_importance(self):
@@ -451,7 +451,7 @@ class TestMonteCarloImportanceBatchChain:
 
     def test_chain_query_for_eliminated_team_returns_low_leverage(self):
         # Querying a downstream outcome that NEVER fires for the team
-        # (e.g., asking about Delta finishing `qualified` — Delta is
+        # (e.g., asking about Delta finishing `qualified`: Delta is
         # the dreadful team and never wins the group) should return
         # near-zero leverage.
         source, target = _make_round_robin()

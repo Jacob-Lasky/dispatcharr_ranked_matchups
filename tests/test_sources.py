@@ -1,4 +1,4 @@
-"""Sanity tests for the sport adapters. Network isn't called — we just check
+"""Sanity tests for the sport adapters. Network isn't called: we just check
 class-level constants and the shape-handling logic so a typo or refactor
 doesn't ship silently."""
 
@@ -158,13 +158,13 @@ class TestNcaamRankingsShape:
             def json(self):
                 return self._p
 
-        # Mix of week=1 and week=15 entries — we want only week 15.
+        # Mix of week=1 and week=15 entries: we want only week 15.
         payload = [
             {"week": 1,  "pollType": "AP Top 25", "team": "Old #1", "ranking": 1},
             {"week": 1,  "pollType": "AP Top 25", "team": "Old #2", "ranking": 2},
             {"week": 15, "pollType": "AP Top 25", "team": "Latest #1", "ranking": 1},
             {"week": 15, "pollType": "AP Top 25", "team": "Latest #2", "ranking": 2},
-            # Different poll type — should be ignored
+            # Different poll type: should be ignored
             {"week": 15, "pollType": "Coaches Poll", "team": "Other", "ranking": 1},
         ]
         monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp(payload))
@@ -192,7 +192,7 @@ class TestNcaamRankingsShape:
                 return [{"week": 1, "pollType": "Coaches Poll", "team": "X", "ranking": 1}]
 
         monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp())
-        # We default to AP Top 25 — Coaches Poll doesn't match.
+        # We default to AP Top 25: Coaches Poll doesn't match.
         assert NcaamSource(api_key="x")._fetch_rankings(2026) is None
 
 
@@ -322,7 +322,7 @@ class TestSoccerCompetitions:
         assert SOCCER_COMPETITIONS["ligue_1"].fd_code == "FL1"
 
     def test_top_flight_leagues_use_position_as_rank(self):
-        # All Big-Five leagues have a real points table — position-as-rank applies.
+        # All Big-Five leagues have a real points table: position-as-rank applies.
         for k in ("bundesliga", "la_liga", "serie_a", "ligue_1"):
             assert SOCCER_COMPETITIONS[k].use_position_as_rank is True
 
@@ -380,7 +380,7 @@ class TestSoccerCompetitions:
         from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
         assert LEAGUE_CONTEXTS["EC"].format == "knockout"
         ec_labels = {label for _cut, label, _w in LEAGUE_CONTEXTS["EC"].thresholds}
-        # EURO is 24-team, enters at LAST_16 — no LAST_32 band.
+        # EURO is 24-team, enters at LAST_16: no LAST_32 band.
         assert "last_32" not in ec_labels
         assert "round_of_16" in ec_labels
         assert "winner" in ec_labels
@@ -401,7 +401,7 @@ class TestSoccerCompetitions:
     def test_last_32_in_knockout_depth(self):
         from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
         assert "LAST_32" in KNOCKOUT_ROUND_DEPTH
-        # Entry-level (same depth as PLAYOFFS — both are pre-LAST_16).
+        # Entry-level (same depth as PLAYOFFS: both are pre-LAST_16).
         assert KNOCKOUT_ROUND_DEPTH["LAST_32"] == 0
         # Strictly shallower than LAST_16.
         assert KNOCKOUT_ROUND_DEPTH["LAST_32"] < KNOCKOUT_ROUND_DEPTH["LAST_16"]
@@ -505,7 +505,7 @@ class TestH2HToCloseness:
 
     def test_missing_home_returns_none(self):
         # If the bookmaker doesn't list the home team's outcome, we
-        # can't compute closeness — return None instead of guessing.
+        # can't compute closeness: return None instead of guessing.
         outcomes = [
             {"name": "draw",      "price": 4.0},
             {"name": "away_team", "price": 2.0},
@@ -582,7 +582,7 @@ class TestSoccerSeedFromPreviousSeason:
         assert calls[1] is not None  # previous-season year passed
         # Returned table came from the seed, not the current sparse table.
         assert all(r["name"].startswith("Veteran") for r in table)
-        # playedGames reset to 0 — the seed represents a fresh-season prior,
+        # playedGames reset to 0: the seed represents a fresh-season prior,
         # not last year's residual (matches_remaining must be the full new season).
         assert all(r["playedGames"] == 0 for r in table)
         # Positions preserved from the seed table.
@@ -607,7 +607,7 @@ class TestSoccerSeedFromPreviousSeason:
         assert table == current_table
 
     def test_seed_skipped_when_current_table_empty(self):
-        # Empty current table (median computes to 0) — by the rules above,
+        # Empty current table (median computes to 0): by the rules above,
         # 0 < threshold → seed should fire. Verify it does.
         src = self._make_source()
         seed_table = [
@@ -642,37 +642,37 @@ class TestSoccerImportanceInterface:
         """
         base_date = "2026-05-01T12:00:00Z"
         return [
-            {  # FINISHED — A beats B 3-0 at home
+            {  # FINISHED: A beats B 3-0 at home
                 "id": 101, "status": "FINISHED",
                 "homeTeam": {"name": "Team A"}, "awayTeam": {"name": "Team B"},
                 "score": {"fullTime": {"home": 3, "away": 0}},
                 "utcDate": base_date, "matchday": 1,
             },
-            {  # FINISHED — C beats D 2-1 at home
+            {  # FINISHED: C beats D 2-1 at home
                 "id": 102, "status": "FINISHED",
                 "homeTeam": {"name": "Team C"}, "awayTeam": {"name": "Team D"},
                 "score": {"fullTime": {"home": 2, "away": 1}},
                 "utcDate": base_date, "matchday": 1,
             },
-            {  # FINISHED — A beats C 2-0 at home
+            {  # FINISHED: A beats C 2-0 at home
                 "id": 103, "status": "FINISHED",
                 "homeTeam": {"name": "Team A"}, "awayTeam": {"name": "Team C"},
                 "score": {"fullTime": {"home": 2, "away": 0}},
                 "utcDate": base_date, "matchday": 2,
             },
-            {  # SCHEDULED — B vs D
+            {  # SCHEDULED: B vs D
                 "id": 104, "status": "SCHEDULED",
                 "homeTeam": {"name": "Team B"}, "awayTeam": {"name": "Team D"},
                 "score": {"fullTime": {"home": None, "away": None}},
                 "utcDate": base_date, "matchday": 2,
             },
-            {  # SCHEDULED — A vs D (the target match for most tests)
+            {  # SCHEDULED: A vs D (the target match for most tests)
                 "id": 105, "status": "SCHEDULED",
                 "homeTeam": {"name": "Team A"}, "awayTeam": {"name": "Team D"},
                 "score": {"fullTime": {"home": None, "away": None}},
                 "utcDate": base_date, "matchday": 3,
             },
-            {  # SCHEDULED — B vs C
+            {  # SCHEDULED: B vs C
                 "id": 106, "status": "SCHEDULED",
                 "homeTeam": {"name": "Team B"}, "awayTeam": {"name": "Team C"},
                 "score": {"fullTime": {"home": None, "away": None}},
@@ -688,7 +688,7 @@ class TestSoccerImportanceInterface:
     # ---------- supports_importance ----------
 
     def test_soccer_source_supports_importance(self):
-        # Class attr — true for ALL SoccerSource instances, regardless of
+        # Class attr: true for ALL SoccerSource instances, regardless of
         # config (UCL etc. will fail at outcome_labels if their fd_code
         # has no LEAGUE_CONTEXTS entry; the caller handles that).
         src = SoccerSource("epl", fd_api_key="fake")
@@ -710,7 +710,7 @@ class TestSoccerImportanceInterface:
         # so we synthesize an unknown fd_code on an existing source to exercise
         # the "ctx is None" branch. The branch must survive so future
         # competitions added to COMPETITIONS without a matching context don't
-        # crash — they silently produce 0 importance.
+        # crash: they silently produce 0 importance.
         src = SoccerSource("epl", fd_api_key="fake")
         monkeypatch.setattr(src.config, "fd_code", "UNKNOWN_COMP")
         assert src.outcome_labels == []
@@ -723,7 +723,7 @@ class TestSoccerImportanceInterface:
         # alive on a no-op-importance fallback. Verifies the guard fires for CL.
         src = SoccerSource("ucl", fd_api_key="fake")  # ucl → fd_code="CL", knockout
         src._all_matches_cache = []  # avoid HTTP
-        # Hand-built minimal state — the guard short-circuits before reading it.
+        # Hand-built minimal state: the guard short-circuits before reading it.
         state = {"_applied": frozenset(), "Some Team": {"played": 0, "points": 0, "gf": 0, "ga": 0}}
         with caplog.at_level("WARNING"):
             out = src.terminal_outcomes(state)
@@ -752,7 +752,7 @@ class TestSoccerImportanceInterface:
         # Mutate the cache to verify the second call returns the cached object.
         src._strengths_cache["MARKER"] = {"sh": 9.9, "ch": 9.9, "sa": 9.9, "ca": 9.9}
         second = src.estimate_strengths()
-        assert "MARKER" in second  # same object — cache hit
+        assert "MARKER" in second  # same object: cache hit
 
     def test_strength_for_unknown_team_returns_defaults(self):
         src = self._make_source()
@@ -791,7 +791,7 @@ class TestSoccerImportanceInterface:
         # Mutate the underlying cache; second call should return same.
         first["MARKER"] = "set"
         second = src.initial_state()
-        assert "MARKER" in second  # same object — cache hit
+        assert "MARKER" in second  # same object: cache hit
 
     # ---------- remaining_matches ----------
 
@@ -908,7 +908,7 @@ class TestSoccerImportanceInterface:
         state["Tied A"] = {"played": 38, "points": 80, "gf": 70, "ga": 50}  # gd=20
         state["Tied B"] = {"played": 38, "points": 80, "gf": 60, "ga": 50}  # gd=10
         # Two stronger fillers (one above each tied team) plus weaker fillers
-        # so Tied A / Tied B land at positions 3 and 4 — straddling the UCL
+        # so Tied A / Tied B land at positions 3 and 4: straddling the UCL
         # cutoff so the GD tiebreak is observable.
         state["Strong 1"] = {"played": 38, "points": 90, "gf": 60, "ga": 30}
         state["Strong 2"] = {"played": 38, "points": 85, "gf": 60, "ga": 35}
@@ -924,7 +924,7 @@ class TestSoccerImportanceInterface:
         assert "title" not in outcomes["Tied B"]
         # GD tiebreak: Tied A should outrank Tied B. The test of that
         # ordering is "Tied B has more outcomes than Tied A only if A is
-        # behind B" — but here both have the same outcomes. Use a second
+        # behind B": but here both have the same outcomes. Use a second
         # state where the cutoff sits between them.
 
     def test_is_bottom_outcome_label_detection(self):
@@ -986,12 +986,12 @@ class TestKnockoutSoccerSource:
         SCHEDULED with no scores.
         """
         if sf_finished:
-            # Tie 1: A vs B — leg1 A 2-0, leg2 B 1-1 → A wins 3-1 aggregate
+            # Tie 1: A vs B: leg1 A 2-0, leg2 B 1-1 → A wins 3-1 aggregate
             sf_leg1_ab = {"home": "A", "away": "B", "home_g": 2, "away_g": 0,
                           "status": "FINISHED", "duration": "REGULAR"}
             sf_leg2_ab = {"home": "B", "away": "A", "home_g": 1, "away_g": 1,
                           "status": "FINISHED", "duration": "REGULAR"}
-            # Tie 2: C vs D — leg1 C 2-0, leg2 D 0-0 → C wins 2-0 aggregate
+            # Tie 2: C vs D: leg1 C 2-0, leg2 D 0-0 → C wins 2-0 aggregate
             sf_leg1_cd = {"home": "C", "away": "D", "home_g": 2, "away_g": 0,
                           "status": "FINISHED", "duration": "REGULAR"}
             sf_leg2_cd = {"home": "D", "away": "C", "home_g": 0, "away_g": 0,
@@ -1014,7 +1014,7 @@ class TestKnockoutSoccerSource:
 
     def _final_match(self, home: str = "A", away: str = "C") -> dict:
         """Final: single leg. By default A vs C (the SF winners in the
-        finished-SF setup). Always SCHEDULED for the test set — the final
+        finished-SF setup). Always SCHEDULED for the test set: the final
         is what the simulator should be predicting.
         """
         return self._fd_match(301, "FINAL", 1, {
@@ -1112,7 +1112,7 @@ class TestKnockoutSoccerSource:
             assert sf_tie["is_entry_tie"] is True
             assert sf_tie["feeds_from"] == {}
         # FINAL: feeds_from for A and C point to their SF ties even though
-        # those SFs are scheduled. is_entry_tie is False — the FINAL is a
+        # those SFs are scheduled. is_entry_tie is False: the FINAL is a
         # downstream tie that blocks until upstream resolves.
         final_tie = bracket["FINAL"][0]
         assert set(final_tie["feeds_from"].keys()) == {"A", "C"}
@@ -1258,7 +1258,7 @@ class TestKnockoutSoccerSource:
         assert {rem[0].home, rem[0].away} == {"A", "C"}
 
     def test_remaining_matches_blocks_downstream_when_feeders_pending(self):
-        """If SFs aren't FINISHED, the FINAL can't be played yet — its
+        """If SFs aren't FINISHED, the FINAL can't be played yet: its
         feeds_from upstreams haven't resolved. remaining = 4 SF legs only."""
         matches = self._semi_finals_matches(sf_finished=False)
         matches.append(self._final_match("A", "C"))
@@ -1273,7 +1273,7 @@ class TestKnockoutSoccerSource:
 
     def test_sample_result_no_et_on_leg_one(self):
         """Leg 1 of a 2-leg tie should never sample ET, even if regulation
-        is tied — the tie is decided over both legs."""
+        is tied: the tie is decided over both legs."""
         matches = self._semi_finals_matches(sf_finished=False)
         src = self._make_source(matches)
         state = src.initial_state()
@@ -1285,7 +1285,7 @@ class TestKnockoutSoccerSource:
                      for t in ("A", "B", "C", "D")}
         rng = random.Random(0)
         result = src.sample_result(state, leg1, strengths, rng)
-        # No ET marker in extra — sample_result returned early for non-decisive leg.
+        # No ET marker in extra: sample_result returned early for non-decisive leg.
         assert "et_goals" not in result.extra
         assert "pen_winner" not in result.extra
 
@@ -1339,7 +1339,7 @@ class TestKnockoutSoccerSource:
         assert state2["_round_reached"]["B"] == KNOCKOUT_ROUND_DEPTH["SEMI_FINALS"]
 
     def test_terminal_outcomes_label_cascade(self):
-        """A team that reached the FINAL should also be labeled SF/QF/R16 —
+        """A team that reached the FINAL should also be labeled SF/QF/R16:
         the deeper round implies all shallower bands."""
         matches = self._semi_finals_matches(sf_finished=True)
         matches.append(self._final_match("A", "C"))
@@ -1360,12 +1360,12 @@ class TestKnockoutSoccerSource:
 
     def test_monte_carlo_winner_importance_is_high_on_final(self, monkeypatch):
         """The FINAL is the only match between participants and the WINNER
-        outcome — tau-c should be near 1.0 (deterministic association).
+        outcome: tau-c should be near 1.0 (deterministic association).
         Sanity-checks the full simulator pipeline against a knockout source.
 
         Strengths are monkeypatched to identical symmetric values so the
         marginal W/L distribution is ~50/50 (tau-c is bounded by the
-        marginal balance — extreme W/L imbalance from a 4-finished-match
+        marginal balance: extreme W/L imbalance from a 4-finished-match
         strength estimate would cap tau-c at ~0.5 even with perfect
         outcome correlation). The algorithm is what's under test, not the
         strength estimator.
@@ -1388,7 +1388,7 @@ class TestKnockoutSoccerSource:
     def test_monte_carlo_already_locked_outcomes_have_zero_importance(self, monkeypatch):
         """A's 'semifinal' label is already true regardless of the FINAL
         result (A reached the final). Importance for that pair should be
-        ~0 — the FINAL doesn't change A's semifinal status."""
+        ~0: the FINAL doesn't change A's semifinal status."""
         from dispatcharr_ranked_matchups.simulation import monte_carlo_importance
         matches = self._semi_finals_matches(sf_finished=True)
         matches.append(self._final_match("A", "C"))
@@ -1408,7 +1408,7 @@ class TestKnockoutSoccerSource:
 
     def test_penalty_shootout_returns_decisive_winner(self):
         """20 shootouts at the same seed should produce both HOME and AWAY
-        winners — penalty resolution is variance-dominated, never the same
+        winners: penalty resolution is variance-dominated, never the same
         outcome every time."""
         outcomes = set()
         for seed in range(30):
@@ -1632,25 +1632,25 @@ class TestNcaafFullSeasonFilter:
                 return self._p
 
         payload = [
-            {  # FBS vs FBS — kept
+            {  # FBS vs FBS: kept
                 "id": 1, "homeClassification": "fbs", "awayClassification": "fbs",
                 "homeTeam": "Michigan", "awayTeam": "Ohio State",
                 "homePoints": 28, "awayPoints": 21, "completed": True,
                 "startDate": "2025-11-29T12:00:00.000Z",
             },
-            {  # FBS vs FCS — kept (cupcake counts toward FBS win total)
+            {  # FBS vs FCS: kept (cupcake counts toward FBS win total)
                 "id": 2, "homeClassification": "fbs", "awayClassification": "fcs",
                 "homeTeam": "Alabama", "awayTeam": "Chattanooga",
                 "homePoints": 56, "awayPoints": 7, "completed": True,
                 "startDate": "2025-09-15T16:00:00.000Z",
             },
-            {  # FCS vs FCS — dropped
+            {  # FCS vs FCS: dropped
                 "id": 3, "homeClassification": "fcs", "awayClassification": "fcs",
                 "homeTeam": "Furman", "awayTeam": "Wofford",
                 "homePoints": 24, "awayPoints": 21, "completed": True,
                 "startDate": "2025-10-01T16:00:00.000Z",
             },
-            {  # SCHEDULED FBS vs FBS — kept, no scores
+            {  # SCHEDULED FBS vs FBS: kept, no scores
                 "id": 4, "homeClassification": "fbs", "awayClassification": "fbs",
                 "homeTeam": "Georgia", "awayTeam": "Texas",
                 "homePoints": None, "awayPoints": None, "completed": False,
@@ -1703,19 +1703,19 @@ class TestNcaamFullSeasonFilter:
         monkeypatch.setattr(src, "_fetch_rankings",
                             lambda _season: {"Duke": 1, "UConn": 2})
         payload = [
-            {  # AP vs AP — kept
+            {  # AP vs AP: kept
                 "id": 101, "homeTeam": "Duke", "awayTeam": "UConn",
                 "homePoints": 78, "awayPoints": 72,
                 "homeWinner": True, "awayWinner": False,
                 "startDate": "2025-12-15T20:00:00.000Z",
             },
-            {  # AP vs non-AP — kept (Duke needs all their games tracked)
+            {  # AP vs non-AP: kept (Duke needs all their games tracked)
                 "id": 102, "homeTeam": "Duke", "awayTeam": "Some Mid-Major",
                 "homePoints": 95, "awayPoints": 60,
                 "homeWinner": True, "awayWinner": False,
                 "startDate": "2025-11-20T20:00:00.000Z",
             },
-            {  # Non-AP vs Non-AP — dropped
+            {  # Non-AP vs Non-AP: dropped
                 "id": 103, "homeTeam": "Random A", "awayTeam": "Random B",
                 "homePoints": 70, "awayPoints": 68,
                 "homeWinner": True, "awayWinner": False,
@@ -1764,7 +1764,7 @@ class TestNcaamFullSeasonFilter:
 
 
 # =====================================================================
-# Phase E: BestOfNSeriesSource — base bracket-state-machine tests
+# Phase E: BestOfNSeriesSource: base bracket-state-machine tests
 # =====================================================================
 
 class TestBestOfNSeriesSource:
@@ -1922,7 +1922,7 @@ class TestBestOfNSeriesSource:
                 (1, 4),  # G3 B-home: A wins  (A: 3, B: 0)
                 (3, 1),  # G4 B-home: B wins  (A: 3, B: 1)
                 (1, 3),  # G5 A-home: B wins  (A: 3, B: 2)
-                (1, 4),  # G6 B-home: A wins  (A: 4, B: 2) — A clinches
+                (1, 4),  # G6 B-home: A wins  (A: 4, B: 2): A clinches
             ],
             series_letter="a",
         )
@@ -2045,12 +2045,12 @@ class TestBestOfNSeriesSource:
         assert "round_2" in outcomes["A"]
         assert "conf_final" not in outcomes["A"]
         assert "cup_final" not in outcomes["A"]
-        # B at depth 0 (R1) — no bands fire (cutoffs all >= 1).
+        # B at depth 0 (R1): no bands fire (cutoffs all >= 1).
         assert outcomes["B"] == []
 
 
 # =====================================================================
-# Phase E: NhlRegularSource — standings_points + OT/SO classification
+# Phase E: NhlRegularSource: standings_points + OT/SO classification
 # =====================================================================
 
 class TestNhlRegularSource:
@@ -2157,7 +2157,7 @@ class TestNhlRegularSource:
 
 
 # =====================================================================
-# Phase E: NhlPlayoffSource — bracket inference + round_reached cascade
+# Phase E: NhlPlayoffSource: bracket inference + round_reached cascade
 # =====================================================================
 
 class TestNhlPlayoffSource:
@@ -2299,7 +2299,7 @@ class TestNcaaBaseballRegularSource:
         assert src.sport_label == "NCAA Baseball"
 
     def test_count_field_is_wins(self):
-        # Inherits the PointsBasedSportSource default — D1 baseball has
+        # Inherits the PointsBasedSportSource default: D1 baseball has
         # no OT/SO bonus point complication like NHL.
         from dispatcharr_ranked_matchups.sources.ncaa_baseball import NcaaBaseballRegularSource
         assert NcaaBaseballRegularSource._count_field == "wins"
@@ -2323,7 +2323,7 @@ class TestNcaaBaseballRegularSource:
         evt = self._event("1002", "2026-04-01T19:00Z", hp=4, ap=2,
                           completed=False, state="in")
         rec = _extract_game_record(evt)
-        # In-progress score is unstable — must not seed wins/losses.
+        # In-progress score is unstable: must not seed wins/losses.
         assert rec is not None
         assert rec["status"] == "SCHEDULED"
         assert rec["home_points"] is None
@@ -2372,7 +2372,7 @@ class TestNcaaBaseballRegularSource:
     def test_team_canonical_name_prefers_location_over_mascot(self):
         from dispatcharr_ranked_matchups.sources.ncaa_baseball import _team_canonical_name
         # EPG provider titles use the school name ("UCLA at Texas")
-        # not the mascot ("Bruins at Longhorns") — pick location.
+        # not the mascot ("Bruins at Longhorns"): pick location.
         assert _team_canonical_name({"location": "UCLA", "name": "Bruins"}) == "UCLA"
 
     def test_team_canonical_name_falls_back_to_nickname(self):
@@ -2411,7 +2411,7 @@ class TestNcaaBaseballRegularSource:
 class TestNcaaBaseballPlayoffSource:
     """NcaaBaseballPlayoffSource: BestOfNSeriesSource subclass that ships
     the cleanly-labeled best-of-3 stages (Super Regional + MCWS Finals).
-    Regional double-elim and 8-team MCWS bracket are Phase 2 — those
+    Regional double-elim and 8-team MCWS bracket are Phase 2: those
     headlines lack game-number metadata so chronological inference is
     needed and that's a separate design.
     """
@@ -2452,7 +2452,7 @@ class TestNcaaBaseballPlayoffSource:
         # MCWS Final winner → MCWS_W synthetic depth.
         assert src._winner_advance_label("MCWS_F") == "MCWS_W"
         # Super Regional advances via default stage_depth + 1 rule
-        # (which lands at MCWS depth — the unmodeled 8-team bracket).
+        # (which lands at MCWS depth: the unmodeled 8-team bracket).
         assert src._winner_advance_label("BSB_SR") is None
 
     def test_outcome_labels_uses_mcws_po_thresholds(self):
@@ -2544,7 +2544,7 @@ class TestBaseballPlayoffHeadlineParser:
         ) == ("BSB_SR", 1)
 
     def test_super_regional_game_3_if_necessary(self):
-        # The "(if necessary)" trailer must be stripped — ESPN attaches
+        # The "(if necessary)" trailer must be stripped: ESPN attaches
         # it to Game 3 placeholders that haven't been confirmed.
         assert self._parse(
             "NCAA Baseball Championship - Auburn Super Regional - Game 3 (if necessary)"
@@ -2571,7 +2571,7 @@ class TestBaseballPlayoffHeadlineParser:
         ) == (None, None)
 
     def test_mcws_elimination_game_returns_none(self):
-        # MCWS losers-bracket games ESPN tags as "Elimination Game" —
+        # MCWS losers-bracket games ESPN tags as "Elimination Game":
         # still Phase 2 (no game number).
         assert self._parse(
             "Men's College World Series - Elimination Game"
@@ -2657,7 +2657,7 @@ class TestBaseballBracketHeadlineParser:
             "Men's College World Series - Double Elimination Round"
         )
         assert stage == "MCWS"
-        # Partial key — sub-bracket resolution happens chronologically.
+        # Partial key: sub-bracket resolution happens chronologically.
         assert key is None
 
     def test_mcws_elimination_game(self):
@@ -2681,7 +2681,7 @@ class TestBaseballBracketHeadlineParser:
 
     def test_super_regional_headline_belongs_to_sibling_source(self):
         # SUPER_REGIONAL headlines are owned by NcaaBaseballPlayoffSource,
-        # NOT the bracket source — the bracket parser must return None.
+        # NOT the bracket source: the bracket parser must return None.
         from dispatcharr_ranked_matchups.sources.ncaa_baseball import (
             _parse_baseball_bracket_headline,
         )
@@ -2750,7 +2750,7 @@ class TestMcwsSubBracketClassification:
         assert out["LSU"] == "MCWS_sub2"
 
     def test_day3_game_inherits_from_opening_day(self):
-        # Day 3 game (Oregon State vs Coastal Carolina) — both teams
+        # Day 3 game (Oregon State vs Coastal Carolina): both teams
         # already classified to sub1 from Day 1, so the Day 3 game
         # MUST stay sub1.
         from datetime import datetime, timezone
@@ -2766,7 +2766,7 @@ class TestMcwsSubBracketClassification:
             # Day 2 establishes sub2
             self._g("UCLA", "Arkansas",
                     datetime(2025, 6, 14, 18, 0, tzinfo=timezone.utc)),
-            # Day 3 rematch — both teams classified already.
+            # Day 3 rematch: both teams classified already.
             self._g("Oregon State", "Coastal Carolina",
                     datetime(2025, 6, 15, 23, 0, tzinfo=timezone.utc)),
         ]
@@ -2894,7 +2894,7 @@ class TestNcaaBaseballPlayoffBracketSource:
 
 class TestNcaaBaseballPlayoffBracketSourceFiltering:
     """Make sure the bracket source DOES NOT step on the sibling
-    NcaaBaseballPlayoffSource's stages — best-of-3 BSB_SR + MCWS_F
+    NcaaBaseballPlayoffSource's stages: best-of-3 BSB_SR + MCWS_F
     headlines must be ignored by the bracket parser."""
 
     def test_super_regional_excluded(self):
@@ -2957,7 +2957,7 @@ class TestSoftballBracketHeadlineParser:
         assert key is None
 
     def test_wcws_elimination_game_if_necessary(self):
-        # Verbatim text from 2025 WCWS — "If Necessary" suffix is part
+        # Verbatim text from 2025 WCWS: "If Necessary" suffix is part
         # of the elimination-game pattern.
         from dispatcharr_ranked_matchups.sources.ncaa_softball import (
             _parse_softball_bracket_headline,
@@ -2989,7 +2989,7 @@ class TestSoftballBracketHeadlineParser:
 
 
 class TestWcwsSubBracketClassification:
-    """Same day-partition heuristic as MCWS — pinned by a representative
+    """Same day-partition heuristic as MCWS: pinned by a representative
     fixture using verbatim 2026 WCWS opening-day pairings."""
 
     @staticmethod
@@ -3035,7 +3035,7 @@ class TestWcwsSubBracketClassification:
             _classify_wcws_sub_brackets,
         )
         games = [
-            # Day 1 (May 29 CT) — first game stays in May 29 UTC.
+            # Day 1 (May 29 CT): first game stays in May 29 UTC.
             self._g("Texas Tech", "Oklahoma",
                     datetime(2026, 5, 29, 22, 0, tzinfo=timezone.utc)),
             # Day 1 second game crosses into May 30 UTC.
@@ -3227,7 +3227,7 @@ class TestNcaaSoccerSource:
         )
         # With lambda~1.0 and 200 samples, draws happen frequently
         # (Poisson(1) variance puts ~30%+ chance of identical scores).
-        # Confirm at least one tie sampled — base PointsBasedSportSource
+        # Confirm at least one tie sampled: base PointsBasedSportSource
         # would have force-coin-flipped it away.
         seen_tie = False
         for seed in range(200):
@@ -3290,7 +3290,7 @@ class TestNhlCupFinalPlaceholder:
         from dispatcharr_ranked_matchups.sources.nhl import NHL_HOME_PATTERN
         games = []
         # Two CONF_FINAL series, each at 0-0 (no games applied yet for
-        # the placeholder logic to fire — it's structural based on
+        # the placeholder logic to fire: it's structural based on
         # series existence, not on series progress).
         for series_idx, (top, bot) in enumerate([("Colorado", "Vegas"), ("Montreal", "Carolina")]):
             for matchday in range(1, len(NHL_HOME_PATTERN) + 1):
@@ -3721,7 +3721,7 @@ class TestMlbPlayoffSource:
 
     def test_mlb_po_thresholds_are_depth_ordered(self):
         """MLB_PO threshold stages must appear in KNOCKOUT_ROUND_DEPTH in
-        increasing depth order — otherwise the terminal_outcomes cascade
+        increasing depth order: otherwise the terminal_outcomes cascade
         would emit out-of-order bands."""
         from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, KNOCKOUT_ROUND_DEPTH
         ctx = LEAGUE_CONTEXTS["MLB_PO"]
@@ -3781,7 +3781,7 @@ class TestNbaHeadlineParser:
         assert self._parse("") is None
 
     def test_unrecognized_returns_none(self):
-        # Defensive — preseason headlines or odd formats should not
+        # Defensive: preseason headlines or odd formats should not
         # accidentally match.
         assert self._parse("Preseason") is None
         assert self._parse("Game 5") is None
@@ -4049,7 +4049,7 @@ class TestNbaPlayoffSource:
 
 class TestMlsSourceIdentity:
     """MlsSource: V1 schedule+closeness adapter. No importance, no
-    standings — just confirm the basic contract holds."""
+    standings: just confirm the basic contract holds."""
 
     @staticmethod
     def _make():
@@ -4254,7 +4254,7 @@ class TestMlsFetchUpcomingShape:
 # =====================================================================
 
 class TestWnbaHeadlineParser:
-    """WNBA headline regex differs from NBA — no East/West prefix on R1
+    """WNBA headline regex differs from NBA: no East/West prefix on R1
     ("First Round"), WNBA name appears explicitly on Semifinals and
     Finals ("WNBA Semifinals", "WNBA Finals")."""
 
@@ -4294,7 +4294,7 @@ class TestWnbaHeadlineParser:
 
 
 class TestWnbaAllStarFilter:
-    """Same All-Star filter pattern as NBA — WNBA also runs an
+    """Same All-Star filter pattern as NBA: WNBA also runs an
     All-Star Game tagged competition.type.abbreviation=ALLSTAR."""
 
     @staticmethod
@@ -4600,7 +4600,7 @@ class TestNcaawBasketballPlayoffSource:
         assert self._make().KO_STAGES == ("R64", "R32", "S16", "E8", "F4", "NCG")
 
     def test_series_length_uniform_one(self):
-        """Single-game elim — every stage uses SERIES_LENGTH=1; the
+        """Single-game elim: every stage uses SERIES_LENGTH=1; the
         clinching-wins target is ceil(1/2)=1."""
         src = self._make()
         for stage in src.KO_STAGES:
@@ -4674,7 +4674,7 @@ class TestNcaawBasketballPlayoffSource:
 # =====================================================================
 
 class TestNcaaSoccerCupSource:
-    """One source class parametrized on gender — same shape / endpoints
+    """One source class parametrized on gender: same shape / endpoints
     / stage labels for both, only ESPN URL slug + league_context_code
     differ. Mirrors NcaaSoccerSource (regular season) parametrization."""
 
@@ -4724,7 +4724,7 @@ class TestNcaaSoccerCupSource:
         assert self._make().KO_STAGES == ("R64", "R32", "S16", "E8", "F4", "NCG")
 
     def test_series_length_uniform_one(self):
-        """Single-game elim — every stage uses SERIES_LENGTH=1; clinches
+        """Single-game elim: every stage uses SERIES_LENGTH=1; clinches
         at ceil(1/2)=1 win."""
         src = self._make()
         for stage in src.KO_STAGES:
@@ -4744,7 +4744,7 @@ class TestNcaaSoccerCupSource:
 
     def test_slug_to_stage_table_covers_both_genders(self):
         """Both M's and W's College Cup slugs map to the same canonical
-        stage labels — M's uses 'college-cup---semifinal' / 'college-
+        stage labels: M's uses 'college-cup---semifinal' / 'college-
         cup---championship', W's uses 'semifinals' / 'college-cup'. Pin
         both gender aliases so an ESPN slug rename surfaces here, not
         as silently-missing-stage in production."""
@@ -4785,7 +4785,7 @@ class TestNcaaSoccerCupSource:
         assert NcaaSoccerCupSource._extract_bracket_record(event) is None
 
     def test_extract_bracket_record_routes_third_round_to_s16(self):
-        """ESPN's 'third-round' slug is what humans call Sweet 16 —
+        """ESPN's 'third-round' slug is what humans call Sweet 16:
         confirm the routing so a label mismatch surfaces here, not via
         an importance-band silently misfiring on production data.
         """
@@ -4856,7 +4856,7 @@ class TestNcaaSoccerCupSource:
     def test_thresholds_are_depth_ordered(self):
         # Cross-sport calibration requires later stages to be ranked
         # deeper than earlier ones. Out-of-order depths would break the
-        # cascade — a team reaching SF wouldn't be credited with the
+        # cascade: a team reaching SF wouldn't be credited with the
         # E8 / S16 / R32 labels below it.
         from dispatcharr_ranked_matchups.scoring import (
             LEAGUE_CONTEXTS, KNOCKOUT_ROUND_DEPTH,
@@ -4884,7 +4884,7 @@ class TestNcaaSoccerCupSource:
 
     def test_champion_cascade(self):
         """A team that wins each of the 6 rounds reaches NCG_WINNER
-        depth and `terminal_outcomes` returns every band — pin the
+        depth and `terminal_outcomes` returns every band: pin the
         cascade end-to-end so a future refactor of bracket.py can't
         silently break the round_reached → terminal_outcomes path
         for soccer-style brackets.
@@ -4925,7 +4925,7 @@ class TestNcaaSoccerCupSource:
     # ---------- sample_result forces a winner (no draws in bracket) ----------
 
     def test_sample_result_never_produces_ties(self):
-        """Bracket games go to OT then PKs in real life — sample_result
+        """Bracket games go to OT then PKs in real life: sample_result
         must coin-flip a +1 to break a regulation tie. Distinct from the
         regular-season NcaaSoccerSource which allows draws (1 standings
         point each). Run a tight-Poisson sample 200x and confirm zero
@@ -4976,7 +4976,7 @@ class TestNcaaSoccerCupSource:
 
     def test_loser_round_reached_stops_at_lost_stage(self):
         """A team that wins R64 + R32 but loses S16 should have
-        round_reached at depth(S16) — they made it to Sweet 16, didn't
+        round_reached at depth(S16): they made it to Sweet 16, didn't
         advance to Elite 8. terminal_outcomes returns sweet_16 and
         round_of_32 but NOT elite_8.
         """
@@ -5077,7 +5077,7 @@ class TestNcaaSoccerCupSource:
 
     def test_dedupe_passes_through_unique_games(self):
         """A bracket with all distinct (stage, participants) tuples
-        passes through unchanged — no false collapsing of legitimate
+        passes through unchanged: no false collapsing of legitimate
         bracket games."""
         from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
             _dedupe_pk_shootout_pairs,
@@ -5103,7 +5103,7 @@ class TestNcaaSoccerCupSource:
 
     def test_fetch_upcoming_emits_only_bracket_games(self, monkeypatch):
         """fetch_upcoming must filter to events with a tournament slug
-        — a regular-season game that happens to fall in the same date
+       : a regular-season game that happens to fall in the same date
         window must not appear. Pin via stub so a slug-table regression
         surfaces here."""
         from dispatcharr_ranked_matchups.sources import ncaa_soccer_cup as mod
@@ -5155,7 +5155,7 @@ class TestNcaaSoccerCupSource:
 
 class TestNcaaSoftballRegularSource:
     """V1: regular-season importance only. WCWS bracket (double-elim)
-    is filed as a follow-up — same scope deferral as NCAA Baseball's CWS."""
+    is filed as a follow-up: same scope deferral as NCAA Baseball's CWS."""
 
     @staticmethod
     def _make():
@@ -5234,7 +5234,7 @@ class TestNcaaSoftballRegularSource:
 
 class TestNcaaSoftballPlayoffSource:
     """NcaaSoftballPlayoffSource: best-of-3 Super Regional + WCWS Finals.
-    Sibling of NcaaBaseballPlayoffSource with one twist — softball
+    Sibling of NcaaBaseballPlayoffSource with one twist: softball
     headlines use "Finals" (plural) where baseball uses "Final"
     (singular)."""
 
@@ -5325,7 +5325,7 @@ class TestSoftballPlayoffHeadlineParser:
         ) == ("SB_SR", 3)
 
     def test_wcws_finals_game_1(self):
-        # Plural "Finals" for softball — distinct from baseball's "Final".
+        # Plural "Finals" for softball: distinct from baseball's "Final".
         assert self._parse(
             "Women's College World Series Championship Finals - Game 1"
         ) == ("WCWS_F", 1)
@@ -5347,7 +5347,7 @@ class TestSoftballPlayoffHeadlineParser:
         ) == (None, None)
 
     def test_wcws_elimination_game_returns_none(self):
-        # WCWS losers-bracket games — observed in live 2026 data
+        # WCWS losers-bracket games: observed in live 2026 data
         # (May 30+). Must skip; no game number → Phase 2.
         assert self._parse(
             "Women's College World Series - Elimination Game"
@@ -5361,7 +5361,7 @@ class TestSoftballPlayoffHeadlineParser:
         ) == (None, None)
 
     def test_regional_elimination_game_returns_none(self):
-        # Regional losers-bracket games carry "Elimination Game" too —
+        # Regional losers-bracket games carry "Elimination Game" too:
         # also Phase 2 territory.
         assert self._parse(
             "NCAA Softball Championship - Athens Regional - Elimination Game"
@@ -5407,7 +5407,7 @@ class TestNflHeadlineParser:
         assert self._parse("Super Bowl LIX") == {"stage": "SB", "matchday": 1}
 
     def test_super_bowl_no_numeral(self):
-        # Defensive — if ESPN ever drops the Roman numeral.
+        # Defensive: if ESPN ever drops the Roman numeral.
         assert self._parse("Super Bowl") == {"stage": "SB", "matchday": 1}
 
     def test_no_headline_returns_none(self):
@@ -5424,7 +5424,7 @@ class TestNflHeadlineParser:
 
 
 class TestNflProBowlFilter:
-    """Pro Bowl is tagged competition.type.abbreviation=ALLSTAR — same
+    """Pro Bowl is tagged competition.type.abbreviation=ALLSTAR: same
     trap as NBA/WNBA. Filter must drop it from regular-season fetches."""
 
     @staticmethod
@@ -5724,7 +5724,7 @@ class TestMlsStandingsContexts:
 
 class TestMlsStandingsRecordResult:
     """The 3 / 1 / 0 standings-points credit. Mirrors ncaa_soccer's
-    record path because both apply the same soccer scheme — pin
+    record path because both apply the same soccer scheme: pin
     independently so regression in one doesn't drag the other."""
 
     @staticmethod
@@ -5832,7 +5832,7 @@ class TestMlsStandingsConferenceFilter:
             if calls["n"] != 1:
                 return {"events": []}
             return {"events": [
-                # (1) A vs B — intra-East, should appear
+                # (1) A vs B: intra-East, should appear
                 {"id": 1, "date": "2025-04-01T19:00:00Z",
                  "season": {"slug": "regular-season"},
                  "competitions": [{
@@ -5842,7 +5842,7 @@ class TestMlsStandingsConferenceFilter:
                          {"homeAway": "away", "team": {"displayName": "B"}, "score": "1"},
                      ],
                  }]},
-                # (2) A vs C — cross-conf, should be filtered out
+                # (2) A vs C: cross-conf, should be filtered out
                 {"id": 2, "date": "2025-04-01T19:00:00Z",
                  "season": {"slug": "regular-season"},
                  "competitions": [{
@@ -5852,7 +5852,7 @@ class TestMlsStandingsConferenceFilter:
                          {"homeAway": "away", "team": {"displayName": "C"}, "score": "1"},
                      ],
                  }]},
-                # (3) C vs D — intra-West, should be filtered out for East
+                # (3) C vs D: intra-West, should be filtered out for East
                 {"id": 3, "date": "2025-04-01T19:00:00Z",
                  "season": {"slug": "regular-season"},
                  "competitions": [{
@@ -5919,7 +5919,7 @@ class TestMlsStandingsConferenceFilter:
         remaining matches in the season produces nonzero playoff_bubble
         leverage. Uses a stub state to bypass ESPN's thin future-
         fixtures publishing (see module docstring's "Known limitation"
-        — live mid-season importance reads near 0 because ESPN MLS
+       : live mid-season importance reads near 0 because ESPN MLS
         publishes only ~1-2 weeks of future games, so the simulator
         can't propagate; this test pins the simulator pipeline
         independent of the data-availability quirk).
@@ -5939,7 +5939,7 @@ class TestMlsStandingsConferenceFilter:
                 # Nashville at 29 pts, one game from the 30 pt bubble.
                 # Inter Miami at 26, also within reach. A single match
                 # result genuinely moves Nashville above or below the
-                # threshold — leverage should be nonzero.
+                # threshold: leverage should be nonzero.
                 return {
                     "_applied": frozenset(),
                     "_teams": {
@@ -6069,7 +6069,7 @@ class TestMlsStandingsConferenceFilter:
     def test_conference_map_returns_empty_on_endpoint_failure(self, monkeypatch):
         """When _http_get returns None (ESPN down / network error /
         4xx), the conference map MUST be empty rather than partial.
-        An empty map cascades to 0 emitted games — graceful degradation
+        An empty map cascades to 0 emitted games: graceful degradation
         rather than misclassified teams getting the wrong conference's
         threshold bands.
         """
@@ -6144,7 +6144,7 @@ class TestMlsCupSourceIdentity:
 
     def test_series_lengths_match_mls_format(self):
         """Mixed format: WC, CSF, CF, MLS_CUP are single-leg; R1 is
-        best-of-3 (clinches at 2 wins). Pin all five — a regression
+        best-of-3 (clinches at 2 wins). Pin all five: a regression
         to uniform best-of-N would silently misclassify clinches."""
         src = self._make()
         assert src._series_length_for_stage("MLS_WC") == 1
@@ -6248,7 +6248,7 @@ class TestMlsCupSlugRouting:
     def test_extract_filters_phantom_best_of_3_game(self):
         """ESPN publishes a phantom game-3 (state=post, completed=False,
         score=0-0) for best-of-3 series that clinch in 2 games. These
-        MUST be filtered out — pinning against the live shape observed
+        MUST be filtered out: pinning against the live shape observed
         on event 722587 in the 2024 R1 (LA Galaxy / Colorado series
         clinched in 2 games; ESPN's game-3 slot was state=post +
         completed=False).
@@ -6393,7 +6393,7 @@ class TestMlsCupMatchdayInference:
 
     def test_best_of_3_does_not_dedupe_legitimate_repeats(self):
         """Same teams playing 2-3 games in a best-of-3 series must
-        NOT be collapsed by the PK dedup — pin so a future refactor
+        NOT be collapsed by the PK dedup: pin so a future refactor
         doesn't accidentally apply dedup to best-of-N stages."""
         from datetime import datetime, timezone
         from dispatcharr_ranked_matchups.sources.mls_cup import (
@@ -6474,7 +6474,7 @@ class TestMlsCupCascade:
 
 
 class TestMlsCupSampleResultNoDraws:
-    """Bracket games go to OT then PKs — sample_result must force a winner."""
+    """Bracket games go to OT then PKs: sample_result must force a winner."""
 
     def test_sample_result_never_produces_ties(self):
         import random
@@ -6513,7 +6513,7 @@ class TestMlsCupFetchUpcoming:
             if calls["n"] != 1:
                 return {"events": []}
             return {"events": [
-                # Scheduled bracket game — should emit.
+                # Scheduled bracket game: should emit.
                 {"id": "playoff-1", "date": "2030-10-26T19:00:00Z",
                  "season": {"slug": "eastern-conference-playoffs---round-one"},
                  "competitions": [{
@@ -6523,7 +6523,7 @@ class TestMlsCupFetchUpcoming:
                          {"homeAway": "away", "team": {"displayName": "Inter Miami CF"}},
                      ],
                  }]},
-                # Regular-season game — must be filtered out.
+                # Regular-season game: must be filtered out.
                 {"id": "regular-1", "date": "2030-10-26T22:00:00Z",
                  "season": {"slug": "regular-season"},
                  "competitions": [{
@@ -6596,7 +6596,7 @@ class TestMlsCupMatchdayInferenceDefensive:
             {"game_id": "g2", "stage": "MLS_R1", "matchday": None,
              "home": "A", "away": "B", "home_goals": 1, "away_goals": 0,
              "status": "FINISHED",
-             "start_time": None,  # malformed input — sort to end
+             "start_time": None,  # malformed input: sort to end
              "extra": {}},
         ]
         out = _assign_matchdays_and_dedupe(games, _MLS_SERIES_LENGTHS)
@@ -6737,7 +6737,7 @@ class TestLigaMxSource:
 # =====================================================================
 
 class TestFieldEventSourceContract:
-    """FieldEventSource is the ABC for racing + golf — events that
+    """FieldEventSource is the ABC for racing + golf: events that
     aren't head-to-head. Pin the contract: home=event_name, away="Field"
     sentinel, no importance simulation."""
 
@@ -6839,7 +6839,7 @@ class TestFieldEventFetchUpcoming:
         assert len(games) == 1
         g = games[0]
         assert g.home == "Heineken Chinese Grand Prix"
-        # Sentinel away team — field events have no opponent.
+        # Sentinel away team: field events have no opponent.
         assert g.away == "Field"
         assert g.sport_prefix == "F1"
         assert g.extra.get("stage") == "EVENT"
@@ -6924,7 +6924,7 @@ class TestFieldEventScoring:
             GameSignals(team_a="X", team_b="Field", tournament_stage="MAJOR"),
             weights,
         )
-        # MAJOR must outrank EVENT — golf majors should beat regular
+        # MAJOR must outrank EVENT: golf majors should beat regular
         # tour stops in the guide.
         assert major_score.raw > event_score.raw
 
@@ -6934,7 +6934,7 @@ class TestFieldEventScoring:
 # =====================================================================
 
 class TestUfcSource:
-    """UFC fits the FieldEventSource pattern — one EPG entry per
+    """UFC fits the FieldEventSource pattern: one EPG entry per
     fight card. Numbered PPVs (UFC 309, etc.) get MAJOR; Fight
     Nights and ESPN-broadcast cards get EVENT."""
 
@@ -6955,7 +6955,7 @@ class TestUfcSource:
     def test_ppv_detected_as_major(self):
         src = self._make()
         assert src.MAJOR_REGEX is not None
-        # Numbered PPV — MAJOR.
+        # Numbered PPV: MAJOR.
         assert src.MAJOR_REGEX.search("UFC 309: Jones vs. Miocic")
         assert src.MAJOR_REGEX.search("UFC 310: Pantoja vs. Asakura")
         # Three-digit (future-proofing).
@@ -6964,14 +6964,14 @@ class TestUfcSource:
     def test_fight_night_not_major(self):
         src = self._make()
         assert src.MAJOR_REGEX is not None
-        # Fight Night and ESPN cards — EVENT-tier.
+        # Fight Night and ESPN cards: EVENT-tier.
         assert not src.MAJOR_REGEX.search(
             "UFC Fight Night: Sandhagen vs. Figueiredo"
         )
         assert not src.MAJOR_REGEX.search("UFC on ESPN: Lewis vs. Nascimento")
 
     def test_emits_ppv_with_major_tier(self, monkeypatch):
-        """Live ESPN response shape — UFC card surfaces as one row."""
+        """Live ESPN response shape: UFC card surfaces as one row."""
         import dispatcharr_ranked_matchups.sources.field_event as field_mod
         espn_response = {
             "events": [{
@@ -7018,7 +7018,7 @@ class TestUfcSource:
 class TestTennisSources:
     """ESPN's tennis scoreboard returns whole tournaments (each entry
     spans 1-2 weeks for a Slam, or 5-7 days for tour stops), not
-    individual matches — same FieldEventSource shape as racing + UFC."""
+    individual matches: same FieldEventSource shape as racing + UFC."""
 
     def test_atp_identity(self):
         from dispatcharr_ranked_matchups.sources.field_event import AtpSource
@@ -7616,8 +7616,8 @@ class TestDoubleEliminationSource:
             self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
             self._game("g2", "BSB_REG", "Site2", "A", "B", (4, 1), matchday=1),
             # Same {A, B} teams in two different sub-bracket grouping_keys.
-            # This shouldn't happen with real source data — teams don't
-            # span sub-brackets — but the contract should honor the
+            # This shouldn't happen with real source data: teams don't
+            # span sub-brackets: but the contract should honor the
             # grouping_key without ambiguity.
         ]
         src = self._make_source(games)
@@ -7723,7 +7723,7 @@ class TestGroupStageSoccerSource:
 
     def test_team_group_map_ignores_knockout_matches(self):
         # Knockout fixtures don't carry a group field. Make sure they're
-        # filtered out — including them would put a Group A winner into
+        # filtered out: including them would put a Group A winner into
         # "no group" classification when the knockout schedule resolves.
         matches = [
             self._match(1, "GROUP_A", "Mexico", "South Africa"),
@@ -7757,7 +7757,7 @@ class TestGroupStageSoccerSource:
             # Argentina 2-0 Chile
             self._match(2, "GROUP_A", "Argentina", "Chile",
                         hg=2, ag=0, status="FINISHED"),
-            # Knockout match — must NOT be applied.
+            # Knockout match: must NOT be applied.
             self._ko_match(99, "LAST_32", "Mexico", "Germany"),
         ]
         src = self._make_source(matches)
@@ -7795,7 +7795,7 @@ class TestGroupStageSoccerSource:
             # Scheduled group matches
             self._match(1, "GROUP_A", "Mexico", "South Africa"),
             self._match(2, "GROUP_A", "Argentina", "Chile"),
-            # Knockout — should NOT be in remaining_matches
+            # Knockout: should NOT be in remaining_matches
             self._ko_match(99, "LAST_32", "Mexico", "Germany"),
         ]
         src = self._make_source(matches)
@@ -7818,7 +7818,7 @@ class TestGroupStageSoccerSource:
 
     def test_terminal_outcomes_top_2_per_group_advance(self):
         # Group A finished: Mexico 9pts, Argentina 6pts, Chile 3pts, SA 0pts.
-        # Top 2 (Mexico, Argentina) advance. Chile is 3rd — could be
+        # Top 2 (Mexico, Argentina) advance. Chile is 3rd: could be
         # promoted via best-3rd-place (#52) in a multi-group fixture, so
         # this test focuses ONLY on the top-2-per-group claim and the
         # bottom-of-group elimination. 4th place (South Africa) never
@@ -7836,7 +7836,7 @@ class TestGroupStageSoccerSource:
         outcomes = src.terminal_outcomes(state)
         assert outcomes["Mexico"] == ["advance"]
         assert outcomes["Argentina"] == ["advance"]
-        # South Africa is 4th in the group — never advances via any path.
+        # South Africa is 4th in the group: never advances via any path.
         assert outcomes["South Africa"] == ["eliminated"]
         # Chile is 3rd. Best-3rd promotion is verified in TestGroupStageBestThirdPlace.
 
@@ -7967,7 +7967,7 @@ class TestKnockoutSoccerSourceSkipsGroupStage:
         assert out_ids == {2, 3}
 
     def test_filter_no_op_for_competitions_without_group_stage(self):
-        # UCL fixtures don't carry stage="GROUP_STAGE" — the filter is a
+        # UCL fixtures don't carry stage="GROUP_STAGE": the filter is a
         # safe no-op, ALL rows pass through.
         from dispatcharr_ranked_matchups.sources.base import GameRow
         from dispatcharr_ranked_matchups.sources.soccer import (
@@ -8001,7 +8001,7 @@ class TestKnockoutSoccerSourceSeedFromChain:
     Downstream stages use placeholder team names ("L32_W1" etc.) wired
     to L32 ties via feeds_from. The bracket machinery resolves them at
     each remaining_matches call via `_winner_of` recursively walking
-    `_resolve_participants` against the simulated tie_results — see
+    `_resolve_participants` against the simulated tie_results: see
     bracket.py:418.
     """
 
@@ -8103,7 +8103,7 @@ class TestKnockoutSoccerSourceSeedFromChain:
         # If _winner_of were broken, L16 would never emit a game and the
         # drain would converge after the L32 round, not iterate.
         assert passes_with_games >= 2, (
-            "L16 tie failed to emit after L32 resolved — _winner_of fix "
+            "L16 tie failed to emit after L32 resolved: _winner_of fix "
             "regression suspected"
         )
         # L16 tie_results should exist with REAL team names (the L32 winners).
@@ -8291,7 +8291,7 @@ class TestBuildBracketSeedWC2026:
         # pair "1E" with "GE3" (same group).
         src = self._wc_source()
         # Use a scenario where all 8 best-3rd-placers come from
-        # groups that include E — so the greedy assignment MIGHT
+        # groups that include E: so the greedy assignment MIGHT
         # accidentally place GE3 in M74's slot if the constraint
         # were ignored.
         state = self._full_wc_state(third_qualifiers=set("ABCDEFGH"))
@@ -8522,7 +8522,7 @@ class TestWC2026ChainEndToEnd:
         # every downstream query (which would be the bug #53 reports).
         max_leverage = max(out.values())
         assert max_leverage > 0.01, (
-            f"chain returned ~zero leverage on all knockout queries: {out!r} — "
+            f"chain returned ~zero leverage on all knockout queries: {out!r}: "
             "the #53 bug pattern (group games show 0 on every downstream "
             "band) appears to be unfixed"
         )
@@ -8561,13 +8561,13 @@ class TestMlbWsPlaceholder:
     have published games but the postseason endpoint hasn't yet
     populated the World Series (which only happens after both LCS
     resolve). Without the placeholder, ws_winner leverage reads 0
-    during LCS week — exactly when LCS-Game-7 leverage should max.
+    during LCS week: exactly when LCS-Game-7 leverage should max.
     Mirrors NhlPlayoffSource's #17 fix.
     """
 
     @staticmethod
     def _two_lcs_in_progress_games():
-        """7-game LCS pair × 2, all SCHEDULED + no WS games yet —
+        """7-game LCS pair × 2, all SCHEDULED + no WS games yet:
         mimics live shape during LCS week."""
         games = []
         # AL LCS: Yankees vs Astros
@@ -8659,7 +8659,7 @@ class TestMlbWsPlaceholderGating:
 
     def test_no_synthesis_when_only_one_lcs_series_started(self, monkeypatch):
         # Only one LCS series has games (other still in LDS), so the
-        # placeholder should NOT fire — we don't know both participants yet.
+        # placeholder should NOT fire: we don't know both participants yet.
         from dispatcharr_ranked_matchups.sources.mlb import MlbPlayoffSource
         src = MlbPlayoffSource(season=2025)
         # Stub _http_get to return a payload with 1 LCS series
@@ -8683,7 +8683,7 @@ class TestMlbWsPlaceholderGating:
         assert sum(1 for g in out if g["stage"] == "LCS") == 1
 
     def test_no_synthesis_when_ws_already_published(self, monkeypatch):
-        # Both LCS resolved AND WS published — real data, no placeholder.
+        # Both LCS resolved AND WS published: real data, no placeholder.
         from dispatcharr_ranked_matchups.sources.mlb import MlbPlayoffSource
         from dispatcharr_ranked_matchups.sources import mlb as mlb_mod
         src = MlbPlayoffSource(season=2025)
@@ -8729,7 +8729,7 @@ class TestMlbWsPlaceholderGating:
         assert ws_games[0]["game_id"] > 0, "Real WS game, should not be synthetic (negative ID)"
 
     def test_synthesis_fires_when_lcs_in_progress(self, monkeypatch):
-        # Both LCS have published games, no WS yet — synthesizer should fire.
+        # Both LCS have published games, no WS yet: synthesizer should fire.
         from dispatcharr_ranked_matchups.sources.mlb import MlbPlayoffSource
         from dispatcharr_ranked_matchups.sources import mlb as mlb_mod
         src = MlbPlayoffSource(season=2025)
@@ -8766,7 +8766,7 @@ class TestGroupStageBestThirdPlace:
     """Issue #52: WC 2026 / EURO 2024 best-3rd-place advancement.
     WC 2026 advances 8 third-place teams across 12 groups; EURO 2024
     advances 4 across 6 groups. Without this, the GroupStageSoccerSource
-    classifies all 3rd-place teams as eliminated — ~25% misclassification
+    classifies all 3rd-place teams as eliminated: ~25% misclassification
     for advancing teams in WC 2026."""
 
     @staticmethod
@@ -8867,7 +8867,7 @@ class TestGroupStageBestThirdPlace:
 
     def test_third_place_tiebreaker_by_gd_then_gf(self):
         # 4 third-placers all tied on 3 pts. Tiebreaker is GD → GF → alphabetical.
-        # Send WC source — best_third_place_count=8, but we only have 8 groups
+        # Send WC source: best_third_place_count=8, but we only have 8 groups
         # constructed so all 8 3rd-placers advance. To test the tiebreaker
         # specifically, give only 4 groups + best_third_place_count effective
         # at picking 1 of them. Simulate by limiting groups.
@@ -8911,13 +8911,13 @@ class TestGroupStageBestThirdPlace:
             teams = [
                 (f"top_{gi}_1st", 9, 5, 8),
                 (f"top_{gi}_2nd", 6, 2, 5),
-                (f"top_{gi}_3rd", 10 - gi, 0, 3),  # 10, 9, 8, 7, 6, 5, 4 — all strictly above 3
+                (f"top_{gi}_3rd", 10 - gi, 0, 3),  # 10, 9, 8, 7, 6, 5, 4: all strictly above 3
                 (f"top_{gi}_4th", 0, -5, 1),
             ]
             for t, *_ in teams:
                 team_group[t] = grp
             group_data[grp] = teams
-        # 5 groups (H..L) with identical 3rd-placer stats — alphabetical chosen by NAME.
+        # 5 groups (H..L) with identical 3rd-placer stats: alphabetical chosen by NAME.
         for gi, name_prefix in enumerate(["aaa", "bbb", "ccc", "ddd", "eee"]):
             grp = f"GROUP_{chr(ord('H') + gi)}"
             teams = [
@@ -9000,7 +9000,7 @@ class TestGroupStageBestThirdPlace:
             group_data[grp] = t
         state = self._make_state(group_data, team_group)
         outcomes = src.terminal_outcomes(state)
-        # Delta is 4th in her own group, regardless of stats — must be eliminated.
+        # Delta is 4th in her own group, regardless of stats: must be eliminated.
         assert outcomes["Delta"] == ["eliminated"]
 
 
@@ -9186,7 +9186,7 @@ class TestComputeGroupStandings:
         from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
 
         # `bundesliga` is a registered competition but Bundesliga is not
-        # a group-stage tournament — its `<fd_code>_GS` ("BL1_GS") has
+        # a group-stage tournament: its `<fd_code>_GS` ("BL1_GS") has
         # no LEAGUE_CONTEXTS entry, so the ctx lookup falls through.
         src = GroupStageSoccerSource("bundesliga", fd_api_key="x", odds_api_key="")
         assert src._group_stage_context_code() not in LEAGUE_CONTEXTS
@@ -9333,7 +9333,7 @@ class TestFdCacheBatching:
 
     def test_tier_fixtures_returns_empty_on_http_error(self, monkeypatch):
         # 429 / 5xx / network failure must return [] for every source
-        # rather than raising — keeps the rest of the refresh
+        # rather than raising: keeps the rest of the refresh
         # pipeline functioning.
         from dispatcharr_ranked_matchups.sources import soccer
 
@@ -9430,7 +9430,7 @@ class TestFdCacheBatching:
 
     def test_instance_level_cache_still_wins_for_test_injection(self, monkeypatch):
         # Existing tests inject fake season data via
-        # `src._all_matches_cache = [...]`. That MUST keep working —
+        # `src._all_matches_cache = [...]`. That MUST keep working:
         # if the module cache shadowed the instance attribute, the
         # injection becomes a no-op and 200+ existing tests silently
         # stop testing what they think they test.
@@ -9449,7 +9449,7 @@ class TestFdCacheBatching:
 
     def test_season_matches_independent_cache_per_fd_code(self, monkeypatch):
         # Two different competitions (WC and EC) each get their own
-        # entry in the module cache — they do NOT collapse into one.
+        # entry in the module cache: they do NOT collapse into one.
         from dispatcharr_ranked_matchups.sources import soccer
 
         call_log = []
@@ -9477,7 +9477,7 @@ class TestFdCacheBatching:
         wc_matches = wc._fetch_all_season_matches()
         ec_matches = ec._fetch_all_season_matches()
 
-        # Each fd_code gets its own fetch — no cross-contamination.
+        # Each fd_code gets its own fetch: no cross-contamination.
         assert len(call_log) == 2
         assert wc_matches[0]["_marker"] == "WC"
         assert ec_matches[0]["_marker"] == "EC"
@@ -9568,7 +9568,7 @@ class TestTierFixturesChunkingForLongWindows:
         chunk2_from = _dt.strptime(call_log[1]["dateFrom"], "%Y-%m-%d")
         assert chunk2_from > chunk1_to, (
             f"chunk2 starts {chunk2_from.date()} but chunk1 ended "
-            f"{chunk1_to.date()} — boundary overlap would double-fetch "
+            f"{chunk1_to.date()}: boundary overlap would double-fetch "
             "the boundary day"
         )
 

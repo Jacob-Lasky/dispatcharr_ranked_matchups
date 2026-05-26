@@ -82,7 +82,7 @@ class TestExtractGameNumberAfterMarker:
 
     def test_marker_not_present(self):
         # If the marker substring isn't in the headline, return None
-        # — caller is expected to try a different marker or skip.
+        #: caller is expected to try a different marker or skip.
         assert extract_game_number_after_marker(
             "Some other headline", "Super Regional - Game "
         ) is None

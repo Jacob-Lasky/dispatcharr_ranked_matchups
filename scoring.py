@@ -32,7 +32,7 @@ UNRANKED = 26
 
 # Sentinel value used in the `cutoff` slot of LEAGUE_CONTEXTS thresholds
 # for group-stage contexts (WC_GS, EC_GS). The cutoff is unused by
-# compute_match_importance for group_advance format — advancement is
+# compute_match_importance for group_advance format: advancement is
 # decided by top-N-per-group sort in GroupStageSoccerSource.terminal_
 # outcomes, not by a flat threshold comparator. The sentinel exists so
 # accidental code that DOES try to compare against this value raises a
@@ -57,7 +57,7 @@ class Weights:
     # bookmaker probabilities (for soccer; NCAAF / NCAAM still convert
     # spread to coinflip-ness via score_game's fallback). Default bumped
     # from 0.1 to 3.0 because the underlying range is now [0, 1] instead
-    # of [0, 7] — same per-game magnitude (~3 raw for a pick'em).
+    # of [0, 7]: same per-game magnitude (~3 raw for a pick'em).
     spread: float = 3.0
     favorite: float = 6.0
     rivalry: float = 2.0
@@ -65,7 +65,7 @@ class Weights:
     narrative: float = 0.0       # LLM narrative score (disabled by default)
     # Lahvička Monte Carlo importance. Per-game raw points are
     # sum_over_(team,outcome) of leverage × consequence_weight (leverage in
-    # [0,1] from Kendall tau-c, weight from LEAGUE_CONTEXTS thresholds —
+    # [0,1] from Kendall tau-c, weight from LEAGUE_CONTEXTS thresholds:
     # relegation=5, UCL=4, title=5, etc.). 3.0 calibrates such that a
     # typical high-leverage relegation six-pointer reads ~15 raw points
     # (0.5 leverage × 5 weight × 2 teams = 5, × 3.0 = 15).
@@ -85,7 +85,7 @@ class GameSignals:
     # devigged moneyline probabilities; NCAAF / NCAAM still populate
     # `spread`. score_game prefers closeness when present, falls back
     # to a normalized spread otherwise. DO NOT populate BOTH on the
-    # same signal — pick the right path per source. See sources/base.py.
+    # same signal: pick the right path per source. See sources/base.py.
     closeness: Optional[float] = None
 
     tournament_stage: Optional[str] = None  # 'FINAL', 'SEMI_FINALS', 'QUARTER_FINALS', etc.
@@ -155,7 +155,7 @@ class LeagueContext:
 # Knockout-round depth ordering. Higher = deeper. The bracket source's
 # `terminal_outcomes` uses this to assign every band a team has reached
 # (a finalist reached the final AND the semis AND the quarters etc.).
-# DO NOT use stage names not present here as knockout thresholds — the
+# DO NOT use stage names not present here as knockout thresholds: the
 # round-rank lookup would silently return -1 and no team would qualify.
 KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     # UEFA cup soccer (UCL / UEL / UECL):
@@ -178,7 +178,7 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     "CUP_WINNER":      4,  # Stanley Cup champion
     # MLB postseason: Wild Card best-of-3 (6 series across both leagues),
     # Division Series best-of-5 (4 series), LCS best-of-7 (2 series),
-    # World Series best-of-7. WC and LDS depths differ — a team that
+    # World Series best-of-7. WC and LDS depths differ: a team that
     # wins the WC reaches LDS, etc.
     "WC":              0,  # Wild Card Series (entry round)
     "LDS":             1,  # Division Series
@@ -186,14 +186,14 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     "WS":              3,  # World Series
     "WS_WINNER":       4,  # World Series champion
     # NBA playoffs: 4 rounds, best-of-7 each. R1 depth 0 is shared with
-    # NHL above — terminal_outcomes reads per-league band cutoffs so
+    # NHL above: terminal_outcomes reads per-league band cutoffs so
     # there's no cross-contamination.
     "CSF":             1,  # Conference Semifinals (4 series)
     "CF":              2,  # Conference Finals (2 series)
     "FINALS":          3,  # NBA Finals (1 series) / WNBA Finals (1 series)
     "FINALS_WINNER":   4,  # NBA Champion
     # WNBA playoffs: 3 rounds, mixed series lengths. R1 (depth 0) and
-    # FINALS (depth 3) reuse labels already above — terminal_outcomes
+    # FINALS (depth 3) reuse labels already above: terminal_outcomes
     # reads per-league bands so no cross-contamination. SF needs its
     # own depth between R1 and FINALS.
     "SF":              1,  # WNBA Semifinals (between R1 and FINALS)
@@ -208,7 +208,7 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     "NCG":             5,  # National Championship Game
     "NCG_WINNER":      6,  # National Champion
     # NFL playoffs: 4 rounds, single-game elimination. The "WC" label
-    # above (depth 0) is shared with MLB Wild Card Series — both happen
+    # above (depth 0) is shared with MLB Wild Card Series: both happen
     # to be at depth 0 in their respective brackets, and
     # terminal_outcomes reads per-league bands.
     "DIV":             1,  # Divisional Playoffs
@@ -235,7 +235,7 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     # MLS Cup playoffs (issue #30 part B). Mixed format: Wild Card
     # single-leg entry, R1 best-of-3, then single-leg CSF / CF / MLS Cup
     # Final. MLS-prefixed labels so depths don't collide with NHL "R1"
-    # at depth 0 or MLB "WC" at depth 0 — each league reads its own
+    # at depth 0 or MLB "WC" at depth 0: each league reads its own
     # bands, but within MLS the WC→R1→CSF advance must move up in
     # depth, requiring unique labels.
     "MLS_WC":          0,  # Wild Card play-in (8 vs 9 seed each conference)
@@ -363,7 +363,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         boundary_summary="Top 3 → UCL · 4-5 → Europa · bottom 3 → relegation",
     ),
     # Primeira Liga (Portugal). 18 teams, 34 matchdays. Same
-    # slot semantics as Eredivisie — 2 direct UCL spots, 3rd UCL
+    # slot semantics as Eredivisie: 2 direct UCL spots, 3rd UCL
     # qualifying, 4-5 Europa, bottom 3 relegation.
     "PPL": LeagueContext(
         code="PPL", matchdays_total=34,
@@ -376,7 +376,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         boundary_summary="Top 3 → UCL · 4-5 → Europa · bottom 3 → relegation",
     ),
     # Brazilian Série A. 20 teams, 38 matchdays. Different
-    # slot semantics from Euro leagues — continental qualifications
+    # slot semantics from Euro leagues: continental qualifications
     # are for Copa Libertadores (top 6 in modern era) and Copa
     # Sudamericana (7-12). No UCL line. Bottom 4 relegated to Série B.
     "BSA": LeagueContext(
@@ -425,7 +425,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # sort in terminal_outcomes, not by a flat threshold). Each tuple's
     # label + consequence_weight are what compute_match_importance reads.
     # The `format="group_advance"` tag isn't pattern-matched anywhere
-    # yet — it's documentation that distinguishes this from "league" /
+    # yet: it's documentation that distinguishes this from "league" /
     # "knockout" / "win_count" / "points_count" formats so a future
     # refactor doesn't accidentally route a group-stage context into
     # one of the threshold-cascade code paths.
@@ -467,7 +467,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     # NCAA Division I baseball regular season. Win-count
     # thresholds tuned against historical NCAA Tournament selection
-    # criteria — ~35 wins is the rough at-large cutoff, 45+ wins puts
+    # criteria: ~35 wins is the rough at-large cutoff, 45+ wins puts
     # a team in national-seed (top 16) contention. Seasons run Feb-June
     # with ~55 regular-season games + conference tournament; matchdays_total
     # is approximate because non-conference scheduling varies by team.
@@ -486,7 +486,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # NCAA Baseball postseason. The cleanly-labeled best-of-3 stages
     # (Super Regional, MCWS Finals) are modeled. Regional double-elim
     # and the 8-team MCWS bracket lack game-level ESPN metadata and
-    # require chronological inference — tracked in #43. Threshold
+    # require chronological inference: tracked in #43. Threshold
     # weights match the MLB_PO scale: each round-deeper reach roughly
     # doubles consequence. The "omaha_bound" band fires for Super
     # Regional winners (depth 2 reached via the _winner_advance_label
@@ -533,7 +533,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     # Issue #24: NCAA Men's + Women's College Cup brackets. Six rounds
     # of single-game elimination (R64 → R32 → S16 → E8 → F4 → NCG)
-    # reusing the same stage labels as NCAA Women's March Madness —
+    # reusing the same stage labels as NCAA Women's March Madness:
     # the depth ordering in KNOCKOUT_ROUND_DEPTH already supports them
     # and the bracket-cascade behaves identically for any single-game
     # elim shape. Field-size asymmetry handled at the source level
@@ -543,7 +543,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # because postseason is when these channels get real broadcast
     # pickup. The NCG is the single highest-viewership D1 soccer game
     # by an order of magnitude; the cup_winner band concentrates that
-    # consequence. Entry round (R64) is NOT in the threshold list —
+    # consequence. Entry round (R64) is NOT in the threshold list:
     # making the tournament is the bar, advancing past R64 is what
     # counts. Same pattern as NCAA Women's Basketball March Madness
     # context which also omits R64 from its thresholds.
@@ -572,7 +572,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         boundary_summary="R1 → R2 → Sweet 16 → Elite 8 → College Cup Semis → Final → Champion (Women's)",
     ),
     # NCAA football and men's basketball. Format is
-    # "win_count" — threshold cutoffs are MINIMUM win counts rather than
+    # "win_count": threshold cutoffs are MINIMUM win counts rather than
     # position cutoffs (the SoccerSource interpretation). The points-
     # based source's `terminal_outcomes` assigns a label when a team's
     # win total >= cutoff. Bands chosen to differentiate marquee from
@@ -644,7 +644,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     # MLB postseason. Series lengths vary (WC=3, LDS=5, LCS=7,
     # WS=7), so the leverage ramp into the World Series is sharper than
-    # NHL's Stanley Cup ramp — fewer total games means each single game
+    # NHL's Stanley Cup ramp: fewer total games means each single game
     # carries more series-decision weight. Weights tuned to put a Game 7
     # World Series at the top of the season's importance distribution
     # while keeping Wild Card games meaningful (otherwise a single-elim
@@ -663,7 +663,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # NBA regular season. 82-game season; play-in tournament
     # (since 2020) opens 9th and 10th seeds onto the bracket via a
     # mini-playoff, but the play-in is structurally between the
-    # regular season and the bracket — we treat it as separate from
+    # regular season and the bracket: we treat it as separate from
     # the 16-team bracket the playoff source models. Threshold field
     # is `wins` (LEAGUE_CONTEXTS["NBA"].format="win_count").
     # Modern NBA (post-2010): the play-in cutoff has hovered around
@@ -682,7 +682,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     # NBA playoffs. 4 rounds (R1 / CSF / CF / FINALS),
     # best-of-7 each. Same structural shape as NHL Stanley Cup
-    # Playoffs — weights mirror NHL's ramp because the
+    # Playoffs: weights mirror NHL's ramp because the
     # consequence-weight calibration is consistent across pro
     # sports' bracket leverage.
     "NBA_PO": LeagueContext(
@@ -699,7 +699,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # make playoffs (since 2022's expansion). The playoff bubble has
     # historically settled around 19-21 wins; top seed pace is ~28-32
     # in the current era. Thresholds are tighter than NBA's because
-    # the season is shorter — equal "strength" of a 25-win WNBA team
+    # the season is shorter: equal "strength" of a 25-win WNBA team
     # ≈ 50-win NBA team relative to the league.
     "WNBA": LeagueContext(
         code="WNBA", matchdays_total=40, format="win_count",
@@ -742,7 +742,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # NCAA Women's March Madness. 6 rounds, single-game
     # elimination at each step. Weights ramp steeper than the pro
     # bracket leagues because single-game elim concentrates leverage
-    # — every game IS the series for the round.
+    #: every game IS the series for the round.
     "NCAAW_BBALL_PO": LeagueContext(
         code="NCAAW_BBALL_PO", matchdays_total=0, format="knockout",
         thresholds=[
@@ -757,7 +757,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     # NCAA Division I Softball regular season. ~55-game season,
     # 64-team NCAA Tournament. Selection bands mirror BSB but tuned
-    # slightly tighter — softball's RPI bar tends to clear at lower
+    # slightly tighter: softball's RPI bar tends to clear at lower
     # win totals because the field is smaller / more concentrated.
     # WCWS bracket is double-elimination and not modeled in V1
     # (follow-up).
@@ -802,7 +802,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     # NFL playoffs. 4 rounds, single-game elimination.
     # Weights ramp aggressively because single-elim concentrates
-    # leverage — a Wild Card upset eliminates a 12-win team in one
+    # leverage: a Wild Card upset eliminates a 12-win team in one
     # game. Same shape as March Madness above but 4 rounds
     # instead of 6 because the field is 14 teams (7 per conference)
     # not 64.
@@ -818,7 +818,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     # Issue #30 part A: MLS conference standings importance. Playoff
     # seeding is per-conference (top 9 from Eastern, top 9 from Western
-    # in the 14-9 modern format), not aggregate league points — so the
+    # in the 14-9 modern format), not aggregate league points: so the
     # threshold bands MUST be per-conference. Two separate sources
     # (MlsEastSource / MlsWestSource) route to MLS_EAST / MLS_WEST
     # respectively; cutoffs are the same on both because the historical
@@ -852,7 +852,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="30+ pts → bubble · 45+ → secured · 55+ → top-4 home field · 70+ → Shield contender (West)",
     ),
-    # Issue #30 part B: MLS Cup playoff bracket. Mixed format — Wild
+    # Issue #30 part B: MLS Cup playoff bracket. Mixed format: Wild
     # Card single-leg entry, R1 best-of-3, then single-leg CSF / CF /
     # MLS Cup Final. Weights ramp aggressively into the MLS Cup Final
     # because postseason concentrates broadcast leverage; the Cup
@@ -860,7 +860,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # the US calendar. The Supporters' Shield band (regular-season
     # league-best record) is handled on the East/West regular-season
     # sources from issue #30 part A. MLS_WC is omitted from
-    # thresholds here — "made the tournament" is the bar, advancing
+    # thresholds here: "made the tournament" is the bar, advancing
     # past WC is what counts, mirroring the NCAAW Basketball March
     # Madness and NCAA College Cup pattern of omitting entry rounds.
     "MLS_PO": LeagueContext(
@@ -894,7 +894,7 @@ class GameScore:
 
 # Compression knee. Lower N = scores saturate faster; higher N = more
 # headroom. Set to 16.0 because sim runs across EPL+ELC 2025-26 showed
-# 70% of games ending up at score >= 9.5 with knee=8.0 — the 0-10 scale
+# 70% of games ending up at score >= 9.5 with knee=8.0: the 0-10 scale
 # became indistinguishable noise above 9. With knee=16.0, a typical good
 # game (raw=20-30) lands at 7.7-8.6 and the differentiation comes back.
 # See TUNING_REPORT.md finding #1 (score saturation) in
@@ -920,13 +920,13 @@ def _compress_to_10(raw: float) -> float:
 
 
 # Minimum batch size for adaptive normalization to engage. With fewer
-# samples than this the in-batch median is too noisy to scale against —
+# samples than this the in-batch median is too noisy to scale against:
 # fall through to absolute compression in that case.
 _ADAPTIVE_MIN_SAMPLES = 5
 
 # Target: median raw in the batch maps to ~5 stars. tanh(1/1.6) ≈ 0.55,
 # so 10 × tanh(median / (scale × 1.6)) where scale = median / 5 yields:
-#   tanh(5/1.6) ≈ 0.998 × 10 = 9.98 — too steep, the median outlier saturates.
+#   tanh(5/1.6) ≈ 0.998 × 10 = 9.98: too steep, the median outlier saturates.
 # Instead use scale = median itself and target factor 1.6 to land median at:
 #   10 × tanh(median / median / 1.6) = 10 × tanh(0.625) ≈ 10 × 0.555 = 5.55.
 # Below the median compresses to under 5; well above saturates near 10.
@@ -938,7 +938,7 @@ def adaptive_compress(raw_scores: List[float]) -> List[float]:
 
     Each raw score gets compressed to 0-10 using a scale derived from the
     batch's median raw score. Effect: top games in any given refresh feel
-    like top games regardless of where in the season they fall — early-
+    like top games regardless of where in the season they fall: early-
     season low-stakes weeks no longer compress to all-low; late-season
     saturation no longer flattens every game to ★10.
 
@@ -970,7 +970,7 @@ def adaptive_compress(raw_scores: List[float]) -> List[float]:
 
 # Spread (point-spread sports) fallback: scale where 0 = full
 # closeness, _SPREAD_BLOWOUT = zero closeness. Anchored to 14 because
-# the pre-B.3 formula maxed at spread=14 too — keeps NCAAF / NCAAM
+# the pre-B.3 formula maxed at spread=14 too: keeps NCAAF / NCAAM
 # magnitudes continuous through the B.3 weight bump.
 _SPREAD_BLOWOUT = 14.0
 
@@ -982,7 +982,7 @@ def _effective_closeness(closeness: Optional[float], spread: Optional[float]) ->
     Precedence: closeness (probability-based, B.3 soccer path) wins
     when populated. Spread (point-based, NCAAF / NCAAM path) is the
     fallback for sources that haven't migrated to moneylines. Returns
-    None when neither is available — score_game then skips the signal.
+    None when neither is available: score_game then skips the signal.
     """
     if closeness is not None:
         if closeness < 0:
@@ -997,7 +997,7 @@ def _effective_closeness(closeness: Optional[float], spread: Optional[float]) ->
 
 # Trailing tokens that mean "same team" (typically the team-type / club suffix).
 # When these follow a favorite name, we allow the match. Superset of the
-# matcher's GENERIC_TEAM_SECOND_WORDS — adds the dotted club-tag variants and
+# matcher's GENERIC_TEAM_SECOND_WORDS: adds the dotted club-tag variants and
 # a few extras that show up in compound club names ("Brighton & Hove Albion").
 TEAM_QUALIFIER_TOKENS = {
     *TEAM_SUFFIX_TOKENS, "f.c.", "a.f.c.",
@@ -1089,7 +1089,7 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             # Field events (F1 GP, NASCAR race, golf tour weekly
             # events). These have no two-team head-to-head
             # structure so the rank / favorite / closeness signals
-            # don't apply — the tournament_stage band is what gets
+            # don't apply: the tournament_stage band is what gets
             # them into the guide at all. "MAJOR" is for golf's four
             # majors (Masters / PGA / US Open / British Open) and
             # marquee racing events the source flags as MAJOR.
@@ -1114,7 +1114,7 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
     # consequence inside compute_match_importance; multiply only by the
     # user's weight_importance tunable here. Gating BOTH the points AND
     # the weight keeps the breakdown clean when the user disables the
-    # signal via weight_importance=0 — no 0.0 stub entries.
+    # signal via weight_importance=0: no 0.0 stub entries.
     if signals.importance_points > 0 and weights.importance > 0:
         imp_pts = signals.importance_points * weights.importance
         breakdown["importance"] = round(imp_pts, 2)
@@ -1148,7 +1148,7 @@ def compute_match_importance(
     Queries cover:
       - The two teams playing the target match (home, away)
       - Every favorite in `favorites_in_league` who ISN'T already in the
-        match (cross-team importance — this match's result affects the
+        match (cross-team importance: this match's result affects the
         favorite's standings outcome, even though the favorite isn't
         playing).
 
@@ -1182,7 +1182,7 @@ def compute_match_importance(
                 continue
             teams_to_query.append(fav)
 
-    # (team, outcome_label) query list — len(teams) × N bands.
+    # (team, outcome_label) query list: len(teams) × N bands.
     queries: List[Tuple[str, str]] = []
     for team in teams_to_query:
         for _, label, _ in league_ctx.thresholds:
@@ -1232,7 +1232,7 @@ def compute_match_importance(
         contrib = leverage * weight
         raw += contrib
         # Format: "Tottenham FC relegation: 0.42 leverage × 5.0 = 2.10".
-        # Strip the team suffix for the note so the line stays readable —
+        # Strip the team suffix for the note so the line stays readable:
         # the underlying signal still uses the canonical name.
         notes.append(
             f"{strip_team_suffix(team)} {label}: "
@@ -1339,7 +1339,7 @@ def format_channel_name(
         EFL 4v6 ⭐ ★10.0 · Middlesbrough at Wrexham · playoff race
 
     The rank pair is normalized so the better (lower-number) rank always
-    appears first — "1v5" not "5v1" — for at-a-glance scanning.
+    appears first: "1v5" not "5v1": for at-a-glance scanning.
 
     Team-name suffixes (FC / AFC / CF / SC) are stripped: 'Manchester
     United FC' renders as 'Manchester United'.
@@ -1379,12 +1379,12 @@ def render_favorite_impact(
       <Favorite> fans: rooting against <Nearby> (<spots> and <pts> <dir>).
       [Optional outcome clause when the gap is interesting, ≤ 9 pts.]
 
-    Examples (the favorite isn't playing — these games are between OTHER
+    Examples (the favorite isn't playing: these games are between OTHER
     teams whose result moves the favorite's standings):
 
       Manchester City fans: rooting against Manchester United (1 spot and
         12 pts back).
-        # No outcome clause — 12 pts is too large for a single result.
+        # No outcome clause: 12 pts is too large for a single result.
 
       Manchester City fans: rooting against Manchester United (1 spot and
         3 pts back). A Manchester United win flips them past you.
@@ -1458,7 +1458,7 @@ def build_impact_narratives(
         fav_name = fav["name"]
         fav_lc = fav_name.lower()
         if fav_lc in home_lc or fav_lc in away_lc:
-            continue  # favorite is playing — skip impact narrative
+            continue  # favorite is playing: skip impact narrative
         fav_pos = fav.get("position")
         if fav_pos is None:
             continue

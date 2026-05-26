@@ -1,4 +1,4 @@
-"""Tests for matcher.py — pure-logic helpers (no Anthropic, no Django)."""
+"""Tests for matcher.py: pure-logic helpers (no Anthropic, no Django)."""
 
 from datetime import datetime, timezone
 
@@ -27,7 +27,7 @@ class TestTeamKeywords:
 
     def test_state_suffix_skipped(self):
         kws = _team_keywords("Penn State")
-        # "State" is too generic — must be excluded so we don't false-match
+        # "State" is too generic: must be excluded so we don't false-match
         # any other "Foo State" team.
         assert "State" not in kws
         assert "Penn State" in kws
@@ -53,7 +53,7 @@ class TestTeamKeywords:
         kws = _team_keywords("Manchester United FC")
         assert "Manchester United" in kws
         assert "Manchester United FC" in kws
-        # 'United' alone is suppressed as a generic — see
+        # 'United' alone is suppressed as a generic: see
         # test_generic_soccer_suffix_not_a_keyword.
 
     def test_afc_suffix_stripped(self):
@@ -149,7 +149,7 @@ class TestRegexFilterChannelName:
         )
 
     def test_team_channel_rejected(self):
-        # 'Manchester United' channel does NOT contain 'Brentford' — reject.
+        # 'Manchester United' channel does NOT contain 'Brentford': reject.
         cands = [self._cand("Manchester United")]
         out = _regex_filter_channel_name(cands, "Manchester United FC", "Brentford FC")
         assert out == []
@@ -160,7 +160,7 @@ class TestRegexFilterChannelName:
         assert len(out) == 1
 
     def test_returns_all_provider_variants(self):
-        # Same fixture across multiple provider channels — all returned for
+        # Same fixture across multiple provider channels: all returned for
         # the caller to stack as fallback streams.
         cands = [
             self._cand("EPL01: Manchester United 20:00 Brentford 27/04", 100),
@@ -247,7 +247,7 @@ class TestTeamAliases:
         assert "united" not in kws_lower
 
     def test_manchester_united_fc_form_also_aliased(self):
-        # FD.org returns 'Manchester United FC' — alias key is the
+        # FD.org returns 'Manchester United FC': alias key is the
         # FC-stripped form, but lookup tries both.
         from dispatcharr_ranked_matchups.matcher import _team_keywords
         kws = _team_keywords("Manchester United FC")

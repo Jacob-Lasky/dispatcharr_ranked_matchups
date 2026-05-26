@@ -20,7 +20,7 @@ from dispatcharr_ranked_matchups.scoring import (
 
 
 class TestCompressTo10:
-    """Anchor values from the docstring — if these drift, the score everyone
+    """Anchor values from the docstring: if these drift, the score everyone
     sees in the UI shifts. Pin them."""
 
     def test_zero_or_negative(self):
@@ -40,7 +40,7 @@ class TestCompressTo10:
         assert round(_compress_to_10(32), 2) == 9.64
 
     def test_asymptotes_at_10_for_large_input(self):
-        # tanh saturates to 1.0 in float64 well before raw=1000 — that's
+        # tanh saturates to 1.0 in float64 well before raw=1000: that's
         # fine; the score is "10/10" in display either way.
         assert _compress_to_10(100) <= 10.0
         assert _compress_to_10(1000) <= 10.0
@@ -54,16 +54,16 @@ class TestMatchFavorites:
 
     def test_word_boundary_blocks_substring(self):
         # "Hull" must NOT match "Hull City" if we're searching for "Hull"
-        # actually it should — "Hull City" has "City" as a TEAM_QUALIFIER_TOKEN
+        # actually it should: "Hull City" has "City" as a TEAM_QUALIFIER_TOKEN
         assert match_favorites("Hull City AFC", "QPR", ["Hull"]) == ["Hull"]
 
     def test_qualifier_required_after_partial(self):
         # "UNC" should NOT match "UNC Pembroke" because Pembroke isn't a
-        # qualifier token — it's a different school.
+        # qualifier token: it's a different school.
         assert match_favorites("UNC Pembroke", "Wofford", ["UNC"]) == []
 
     def test_qualifier_required_for_compound_name(self):
-        # "North Carolina" inside "North Carolina A&T" — A&T is the second
+        # "North Carolina" inside "North Carolina A&T": A&T is the second
         # word, "&" is a qualifier token, so this matches A&T as the
         # trailing capitalized word's first char.
         # (Documenting actual behavior: "A&T" starts with "A", a single
@@ -193,7 +193,7 @@ class TestScoreGameCloseness:
         assert s.breakdown["close_game"] == 1.5
 
     def test_closeness_note_distinguishes_from_spread_path(self):
-        # The note format reveals which path fired — closeness path says
+        # The note format reveals which path fired: closeness path says
         # "implied coinflip-ness", spread path says "betting spread".
         sig = GameSignals(closeness=0.8)
         s = score_game(sig, Weights())
@@ -277,7 +277,7 @@ class TestStripTeamSuffix:
 
     def test_keeps_compound_when_not_suffix(self):
         # "City" is a qualifier (Hull City is its own team), not a strippable
-        # club-tag — must NOT be stripped.
+        # club-tag: must NOT be stripped.
         assert strip_team_suffix("Hull City") == "Hull City"
 
     def test_strips_only_trailing(self):
@@ -381,7 +381,7 @@ class TestBuildImpactNarratives:
             ],
         )
         assert len(narratives) == 1
-        # Man United is closer (1 spot away) — narrative should reference it
+        # Man United is closer (1 spot away): narrative should reference it
         assert "Manchester United" in narratives[0]
         assert "Brentford" not in narratives[0]
 
@@ -434,7 +434,7 @@ class TestPickTagline:
 
     def test_standings_rank_pair_dropped(self):
         # For league standings (every team is "ranked"), rank-pair tagline
-        # must be dropped — it's noise. Should fall through to other signals.
+        # must be dropped: it's noise. Should fall through to other signals.
         tag = pick_tagline(
             score_breakdown={"rank_pair": 5.0},
             favorites_matched=[],
@@ -521,7 +521,7 @@ class _FakeMatch:
 class _FakeImportanceSource:
     """A SportSource stand-in that returns deterministic per-(team, label)
     leverages. Lets compute_match_importance be tested without running the
-    actual Monte Carlo simulator — that's tested separately in
+    actual Monte Carlo simulator: that's tested separately in
     test_simulation.py.
     """
     def __init__(self, leverages):
@@ -531,7 +531,7 @@ class _FakeImportanceSource:
 
     def __getattr__(self, name):
         # Other SportSource methods are unused on the compute_match_importance
-        # path (which delegates straight to monte_carlo_importance_batch — we
+        # path (which delegates straight to monte_carlo_importance_batch: we
         # monkeypatch the simulator below for tests).
         raise AttributeError(name)
 
@@ -640,7 +640,7 @@ class TestComputeMatchImportance:
 
     def test_locked_outcomes_contribute_zero(self, monkeypatch):
         """When the simulator returns leverage=0 for every (team, outcome)
-        — i.e., locked seasons — the raw points are 0 and there are no notes.
+       : i.e., locked seasons: the raw points are 0 and there are no notes.
         This is the structural fix Phase C delivers: mathematically locked
         teams stop polluting the importance signal.
         """
@@ -717,7 +717,7 @@ class TestComputeMatchImportanceChainRouting:
     ):
         # Patch BOTH simulator entry points. Confirm the chain function
         # fires (not the regular batch) AND that the queries passed in
-        # include the downstream-cascade labels — otherwise WC_GS
+        # include the downstream-cascade labels: otherwise WC_GS
         # could silently drop the cascade labels and this routing test
         # would still pass while production produces 0 contribution
         # on R16+ bands.
@@ -876,7 +876,7 @@ class TestScoreGameImportanceBranch:
         s = GameSignals(rank_a=1, rank_b=2, importance_points=4.0,
                         importance_notes=["X: 0.50 leverage × 5.0 = 2.50"])
         score = score_game(s, Weights(importance=0.0))
-        # weight=0 → zero contribution AND no breakdown entry — same as
+        # weight=0 → zero contribution AND no breakdown entry: same as
         # importance_points=0. Other signals (rank_pair) still fire.
         assert "importance" not in score.breakdown
 

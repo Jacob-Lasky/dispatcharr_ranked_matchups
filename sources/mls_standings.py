@@ -1,4 +1,4 @@
-"""MLS conference-standings importance source — closes the gap left by
+"""MLS conference-standings importance source: closes the gap left by
 the Phase J V1 MlsSource (which surfaced schedule + closeness only).
 
 Issue #30 (part A): MLS playoff seeding is per-conference (top 9 from
@@ -19,7 +19,7 @@ uses a single league-wide source). Cross-conference games:
     outcome cascade.
   - `fetch_upcoming` emits games where the HOME team is in this
     conference. Cross-conf away games surface via the home team's
-    source — they still get importance computed (against the home
+    source: they still get importance computed (against the home
     team's conference bands), they just don't double-emit.
 
 Note: this module does NOT touch the existing MlsSource (which remains
@@ -32,18 +32,18 @@ Closeness via The Odds API is preserved (the V1 MlsSource computed
 it and we don't regress that signal): each conference source pulls
 the league-wide odds feed and attaches devigged h2h closeness to the
 games it emits. Helpers `_h2h_to_closeness` and `ODDS_BASE` are
-imported from mls.py to keep the calibration line consistent — the
+imported from mls.py to keep the calibration line consistent: the
 two sources MUST produce the same closeness for any given matchup as
 the legacy MlsSource would have.
 
 ESPN endpoints used:
-  - `/apis/v2/sports/soccer/usa.1/standings` — conference rosters +
+  - `/apis/v2/sports/soccer/usa.1/standings`: conference rosters +
     current standings points (3 W / 1 D / 0 L). Fetched once per
     refresh; the team→conference map is cached on the source instance.
-  - `/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=YYYYMMDD` —
+  - `/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=YYYYMMDD`:
     per-day schedule sweep across the Feb-Nov regular season.
 
-Known limitation — ESPN MLS future-fixtures coverage. The day-by-day
+Known limitation: ESPN MLS future-fixtures coverage. The day-by-day
 scoreboard sweep finds the season's FINISHED games but very few
 SCHEDULED ones: ESPN's MLS scoreboard endpoint publishes only ~1-2
 weeks of future fixtures, while pro leagues like MLB / NCAA Baseball
@@ -113,7 +113,7 @@ def _http_get(url: str, timeout: float = 15.0, **params: Any) -> Optional[Any]:
         return None
 
 
-# `_team_canonical_name` is imported from mls.py — both modules need
+# `_team_canonical_name` is imported from mls.py: both modules need
 # the same ESPN displayName join key across /standings and /scoreboard
 # endpoints. DO NOT define a parallel canonicalizer here; divergence
 # between the two would break the cross-endpoint team lookup.
@@ -127,7 +127,7 @@ REGULAR_SEASON_SLUG = "regular-season"
 
 # ESPN exposes MLS conference rosters under /standings → children[].abbreviation
 # as either "East" or "West". DO NOT use `children[].name` ("Eastern
-# Conference" / "Western Conference") — match the short token to keep
+# Conference" / "Western Conference"): match the short token to keep
 # `MlsEastSource._conference` / `MlsWestSource._conference` concise.
 CONFERENCE_ABBREVIATIONS = ("East", "West")
 
@@ -135,7 +135,7 @@ CONFERENCE_ABBREVIATIONS = ("East", "West")
 def _fetch_conference_map() -> Dict[str, str]:
     """Pull the current MLS conference assignments from ESPN's /standings
     endpoint. Returns {team_displayName: "East" | "West"}. Empty dict
-    on any failure — the source falls back to emitting zero games for
+    on any failure: the source falls back to emitting zero games for
     that conference (no spurious importance signal).
 
     The conference roster changes year over year (expansion teams). The
@@ -163,7 +163,7 @@ def _fetch_conference_map() -> Dict[str, str]:
 def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Convert one ESPN MLS scoreboard event into the canonical
     PointsBasedSportSource game record. Soccer-specific: a tied score
-    in a finished regulation game IS a draw (1 point each) — DO NOT
+    in a finished regulation game IS a draw (1 point each): DO NOT
     coin-flip it into a win the way NCAAF / NCAAM do. Same shape as
     `ncaa_soccer._extract_game_record`.
 
@@ -226,9 +226,9 @@ def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 class MlsStandingsSourceBase(PointsBasedSportSource):
     """Shared logic for MlsEastSource / MlsWestSource. Subclasses set
     `_conference` ("East" | "West") and the matching
-    `league_context_code` ("MLS_EAST" | "MLS_WEST"). Everything else —
+    `league_context_code` ("MLS_EAST" | "MLS_WEST"). Everything else:
     the standings fetch, the per-day scoreboard sweep, the 3 / 1 / 0
-    `_record_result_into_state` override — is shared here.
+    `_record_result_into_state` override: is shared here.
     """
 
     _count_field = "standings_points"
@@ -249,7 +249,7 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         # MLS season is named by calendar year (the 2025 season runs Feb-Nov
         # 2025). Default to current calendar year; pre-February in early
         # winter reads as the prior season (MLS Cup wraps in early Dec, so
-        # January is firmly between seasons — default to prior year so
+        # January is firmly between seasons: default to prior year so
         # offseason refreshes still pick up the last-finished season's data).
         self.season_year = (
             season_year if season_year is not None
@@ -386,7 +386,7 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
                     continue
                 # Skip non-regular-season games for V1. MLS Cup playoff
                 # bracket is filed under issue #30 part B; until it lands,
-                # postseason MLS games should not be emitted here — they
+                # postseason MLS games should not be emitted here: they
                 # would get importance computed against regular-season
                 # bands, inflating their score.
                 if rec.get("season_slug") != REGULAR_SEASON_SLUG:
@@ -418,7 +418,7 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
         """Day-by-day sweep across Feb 1 - Nov 30 of `season_year`.
-        Filters to INTRA-CONFERENCE regular-season games only — the
+        Filters to INTRA-CONFERENCE regular-season games only: the
         simulator's `_teams` dict then never picks up out-of-conference
         teams (which would get the wrong threshold bands applied in
         terminal_outcomes).
@@ -467,11 +467,11 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
             day += timedelta(days=1)
         return list(seen.values())
 
-    # ---------- sample_result (allows draws — soccer rules) ----------
+    # ---------- sample_result (allows draws: soccer rules) ----------
 
     def sample_result(self, state, match, strengths, rng):
         """Sample Poisson goals per side. Soccer regulation results
-        include draws — DO NOT coin-flip a tied score into a win the
+        include draws: DO NOT coin-flip a tied score into a win the
         way the base PointsBasedSportSource does for NCAAF / NCAAM /
         NHL. MLS regular-season games CAN end in regulation draws
         (MLS dropped the shootout tiebreaker in 2000). A draw banks 1
@@ -500,11 +500,11 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
     ) -> None:
         """MLS standings scheme mirrors college soccer's 3 / 1 / 0:
         win = 3 standings points, draw = 1 each, loss = 0. Subclass
-        of `ncaa_soccer._record_result_into_state` structurally —
+        of `ncaa_soccer._record_result_into_state` structurally:
         same pattern, no shared inheritance because the rest of the
         ESPN endpoint shape differs.
         """
-        del result_extra  # not used — MLS regular-season ties bank 1 pt each
+        del result_extra  # not used: MLS regular-season ties bank 1 pt each
         h = teams[home]
         a = teams[away]
         h.setdefault("draws", 0)
