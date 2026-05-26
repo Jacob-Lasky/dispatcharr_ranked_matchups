@@ -75,6 +75,7 @@ from .mls import (
     _team_canonical_name,
 )
 from .._util import parse_iso_utc
+from ._espn import extract_espn_scoreboard_event
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_standings")
 
@@ -162,65 +163,19 @@ def _fetch_conference_map() -> Dict[str, str]:
 
 def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Convert one ESPN MLS scoreboard event into the canonical
-    PointsBasedSportSource game record. Soccer-specific: a tied score
-    in a finished regulation game IS a draw (1 point each): DO NOT
-    coin-flip it into a win the way NCAAF / NCAAM do. Same shape as
-    `ncaa_soccer._extract_game_record`.
-
-    Returns None when the event is malformed (missing competitors,
-    missing teams) or when status reads as in-progress with no
-    final score.
+    PointsBasedSportSource game record. Adds `season_slug` (top-level
+    AND inside `extra`) so callers can route bracket vs regular-season
+    rows. Soccer-specific: a tied score in a finished regulation game
+    IS a draw (1 point each) -- the shared parser preserves this
+    (NCAAF / NCAAM coin-flip the tie upstream, not here).
     """
-    comps = event.get("competitions") or []
-    if not comps:
-        return None
-    comp = comps[0]
-    competitors = comp.get("competitors") or []
-    if len(competitors) != 2:
-        return None
-    home = next((c for c in competitors if c.get("homeAway") == "home"), None)
-    away = next((c for c in competitors if c.get("homeAway") == "away"), None)
-    if home is None or away is None:
-        return None
-    home_team = _team_canonical_name(home.get("team") or {})
-    away_team = _team_canonical_name(away.get("team") or {})
-    if not home_team or not away_team:
-        return None
+    def _mls_extras(ev: Dict[str, Any]) -> Dict[str, Any]:
+        season_slug = ((ev.get("season") or {}).get("slug") or "").lower()
+        return {"season_slug": season_slug, "extra": {"season_slug": season_slug}}
 
-    status_type = (comp.get("status") or {}).get("type") or {}
-    completed = bool(status_type.get("completed"))
-    state = (status_type.get("state") or "").lower()
-    if completed or state == "post":
-        status = "FINISHED"
-    else:
-        status = "SCHEDULED"
-
-    try:
-        hp = int(home.get("score")) if status == "FINISHED" else None
-    except (TypeError, ValueError):
-        hp = None
-    try:
-        ap = int(away.get("score")) if status == "FINISHED" else None
-    except (TypeError, ValueError):
-        ap = None
-
-    if status == "FINISHED" and (hp is None or ap is None):
-        status = "SCHEDULED"
-        hp = None
-        ap = None
-
-    season_slug = ((event.get("season") or {}).get("slug") or "").lower()
-    return {
-        "id": event.get("id"),
-        "home": home_team,
-        "away": away_team,
-        "home_points": hp,
-        "away_points": ap,
-        "status": status,
-        "start_time": parse_iso_utc(event.get("date")),
-        "season_slug": season_slug,
-        "extra": {"season_slug": season_slug},
-    }
+    return extract_espn_scoreboard_event(
+        event, team_namer=_team_canonical_name, extras_fn=_mls_extras,
+    )
 
 
 class MlsStandingsSourceBase(PointsBasedSportSource):
