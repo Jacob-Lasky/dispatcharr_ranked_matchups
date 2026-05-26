@@ -1717,3 +1717,156 @@ class TestPluginStopTeardown:
         finally:
             plugin._scheduler_thread = saved_thread
             plugin._scheduler_stop.clear()
+
+
+class TestDedupSeriesGames:
+    """Best-of-N playoff series sources (NHL / NBA / MLB / NCAA tournaments)
+    return every scheduled series game from fetch_upcoming. Without
+    dedup, a Carolina vs Montreal best-of-7 becomes 4-7 redundant
+    virtual channels — same matchup, different dates. The user-facing
+    fix Jake hit live on 2026-05-26: keep ONLY the chronologically
+    earliest game per (sport_prefix, team-pair) key; let the next
+    refresh after the game finishes promote the subsequent series
+    game.
+
+    The dedup MUST key on `frozenset({home, away})` not `(home, away)`
+    — NHL playoff games 2 and 4 swap home-ice (the lower-seed gets
+    "Carolina at Montreal" alternating with "Montreal at Carolina"),
+    and a strict ordered key would treat them as distinct.
+    """
+
+    @staticmethod
+    def _game(sport, home, away, start_dt):
+        """Minimal GameRow-shaped stub: attribute access on sport_prefix,
+        home, away, start_time is all the dedup helper touches."""
+        import types
+        return types.SimpleNamespace(
+            sport_prefix=sport, home=home, away=away, start_time=start_dt,
+        )
+
+    def test_empty_input_returns_empty(self, plugin):
+        g, s, n = plugin._dedup_series_games([], [])
+        assert g == []
+        assert s == []
+        assert n == 0
+
+    def test_single_game_per_pair_passes_through(self, plugin):
+        from datetime import datetime, timezone
+        games = [
+            self._game("NHL", "Vegas", "Colorado", datetime(2026, 5, 27, 1, 0, tzinfo=timezone.utc)),
+            self._game("NHL", "Carolina", "Montreal", datetime(2026, 5, 28, 0, 0, tzinfo=timezone.utc)),
+        ]
+        sources = ["src_nhl_1", "src_nhl_2"]
+        out_g, out_s, n = plugin._dedup_series_games(games, sources)
+        assert n == 0
+        assert len(out_g) == 2
+        assert out_s == sources
+
+    def test_drops_later_games_in_same_series(self, plugin):
+        # 4-game best-of-7 schedule: keep only the earliest (game 1).
+        from datetime import datetime, timezone
+        games = [
+            self._game("NHL", "Vegas", "Colorado",  datetime(2026, 5, 27, 1, 0, tzinfo=timezone.utc)),   # G1
+            self._game("NHL", "Colorado", "Vegas",  datetime(2026, 5, 29, 0, 0, tzinfo=timezone.utc)),   # G2 (swap home)
+            self._game("NHL", "Vegas", "Colorado",  datetime(2026, 5, 31, 0, 0, tzinfo=timezone.utc)),   # G3
+            self._game("NHL", "Colorado", "Vegas",  datetime(2026, 6, 2, 0, 0, tzinfo=timezone.utc)),    # G4
+        ]
+        sources = ["s1", "s2", "s3", "s4"]
+        out_g, out_s, n = plugin._dedup_series_games(games, sources)
+        assert n == 3
+        assert len(out_g) == 1
+        # The earliest survives.
+        assert out_g[0].start_time.day == 27
+        # The corresponding source survives too — parallel index preserved.
+        assert out_s == ["s1"]
+
+    def test_home_ice_swap_treated_as_same_series(self, plugin):
+        # Carolina at Montreal AND Montreal at Carolina = same series.
+        # Strict ordered key would treat them distinct; frozenset key
+        # collapses them. This is THE key invariant Jake's bug ran into.
+        from datetime import datetime, timezone
+        games = [
+            self._game("NHL", "Carolina", "Montreal", datetime(2026, 5, 30, 0, 0, tzinfo=timezone.utc)),
+            self._game("NHL", "Montreal", "Carolina", datetime(2026, 5, 28, 0, 0, tzinfo=timezone.utc)),
+        ]
+        out_g, out_s, n = plugin._dedup_series_games(games, ["a", "b"])
+        assert n == 1
+        assert len(out_g) == 1
+        # The May 28 game (with Montreal at Carolina) survives — earlier.
+        assert out_g[0].home == "Montreal"
+        assert out_g[0].away == "Carolina"
+
+    def test_different_sport_prefixes_not_merged(self, plugin):
+        # Hypothetical: same team-name string used by two leagues
+        # (extremely unlikely but invariant should hold). NHL Edmonton
+        # Oilers and a fictitious other-league "Edmonton Oilers" stay
+        # separate because sport_prefix differs.
+        from datetime import datetime, timezone
+        games = [
+            self._game("NHL", "Edmonton", "Vancouver",
+                       datetime(2026, 5, 27, 1, 0, tzinfo=timezone.utc)),
+            self._game("AHL", "Edmonton", "Vancouver",
+                       datetime(2026, 5, 27, 2, 0, tzinfo=timezone.utc)),
+        ]
+        out_g, out_s, n = plugin._dedup_series_games(games, ["nhl", "ahl"])
+        assert n == 0
+        assert len(out_g) == 2
+
+    def test_keeps_earliest_when_input_order_is_reversed(self, plugin):
+        # Defensive: the dedup must not depend on input order. Even if
+        # game 4 appears before game 1 in the list, game 1 must win.
+        from datetime import datetime, timezone
+        games = [
+            self._game("NHL", "Vegas", "Colorado", datetime(2026, 6, 2,  0, 0, tzinfo=timezone.utc)),  # G4 first
+            self._game("NHL", "Vegas", "Colorado", datetime(2026, 5, 27, 1, 0, tzinfo=timezone.utc)),  # G1 second
+            self._game("NHL", "Vegas", "Colorado", datetime(2026, 5, 31, 0, 0, tzinfo=timezone.utc)),  # G3 third
+        ]
+        out_g, out_s, n = plugin._dedup_series_games(games, ["g4", "g1", "g3"])
+        assert n == 2
+        assert len(out_g) == 1
+        assert out_g[0].start_time.day == 27
+        assert out_s == ["g1"]
+
+    def test_preserves_source_alignment_with_mixed_input(self, plugin):
+        # When some games are deduped and others pass through, the
+        # surviving games' indices into the sources list MUST stay
+        # aligned. A broken alignment would mean compute_match_
+        # importance ran against the wrong source for some games.
+        from datetime import datetime, timezone
+        games = [
+            self._game("NHL", "Vegas", "Colorado",  datetime(2026, 5, 27, 1, 0, tzinfo=timezone.utc)),   # series A, G1
+            self._game("CL",  "Real Madrid", "PSG", datetime(2026, 5, 28, 19, 0, tzinfo=timezone.utc)),   # CL pass-through
+            self._game("NHL", "Colorado", "Vegas",  datetime(2026, 5, 29, 0, 0, tzinfo=timezone.utc)),   # series A, G2 (drop)
+            self._game("NHL", "Carolina", "Montreal", datetime(2026, 5, 28, 0, 0, tzinfo=timezone.utc)), # series B, G1
+        ]
+        sources = ["src_nhl_a", "src_ucl", "src_nhl_b", "src_nhl_c"]
+        out_g, out_s, n = plugin._dedup_series_games(games, sources)
+        assert n == 1
+        # Keep G1 of each series + the CL pass-through.
+        assert len(out_g) == 3
+        # Sources line up with their games (UCL with UCL game, etc.).
+        for g, s in zip(out_g, out_s):
+            if g.sport_prefix == "CL":
+                assert s == "src_ucl"
+            elif g.home == "Vegas" or g.away == "Vegas":
+                assert s == "src_nhl_a"
+            elif g.home == "Carolina" or g.away == "Carolina":
+                assert s == "src_nhl_c"
+            else:
+                raise AssertionError(f"unexpected game in output: {g.home} vs {g.away}")
+
+    def test_handles_missing_start_time_gracefully(self, plugin):
+        # If a source omits start_time (None), the earlier-wins
+        # comparison falls back to "keep the existing one" so we don't
+        # crash on a None < datetime comparison.
+        from datetime import datetime, timezone
+        games = [
+            self._game("NHL", "Vegas", "Colorado",
+                       datetime(2026, 5, 27, 1, 0, tzinfo=timezone.utc)),
+            self._game("NHL", "Vegas", "Colorado", None),
+        ]
+        out_g, out_s, n = plugin._dedup_series_games(games, ["a", "b"])
+        assert n == 1
+        assert len(out_g) == 1
+        # The one with a real start_time wins.
+        assert out_g[0].start_time is not None

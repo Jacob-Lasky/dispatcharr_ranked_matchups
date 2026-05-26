@@ -366,6 +366,56 @@ def _write_cache(data: Dict[str, Any]) -> None:
 
 # ---------- settings parsing ----------
 
+def _dedup_series_games(games: List[Any], sources: List[Any]) -> Tuple[List[Any], List[Any], int]:
+    """Collapse a best-of-N playoff series to its next-scheduled game.
+
+    NHL / NBA / MLB / NCAA-tournament source `fetch_upcoming` calls
+    return every scheduled game in a series — including future entries
+    whose date is a placeholder for "Game 5/6/7 IF NEEDED". The user
+    sees that as 4-7 redundant virtual channels for the same matchup.
+    Group rows by `(sport_prefix, frozenset({home, away}))` and keep
+    the one with the earliest `start_time`; drop the rest. Returns
+    `(deduped_games, deduped_sources, n_dropped)` preserving the
+    parallel-index relationship between games and sources.
+
+    DO NOT key on `(sport_prefix, home, away)` with order preserved —
+    NHL playoff Games 2 and 4 swap home-ice (the lower-seed gets
+    "Carolina at Montreal" alternating with "Montreal at Carolina")
+    and a strict ordered key would treat them as distinct.
+
+    League sources also flow through this — same team-pair appearing
+    twice in a 7-day lookahead is genuinely rare (would have to be a
+    midweek + weekend cup pairing, or a replay), and "show only the
+    next one" is the same UX as for playoffs. If a future scenario
+    needs both, the dedup needs to grow a `keep_all` opt-out signal
+    on the source contract; for now the curation rule is "one channel
+    per matchup, soonest first."
+    """
+    if not games:
+        return [], [], 0
+    by_key: Dict[Tuple[str, frozenset], int] = {}
+    for idx, g in enumerate(games):
+        sport_prefix = getattr(g, "sport_prefix", "") or ""
+        teams = frozenset({getattr(g, "home", ""), getattr(g, "away", "")})
+        key = (sport_prefix, teams)
+        prior_idx = by_key.get(key)
+        if prior_idx is None:
+            by_key[key] = idx
+            continue
+        # Pick the chronologically earlier of (existing, current).
+        # GameRow.start_time is timezone-aware UTC (parse_iso_utc
+        # contract); direct comparison is safe.
+        prior = games[prior_idx]
+        cur_start = getattr(g, "start_time", None)
+        prior_start = getattr(prior, "start_time", None)
+        if cur_start is not None and (prior_start is None or cur_start < prior_start):
+            by_key[key] = idx
+    keep_indices = sorted(by_key.values())
+    deduped_games = [games[i] for i in keep_indices]
+    deduped_sources = [sources[i] for i in keep_indices]
+    return deduped_games, deduped_sources, len(games) - len(deduped_games)
+
+
 def _parse_favorites(raw: str) -> List[str]:
     if not raw:
         return []
@@ -847,6 +897,26 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                  "summary": src_summary}
         _write_cache(cache)
         return {"status": "ok", "message": msg}
+
+    # 1a. Series dedup. Best-of-N playoff sources (NHL, NBA, MLB, NCAA
+    # basketball/baseball) return EVERY scheduled game in a series, so a
+    # Carolina vs Montreal best-of-7 can produce 4-7 separate GameRows
+    # with the same team-pair and different dates. The user wants ONE
+    # channel per series showing the next game; subsequent series games
+    # appear after the prior one is removed by a later refresh. Group
+    # by (sport_prefix, frozenset of teams) and keep the chronologically
+    # earliest start_time in each group; the rest are dropped from this
+    # refresh. League sources are unaffected — same team-pair appearing
+    # twice in a 7-day window is rare and means a real fixture/replay.
+    all_games, game_sources, deduped_count = _dedup_series_games(
+        all_games, game_sources,
+    )
+    if deduped_count:
+        logger.info(
+            "[ranked_matchups] series dedup: dropped %d redundant "
+            "series-game rows (kept earliest per team-pair)",
+            deduped_count,
+        )
 
     # 2. Score. The Lahvička Monte Carlo importance signal covers three
     # related concerns structurally:
