@@ -38,6 +38,130 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.soccer")
 FD_BASE = "https://api.football-data.org/v4"
 ODDS_BASE = "https://api.the-odds-api.com/v4"
 
+
+# ---------- Module-level FD.org caches (refresh-scoped) ----------
+#
+# The plugin's _action_refresh enables ~10+ soccer competitions and the
+# free FD.org tier allows 10 calls/minute. Without batching, per-source
+# fetches blow the quota every refresh: see PR #79 era logs where the
+# WC fixtures fetch returned 429 because earlier league/cup competitions
+# in the iteration burned through the per-minute budget first.
+#
+# Two caches replace the per-source-instance fetch pattern:
+#
+#   _TIER_FIXTURES_CACHE  — one /v4/matches call returns fixtures for
+#                           every competition on the tier in a single
+#                           date window. SoccerSource._fetch_fixtures
+#                           filters this by self.config.fd_code instead
+#                           of calling /v4/competitions/<code>/matches.
+#   _SEASON_MATCHES_CACHE — full-season matches per competition (used
+#                           by the Monte Carlo importance simulator).
+#                           Keyed by fd_code so sibling sources
+#                           (wc_groups + wc_knockout) share one fetch
+#                           rather than each instance fetching its own.
+#
+# Cache lifetime is "until _clear_fd_caches() runs"; plugin._action_
+# refresh calls it at the top of every refresh so each scheduler tick
+# sees fresh data. Within a refresh, cross-source calls reuse the
+# cached responses.
+_TIER_FIXTURES_CACHE: "Optional[Tuple[Tuple[str, str, str], Dict[str, List[Dict]]]]" = None
+_SEASON_MATCHES_CACHE: Dict[str, List[Dict]] = {}
+
+
+def _clear_fd_caches() -> None:
+    """Reset the refresh-scoped FD.org caches. Called by plugin._action_
+    refresh at the start of each refresh so subsequent fetches see fresh
+    data. Safe to call between refreshes from tests too.
+    """
+    global _TIER_FIXTURES_CACHE
+    _TIER_FIXTURES_CACHE = None
+    _SEASON_MATCHES_CACHE.clear()
+
+
+def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dict]]:
+    """One /v4/matches call covering every competition on the requester's
+    tier within the [today, today+days_ahead] window. Returns a dict
+    keyed by competition code (PL, ELC, WC, etc.) with the raw FD.org
+    match dicts as values.
+
+    Cache key includes the date window so a same-day refresh with a
+    different lookahead_days setting refetches correctly. In practice
+    lookahead_days is uniform per refresh; the cache key just makes the
+    invariant explicit.
+
+    Falls back to {} on auth failure or HTTP error so callers degrade
+    to "no upcoming fixtures" (the same shape as a 429 / 5xx today),
+    keeping the rest of the refresh pipeline functioning.
+    """
+    global _TIER_FIXTURES_CACHE
+    if not fd_api_key:
+        return {}
+    now = datetime.now(timezone.utc)
+    date_from = now.strftime("%Y-%m-%d")
+    date_to = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+    cache_key = (fd_api_key, date_from, date_to)
+    cached = _TIER_FIXTURES_CACHE
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+    try:
+        r = requests.get(
+            f"{FD_BASE}/matches",
+            headers={"X-Auth-Token": fd_api_key},
+            params={"dateFrom": date_from, "dateTo": date_to},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        logger.error("[soccer:tier] /v4/matches fetch failed: %s", e)
+        _TIER_FIXTURES_CACHE = (cache_key, {})
+        return {}
+    by_code: Dict[str, List[Dict]] = {}
+    for m in data.get("matches", []) or []:
+        code = (m.get("competition") or {}).get("code")
+        if not code:
+            # Defensive: a tier-wide response with no competition code
+            # on a match would be a FD.org schema regression. Skip
+            # rather than misroute it.
+            continue
+        by_code.setdefault(code, []).append(m)
+    _TIER_FIXTURES_CACHE = (cache_key, by_code)
+    return by_code
+
+
+def _fetch_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[Dict]:
+    """Full-season matches for a single competition, cached at module
+    level by fd_code. Sibling sources (e.g., wc_groups + wc_knockout
+    both keyed off "WC") share this cache and avoid double-fetching
+    the same competition's schedule.
+
+    NOTE: there's no /v4/matches-equivalent that returns full-season
+    history per competition in one shot — /v4/matches is date-bounded.
+    So this remains a per-competition call, but at most ONE call per
+    distinct fd_code per refresh, regardless of how many sources
+    consume it.
+    """
+    if fd_code in _SEASON_MATCHES_CACHE:
+        return _SEASON_MATCHES_CACHE[fd_code]
+    if not fd_api_key:
+        _SEASON_MATCHES_CACHE[fd_code] = []
+        return []
+    try:
+        r = requests.get(
+            f"{FD_BASE}/competitions/{fd_code}/matches",
+            headers={"X-Auth-Token": fd_api_key},
+            timeout=15,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        logger.warning("[soccer:%s] all-matches fetch failed: %s", fd_code, e)
+        _SEASON_MATCHES_CACHE[fd_code] = []
+        return []
+    matches: List[Dict] = data.get("matches", []) or []
+    _SEASON_MATCHES_CACHE[fd_code] = matches
+    return matches
+
 # When the current season's median playedGames falls below this number,
 # replace the current standings with the previous season's final table as
 # a "position prior." Without the seed, MD1-3 produces tied scores (no
@@ -444,23 +568,17 @@ class SoccerSource(SportSource):
     # ---------- fixtures ----------
 
     def _fetch_fixtures(self, days_ahead: int) -> List[Dict]:
-        now = datetime.now(timezone.utc)
-        start = now.strftime("%Y-%m-%d")
-        end = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-        try:
-            r = requests.get(
-                f"{FD_BASE}/competitions/{self.config.fd_code}/matches",
-                headers={"X-Auth-Token": self.fd_api_key},
-                params={"dateFrom": start, "dateTo": end},
-                timeout=15,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            logger.error("[soccer:%s] fixtures fetch failed: %s",
-                         self.config.fd_code, e)
-            return []
-        return data.get("matches", [])
+        """Return upcoming matches for this source's competition.
+
+        Filters the module-level tier-wide cache by `self.config.fd_code`
+        instead of making a per-competition call. The first source to
+        ask for a given (fd_api_key, date_window) triggers one
+        /v4/matches fetch covering every competition on the tier;
+        every subsequent source in the same refresh reads from cache.
+        See `_fetch_tier_fixtures` for the cache contract.
+        """
+        by_code = _fetch_tier_fixtures(self.fd_api_key, days_ahead)
+        return by_code.get(self.config.fd_code, [])
 
     # ---------- odds ----------
 
@@ -560,31 +678,20 @@ class SoccerSource(SportSource):
     # ---------- Monte Carlo importance ----------
 
     def _fetch_all_season_matches(self) -> List[Dict]:
-        """All matches for the current competition season — finished AND
-        scheduled. One FD.org call per refresh. Cached on the instance so
-        repeat calls within the same refresh don't re-bill.
+        """All matches for the current competition season, finished AND
+        scheduled. Used by the Monte Carlo importance simulator.
+
+        Two layers of cache: the per-instance `_all_matches_cache` is
+        an injection point for tests (set the attribute to a stub list
+        to bypass the network entirely). When unset, the module-level
+        `_fetch_season_matches_for_code` cache takes over, keyed by
+        fd_code so sibling sources for the same competition (e.g.,
+        wc_groups + wc_knockout) share one fetch instead of doubling
+        up.
         """
         if self._all_matches_cache is not None:
             return self._all_matches_cache
-        if not self.fd_api_key:
-            self._all_matches_cache = []
-            return []
-        try:
-            r = requests.get(
-                f"{FD_BASE}/competitions/{self.config.fd_code}/matches",
-                headers={"X-Auth-Token": self.fd_api_key},
-                timeout=15,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            logger.warning("[soccer:%s] all-matches fetch failed: %s",
-                           self.config.fd_code, e)
-            self._all_matches_cache = []
-            return []
-        cache: List[Dict] = data.get("matches", []) or []
-        self._all_matches_cache = cache
-        return cache
+        return _fetch_season_matches_for_code(self.fd_api_key, self.config.fd_code)
 
     @property
     def outcome_labels(self) -> List[str]:

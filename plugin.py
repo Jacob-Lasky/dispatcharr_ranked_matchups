@@ -803,6 +803,14 @@ def _build_sources(settings: Dict[str, Any]):
 def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     from .scoring import GameSignals, score_game
     from .matcher import match_games_to_channels
+    from .sources.soccer import _clear_fd_caches
+
+    # Reset the refresh-scoped FD.org caches at the top of every
+    # refresh. Soccer sources share two module-level caches (tier-wide
+    # fixtures + per-competition season matches) for the lifetime of a
+    # refresh; without this reset, a long-running plugin instance would
+    # serve stale data on the second and subsequent refreshes.
+    _clear_fd_caches()
 
     favorites = _parse_favorites(settings.get("favorites", ""))
     weights = _build_weights(settings)

@@ -44,6 +44,79 @@ def plugin():
     return _load_plugin_module()
 
 
+class TestActionRefreshClearsFdCaches:
+    """The FD.org batching refactor pins module-level caches into
+    `sources/soccer.py` and relies on `_action_refresh` to wipe them at
+    the top of every refresh. Without the wipe, a long-running plugin
+    instance serves stale fixtures on the second and later refreshes —
+    silent staleness, no error.
+
+    This integration test asserts the contract directly: pre-populate
+    the caches with sentinel data, invoke `_action_refresh` (with
+    `_build_sources` stubbed to return [] so we short-circuit before
+    hitting Django / FD.org), then verify both caches were cleared.
+
+    A future refactor that removes the `_clear_fd_caches()` call from
+    `_action_refresh` would silently regress to stale-cache behavior
+    and pass every unit-level cache test. This test is the safety net.
+    """
+
+    def test_action_refresh_clears_tier_fixtures_cache(self, plugin, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        # Pre-populate both caches with sentinel data.
+        sentinel_tier = (("sentinel-key", "2026-01-01", "2026-01-08"), {"PL": [{"id": 999}]})
+        soccer._TIER_FIXTURES_CACHE = sentinel_tier
+        soccer._SEASON_MATCHES_CACHE["SENTINEL"] = [{"id": 888}]
+
+        # Short-circuit _action_refresh past the cache-clear by stubbing
+        # _build_sources to return [] (no sources → early return with
+        # status=error).
+        monkeypatch.setattr(plugin, "_build_sources", lambda _settings: [])
+
+        result = plugin._action_refresh({"lookahead_days": 7})
+        # Confirm we hit the early-return path so the only thing
+        # _action_refresh did was clear caches + build empty sources.
+        assert result.get("status") == "error"
+
+        # Both caches must be wiped.
+        assert soccer._TIER_FIXTURES_CACHE is None, (
+            "_action_refresh did not call _clear_fd_caches() — tier "
+            "fixtures cache survived the refresh boundary, which would "
+            "cause stale FD.org data on every refresh after the first."
+        )
+        assert "SENTINEL" not in soccer._SEASON_MATCHES_CACHE, (
+            "_action_refresh did not call _clear_fd_caches() — season "
+            "matches cache survived the refresh boundary."
+        )
+
+    def test_clear_fd_caches_runs_before_build_sources(self, plugin, monkeypatch):
+        # Pin the order: the cache wipe must precede the source loop,
+        # not run after it. If it ran AFTER, the first source's fetch
+        # would still hit a stale cache from the prior refresh.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        order: list = []
+
+        def fake_clear():
+            order.append("clear")
+            soccer._TIER_FIXTURES_CACHE = None
+            soccer._SEASON_MATCHES_CACHE.clear()
+
+        def fake_build_sources(_settings):
+            order.append("build_sources")
+            return []
+
+        monkeypatch.setattr(soccer, "_clear_fd_caches", fake_clear)
+        monkeypatch.setattr(plugin, "_build_sources", fake_build_sources)
+
+        plugin._action_refresh({"lookahead_days": 7})
+        assert order == ["clear", "build_sources"], (
+            f"unexpected order: {order} — cache clear must fire BEFORE "
+            "source building so the first source's fetch sees fresh data"
+        )
+
+
 class TestParseScheduledTimes:
     def test_simple_csv(self, plugin):
         out = plugin._parse_scheduled_times("0400,1000,1600,2200")
