@@ -68,6 +68,16 @@ _TIER_FIXTURES_CACHE: "Optional[Tuple[Tuple[str, str, str], Dict[str, List[Dict]
 _SEASON_MATCHES_CACHE: Dict[str, List[Dict]] = {}
 
 
+# FD.org's /v4/matches endpoint caps each call's window at 10 days
+# (HTTP 400 "Specified period must not exceed 10 days"). The
+# per-competition /v4/competitions/<code>/matches endpoint, which the
+# tier-wide fetch replaced, did NOT have this cap. To preserve the
+# pre-refactor contract for plugin configs with lookahead_days > 10,
+# windows longer than this split into back-to-back chunks inside
+# _fetch_tier_fixtures.
+_FD_TIER_MAX_WINDOW_DAYS = 10
+
+
 def _clear_fd_caches() -> None:
     """Reset the refresh-scoped FD.org caches. Called by plugin._action_
     refresh at the start of each refresh so subsequent fetches see fresh
@@ -79,19 +89,27 @@ def _clear_fd_caches() -> None:
 
 
 def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dict]]:
-    """One /v4/matches call covering every competition on the requester's
-    tier within the [today, today+days_ahead] window. Returns a dict
-    keyed by competition code (PL, ELC, WC, etc.) with the raw FD.org
-    match dicts as values.
+    """One or more /v4/matches calls covering [today, today+days_ahead].
+    Returns a dict keyed by competition code (PL, ELC, WC, etc.) with
+    the raw FD.org match dicts as values.
+
+    Windows longer than `_FD_TIER_MAX_WINDOW_DAYS` (10) are split into
+    back-to-back chunks because the endpoint rejects requests over 10
+    days with HTTP 400 ("Specified period must not exceed 10 days").
+    Each chunk's matches merge into the same `by_code` dict; the cache
+    stores the merged result keyed by the full requested window. The
+    per-competition /v4/competitions/<code>/matches endpoint does NOT
+    have this cap, so chunking preserves the contract callers had
+    before the tier-wide refactor (lookahead_days values > 10 were
+    valid).
 
     Cache key includes the date window so a same-day refresh with a
-    different lookahead_days setting refetches correctly. In practice
-    lookahead_days is uniform per refresh; the cache key just makes the
-    invariant explicit.
+    different lookahead_days setting refetches correctly.
 
-    Falls back to {} on auth failure or HTTP error so callers degrade
-    to "no upcoming fixtures" (the same shape as a 429 / 5xx today),
-    keeping the rest of the refresh pipeline functioning.
+    Returns the merged-by-code dict on partial failure too: if chunk N
+    succeeds and chunk N+1 returns 429/5xx, the chunks fetched so far
+    are still cached and returned so the rest of the refresh has at
+    least the earlier fixtures rather than nothing.
     """
     global _TIER_FIXTURES_CACHE
     if not fd_api_key:
@@ -103,28 +121,49 @@ def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dic
     cached = _TIER_FIXTURES_CACHE
     if cached is not None and cached[0] == cache_key:
         return cached[1]
-    try:
-        r = requests.get(
-            f"{FD_BASE}/matches",
-            headers={"X-Auth-Token": fd_api_key},
-            params={"dateFrom": date_from, "dateTo": date_to},
-            timeout=15,
-        )
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        logger.error("[soccer:tier] /v4/matches fetch failed: %s", e)
-        _TIER_FIXTURES_CACHE = (cache_key, {})
-        return {}
+
     by_code: Dict[str, List[Dict]] = {}
-    for m in data.get("matches", []) or []:
-        code = (m.get("competition") or {}).get("code")
-        if not code:
-            # Defensive: a tier-wide response with no competition code
-            # on a match would be a FD.org schema regression. Skip
-            # rather than misroute it.
-            continue
-        by_code.setdefault(code, []).append(m)
+    chunk_start = now
+    window_end = now + timedelta(days=days_ahead)
+    while chunk_start.date() <= window_end.date():
+        chunk_end = min(
+            chunk_start + timedelta(days=_FD_TIER_MAX_WINDOW_DAYS),
+            window_end,
+        )
+        chunk_from = chunk_start.strftime("%Y-%m-%d")
+        chunk_to = chunk_end.strftime("%Y-%m-%d")
+        try:
+            r = requests.get(
+                f"{FD_BASE}/matches",
+                headers={"X-Auth-Token": fd_api_key},
+                params={"dateFrom": chunk_from, "dateTo": chunk_to},
+                timeout=15,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            logger.error(
+                "[soccer:tier] /v4/matches fetch failed [%s..%s]: %s",
+                chunk_from, chunk_to, e,
+            )
+            # Cache what we have so far and bail. Partial data beats
+            # zero data on a mid-burst quota hit.
+            _TIER_FIXTURES_CACHE = (cache_key, by_code)
+            return by_code
+        for m in data.get("matches", []) or []:
+            code = (m.get("competition") or {}).get("code")
+            if not code:
+                # Defensive: a tier-wide response with no competition
+                # code on a match would be a FD.org schema regression.
+                # Skip rather than misroute it.
+                continue
+            by_code.setdefault(code, []).append(m)
+        if chunk_end >= window_end:
+            break
+        # +1 day so the next chunk starts AFTER chunk_end and we don't
+        # re-fetch the boundary day (FD's dateFrom/dateTo are inclusive
+        # on both ends).
+        chunk_start = chunk_end + timedelta(days=1)
     _TIER_FIXTURES_CACHE = (cache_key, by_code)
     return by_code
 
