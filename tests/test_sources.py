@@ -7991,6 +7991,167 @@ class TestKnockoutSoccerSourceSkipsGroupStage:
         assert {r.extra["fd_id"] for r in out} == {1, 2}
 
 
+class TestKnockoutSoccerSourceSeedFromChain:
+    """`seed_from_chain` is the #53 entry point for chain-driven bracket
+    simulation. The seed dict carries an explicit per-stage tie shape so
+    the bracket doesn't need to be present in FD.org pre-tournament
+    (probed and confirmed empty: WC LAST_32 endpoint returns 16 timed
+    placeholders with null team names).
+
+    Downstream stages use placeholder team names ("L32_W1" etc.) wired
+    to L32 ties via feeds_from. The bracket machinery resolves them at
+    each remaining_matches call via `_winner_of` recursively walking
+    `_resolve_participants` against the simulated tie_results — see
+    bracket.py:418.
+    """
+
+    @staticmethod
+    def _src():
+        from dispatcharr_ranked_matchups.sources.soccer import KnockoutSoccerSource
+        return KnockoutSoccerSource("world_cup", fd_api_key="x")
+
+    def test_returns_initial_state_shape(self):
+        src = self._src()
+        state = src.seed_from_chain({"stages": []})
+        # Same keys as BracketSportSource.initial_state.
+        assert set(state.keys()) == {"_applied", "_tie_results", "_bracket", "_round_reached"}
+        assert state["_applied"] == frozenset()
+        assert state["_round_reached"] == {}
+        # Empty seed yields per-stage empty lists for every KO_STAGE.
+        assert set(state["_bracket"].keys()) == set(src.KO_STAGES)
+        for ties in state["_bracket"].values():
+            assert ties == []
+
+    def test_minimal_two_team_l32_drains_and_emits_round_reached(self):
+        # One LAST_32 tie. After draining, the loser hits round_of_16
+        # depth (eliminated at L32) and the winner advances.
+        import random
+        src = self._src()
+        seed = {
+            "stages": [{
+                "stage": "LAST_32",
+                "ties": [{"home": "Mexico", "away": "Norway",
+                          "matchday": 1, "feeds_from": {}}],
+            }],
+        }
+        state = src.seed_from_chain(seed)
+        # Stub strengths so Mexico is ~certain to win.
+        strengths = {
+            "Mexico": {"sh": 3.0, "sa": 2.5, "ch": 0.5, "ca": 0.5},
+            "Norway": {"sh": 0.3, "sa": 0.3, "ch": 3.0, "ca": 3.0},
+        }
+        rng = random.Random(0)
+        while True:
+            rem = src.remaining_matches(state)
+            if not rem:
+                break
+            for m in rem:
+                r = src.sample_result(state, m, strengths, rng)
+                state = src.apply_result(state, m, r)
+        # One tie resolved; the tie_results entry exists keyed by simulated
+        # participants.
+        tr = state["_tie_results"]
+        assert ("LAST_32", frozenset({"Mexico", "Norway"})) in tr
+        # round_reached should mark both teams; the loser caps at L32 depth.
+        rr = state["_round_reached"]
+        assert "Mexico" in rr and "Norway" in rr
+
+    def test_two_stage_chain_resolves_via_winner_of_fix(self):
+        # 2 L32 ties + 1 L16 tie wired via feeds_from with placeholder
+        # participant names. After both L32 ties resolve, the L16 tie
+        # must emit a game with the REAL winners (not the placeholders).
+        # This validates the bracket.py _winner_of recursive-resolution
+        # fix end-to-end: without it, the L16 tie would never emit
+        # because _winner_of would key tie_results by placeholder names
+        # and miss the simulated-name entries.
+        import random
+        src = self._src()
+        seed = {
+            "stages": [
+                {"stage": "LAST_32", "ties": [
+                    {"home": "Mexico", "away": "Norway",
+                     "matchday": 1, "feeds_from": {}},
+                    {"home": "Brazil", "away": "Iceland",
+                     "matchday": 1, "feeds_from": {}},
+                ]},
+                {"stage": "LAST_16", "ties": [
+                    {"home": "L32_W1", "away": "L32_W2",
+                     "matchday": 1,
+                     "feeds_from": {"L32_W1": ("LAST_32", 0),
+                                    "L32_W2": ("LAST_32", 1)}},
+                ]},
+            ],
+        }
+        state = src.seed_from_chain(seed)
+        strengths = {
+            "Mexico":  {"sh": 3.0, "sa": 2.5, "ch": 0.5, "ca": 0.5},
+            "Norway":  {"sh": 0.3, "sa": 0.3, "ch": 3.0, "ca": 3.0},
+            "Brazil":  {"sh": 3.5, "sa": 3.0, "ch": 0.4, "ca": 0.4},
+            "Iceland": {"sh": 0.4, "sa": 0.3, "ch": 3.2, "ca": 3.2},
+        }
+        rng = random.Random(1)
+        # Drain until empty. Each pass should emit eligible games.
+        passes_with_games = 0
+        for _ in range(10):  # safety cap; should converge in <=3 passes
+            rem = src.remaining_matches(state)
+            if not rem:
+                break
+            passes_with_games += 1
+            for m in rem:
+                r = src.sample_result(state, m, strengths, rng)
+                state = src.apply_result(state, m, r)
+        # If _winner_of were broken, L16 would never emit a game and the
+        # drain would converge after the L32 round, not iterate.
+        assert passes_with_games >= 2, (
+            "L16 tie failed to emit after L32 resolved — _winner_of fix "
+            "regression suspected"
+        )
+        # L16 tie_results should exist with REAL team names (the L32 winners).
+        l16_keys = [k for k in state["_tie_results"] if k[0] == "LAST_16"]
+        assert len(l16_keys) == 1
+        _, teams = l16_keys[0]
+        # Placeholders should NEVER appear in resolved tie_results keys.
+        assert "L32_W1" not in teams
+        assert "L32_W2" not in teams
+        # The teams are the strong-team winners (deterministic-ish with
+        # the strength gradient + seed=1).
+        assert teams == frozenset({"Mexico", "Brazil"})
+
+    def test_seed_from_chain_skips_unknown_stages_defensively(self):
+        # Stages not in KO_STAGES are silently dropped (defensive against
+        # FIFA introducing a new stage label we haven't mapped).
+        src = self._src()
+        seed = {"stages": [
+            {"stage": "ROUND_OF_128", "ties": [
+                {"home": "Foo", "away": "Bar",
+                 "matchday": 1, "feeds_from": {}},
+            ]},
+        ]}
+        state = src.seed_from_chain(seed)
+        for ties in state["_bracket"].values():
+            assert ties == []
+
+    def test_seed_from_chain_synthesizes_unique_game_ids(self):
+        # Synthetic game_ids must be unique across the bracket; otherwise
+        # the `applied` set conflates ties and an already-played L32 tie
+        # would re-emit when L16 starts up.
+        src = self._src()
+        seed = {"stages": [
+            {"stage": "LAST_32", "ties": [
+                {"home": f"T{i}A", "away": f"T{i}B", "matchday": 1,
+                 "feeds_from": {}} for i in range(3)
+            ]},
+        ]}
+        state = src.seed_from_chain(seed)
+        all_ids = [
+            g["game_id"]
+            for ties in state["_bracket"].values()
+            for tie_meta in ties
+            for g in tie_meta["games"]
+        ]
+        assert len(all_ids) == len(set(all_ids)), "duplicate synthetic game_ids"
+
+
 class TestGroupStageContextCodes:
     """LEAGUE_CONTEXTS entries for WC_GS / EC_GS must exist with the
     `advance` outcome label so the GroupStageSoccerSource's

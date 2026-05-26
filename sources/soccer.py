@@ -1034,6 +1034,106 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
                 })
         return out
 
+    # ---------- #53 cross-source chain seeding ----------
+
+    def seed_from_chain(self, seed: Dict[str, Any]) -> Dict[str, Any]:
+        """Build initial bracket state from an explicit per-stage seed
+        rather than from `_fetch_bracket_games()`. The seed is produced
+        by the chain's primary source (`GroupStageSoccerSource.
+        _build_bracket_seed` for WC / EURO) and carries the cross-group
+        LAST_32 pairings plus the placeholder feeds_from wiring for
+        downstream rounds.
+
+        Seed shape:
+        ```
+        {"stages": [
+          {"stage": "LAST_32", "ties": [
+            {"home": "Mexico", "away": "Norway", "matchday": 1,
+             "feeds_from": {}},
+            ...16 entry ties for WC
+          ]},
+          {"stage": "LAST_16", "ties": [
+            {"home": "L32_W1", "away": "L32_W2", "matchday": 1,
+             "feeds_from": {"L32_W1": ("LAST_32", 0),
+                            "L32_W2": ("LAST_32", 1)}},
+            ...8 downstream ties with placeholder participants
+          ]},
+          ...
+        ]}
+        ```
+
+        Downstream-stage ties carry placeholder names (e.g., `L32_W1`)
+        that are resolved at lookup time by `_winner_of` via the
+        feeds_from wiring. Single source of truth for placeholder
+        naming: the seed itself. The bracket machinery does NOT depend
+        on a fixed placeholder convention; it only depends on consistent
+        keying between each tie's `feeds_from` entries and its game's
+        `home`/`away` strings.
+
+        Returns a state dict in the shape `BracketSportSource.
+        initial_state` produces: keys `_applied`, `_tie_results`,
+        `_bracket`, `_round_reached`. Compatible with `remaining_matches`,
+        `sample_result`, `apply_result`, `terminal_outcomes` as-is —
+        seed_from_chain is the entry point INSTEAD of `initial_state`,
+        not in addition to it.
+        """
+        bracket: Dict[str, List[Dict[str, Any]]] = {s: [] for s in self.KO_STAGES}
+        tie_results: Dict[Any, Dict[str, Any]] = {}
+
+        for stage_spec in seed.get("stages", []):
+            stage = stage_spec.get("stage")
+            if stage not in bracket:
+                continue
+            for tie_idx, tie_spec in enumerate(stage_spec.get("ties", [])):
+                home = tie_spec["home"]
+                away = tie_spec["away"]
+                matchday = tie_spec.get("matchday", 1)
+                feeds_from = tie_spec.get("feeds_from", {})
+                teams_set = frozenset({home, away})
+                # Synthetic game_id keyed by (stage, tie_idx, matchday).
+                # Required: AggregateLegSource._emit_remaining_games_for_tie
+                # filters by `game_id in applied`; a None game_id would
+                # cause the synthetic tie to be re-emitted every drain
+                # pass and the sim would never terminate.
+                game_id = f"chain:{stage}:{tie_idx}:leg{matchday}"
+                games = [{
+                    "game_id": game_id,
+                    "stage": stage,
+                    "matchday": matchday,
+                    "home": home,
+                    "away": away,
+                    "home_goals": None,
+                    "away_goals": None,
+                    "status": "SCHEDULED",
+                    "start_time": None,
+                    "extra": {},
+                }]
+                tie_meta = {
+                    "stage": stage,
+                    "teams": teams_set,
+                    "games": games,
+                    "feeds_from": feeds_from,
+                    "is_entry_tie": not feeds_from,
+                }
+                bracket[stage].append(tie_meta)
+                # Populate tie_results ONLY for entry ties (LAST_32 here).
+                # Downstream ties carry placeholder team names; their
+                # tie_results entry is created lazily by remaining_matches
+                # / apply_result once feeds_from resolves to real names.
+                # Eagerly populating with the placeholder set would leave
+                # dead `{L32_W1, L32_W2}`-keyed entries permanently
+                # alongside the real `{Mexico, Portugal}` entry written
+                # by apply_result.
+                if not feeds_from:
+                    tie_results[(stage, teams_set)] = self._new_tie_record(tie_meta)
+
+        return {
+            "_applied": frozenset(),
+            "_tie_results": tie_results,
+            "_bracket": bracket,
+            "_round_reached": {},
+        }
+
     # ---------- soccer-specific sampling: regulation + ET + penalty ----------
 
     def sample_result(

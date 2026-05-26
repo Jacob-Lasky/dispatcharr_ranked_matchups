@@ -414,18 +414,40 @@ class BracketSportSource(SportSource):
             return None
         return home, away
 
-    @staticmethod
     def _winner_of(
+        self,
         feed_ref: Tuple[str, int],
         bracket: Dict[str, List[Dict[str, Any]]],
         tie_results: Dict[Any, Dict[str, Any]],
     ) -> Optional[str]:
+        """Resolve the winner of the feeder tie at `feed_ref`. Looks up
+        tie_results using the tie's RESOLVED participants (recursively
+        via _resolve_participants), not its source-published team names.
+
+        Two cases where the published names diverge from the simulated
+        ones:
+          1. UCL-style counterfactual — an upstream sim flipped a feeder,
+             putting a different team into this tie than FD.org's draw
+             published.
+          2. WC chain seed (#53) — the entry tie's participants come from
+             the group-stage chain rather than FD.org; downstream-round
+             tie_metas carry placeholder names ("L32_W1" etc.) that have
+             to be resolved at lookup time, not at synthesis time.
+
+        Both cases were silently broken when this method consulted
+        `tie_meta["teams"]` directly: the lookup key was the published
+        set, the stored key was the simulated set, lookup returned None,
+        and the chain stalled.
+        """
         stage, tie_idx = feed_ref
         ties = bracket.get(stage, [])
         if tie_idx >= len(ties):
             return None
         tie_meta = ties[tie_idx]
-        tk = (stage, frozenset(tie_meta["teams"]))
+        participants = self._resolve_participants(tie_meta, bracket, tie_results)
+        if participants is None:
+            return None
+        tk = (stage, frozenset(participants))
         return tie_results.get(tk, {}).get("winner")
 
 
