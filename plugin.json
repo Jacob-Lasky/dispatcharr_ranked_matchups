@@ -233,16 +233,16 @@
     {
       "id": "enable_ncaa_mens_soccer",
       "type": "boolean",
-      "label": "NCAA Men's Soccer (D1)",
+      "label": "NCAA Men's Soccer (D1 + College Cup)",
       "default": false,
-      "help_text": "D1 men's soccer regular season. ESPN unofficial API + United Soccer Coaches Top 25 poll. Standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. College Cup bracket not yet modeled. No API key required."
+      "help_text": "D1 men's soccer regular season + College Cup tournament bracket. ESPN unofficial API + United Soccer Coaches Top 25 poll. Regular-season standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. Postseason: single-game elim (R1 -> R2 -> Sweet 16 -> Elite 8 -> College Cup Semis -> Final -> Champion). 48-team field with 16 byes for top seeds. No API key required."
     },
     {
       "id": "enable_ncaa_womens_soccer",
       "type": "boolean",
-      "label": "NCAA Women's Soccer (D1)",
+      "label": "NCAA Women's Soccer (D1 + College Cup)",
       "default": false,
-      "help_text": "D1 women's soccer regular season. ESPN unofficial API + United Soccer Coaches Top 25 poll. Standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. College Cup bracket not yet modeled. No API key required."
+      "help_text": "D1 women's soccer regular season + College Cup tournament bracket. ESPN unofficial API + United Soccer Coaches Top 25 poll. Regular-season standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. Postseason: single-game elim across 6 rounds (full 64-team field). No API key required."
     },
     {
       "id": "_section_keys",

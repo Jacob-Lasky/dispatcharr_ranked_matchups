@@ -4670,6 +4670,486 @@ class TestNcaawBasketballPlayoffSource:
 
 
 # =====================================================================
+# Issue #24: NCAA College Cup brackets (M's + W's)
+# =====================================================================
+
+class TestNcaaSoccerCupSource:
+    """One source class parametrized on gender — same shape / endpoints
+    / stage labels for both, only ESPN URL slug + league_context_code
+    differ. Mirrors NcaaSoccerSource (regular season) parametrization."""
+
+    @staticmethod
+    def _make(gender="m", bracket_games=None):
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
+            NcaaSoccerCupSource,
+        )
+        src = NcaaSoccerCupSource(gender=gender, season_year=2024)
+        src._bracket_games_cache = bracket_games or []
+        return src
+
+    # ---------- identity + parametrization ----------
+
+    def test_gender_routes_to_correct_context(self):
+        m = self._make("m")
+        w = self._make("w")
+        assert m._league_context_code() == "NCAA_MSOC_CUP"
+        assert w._league_context_code() == "NCAA_WSOC_CUP"
+        assert m.sport_prefix == "NCAAMSOC"
+        assert w.sport_prefix == "NCAAWSOC"
+        assert "Men's" in m.sport_label
+        assert "Women's" in w.sport_label
+
+    def test_gender_routes_to_correct_espn_slug(self):
+        assert self._make("m")._espn_slug == "usa.ncaa.m.1"
+        assert self._make("w")._espn_slug == "usa.ncaa.w.1"
+
+    def test_invalid_gender_rejected(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
+            NcaaSoccerCupSource,
+        )
+        try:
+            NcaaSoccerCupSource(gender="x")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("expected ValueError on invalid gender")
+
+    def test_supports_importance(self):
+        assert self._make("m").supports_importance is True
+        assert self._make("w").supports_importance is True
+
+    def test_ko_stages(self):
+        # Six rounds, same canonical labels as NCAAW Basketball's tournament
+        # so KNOCKOUT_ROUND_DEPTH entries are reused.
+        assert self._make().KO_STAGES == ("R64", "R32", "S16", "E8", "F4", "NCG")
+
+    def test_series_length_uniform_one(self):
+        """Single-game elim — every stage uses SERIES_LENGTH=1; clinches
+        at ceil(1/2)=1 win."""
+        src = self._make()
+        for stage in src.KO_STAGES:
+            assert src._series_length_for_stage(stage) == 1
+            assert src._clinching_wins_for_stage(stage) == 1
+
+    def test_winner_advance_label(self):
+        # NCG winner → NCG_WINNER synthetic depth (shared with NCAAW
+        # Basketball's bracket). All non-final stages return None and
+        # the base machinery handles the next-stage advance.
+        src = self._make()
+        assert src._winner_advance_label("NCG") == "NCG_WINNER"
+        assert src._winner_advance_label("F4") is None
+        assert src._winner_advance_label("R64") is None
+
+    # ---------- slug parser ----------
+
+    def test_slug_to_stage_table_covers_both_genders(self):
+        """Both M's and W's College Cup slugs map to the same canonical
+        stage labels — M's uses 'college-cup---semifinal' / 'college-
+        cup---championship', W's uses 'semifinals' / 'college-cup'. Pin
+        both gender aliases so an ESPN slug rename surfaces here, not
+        as silently-missing-stage in production."""
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
+            SLUG_TO_STAGE,
+        )
+        # Shared across genders (R1 - QF)
+        assert SLUG_TO_STAGE["first-round"] == "R64"
+        assert SLUG_TO_STAGE["second-round"] == "R32"
+        assert SLUG_TO_STAGE["third-round"] == "S16"
+        assert SLUG_TO_STAGE["quarterfinals"] == "E8"
+        # M's gender-specific aliases
+        assert SLUG_TO_STAGE["college-cup---semifinal"] == "F4"
+        assert SLUG_TO_STAGE["college-cup---championship"] == "NCG"
+        # W's gender-specific aliases
+        assert SLUG_TO_STAGE["semifinals"] == "F4"
+        assert SLUG_TO_STAGE["college-cup"] == "NCG"
+
+    def test_extract_bracket_record_filters_non_tournament_slugs(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
+            NcaaSoccerCupSource,
+        )
+        # Regular-season game with the regular-season slug should be
+        # filtered out entirely (return None), not silently coerced
+        # into a bracket stage.
+        event = {
+            "id": "regular-1",
+            "date": "2024-09-01T19:00:00Z",
+            "season": {"slug": "regular-season"},
+            "competitions": [{
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"location": "Stanford"}, "score": "2"},
+                    {"homeAway": "away", "team": {"location": "Washington"}, "score": "1"},
+                ],
+            }],
+        }
+        assert NcaaSoccerCupSource._extract_bracket_record(event) is None
+
+    def test_extract_bracket_record_routes_third_round_to_s16(self):
+        """ESPN's 'third-round' slug is what humans call Sweet 16 —
+        confirm the routing so a label mismatch surfaces here, not via
+        an importance-band silently misfiring on production data.
+        """
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
+            NcaaSoccerCupSource,
+        )
+        event = {
+            "id": "s16-1",
+            "date": "2024-11-30T19:00:00Z",
+            "season": {"slug": "third-round"},
+            "competitions": [{
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"location": "Stanford"}, "score": "2"},
+                    {"homeAway": "away", "team": {"location": "Washington"}, "score": "1"},
+                ],
+            }],
+        }
+        rec = NcaaSoccerCupSource._extract_bracket_record(event)
+        assert rec is not None
+        assert rec["stage"] == "S16"
+        assert rec["home"] == "Stanford"
+        assert rec["away"] == "Washington"
+        assert rec["home_goals"] == 2
+        assert rec["away_goals"] == 1
+        assert rec["status"] == "FINISHED"
+        assert rec["matchday"] == 1  # SERIES_LENGTH=1 means single game per "tie"
+
+    def test_extract_bracket_record_scheduled_has_no_score(self):
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
+            NcaaSoccerCupSource,
+        )
+        event = {
+            "id": "qf-1",
+            "date": "2030-12-07T19:00:00Z",
+            "season": {"slug": "quarterfinals"},
+            "competitions": [{
+                "status": {"type": {"completed": False, "state": "pre"}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"location": "Stanford"}},
+                    {"homeAway": "away", "team": {"location": "Washington"}},
+                ],
+            }],
+        }
+        rec = NcaaSoccerCupSource._extract_bracket_record(event)
+        assert rec is not None
+        assert rec["stage"] == "E8"
+        assert rec["status"] == "SCHEDULED"
+        assert rec["home_goals"] is None
+        assert rec["away_goals"] is None
+
+    # ---------- LEAGUE_CONTEXTS for both genders ----------
+
+    def test_contexts_use_knockout_format(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        assert LEAGUE_CONTEXTS["NCAA_MSOC_CUP"].format == "knockout"
+        assert LEAGUE_CONTEXTS["NCAA_WSOC_CUP"].format == "knockout"
+
+    def test_outcome_labels(self):
+        labels = self._make("m").outcome_labels
+        assert "round_of_32" in labels
+        assert "sweet_16" in labels
+        assert "elite_8" in labels
+        assert "college_cup_semis" in labels
+        assert "college_cup_final" in labels
+        assert "cup_winner" in labels
+
+    def test_thresholds_are_depth_ordered(self):
+        # Cross-sport calibration requires later stages to be ranked
+        # deeper than earlier ones. Out-of-order depths would break the
+        # cascade — a team reaching SF wouldn't be credited with the
+        # E8 / S16 / R32 labels below it.
+        from dispatcharr_ranked_matchups.scoring import (
+            LEAGUE_CONTEXTS, KNOCKOUT_ROUND_DEPTH,
+        )
+        for code in ("NCAA_MSOC_CUP", "NCAA_WSOC_CUP"):
+            ctx = LEAGUE_CONTEXTS[code]
+            depths = [
+                KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds
+            ]
+            for i in range(len(depths) - 1):
+                assert depths[i] < depths[i + 1], (
+                    f"{code} depths {depths} not monotonic at {i}"
+                )
+
+    def test_weights_are_monotonic_increasing(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        for code in ("NCAA_MSOC_CUP", "NCAA_WSOC_CUP"):
+            weights = [w for _, _, w in LEAGUE_CONTEXTS[code].thresholds]
+            for i in range(len(weights) - 1):
+                assert weights[i] < weights[i + 1], (
+                    f"{code} weights {weights} not monotonic at {i}"
+                )
+
+    # ---------- bracket cascade end-to-end ----------
+
+    def test_champion_cascade(self):
+        """A team that wins each of the 6 rounds reaches NCG_WINNER
+        depth and `terminal_outcomes` returns every band — pin the
+        cascade end-to-end so a future refactor of bracket.py can't
+        silently break the round_reached → terminal_outcomes path
+        for soccer-style brackets.
+        """
+        games = []
+        for i, (stage, opp) in enumerate([
+            ("R64", "Sixteen"),
+            ("R32", "Eight"),
+            ("S16", "Four"),
+            ("E8",  "Two"),
+            ("F4",  "One"),
+            ("NCG", "Final"),
+        ]):
+            games.append({
+                "game_id": f"ncsoc-{i+1}",
+                "stage": stage,
+                "matchday": 1,
+                "home": "Champion",
+                "away": opp,
+                "home_goals": 2,
+                "away_goals": 1,
+                "status": "FINISHED",
+                "start_time": None,
+                "extra": {},
+            })
+        src = self._make(bracket_games=games)
+        state = src.initial_state()
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        assert state["_round_reached"]["Champion"] == KNOCKOUT_ROUND_DEPTH["NCG_WINNER"]
+        assert state["_round_reached"]["Final"] == KNOCKOUT_ROUND_DEPTH["NCG"]
+        assert state["_round_reached"]["One"] == KNOCKOUT_ROUND_DEPTH["F4"]
+        outcomes = src.terminal_outcomes(state)
+        assert "cup_winner" in outcomes["Champion"]
+        assert "college_cup_final" in outcomes["Final"]
+        assert "college_cup_final" not in outcomes["One"]
+        assert "college_cup_semis" in outcomes["One"]
+
+    # ---------- sample_result forces a winner (no draws in bracket) ----------
+
+    def test_sample_result_never_produces_ties(self):
+        """Bracket games go to OT then PKs in real life — sample_result
+        must coin-flip a +1 to break a regulation tie. Distinct from the
+        regular-season NcaaSoccerSource which allows draws (1 standings
+        point each). Run a tight-Poisson sample 200x and confirm zero
+        draws.
+        """
+        import random
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        src = self._make()
+        strengths = {
+            "A": {"pf_per_game": 1.0, "pa_per_game": 1.0},
+            "B": {"pf_per_game": 1.0, "pa_per_game": 1.0},
+        }
+        gr = GameRow(
+            sport_prefix="NCAAMSOC", sport_label="NCAA Men's College Cup",
+            home="A", away="B", rank_home=None, rank_away=None,
+            start_time=datetime(2025, 12, 1, tzinfo=timezone.utc),
+        )
+        rng = random.Random(42)
+        ties = 0
+        for _ in range(200):
+            res = src.sample_result({}, gr, strengths, rng)
+            if res.home_goals == res.away_goals:
+                ties += 1
+        assert ties == 0, (
+            f"bracket sample_result must force a winner; got {ties} ties"
+        )
+
+    # ---------- strength sharing ----------
+
+    def test_set_regular_season_strengths_persists_to_estimate(self):
+        src = self._make()
+        custom = {
+            "Stanford":   {"pf_per_game": 2.5, "pa_per_game": 0.5},
+            "Washington": {"pf_per_game": 1.0, "pa_per_game": 1.5},
+        }
+        src.set_regular_season_strengths(custom)
+        assert src.estimate_strengths() == custom
+
+    def test_estimate_strengths_empty_when_not_seeded(self):
+        # Without a regular-season seed, the source returns {} and
+        # sample_result falls through to the league-average prior.
+        # Pin this so a future change to the default doesn't silently
+        # inject league-wide priors that should have been per-team.
+        assert self._make().estimate_strengths() == {}
+
+    # ---------- loser stops at the stage they lost ----------
+
+    def test_loser_round_reached_stops_at_lost_stage(self):
+        """A team that wins R64 + R32 but loses S16 should have
+        round_reached at depth(S16) — they made it to Sweet 16, didn't
+        advance to Elite 8. terminal_outcomes returns sweet_16 and
+        round_of_32 but NOT elite_8.
+        """
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        games = [
+            # Loser wins R64
+            {"game_id": "g1", "stage": "R64", "matchday": 1,
+             "home": "Loser", "away": "Sixteen",
+             "home_goals": 2, "away_goals": 1,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            # Loser wins R32
+            {"game_id": "g2", "stage": "R32", "matchday": 1,
+             "home": "Loser", "away": "Eight",
+             "home_goals": 2, "away_goals": 1,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            # Loser loses S16
+            {"game_id": "g3", "stage": "S16", "matchday": 1,
+             "home": "Loser", "away": "Four",
+             "home_goals": 0, "away_goals": 1,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        src = self._make(bracket_games=games)
+        state = src.initial_state()
+        rr = state["_round_reached"]
+        assert rr["Loser"] == KNOCKOUT_ROUND_DEPTH["S16"], (
+            f"Loser should reach S16 depth, got {rr['Loser']}"
+        )
+        # Four (the opponent that beat Loser at S16) advances to E8.
+        assert rr["Four"] == KNOCKOUT_ROUND_DEPTH["E8"]
+        outcomes = src.terminal_outcomes(state)
+        assert "sweet_16" in outcomes["Loser"]
+        assert "round_of_32" in outcomes["Loser"]
+        assert "elite_8" not in outcomes["Loser"]
+        assert "college_cup_semis" not in outcomes["Loser"]
+
+    # ---------- PK shootout dedup ----------
+
+    def test_dedupe_pk_shootout_keeps_non_tie_event(self):
+        """ESPN sometimes publishes two events for a soccer bracket
+        game that goes to PKs: one with regulation 0-0 and a second
+        with the PK shootout final score. The dedup must keep the
+        non-tie event so the bracket cascade gets the actual winner.
+        Pin the live 2024 M's Marshall @ SMU QF shape observed during
+        live verification.
+        """
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
+            _dedupe_pk_shootout_pairs,
+        )
+        regulation_tie = {
+            "game_id": "723937", "stage": "E8", "matchday": 1,
+            "home": "SMU", "away": "Marshall",
+            "home_goals": 0, "away_goals": 0,
+            "status": "FINISHED",
+            "start_time": datetime(2024, 12, 8, 0, 0, tzinfo=timezone.utc),
+            "extra": {},
+        }
+        pk_shootout = {
+            "game_id": "724472", "stage": "E8", "matchday": 1,
+            "home": "SMU", "away": "Marshall",
+            "home_goals": 2, "away_goals": 3,
+            "status": "FINISHED",
+            "start_time": datetime(2024, 12, 8, 20, 0, tzinfo=timezone.utc),
+            "extra": {},
+        }
+        deduped = _dedupe_pk_shootout_pairs([regulation_tie, pk_shootout])
+        assert len(deduped) == 1
+        assert deduped[0]["game_id"] == "724472"
+        assert deduped[0]["away_goals"] == 3
+        assert deduped[0]["home_goals"] == 2
+
+    def test_dedupe_with_scheduled_vs_finished_keeps_finished(self):
+        """A scheduled placeholder and a finished result for the same
+        bracket game must collapse to the finished record."""
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
+            _dedupe_pk_shootout_pairs,
+        )
+        scheduled = {
+            "game_id": "s1", "stage": "S16", "matchday": 1,
+            "home": "A", "away": "B",
+            "home_goals": None, "away_goals": None,
+            "status": "SCHEDULED",
+            "start_time": datetime(2024, 11, 30, tzinfo=timezone.utc),
+            "extra": {},
+        }
+        finished = {
+            "game_id": "f1", "stage": "S16", "matchday": 1,
+            "home": "A", "away": "B",
+            "home_goals": 2, "away_goals": 1,
+            "status": "FINISHED",
+            "start_time": datetime(2024, 11, 30, tzinfo=timezone.utc),
+            "extra": {},
+        }
+        deduped = _dedupe_pk_shootout_pairs([scheduled, finished])
+        assert len(deduped) == 1
+        assert deduped[0]["game_id"] == "f1"
+
+    def test_dedupe_passes_through_unique_games(self):
+        """A bracket with all distinct (stage, participants) tuples
+        passes through unchanged — no false collapsing of legitimate
+        bracket games."""
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
+            _dedupe_pk_shootout_pairs,
+        )
+        games = [
+            {"game_id": "1", "stage": "S16", "matchday": 1,
+             "home": "A", "away": "B", "home_goals": 2, "away_goals": 1,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "2", "stage": "S16", "matchday": 1,
+             "home": "C", "away": "D", "home_goals": 1, "away_goals": 2,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "3", "stage": "E8", "matchday": 1,
+             "home": "A", "away": "B",  # same teams BUT different stage
+             "home_goals": 3, "away_goals": 2,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        deduped = _dedupe_pk_shootout_pairs(games)
+        assert len(deduped) == 3
+        ids = {g["game_id"] for g in deduped}
+        assert ids == {"1", "2", "3"}
+
+    # ---------- fetch_upcoming (EPG emit side) ----------
+
+    def test_fetch_upcoming_emits_only_bracket_games(self, monkeypatch):
+        """fetch_upcoming must filter to events with a tournament slug
+        — a regular-season game that happens to fall in the same date
+        window must not appear. Pin via stub so a slug-table regression
+        surfaces here."""
+        from dispatcharr_ranked_matchups.sources import ncaa_soccer_cup as mod
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
+            NcaaSoccerCupSource,
+        )
+        # Two events: one tournament (third-round) and one regular-season.
+        # Only the tournament event should be emitted.
+        calls = {"n": 0}
+        def fake_get(url, *_a, **_kw):
+            calls["n"] += 1
+            if calls["n"] != 1:
+                return {"events": []}
+            return {"events": [
+                {"id": "tournament-event", "date": "2030-11-30T19:00:00Z",
+                 "season": {"slug": "third-round"},
+                 "competitions": [{
+                     "status": {"type": {"completed": False, "state": "pre"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"location": "Stanford"}},
+                         {"homeAway": "away", "team": {"location": "Washington"}},
+                     ],
+                 }]},
+                {"id": "regular-season-event", "date": "2030-11-30T22:00:00Z",
+                 "season": {"slug": "regular-season"},
+                 "competitions": [{
+                     "status": {"type": {"completed": False, "state": "pre"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"location": "UCLA"}},
+                         {"homeAway": "away", "team": {"location": "USC"}},
+                     ],
+                 }]},
+            ]}
+        monkeypatch.setattr(mod, "_http_get", fake_get)
+        src = NcaaSoccerCupSource(gender="m")
+        games = src.fetch_upcoming(days_ahead=0)
+        ids = {(g.extra or {}).get("espn_event_id") for g in games}
+        assert ids == {"tournament-event"}, (
+            f"only the bracket slug should pass through, got {ids}"
+        )
+        # And the emitted game carries the bracket stage in extra.
+        assert games[0].extra["stage"] == "S16"
+        assert games[0].extra["fd_competition_code"] == "NCAA_MSOC_CUP"
+
+
+# =====================================================================
 # Phase N: NCAA Softball
 # =====================================================================
 

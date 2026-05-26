@@ -490,9 +490,8 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # and is well above the tournament bubble. Bands tuned against the
     # United Soccer Coaches Top 25 historical NCAA Tournament cutoffs:
     # ~25 points is the bubble; 45+ puts a team in top-regional / seed
-    # contention. Postseason College Cup bracket is not modeled in V1
-    # (single-elimination — filed as follow-up; reuses the existing
-    # KnockoutSoccerSource machinery once API bracket data is parsed).
+    # contention. Postseason College Cup bracket lives at
+    # `NCAA_MSOC_CUP` / `NCAA_WSOC_CUP` further down (issue #24).
     "NCAA_MSOC": LeagueContext(
         code="NCAA_MSOC", matchdays_total=20, format="points_count",
         thresholds=[
@@ -512,6 +511,46 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             (50, "national_seed",     4.0),
         ],
         boundary_summary="25+ pts → bubble · 35+ → at-large lock · 45+ → top regional · 50+ → national seed (Women's)",
+    ),
+    # Issue #24: NCAA Men's + Women's College Cup brackets. Six rounds
+    # of single-game elimination (R64 → R32 → S16 → E8 → F4 → NCG)
+    # reusing the same stage labels as NCAA Women's March Madness —
+    # the depth ordering in KNOCKOUT_ROUND_DEPTH already supports them
+    # and the bracket-cascade behaves identically for any single-game
+    # elim shape. Field-size asymmetry handled at the source level
+    # (M's 48-team with 16 byes, W's full 64-team).
+    #
+    # Weights ramp aggressively toward the National Championship Game
+    # because postseason is when these channels get real broadcast
+    # pickup. The NCG is the single highest-viewership D1 soccer game
+    # by an order of magnitude; the cup_winner band concentrates that
+    # consequence. Entry round (R64) is NOT in the threshold list —
+    # making the tournament is the bar, advancing past R64 is what
+    # counts. Same pattern as NCAA Women's Basketball March Madness
+    # context which also omits R64 from its thresholds.
+    "NCAA_MSOC_CUP": LeagueContext(
+        code="NCAA_MSOC_CUP", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("R32",        "round_of_32",          1.0),
+            ("S16",        "sweet_16",             2.0),
+            ("E8",         "elite_8",              3.5),
+            ("F4",         "college_cup_semis",    5.0),
+            ("NCG",        "college_cup_final",    7.0),
+            ("NCG_WINNER", "cup_winner",          10.0),
+        ],
+        boundary_summary="R1 → R2 → Sweet 16 → Elite 8 → College Cup Semis → Final → Champion (Men's)",
+    ),
+    "NCAA_WSOC_CUP": LeagueContext(
+        code="NCAA_WSOC_CUP", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("R32",        "round_of_32",          1.0),
+            ("S16",        "sweet_16",             2.0),
+            ("E8",         "elite_8",              3.5),
+            ("F4",         "college_cup_semis",    5.0),
+            ("NCG",        "college_cup_final",    7.0),
+            ("NCG_WINNER", "cup_winner",          10.0),
+        ],
+        boundary_summary="R1 → R2 → Sweet 16 → Elite 8 → College Cup Semis → Final → Champion (Women's)",
     ),
     # NCAA football and men's basketball. Format is
     # "win_count" — threshold cutoffs are MINIMUM win counts rather than
