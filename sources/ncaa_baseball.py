@@ -56,6 +56,7 @@ from .._util import (
     parse_iso_utc,
     poisson_sample as _poisson,
 )
+from ._espn import extract_espn_scoreboard_event
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_baseball")
 
@@ -137,61 +138,11 @@ def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Convert one ESPN scoreboard event into the canonical PointsBased
     game record. Returns None if the event isn't a two-team competition
     we can score (cancellations, postponements with no competitors, etc.).
-    """
-    comps = event.get("competitions") or []
-    if not comps:
-        return None
-    comp = comps[0]
-    competitors = comp.get("competitors") or []
-    if len(competitors) != 2:
-        return None
-    home = next((c for c in competitors if c.get("homeAway") == "home"), None)
-    away = next((c for c in competitors if c.get("homeAway") == "away"), None)
-    if home is None or away is None:
-        return None
-    home_team = _team_canonical_name(home.get("team") or {})
-    away_team = _team_canonical_name(away.get("team") or {})
-    if not home_team or not away_team:
-        return None
-
-    status_type = (comp.get("status") or {}).get("type") or {}
-    completed = bool(status_type.get("completed"))
-    state = (status_type.get("state") or "").lower()
-    if completed or state == "post":
-        status = "FINISHED"
-    elif state == "in":
-        # In-progress games are unstable scores. Treat as SCHEDULED so
-        # the simulator doesn't seed wins/losses from mid-game state.
-        status = "SCHEDULED"
-    else:
-        status = "SCHEDULED"
-
-    try:
-        hp = int(home.get("score")) if status == "FINISHED" else None
-    except (TypeError, ValueError):
-        hp = None
-    try:
-        ap = int(away.get("score")) if status == "FINISHED" else None
-    except (TypeError, ValueError):
-        ap = None
-
-    # If "FINISHED" but scores are missing, demote to SCHEDULED: the
-    # importance simulator must not seed a 0-0 result.
-    if status == "FINISHED" and (hp is None or ap is None):
-        status = "SCHEDULED"
-        hp = None
-        ap = None
-
-    return {
-        "id": event.get("id"),
-        "home": home_team,
-        "away": away_team,
-        "home_points": hp,
-        "away_points": ap,
-        "status": status,
-        "start_time": parse_iso_utc(event.get("date")),
-        "extra": {},
-    }
+    The shared parser handles status / score / FINISHED-without-scores
+    demotion; ncaa_baseball's previous explicit `state == "in"` branch
+    is collapsed because the shared parser's else-branch produces the
+    same SCHEDULED outcome for in-progress games."""
+    return extract_espn_scoreboard_event(event, team_namer=_team_canonical_name)
 
 
 class NcaaBaseballRegularSource(PointsBasedSportSource):
