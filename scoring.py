@@ -232,6 +232,18 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
     "WCWS":            2,  # 8-team double-elim in OKC (#43)
     "WCWS_F":          3,  # Championship Finals (best-of-3)
     "WCWS_W":          4,  # WCWS Champion
+    # MLS Cup playoffs (issue #30 part B). Mixed format: Wild Card
+    # single-leg entry, R1 best-of-3, then single-leg CSF / CF / MLS Cup
+    # Final. MLS-prefixed labels so depths don't collide with NHL "R1"
+    # at depth 0 or MLB "WC" at depth 0 — each league reads its own
+    # bands, but within MLS the WC→R1→CSF advance must move up in
+    # depth, requiring unique labels.
+    "MLS_WC":          0,  # Wild Card play-in (8 vs 9 seed each conference)
+    "MLS_R1":          1,  # Round One (best-of-3)
+    "MLS_CSF":         2,  # Conference Semifinals (single-leg)
+    "MLS_CF":          3,  # Conference Finals (single-leg)
+    "MLS_CUP":         4,  # MLS Cup Final (single-leg, cross-conference)
+    "MLS_CUP_WINNER":  5,  # MLS Cup Champion (synthetic)
 }
 
 
@@ -781,6 +793,28 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
             (70, "shield_contender",     5.0),
         ],
         boundary_summary="30+ pts → bubble · 45+ → secured · 55+ → top-4 home field · 70+ → Shield contender (West)",
+    ),
+    # Issue #30 part B: MLS Cup playoff bracket. Mixed format — Wild
+    # Card single-leg entry, R1 best-of-3, then single-leg CSF / CF /
+    # MLS Cup Final. Weights ramp aggressively into the MLS Cup Final
+    # because postseason concentrates broadcast leverage; the Cup
+    # Final is the single highest-viewership domestic-soccer game in
+    # the US calendar. The Supporters' Shield band (regular-season
+    # league-best record) is handled on the East/West regular-season
+    # sources from issue #30 part A. MLS_WC is omitted from
+    # thresholds here — "made the tournament" is the bar, advancing
+    # past WC is what counts, mirroring the NCAAW Basketball March
+    # Madness and NCAA College Cup pattern of omitting entry rounds.
+    "MLS_PO": LeagueContext(
+        code="MLS_PO", matchdays_total=0, format="knockout",
+        thresholds=[
+            ("MLS_R1",         "round_one",       1.0),
+            ("MLS_CSF",        "conf_semis",      2.5),
+            ("MLS_CF",         "conf_final",      4.5),
+            ("MLS_CUP",        "mls_cup_final",   7.0),
+            ("MLS_CUP_WINNER", "mls_cup_winner", 10.0),
+        ],
+        boundary_summary="WC → R1 → Conf Semis → Conf Final → MLS Cup → Champion",
     ),
 }
 
