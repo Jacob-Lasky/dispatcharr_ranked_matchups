@@ -738,3 +738,69 @@ class TestScoreGameImportanceBranch:
         # weight=0 → zero contribution AND no breakdown entry — same as
         # importance_points=0. Other signals (rank_pair) still fire.
         assert "importance" not in score.breakdown
+
+
+class TestAdaptiveCompress:
+    """#7: season-relative score normalization via batch-median scaling."""
+
+    def test_falls_back_to_absolute_on_small_batch(self):
+        from dispatcharr_ranked_matchups.scoring import adaptive_compress, _compress_to_10
+        # 4 samples < _ADAPTIVE_MIN_SAMPLES=5 → absolute compression.
+        raws = [2.0, 4.0, 8.0, 12.0]
+        out = adaptive_compress(raws)
+        expected = [_compress_to_10(r) for r in raws]
+        assert out == expected
+
+    def test_scales_against_median_when_above_threshold(self):
+        from dispatcharr_ranked_matchups.scoring import adaptive_compress
+        # All-low batch: median 4 → scale=4. The top entry (8) is 2×
+        # median → should compress to a high but non-saturated value.
+        out = adaptive_compress([2.0, 3.0, 4.0, 5.0, 8.0])
+        # Median = 4. Each entry's tanh(r / (4 × 1.6)) = tanh(r/6.4).
+        # 4.0 (median) → 10 × tanh(4/6.4) = 10 × tanh(0.625) ≈ 5.54.
+        # 8.0 (2× median) → 10 × tanh(8/6.4) = 10 × tanh(1.25) ≈ 8.48.
+        assert 5.4 <= out[2] <= 5.6, f"median should map near 5.55, got {out[2]:.2f}"
+        assert 8.0 <= out[4] <= 8.7, f"2× median should map near 8.48, got {out[4]:.2f}"
+
+    def test_zero_compresses_to_zero(self):
+        from dispatcharr_ranked_matchups.scoring import adaptive_compress
+        out = adaptive_compress([0.0, 4.0, 8.0, 12.0, 16.0, 20.0])
+        assert out[0] == 0.0
+
+    def test_negative_raw_treated_as_zero(self):
+        from dispatcharr_ranked_matchups.scoring import adaptive_compress
+        out = adaptive_compress([-1.0, 4.0, 8.0, 12.0, 16.0, 20.0])
+        assert out[0] == 0.0
+
+    def test_uniformly_low_batch_doesnt_saturate(self):
+        # If every game is low (median 0.5), scale floors at 1.0 so a
+        # raw=0.5 doesn't compress to ★10 via division-by-near-zero.
+        from dispatcharr_ranked_matchups.scoring import adaptive_compress
+        out = adaptive_compress([0.5] * 5)
+        # All identical inputs map to the same output. With scale=1.0
+        # (floor): tanh(0.5/(1×1.6)) = tanh(0.3125) ≈ 0.303 → 3.03.
+        for v in out:
+            assert v < 4.0, f"low-uniform batch should NOT saturate, got {v:.2f}"
+
+    def test_late_season_inflated_batch_compresses(self):
+        # Late-season simulation: half the batch is high-stakes (raw 20+),
+        # median pushes high → high-raw scores no longer saturate at ★10.
+        from dispatcharr_ranked_matchups.scoring import adaptive_compress
+        out = adaptive_compress([4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0])
+        # Median = 16; routine games (raw=4-8, half the median) compress
+        # to mid-range; top (28 = ~1.75× median) still leaves headroom for the
+        # rare ★10. Top output well below 10 → curve doesn't saturate.
+        assert out[-1] < 10.0
+        # Spread: top of batch is meaningfully higher than median.
+        assert out[-1] - out[3] > 1.0
+
+    def test_preserves_ordering(self):
+        from dispatcharr_ranked_matchups.scoring import adaptive_compress
+        raws = [1.0, 5.0, 3.0, 9.0, 7.0, 12.0]
+        out = adaptive_compress(raws)
+        # Same order after normalization as raw order.
+        pairs_in = sorted(zip(raws, range(len(raws))))
+        pairs_out = sorted(zip(out, range(len(out))))
+        in_order = [i for _, i in pairs_in]
+        out_order = [i for _, i in pairs_out]
+        assert in_order == out_order

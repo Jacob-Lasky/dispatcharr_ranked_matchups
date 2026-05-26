@@ -887,6 +887,18 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         score = score_game(signals, weights)
         scored.append((g, signals, score))
 
+    # Adaptive normalization (#7): re-derive each game's final score from
+    # the batch's median raw, so top games feel "top" regardless of
+    # where in the season we are. Opt-in via `adaptive_scoring`; the
+    # default keeps the absolute-tanh compression in score_game.
+    if bool(settings.get("adaptive_scoring", False)) and scored:
+        from .scoring import adaptive_compress
+        raws = [score.raw for _, _, score in scored]
+        finals = adaptive_compress(raws)
+        for (game, sigs, score), new_final in zip(scored, finals):
+            del game, sigs  # unpacking only; the GameScore is what we update
+            score.final = round(new_final, 2)
+
     # Sort: today's games first (0 before 1), then 0-10 score desc, then raw as
     # tiebreak, then start_time ascending. So a game today with ★7 outranks a
     # game next week with ★9.5.

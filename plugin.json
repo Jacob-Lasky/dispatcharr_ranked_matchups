@@ -405,6 +405,13 @@
       "help_text": "Optional LLM-judged narrative score. Disabled by default — the Monte Carlo importance signal covers structural standings stakes. Set > 0 to enable Claude-based narrative scoring for storyline / form / managerial-drama factors that the structural simulator can't capture."
     },
     {
+      "id": "adaptive_scoring",
+      "type": "boolean",
+      "label": "Adaptive (season-relative) scoring",
+      "default": false,
+      "help_text": "Off (default) = absolute scoring: raw signal sum compressed via fixed tanh curve. ★10 saturates late-season; early-season weeks feel flat. On = each refresh batch's median raw score sets the scale, so the top games of any week always feel like top games. Recommended once the season is in full swing; leave off for the simpler absolute mode."
+    },
+    {
       "id": "weight_importance",
       "type": "number",
       "label": "Monte Carlo importance weight",
