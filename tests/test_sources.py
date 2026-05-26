@@ -8152,6 +8152,382 @@ class TestKnockoutSoccerSourceSeedFromChain:
         assert len(all_ids) == len(set(all_ids)), "duplicate synthetic game_ids"
 
 
+class TestGroupStageSoccerSourceChainWiring:
+    """`set_paired_knockout_source` + `cross_source_chain` together
+    expose the toggle that scoring.py:compute_match_importance reads
+    to decide between the single-source path and the chain path (#53).
+    """
+
+    @staticmethod
+    def _wc_pair():
+        from dispatcharr_ranked_matchups.sources.soccer import (
+            GroupStageSoccerSource, KnockoutSoccerSource,
+        )
+        groups = GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+        knockout = KnockoutSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+        return groups, knockout
+
+    def test_unwired_returns_none(self):
+        # No `_paired_knockout` registered: single-source path.
+        groups, _ = self._wc_pair()
+        assert groups.cross_source_chain() is None
+
+    def test_wired_with_empty_bracket_returns_chain(self):
+        # Pre-tournament state: knockout's _fetch_bracket_games returns
+        # empty (FD.org publishes placeholders with null team names).
+        # The chain should activate.
+        groups, knockout = self._wc_pair()
+        knockout._fetch_bracket_games = lambda: []  # type: ignore[method-assign]
+        groups.set_paired_knockout_source(knockout)
+        result = groups.cross_source_chain()
+        assert result is not None
+        downstream, seed_fn = result
+        assert downstream is knockout
+        # seed_fn is the bracket seed builder.
+        assert callable(seed_fn)
+
+    def test_wired_with_populated_bracket_returns_none(self):
+        # Mid-tournament toggle: once FD.org has real teams in the
+        # knockout bracket, the chain steps aside and lets the
+        # existing single-source path take over.
+        groups, knockout = self._wc_pair()
+        knockout._fetch_bracket_games = lambda: [  # type: ignore[method-assign]
+            {"game_id": 1, "stage": "LAST_32", "matchday": 1,
+             "home": "Mexico", "away": "Norway",
+             "home_goals": None, "away_goals": None,
+             "status": "SCHEDULED", "start_time": None, "extra": {}},
+        ]
+        groups.set_paired_knockout_source(knockout)
+        assert groups.cross_source_chain() is None
+
+
+class TestBuildBracketSeedWC2026:
+    """`_build_bracket_seed` maps a 12-group primary_state to the WC 2026
+    bracket structure per FIFA's published M73-M103 schedule. The
+    LAST_32 pairings are exact; best-3rd-place slot assignment is a
+    constraint-respecting greedy approximation of FIFA's Annex C.
+    """
+
+    @staticmethod
+    def _wc_source():
+        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
+        return GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+
+    @staticmethod
+    def _make_wc_state(group_data, team_group):
+        """Build a primary_state shaped like GroupStageSoccerSource produces."""
+        state = {"_applied": frozenset(), "_team_group": team_group}
+        for _grp, rows in group_data.items():
+            for team, points, gd, gf in rows:
+                state[team] = {"points": points, "gf": gf, "ga": gf - gd, "_played": 3}
+        return state
+
+    @classmethod
+    def _full_wc_state(cls, third_qualifiers=None):
+        """Build a full 12-group state where each group's finishing
+        order is deterministic: GA1 > GA2 > GA3 > GA4 by points.
+        `third_qualifiers`, if given, is a set of group letters whose
+        3rd-placers should have stronger stats so they advance as
+        best-3rd. Default: all 12 third-placers tied; tiebreaker by
+        alphabetical group letter (A wins, L loses) so the top 8 are A-H.
+        """
+        team_group: Dict[str, str] = {}
+        group_data: Dict[str, List[Tuple[str, int, int, int]]] = {}
+        third_qualifiers = third_qualifiers or set("ABCDEFGH")
+        for gi in range(12):
+            letter = chr(ord("A") + gi)
+            grp = f"GROUP_{letter}"
+            third_pts = 4 if letter in third_qualifiers else 1
+            third_gd = 2 if letter in third_qualifiers else -2
+            teams = [
+                (f"G{letter}1", 9, 5, 8),
+                (f"G{letter}2", 6, 2, 5),
+                (f"G{letter}3", third_pts, third_gd, 3),
+                (f"G{letter}4", 0, -5, 1),
+            ]
+            for t, _p, _g, _f in teams:
+                team_group[t] = grp
+            group_data[grp] = teams
+        return cls._make_wc_state(group_data, team_group)
+
+    def test_returns_five_stage_seed_shape(self):
+        src = self._wc_source()
+        state = self._full_wc_state()
+        seed = src._build_bracket_seed(state)
+        stage_names = [s["stage"] for s in seed["stages"]]
+        assert stage_names == [
+            "LAST_32", "LAST_16", "QUARTER_FINALS", "SEMI_FINALS", "FINAL",
+        ]
+
+    def test_last_32_has_16_ties(self):
+        src = self._wc_source()
+        state = self._full_wc_state()
+        seed = src._build_bracket_seed(state)
+        l32 = seed["stages"][0]
+        assert l32["stage"] == "LAST_32"
+        assert len(l32["ties"]) == 16
+
+    def test_last_32_pairing_m73_runners_up_a_vs_b(self):
+        # M73 per FIFA: 2A vs 2B → "GA2" vs "GB2" in our deterministic state.
+        src = self._wc_source()
+        state = self._full_wc_state()
+        seed = src._build_bracket_seed(state)
+        l32 = seed["stages"][0]["ties"]
+        m73 = l32[0]
+        assert {m73["home"], m73["away"]} == {"GA2", "GB2"}
+
+    def test_last_32_pairing_m75_fixed_winner_runner_up(self):
+        # M75 per FIFA: 1F vs 2C → "GF1" vs "GC2".
+        src = self._wc_source()
+        state = self._full_wc_state()
+        seed = src._build_bracket_seed(state)
+        l32 = seed["stages"][0]["ties"]
+        m75 = l32[2]
+        assert {m75["home"], m75["away"]} == {"GF1", "GC2"}
+
+    def test_best_third_respects_allowed_groups_constraint(self):
+        # M74 per FIFA: 1E vs best-third from {A,B,C,D,F}. The 3rd-placer
+        # MUST come from one of those 5 groups. The bracket MUST NOT
+        # pair "1E" with "GE3" (same group).
+        src = self._wc_source()
+        # Use a scenario where all 8 best-3rd-placers come from
+        # groups that include E — so the greedy assignment MIGHT
+        # accidentally place GE3 in M74's slot if the constraint
+        # were ignored.
+        state = self._full_wc_state(third_qualifiers=set("ABCDEFGH"))
+        seed = src._build_bracket_seed(state)
+        l32 = seed["stages"][0]["ties"]
+        m74 = l32[1]
+        # Home = 1E = "GE1"; away = best-3rd from {A,B,C,D,F}.
+        assert "GE1" in {m74["home"], m74["away"]}
+        third_team = m74["home"] if m74["away"] == "GE1" else m74["away"]
+        # Constraint: that team's group letter is in {A,B,C,D,F}, NOT E.
+        team_group_letter = third_team[1]  # "GA3" -> "A"
+        assert team_group_letter in "ABCDF"
+        assert team_group_letter != "E"
+
+    def test_last_16_pairings_match_fifa_published_tree(self):
+        # M89 = W73 vs W75 → L16 tie 0 wires to L32 indices 0 and 2.
+        # M90 = W74 vs W77 → L16 tie 1 wires to L32 indices 1 and 4.
+        src = self._wc_source()
+        state = self._full_wc_state()
+        seed = src._build_bracket_seed(state)
+        l16 = seed["stages"][1]["ties"]
+        # Tie 0: feeds_from should reference LAST_32 indices 0 and 2.
+        feeds_m89 = list(l16[0]["feeds_from"].values())
+        assert set(feeds_m89) == {("LAST_32", 0), ("LAST_32", 2)}
+        # Tie 1: indices 1 and 4.
+        feeds_m90 = list(l16[1]["feeds_from"].values())
+        assert set(feeds_m90) == {("LAST_32", 1), ("LAST_32", 4)}
+
+    def test_quarter_finals_pairings_match_fifa_published_tree(self):
+        # M97 = W89 vs W90 → QF tie 0 wires to LAST_16 indices 0 and 1.
+        # M99 = W91 vs W92 → QF tie 2 wires to LAST_16 indices 2 and 3.
+        src = self._wc_source()
+        state = self._full_wc_state()
+        seed = src._build_bracket_seed(state)
+        qf = seed["stages"][2]["ties"]
+        feeds_m97 = list(qf[0]["feeds_from"].values())
+        assert set(feeds_m97) == {("LAST_16", 0), ("LAST_16", 1)}
+        feeds_m99 = list(qf[2]["feeds_from"].values())
+        assert set(feeds_m99) == {("LAST_16", 2), ("LAST_16", 3)}
+
+    def test_semi_finals_and_final_have_correct_feeder_counts(self):
+        src = self._wc_source()
+        state = self._full_wc_state()
+        seed = src._build_bracket_seed(state)
+        sf = seed["stages"][3]["ties"]
+        final = seed["stages"][4]["ties"]
+        assert len(sf) == 2
+        assert len(final) == 1
+        # FINAL feeds from SF indices 0 and 1.
+        feeds_final = list(final[0]["feeds_from"].values())
+        assert set(feeds_final) == {("SEMI_FINALS", 0), ("SEMI_FINALS", 1)}
+
+    def test_no_same_group_pairings_in_last_32(self):
+        # Hard invariant: no two teams from the same group can meet in
+        # the LAST_32. The greedy 3rd-placer assignment honors this
+        # via the allowed-groups constraint.
+        src = self._wc_source()
+        state = self._full_wc_state()
+        seed = src._build_bracket_seed(state)
+        l32 = seed["stages"][0]["ties"]
+        for tie in l32:
+            assert tie["home"][1] != tie["away"][1], (
+                f"same-group L32 pairing: {tie['home']} vs {tie['away']}"
+            )
+
+    def test_only_top_n_third_placers_advance(self):
+        # 12 groups → 12 third-placers; with WC's
+        # best_third_place_count=8, exactly 8 should appear in L32 ties.
+        src = self._wc_source()
+        state = self._full_wc_state(third_qualifiers=set("ABCDEFGH"))
+        seed = src._build_bracket_seed(state)
+        l32 = seed["stages"][0]["ties"]
+        # Pull all 3rd-placers (team names ending in "3") that landed
+        # in L32 slots.
+        thirds_in_bracket = [
+            t for tie in l32 for t in (tie["home"], tie["away"])
+            if t.endswith("3")
+        ]
+        assert len(thirds_in_bracket) == 8
+        # All from the 8 strong groups (A-H), per the deterministic
+        # test setup.
+        for team in thirds_in_bracket:
+            assert team[1] in "ABCDEFGH"
+
+
+class TestWC2026ChainEndToEnd:
+    """The #53 acceptance criterion: a WC group-stage match must produce
+    nonzero leverage on R16 / QF / SF / FINAL / WINNER bands via the
+    cross-source chain.
+
+    This test bypasses FD.org by patching `_fetch_all_season_matches`
+    and `estimate_strengths` on the primary group source so the chain
+    runs against a deterministic 12-group, 72-match fixture set.
+    """
+
+    @staticmethod
+    def _wc_pair_with_fixtures():
+        """Build a GroupStageSoccerSource + KnockoutSoccerSource pair
+        with patched fetchers returning a synthetic WC 2026 fixture.
+        Each of 12 groups (A-L) has 4 teams playing 6 games. All games
+        SCHEDULED so the simulator drains them all per sim.
+        """
+        from dispatcharr_ranked_matchups.sources.soccer import (
+            GroupStageSoccerSource, KnockoutSoccerSource,
+        )
+        groups_src = GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+        knockout_src = KnockoutSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+
+        fixtures: List[Dict[str, Any]] = []
+        fid = 0
+        for gi in range(12):
+            letter = chr(ord("A") + gi)
+            grp = f"GROUP_{letter}"
+            teams = [f"G{letter}{n}" for n in (1, 2, 3, 4)]
+            # Round-robin 6 games per group.
+            pairs = [(0, 1), (2, 3), (0, 2), (1, 3), (0, 3), (1, 2)]
+            for pi, (a, b) in enumerate(pairs):
+                fid += 1
+                fixtures.append({
+                    "id": fid,
+                    "stage": "GROUP_STAGE",
+                    "group": grp,
+                    "matchday": pi % 3 + 1,
+                    "homeTeam": {"name": teams[a]},
+                    "awayTeam": {"name": teams[b]},
+                    "status": "SCHEDULED",
+                    "utcDate": "2026-06-11T19:00:00Z",
+                    "score": {},
+                })
+        groups_src._all_matches_cache = fixtures
+        knockout_src._all_matches_cache = fixtures  # the knockout filters down
+
+        # Synthetic strengths: G[L]1 strongest, G[L]4 weakest in each group.
+        # Stronger groups (earlier alphabet) have higher absolute strengths
+        # so the cross-group standings settle into a deterministic-ish
+        # qualification pattern across sims.
+        strengths: Dict[str, Dict[str, float]] = {}
+        for gi in range(12):
+            letter = chr(ord("A") + gi)
+            base = 2.5 - gi * 0.05
+            strengths[f"G{letter}1"] = {"sh": base + 1.2, "sa": base + 0.9, "ch": 0.5, "ca": 0.7}
+            strengths[f"G{letter}2"] = {"sh": base + 0.4, "sa": base + 0.2, "ch": 1.0, "ca": 1.2}
+            strengths[f"G{letter}3"] = {"sh": base - 0.2, "sa": base - 0.4, "ch": 1.5, "ca": 1.7}
+            strengths[f"G{letter}4"] = {"sh": base - 1.0, "sa": base - 1.2, "ch": 2.0, "ca": 2.2}
+        groups_src.estimate_strengths = lambda: strengths  # type: ignore[method-assign]
+        knockout_src.estimate_strengths = lambda: strengths  # type: ignore[method-assign]
+
+        # Knockout source's bracket fetcher returns empty (pre-tournament
+        # state). Without this the chain toggles off.
+        knockout_src._fetch_bracket_games = lambda: []  # type: ignore[method-assign]
+
+        groups_src.set_paired_knockout_source(knockout_src)
+        return groups_src, knockout_src
+
+    def test_chain_runs_end_to_end_and_emits_knockout_outcomes(self):
+        # Smoke test: the chain runs without exceptions and the merged
+        # outcomes include knockout-stage labels for at least one team
+        # in the simulated bracket.
+        import random
+        from dispatcharr_ranked_matchups import simulation
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+
+        groups_src, _ = self._wc_pair_with_fixtures()
+        chain = groups_src.cross_source_chain()
+        assert chain is not None
+        knockout_src, seed_fn = chain
+
+        # Target a group A MD1 game (GA1 vs GA2).
+        target = GameRow(
+            sport_prefix="WC", sport_label="FIFA World Cup",
+            home="GA1", away="GA2",
+            rank_home=None, rank_away=None, start_time=None,
+            extra={"fd_id": 1, "stage": "GROUP_STAGE",
+                   "fd_competition_code": "WC_GS"},
+        )
+
+        # Query a knockout-stage outcome for one of the playing teams.
+        queries = [("GA1", "round_of_16"), ("GA1", "quarterfinal")]
+        out = simulation.monte_carlo_importance_batch_chain(
+            groups_src, target, queries=queries,
+            downstream=knockout_src, seed_fn=seed_fn,
+            n_sims=20, rng=random.Random(0),
+        )
+        # Result dict has both queries; values in [0, 1].
+        assert set(out.keys()) == set(queries)
+        for v in out.values():
+            assert 0.0 <= v <= 1.0
+
+    def test_chain_emits_nonzero_r16_leverage_for_group_game(self):
+        # Acceptance criterion from #53: a group-stage game should
+        # report NONZERO leverage on R16+ outcomes via the chain.
+        # Without the chain, the single-source path returns 0 on every
+        # knockout band for a group source (the group source's
+        # outcome vocabulary is just advance/eliminated).
+        import random
+        from dispatcharr_ranked_matchups import simulation
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+
+        groups_src, _ = self._wc_pair_with_fixtures()
+        chain = groups_src.cross_source_chain()
+        assert chain is not None
+        knockout_src, seed_fn = chain
+
+        target = GameRow(
+            sport_prefix="WC", sport_label="FIFA World Cup",
+            home="GA1", away="GA2",
+            rank_home=None, rank_away=None, start_time=None,
+            extra={"fd_id": 1, "stage": "GROUP_STAGE",
+                   "fd_competition_code": "WC_GS"},
+        )
+
+        # Query several knockout bands on the strong team. With 200
+        # sims and the synthetic strength gradient, at least one
+        # downstream band should show measurable leverage.
+        queries = [
+            ("GA1", "round_of_16"),
+            ("GA1", "quarterfinal"),
+            ("GA1", "semifinal"),
+        ]
+        out = simulation.monte_carlo_importance_batch_chain(
+            groups_src, target, queries=queries,
+            downstream=knockout_src, seed_fn=seed_fn,
+            n_sims=200, rng=random.Random(0),
+        )
+        # At least one knockout band fires with measurable leverage.
+        # The exact band that fires depends on the strength gradient;
+        # the test passes as long as the chain isn't returning 0 on
+        # every downstream query (which would be the bug #53 reports).
+        max_leverage = max(out.values())
+        assert max_leverage > 0.01, (
+            f"chain returned ~zero leverage on all knockout queries: {out!r} — "
+            "the #53 bug pattern (group games show 0 on every downstream "
+            "band) appears to be unfixed"
+        )
+
+
 class TestGroupStageContextCodes:
     """LEAGUE_CONTEXTS entries for WC_GS / EC_GS must exist with the
     `advance` outcome label so the GroupStageSoccerSource's
