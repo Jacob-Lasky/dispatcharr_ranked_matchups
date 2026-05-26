@@ -724,7 +724,7 @@ class TestSoccerImportanceInterface:
         src = SoccerSource("ucl", fd_api_key="fake")  # ucl → fd_code="CL", knockout
         src._all_matches_cache = []  # avoid HTTP
         # Hand-built minimal state: the guard short-circuits before reading it.
-        state = {"_applied": frozenset(), "Some Team": {"played": 0, "points": 0, "gf": 0, "ga": 0}}
+        state = {"_applied": frozenset(), "_teams": {"Some Team": {"played": 0, "points": 0, "gf": 0, "ga": 0}}}
         with caplog.at_level("WARNING"):
             out = src.terminal_outcomes(state)
         assert out == {"Some Team": []}
@@ -768,16 +768,16 @@ class TestSoccerImportanceInterface:
         state = src.initial_state()
         # Team A won twice (3 pts × 2 = 6); Team C beat Team D (3 pts);
         # Team B lost (0 pts); Team D lost twice (0 pts).
-        assert state["Team A"]["played"] == 2
-        assert state["Team A"]["points"] == 6
-        assert state["Team A"]["gf"] == 5
-        assert state["Team A"]["ga"] == 0
-        assert state["Team B"]["played"] == 1
-        assert state["Team B"]["points"] == 0
-        assert state["Team C"]["played"] == 2
-        assert state["Team C"]["points"] == 3
-        assert state["Team D"]["played"] == 1
-        assert state["Team D"]["points"] == 0
+        assert state["_teams"]["Team A"]["played"] == 2
+        assert state["_teams"]["Team A"]["points"] == 6
+        assert state["_teams"]["Team A"]["gf"] == 5
+        assert state["_teams"]["Team A"]["ga"] == 0
+        assert state["_teams"]["Team B"]["played"] == 1
+        assert state["_teams"]["Team B"]["points"] == 0
+        assert state["_teams"]["Team C"]["played"] == 2
+        assert state["_teams"]["Team C"]["points"] == 3
+        assert state["_teams"]["Team D"]["played"] == 1
+        assert state["_teams"]["Team D"]["points"] == 0
 
     def test_initial_state_tracks_applied_matches(self):
         src = self._make_source()
@@ -841,15 +841,15 @@ class TestSoccerImportanceInterface:
     def test_apply_result_does_not_mutate_input_state(self):
         src = self._make_source()
         state = src.initial_state()
-        original_a_pts = state["Team A"]["points"]
+        original_a_pts = state["_teams"]["Team A"]["points"]
         original_applied = state["_applied"]
         match = next(m for m in src.remaining_matches(state) if m.extra["fd_id"] == 105)
         new_state = src.apply_result(state, match, MatchResult(home_goals=2, away_goals=0))
         # Input state untouched.
-        assert state["Team A"]["points"] == original_a_pts
+        assert state["_teams"]["Team A"]["points"] == original_a_pts
         assert state["_applied"] == original_applied
         # New state reflects the result.
-        assert new_state["Team A"]["points"] == original_a_pts + 3
+        assert new_state["_teams"]["Team A"]["points"] == original_a_pts + 3
         assert 105 in new_state["_applied"]
 
     def test_apply_result_draw(self):
@@ -857,16 +857,16 @@ class TestSoccerImportanceInterface:
         state = src.initial_state()
         match = next(m for m in src.remaining_matches(state) if m.extra["fd_id"] == 104)
         new_state = src.apply_result(state, match, MatchResult(home_goals=1, away_goals=1))
-        assert new_state["Team B"]["points"] == state["Team B"]["points"] + 1
-        assert new_state["Team D"]["points"] == state["Team D"]["points"] + 1
+        assert new_state["_teams"]["Team B"]["points"] == state["_teams"]["Team B"]["points"] + 1
+        assert new_state["_teams"]["Team D"]["points"] == state["_teams"]["Team D"]["points"] + 1
 
     def test_apply_result_away_win(self):
         src = self._make_source()
         state = src.initial_state()
         match = next(m for m in src.remaining_matches(state) if m.extra["fd_id"] == 104)
         new_state = src.apply_result(state, match, MatchResult(home_goals=0, away_goals=2))
-        assert new_state["Team B"]["points"] == state["Team B"]["points"]  # no change
-        assert new_state["Team D"]["points"] == state["Team D"]["points"] + 3
+        assert new_state["_teams"]["Team B"]["points"] == state["_teams"]["Team B"]["points"]  # no change
+        assert new_state["_teams"]["Team D"]["points"] == state["_teams"]["Team D"]["points"] + 3
 
     # ---------- terminal_outcomes ----------
 
@@ -875,9 +875,9 @@ class TestSoccerImportanceInterface:
         # position 1 should match all three top-side labels.
         src = self._make_source()
         # Hand-craft a fake final state with 20 teams.
-        state = {"_applied": frozenset()}
+        state = {"_applied": frozenset(), "_teams": {}}
         for i in range(1, 21):
-            state[f"Team {i}"] = {"played": 38, "points": 100 - i * 3, "gf": 80 - i, "ga": 20}
+            state["_teams"][f"Team {i}"] = {"played": 38, "points": 100 - i * 3, "gf": 80 - i, "ga": 20}
         outcomes = src.terminal_outcomes(state)
         assert "title" in outcomes["Team 1"]
         assert "UCL" in outcomes["Team 1"]
@@ -890,9 +890,9 @@ class TestSoccerImportanceInterface:
     def test_terminal_outcomes_assigns_bottom_side_exclusively(self):
         # In EPL: relegation cutoff = 17 (bottom-side, pos > 17 → relegated).
         src = self._make_source()
-        state = {"_applied": frozenset()}
+        state = {"_applied": frozenset(), "_teams": {}}
         for i in range(1, 21):
-            state[f"Team {i}"] = {"played": 38, "points": 100 - i * 3, "gf": 80 - i, "ga": 20}
+            state["_teams"][f"Team {i}"] = {"played": 38, "points": 100 - i * 3, "gf": 80 - i, "ga": 20}
         outcomes = src.terminal_outcomes(state)
         # Team 17 should be safe (pos 17 is not > 17).
         assert "relegation" not in outcomes["Team 17"]
@@ -904,16 +904,16 @@ class TestSoccerImportanceInterface:
     def test_terminal_outcomes_sorts_by_points_then_gd(self):
         # Two teams tied on points; goal differential breaks the tie.
         src = self._make_source()
-        state = {"_applied": frozenset()}
-        state["Tied A"] = {"played": 38, "points": 80, "gf": 70, "ga": 50}  # gd=20
-        state["Tied B"] = {"played": 38, "points": 80, "gf": 60, "ga": 50}  # gd=10
+        state = {"_applied": frozenset(), "_teams": {}}
+        state["_teams"]["Tied A"] = {"played": 38, "points": 80, "gf": 70, "ga": 50}  # gd=20
+        state["_teams"]["Tied B"] = {"played": 38, "points": 80, "gf": 60, "ga": 50}  # gd=10
         # Two stronger fillers (one above each tied team) plus weaker fillers
         # so Tied A / Tied B land at positions 3 and 4: straddling the UCL
         # cutoff so the GD tiebreak is observable.
-        state["Strong 1"] = {"played": 38, "points": 90, "gf": 60, "ga": 30}
-        state["Strong 2"] = {"played": 38, "points": 85, "gf": 60, "ga": 35}
+        state["_teams"]["Strong 1"] = {"played": 38, "points": 90, "gf": 60, "ga": 30}
+        state["_teams"]["Strong 2"] = {"played": 38, "points": 85, "gf": 60, "ga": 35}
         for i in range(5, 21):
-            state[f"Filler {i}"] = {"played": 38, "points": 100 - i * 5, "gf": 40, "ga": 50}
+            state["_teams"][f"Filler {i}"] = {"played": 38, "points": 100 - i * 5, "gf": 40, "ga": 50}
         outcomes = src.terminal_outcomes(state)
         # Tied A finishes #3 (UCL cutoff = top 4 → in UCL).
         # Tied B finishes #4 (also in UCL, but the next teams below are
@@ -7745,7 +7745,7 @@ class TestGroupStageSoccerSource:
         src = self._make_source(matches)
         state = src.initial_state()
         for team in ("Mexico", "South Africa", "Argentina", "Chile"):
-            assert state[team] == {"played": 0, "points": 0, "gf": 0, "ga": 0}
+            assert state["_teams"][team] == {"played": 0, "points": 0, "gf": 0, "ga": 0}
         assert state["_applied"] == frozenset()
         assert state["_team_group"]["Mexico"] == "GROUP_A"
 
@@ -7762,10 +7762,10 @@ class TestGroupStageSoccerSource:
         ]
         src = self._make_source(matches)
         state = src.initial_state()
-        assert state["Mexico"] == {"played": 1, "points": 3, "gf": 3, "ga": 1}
-        assert state["South Africa"] == {"played": 1, "points": 0, "gf": 1, "ga": 3}
-        assert state["Argentina"] == {"played": 1, "points": 3, "gf": 2, "ga": 0}
-        assert state["Chile"] == {"played": 1, "points": 0, "gf": 0, "ga": 2}
+        assert state["_teams"]["Mexico"] == {"played": 1, "points": 3, "gf": 3, "ga": 1}
+        assert state["_teams"]["South Africa"] == {"played": 1, "points": 0, "gf": 1, "ga": 3}
+        assert state["_teams"]["Argentina"] == {"played": 1, "points": 3, "gf": 2, "ga": 0}
+        assert state["_teams"]["Chile"] == {"played": 1, "points": 0, "gf": 0, "ga": 2}
         assert state["_applied"] == frozenset({1, 2})
 
     def test_initial_state_skips_knockout_matches(self):
@@ -7783,8 +7783,8 @@ class TestGroupStageSoccerSource:
         ]
         src = self._make_source(matches)
         state = src.initial_state()
-        assert state["Mexico"]["points"] == 3  # ONLY the group match counts
-        assert state["Mexico"]["gf"] == 3
+        assert state["_teams"]["Mexico"]["points"] == 3  # ONLY the group match counts
+        assert state["_teams"]["Mexico"]["gf"] == 3
         # Germany isn't in the group map → no row at all.
         assert "Germany" not in state
 
@@ -7907,8 +7907,8 @@ class TestGroupStageSoccerSource:
         matches = [self._match(1, "GROUP_A", "Mexico", "South Africa")]
         src = self._make_source(matches)
         state = src.initial_state()
-        snap_mex = dict(state["Mexico"])
-        snap_sa = dict(state["South Africa"])
+        snap_mex = dict(state["_teams"]["Mexico"])
+        snap_sa = dict(state["_teams"]["South Africa"])
         snap_applied = set(state["_applied"])
 
         match = GameRow(
@@ -7920,12 +7920,12 @@ class TestGroupStageSoccerSource:
         result = MatchResult(home_goals=3, away_goals=1)
         new_state = src.apply_result(state, match, result)
         # Original untouched.
-        assert state["Mexico"] == snap_mex
-        assert state["South Africa"] == snap_sa
+        assert state["_teams"]["Mexico"] == snap_mex
+        assert state["_teams"]["South Africa"] == snap_sa
         assert set(state["_applied"]) == snap_applied
         # New state has the result.
-        assert new_state["Mexico"]["points"] == 3
-        assert new_state["Mexico"]["gf"] == 3
+        assert new_state["_teams"]["Mexico"]["points"] == 3
+        assert new_state["_teams"]["Mexico"]["gf"] == 3
         assert 1 in new_state["_applied"]
 
 
@@ -8216,10 +8216,10 @@ class TestBuildBracketSeedWC2026:
     @staticmethod
     def _make_wc_state(group_data, team_group):
         """Build a primary_state shaped like GroupStageSoccerSource produces."""
-        state = {"_applied": frozenset(), "_team_group": team_group}
+        state = {"_applied": frozenset(), "_team_group": team_group, "_teams": {}}
         for _grp, rows in group_data.items():
             for team, points, gd, gf in rows:
-                state[team] = {"points": points, "gf": gf, "ga": gf - gd, "_played": 3}
+                state["_teams"][team] = {"points": points, "gf": gf, "ga": gf - gd, "_played": 3}
         return state
 
     @classmethod
@@ -8787,11 +8787,10 @@ class TestGroupStageBestThirdPlace:
     def _make_state(group_data, team_group):
         """Build a state dict from {group: [(team, points, gd, gf), ...]}.
         Each group should have 4 teams pre-sorted by position."""
-        state = {"_applied": set(), "_team_group": team_group}
+        state = {"_applied": set(), "_team_group": team_group, "_teams": {}}
         for group, rows in group_data.items():
             for team, points, gd, gf in rows:
-                state[team] = {
-                    "points": points,
+                state["_teams"][team] = {"points": points,
                     "gf": gf,
                     "ga": gf - gd,  # we only need gf-ga for diff; ga value here doesn't matter
                     "_played": 3,
@@ -9028,10 +9027,10 @@ class TestComputeGroupStandings:
     def _make_state(group_data, team_group):
         """Same shape as TestGroupStageBestThirdPlace's helper: per-team
         rows with points / gf / ga; the helper computes gd = gf - ga."""
-        state = {"_applied": set(), "_team_group": team_group}
+        state = {"_applied": set(), "_team_group": team_group, "_teams": {}}
         for _grp, rows in group_data.items():
             for team, points, gd, gf in rows:
-                state[team] = {"points": points, "gf": gf, "ga": gf - gd, "_played": 3}
+                state["_teams"][team] = {"points": points, "gf": gf, "ga": gf - gd, "_played": 3}
         return state
 
     def test_by_group_sorted_by_fifa_tiebreaker(self):
@@ -9096,7 +9095,7 @@ class TestComputeGroupStandings:
         # best_third_place_count=8.
         src = self._wc_source()
         _, _, n = src._compute_group_standings(
-            {"_applied": set(), "_team_group": {}}
+            {"_applied": set(), "_team_group": {}, "_teams": {}}
         )
         assert n == 8
 
@@ -9104,7 +9103,7 @@ class TestComputeGroupStandings:
         # EURO 2024+ config maps to EC_GS with best_third_place_count=4.
         src = self._euro_source()
         _, _, n = src._compute_group_standings(
-            {"_applied": set(), "_team_group": {}}
+            {"_applied": set(), "_team_group": {}, "_teams": {}}
         )
         assert n == 4
 
@@ -9165,7 +9164,7 @@ class TestComputeGroupStandings:
         # supported because Phase B's call sites and earlier ones rely on
         # it. Pin both contracts here.
         src = self._wc_source()
-        state = {"_applied": set(), "_team_group": {}}
+        state = {"_applied": set(), "_team_group": {}, "_teams": {}}
         standings = src._compute_group_standings(state)
         # Field access shape.
         assert standings.by_group == {}
@@ -9191,7 +9190,7 @@ class TestComputeGroupStandings:
         src = GroupStageSoccerSource("bundesliga", fd_api_key="x", odds_api_key="")
         assert src._group_stage_context_code() not in LEAGUE_CONTEXTS
         standings = src._compute_group_standings(
-            {"_applied": set(), "_team_group": {}}
+            {"_applied": set(), "_team_group": {}, "_teams": {}}
         )
         assert standings.n_best_third_advance == 0
 

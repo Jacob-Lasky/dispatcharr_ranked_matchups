@@ -16,7 +16,46 @@ import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, TypedDict
+
+
+class SoccerTeamRow(TypedDict):
+    """Per-team standings row used by SoccerSource / GroupStageSoccerSource.
+
+    DO NOT add fields here without checking every producer and consumer in
+    sources/soccer.py -- this row is constructed in two `initial_state`
+    methods and mutated in `_mutate_apply`; a missing field is a runtime
+    KeyError on the first match the simulator applies. A renamed field is
+    worse: silent miscounting in the standings sort that drives
+    terminal_outcomes' advance/eliminated labels."""
+    played: int
+    points: int
+    gf: int   # goals for
+    ga: int   # goals against
+
+
+class PointsBasedTeamRow(TypedDict):
+    """Per-team row used by PointsBasedSportSource (NCAAF / NCAAM / NFL /
+    NHL / MLB / NBA / MLS conference standings / NCAA baseball / etc.).
+
+    NHL subclasses extend with a `standings_points` field via
+    `_record_result_into_state` override; the TypedDict is total=False so
+    a typed consumer can read it without pyright complaining that it might
+    be missing on non-NHL rows."""
+    wins: int
+    losses: int
+    pf: int            # points-for (aggregated across games)
+    pa: int            # points-against
+    games_played: int
+
+
+class PointsBasedTeamRowWithStandings(PointsBasedTeamRow, total=False):
+    """NHL extends the base row with `standings_points` (regulation +
+    OT + shootout per the NHL 2-point regulation / 1-point OT-loss
+    rule). Other points-based sports don't need this field. Optional
+    via total=False so consumers can read row.get('standings_points')
+    safely."""
+    standings_points: int
 
 
 @dataclass

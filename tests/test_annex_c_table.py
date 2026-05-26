@@ -173,8 +173,8 @@ class TestBuildBracketSeedUsesCanonicalMapping:
     def _state_with_thirds_abcdefgh(soccer):
         # Lifted from test_sources.py::TestBuildBracketSeedWC2026._full_wc_state
         # but inlined to avoid cross-file fixture coupling.
-        team_group = {}
-        state = {"_applied": frozenset(), "_team_group": team_group}
+        team_group: dict = {}
+        teams_dict: dict = {}
         for gi in range(12):
             letter = chr(ord("A") + gi)
             grp = f"GROUP_{letter}"
@@ -189,8 +189,8 @@ class TestBuildBracketSeedUsesCanonicalMapping:
             ]
             for team, points, gd, gf in teams:
                 team_group[team] = grp
-                state[team] = {"points": points, "gf": gf, "ga": gf - gd, "_played": 3}
-        return state
+                teams_dict[team] = {"points": points, "gf": gf, "ga": gf - gd, "played": 3}
+        return {"_applied": frozenset(), "_team_group": team_group, "_teams": teams_dict}
 
     def test_canonical_m74_assignment(self, soccer):
         """Annex C row {ABCDEFGH}: M74's away (the slot whose home is
