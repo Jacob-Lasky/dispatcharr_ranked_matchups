@@ -143,6 +143,13 @@ class LeagueContext:
     thresholds: List[Tuple[Any, str, float]] = field(default_factory=list)
     boundary_summary: str = ""   # e.g. "Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation"
     format: str = "league"       # "league" | "knockout" | "win_count" | "points_count"
+    # Only meaningful for format="group_advance" (WC_GS / EC_GS). N > 0 means
+    # the top N third-place teams across ALL groups also advance via the FIFA
+    # tiebreaker chain (points → goal_diff → goals_for → alphabetical fallback).
+    # Default 0 = strict top-2-per-group, no third-place advancement. See #52.
+    #   WC 2026: 12 groups, top 2 + 8 best 3rds = 32 advancing → best_third_place_count=8
+    #   EURO 2024: 6 groups, top 2 + 4 best 3rds = 16 advancing → best_third_place_count=4
+    best_third_place_count: int = 0
 
 
 # Knockout-round depth ordering. Higher = deeper. The bracket source's
@@ -409,14 +416,23 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         thresholds=[
             (_GROUP_ADVANCE_SENTINEL, "advance", 4.0),
         ],
-        boundary_summary="Top 2 per group → LAST_32 (FIFA World Cup group stage)",
+        # WC 2026 format: 12 groups × 4 teams, top 2 + 8 best 3rd-place
+        # = 32 advancing teams → LAST_32. Best-3rd advancement is ~25%
+        # of advancing teams and was the #52 follow-up to #20.
+        boundary_summary="Top 2 per group + 8 best 3rd-place → LAST_32 (FIFA World Cup group stage)",
+        best_third_place_count=8,
     ),
     "EC_GS": LeagueContext(
         code="EC_GS", matchdays_total=3, format="group_advance",
         thresholds=[
             (_GROUP_ADVANCE_SENTINEL, "advance", 3.0),
         ],
-        boundary_summary="Top 2 per group → LAST_16 (UEFA EURO group stage)",
+        # EURO 2016/2020/2024 format: 6 groups × 4 teams, top 2 + 4 best
+        # 3rd-place = 16 advancing → LAST_16. EURO has used this format
+        # since 2016; the older 16-team / 8-team formats had no 3rd-place
+        # advancement (covered by best_third_place_count=0 default).
+        boundary_summary="Top 2 per group + 4 best 3rd-place → LAST_16 (UEFA EURO group stage)",
+        best_third_place_count=4,
     ),
     # NCAA Division I baseball regular season. Win-count
     # thresholds tuned against historical NCAA Tournament selection

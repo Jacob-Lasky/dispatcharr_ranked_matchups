@@ -6333,7 +6333,11 @@ class TestGroupStageSoccerSource:
 
     def test_terminal_outcomes_top_2_per_group_advance(self):
         # Group A finished: Mexico 9pts, Argentina 6pts, Chile 3pts, SA 0pts.
-        # Top 2 (Mexico, Argentina) advance; Chile + SA eliminated.
+        # Top 2 (Mexico, Argentina) advance. Chile is 3rd — could be
+        # promoted via best-3rd-place (#52) in a multi-group fixture, so
+        # this test focuses ONLY on the top-2-per-group claim and the
+        # bottom-of-group elimination. 4th place (South Africa) never
+        # advances regardless of best-3rd logic.
         matches = [
             self._match(1, "GROUP_A", "Mexico", "South Africa", 3, 0, "FINISHED"),
             self._match(2, "GROUP_A", "Argentina", "Chile", 2, 0, "FINISHED"),
@@ -6347,8 +6351,9 @@ class TestGroupStageSoccerSource:
         outcomes = src.terminal_outcomes(state)
         assert outcomes["Mexico"] == ["advance"]
         assert outcomes["Argentina"] == ["advance"]
-        assert outcomes["Chile"] == ["eliminated"]
+        # South Africa is 4th in the group — never advances via any path.
         assert outcomes["South Africa"] == ["eliminated"]
+        # Chile is 3rd. Best-3rd promotion is verified in TestGroupStageBestThirdPlace.
 
     def test_terminal_outcomes_ties_break_on_goal_diff_then_goals_for(self):
         # 2 teams tied on points (3 each): GD decides.
@@ -6371,10 +6376,14 @@ class TestGroupStageSoccerSource:
         src = self._make_source(matches)
         state = src.initial_state()
         outcomes = src.terminal_outcomes(state)
+        # Per-group sort puts Argentina 1st (9 pts), Chile 2nd (4 pts) on
+        # tiebreaker over Mexico (3 pts, worse GD): both advance via top-2.
         assert outcomes["Argentina"] == ["advance"]
         assert outcomes["Chile"] == ["advance"]
+        # 3rd: Mexico (3 pts, GD=-4); 4th: South Africa (1 pt). 4th never
+        # advances. 3rd-place fate is verified separately in
+        # TestGroupStageBestThirdPlace.
         assert outcomes["South Africa"] == ["eliminated"]
-        assert outcomes["Mexico"] == ["eliminated"]
 
     def test_terminal_outcomes_handles_multiple_groups_independently(self):
         # Group A: Mexico/Argentina advance; Chile/SA eliminated.
@@ -6388,15 +6397,16 @@ class TestGroupStageSoccerSource:
         src = self._make_source(matches)
         state = src.initial_state()
         outcomes = src.terminal_outcomes(state)
+        # Top-2 of each group always advances.
         # Group A
         assert outcomes["Mexico"] == ["advance"]
         assert outcomes["Argentina"] == ["advance"]
-        assert outcomes["Chile"] == ["eliminated"]
-        assert outcomes["South Africa"] == ["eliminated"]
         # Group B
         assert outcomes["Germany"] == ["advance"]
         assert outcomes["France"] == ["advance"]
-        assert outcomes["Brazil"] == ["eliminated"]
+        # 4th-place teams in both groups stay eliminated regardless of
+        # best-3rd promotion (#52 only promotes 3rd-placers).
+        assert outcomes["South Africa"] == ["eliminated"]
         assert outcomes["Spain"] == ["eliminated"]
 
     def test_terminal_outcomes_empty_state_returns_empty(self):
@@ -6728,3 +6738,245 @@ class TestMlbWsPlaceholderGating:
         ws_games = [g for g in out if g["stage"] == "WS"]
         assert len(ws_games) == 7, "should synth a 7-game WS placeholder"
         assert all(g["game_id"] < 0 for g in ws_games), "all synthesized (negative IDs)"
+
+
+class TestGroupStageBestThirdPlace:
+    """Issue #52: WC 2026 / EURO 2024 best-3rd-place advancement.
+    WC 2026 advances 8 third-place teams across 12 groups; EURO 2024
+    advances 4 across 6 groups. Without this, the GroupStageSoccerSource
+    classifies all 3rd-place teams as eliminated — ~25% misclassification
+    for advancing teams in WC 2026."""
+
+    @staticmethod
+    def _wc_source():
+        """GroupStageSoccerSource for the World Cup config (uses WC_GS
+        context with best_third_place_count=8)."""
+        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
+        src = GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+        return src
+
+    @staticmethod
+    def _euro_source():
+        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
+        src = GroupStageSoccerSource("euros", fd_api_key="x", odds_api_key="")
+        return src
+
+    @staticmethod
+    def _make_state(group_data, team_group):
+        """Build a state dict from {group: [(team, points, gd, gf), ...]}.
+        Each group should have 4 teams pre-sorted by position."""
+        state = {"_applied": set(), "_team_group": team_group}
+        for group, rows in group_data.items():
+            for team, points, gd, gf in rows:
+                state[team] = {
+                    "points": points,
+                    "gf": gf,
+                    "ga": gf - gd,  # we only need gf-ga for diff; ga value here doesn't matter
+                    "_played": 3,
+                }
+        return state
+
+    def test_wc_promotes_top_8_third_place(self):
+        # 12 groups, 12 third-place teams. Top 8 should advance, bottom 4
+        # should be eliminated. Construct so the rank by (pts, gd, gf) is
+        # deterministic: 3rd-placers carry pts 4 down to 0.
+        src = self._wc_source()
+        team_group: Dict[str, str] = {}
+        group_data: Dict[str, List[Tuple[str, int, int, int]]] = {}
+        for gi in range(12):
+            grp = f"GROUP_{chr(ord('A') + gi)}"
+            # 1st: 9 pts, 2nd: 6 pts, 3rd: varying, 4th: 0 pts
+            third_pts = 12 - gi  # GROUP_A 3rd has 12, ..., GROUP_L 3rd has 1
+            teams = [
+                (f"team_{gi}_1st", 9, 5, 8),
+                (f"team_{gi}_2nd", 6, 2, 5),
+                (f"team_{gi}_3rd", third_pts, 0, 3),
+                (f"team_{gi}_4th", 0, -5, 1),
+            ]
+            for t, _pts, _gd, _gf in teams:
+                team_group[t] = grp
+            group_data[grp] = teams
+        state = self._make_state(group_data, team_group)
+        outcomes = src.terminal_outcomes(state)
+
+        # 1st + 2nd from every group always advance: 24 advancers from that.
+        firsts_seconds_advance = sum(
+            1 for t, o in outcomes.items()
+            if (t.endswith("_1st") or t.endswith("_2nd")) and o == ["advance"]
+        )
+        assert firsts_seconds_advance == 24
+
+        # Of the 12 3rd-placers, top 8 by points should advance.
+        # GROUP_A 3rd has 12 pts (best), GROUP_L 3rd has 1 pt (worst).
+        # Top 8 are GROUP_A through GROUP_H (pts 12-5).
+        thirds_advance = [t for t, o in outcomes.items() if t.endswith("_3rd") and o == ["advance"]]
+        thirds_eliminated = [t for t, o in outcomes.items() if t.endswith("_3rd") and o == ["eliminated"]]
+        assert len(thirds_advance) == 8
+        assert len(thirds_eliminated) == 4
+        # Specifically: 4 lowest groups (I/J/K/L) are eliminated 3rd-placers.
+        for low_gi in range(8, 12):
+            grp_letter = chr(ord('A') + low_gi)
+            assert f"team_{low_gi}_3rd" in [t for t, o in outcomes.items() if o == ["eliminated"]]
+
+    def test_euro_promotes_top_4_third_place(self):
+        # 6 groups → 6 third-placers, top 4 advance.
+        src = self._euro_source()
+        team_group: Dict[str, str] = {}
+        group_data: Dict[str, List[Tuple[str, int, int, int]]] = {}
+        for gi in range(6):
+            grp = f"GROUP_{chr(ord('A') + gi)}"
+            third_pts = 6 - gi  # A=6 .. F=1
+            teams = [
+                (f"team_{gi}_1st", 9, 5, 8),
+                (f"team_{gi}_2nd", 6, 2, 5),
+                (f"team_{gi}_3rd", third_pts, 0, 3),
+                (f"team_{gi}_4th", 0, -5, 1),
+            ]
+            for t, _pts, _gd, _gf in teams:
+                team_group[t] = grp
+            group_data[grp] = teams
+        state = self._make_state(group_data, team_group)
+        outcomes = src.terminal_outcomes(state)
+
+        thirds_advance = [t for t, o in outcomes.items() if t.endswith("_3rd") and o == ["advance"]]
+        thirds_eliminated = [t for t, o in outcomes.items() if t.endswith("_3rd") and o == ["eliminated"]]
+        assert len(thirds_advance) == 4
+        assert len(thirds_eliminated) == 2
+
+    def test_third_place_tiebreaker_by_gd_then_gf(self):
+        # 4 third-placers all tied on 3 pts. Tiebreaker is GD → GF → alphabetical.
+        # Send WC source — best_third_place_count=8, but we only have 8 groups
+        # constructed so all 8 3rd-placers advance. To test the tiebreaker
+        # specifically, give only 4 groups + best_third_place_count effective
+        # at picking 1 of them. Simulate by limiting groups.
+        src = self._wc_source()
+        team_group = {}
+        # 12 groups but only the 3rds differentiate by tiebreaker.
+        # Make all 12 3rds tied on points; GD picks top 8.
+        group_data = {}
+        for gi in range(12):
+            grp = f"GROUP_{chr(ord('A') + gi)}"
+            # 3rd-placers all 3 pts; GD descending by gi
+            third_gd = 11 - gi
+            teams = [
+                (f"team_{gi}_1st", 9, 5, 8),
+                (f"team_{gi}_2nd", 6, 2, 5),
+                (f"team_{gi}_3rd", 3, third_gd, 4),
+                (f"team_{gi}_4th", 0, -5, 1),
+            ]
+            for t, *_ in teams:
+                team_group[t] = grp
+            group_data[grp] = teams
+        state = self._make_state(group_data, team_group)
+        outcomes = src.terminal_outcomes(state)
+        thirds_advance = sorted([t for t, o in outcomes.items() if t.endswith("_3rd") and o == ["advance"]])
+        # Best 8 by GD = A..H (gi 0..7) since their GD is 11..4 (descending),
+        # I..L are 3..0.
+        expected = sorted([f"team_{i}_3rd" for i in range(8)])
+        assert thirds_advance == expected
+
+    def test_alphabetical_breaks_remaining_ties(self):
+        # Two 3rd-placers tied on (pts, gd, gf). With n_best_third=8 across
+        # 12 groups and bottom-most groups tied, alphabetical name decides.
+        src = self._wc_source()
+        team_group = {}
+        group_data = {}
+        # 7 groups with clearly-best 3rd-placers (all > 3 pts); 5 groups
+        # completely tied at 3 pts. 8th slot resolved by alphabetical of
+        # the 5 tied. The strict-better 7 take slots 1-7.
+        for gi in range(7):
+            grp = f"GROUP_{chr(ord('A') + gi)}"
+            teams = [
+                (f"top_{gi}_1st", 9, 5, 8),
+                (f"top_{gi}_2nd", 6, 2, 5),
+                (f"top_{gi}_3rd", 10 - gi, 0, 3),  # 10, 9, 8, 7, 6, 5, 4 — all strictly above 3
+                (f"top_{gi}_4th", 0, -5, 1),
+            ]
+            for t, *_ in teams:
+                team_group[t] = grp
+            group_data[grp] = teams
+        # 5 groups (H..L) with identical 3rd-placer stats — alphabetical chosen by NAME.
+        for gi, name_prefix in enumerate(["aaa", "bbb", "ccc", "ddd", "eee"]):
+            grp = f"GROUP_{chr(ord('H') + gi)}"
+            teams = [
+                (f"{name_prefix}_1st", 9, 5, 8),
+                (f"{name_prefix}_2nd", 6, 2, 5),
+                (f"{name_prefix}_3rd", 3, 0, 3),  # All tied at 3 pts, 0 GD, 3 GF
+                (f"{name_prefix}_4th", 0, -5, 1),
+            ]
+            for t, *_ in teams:
+                team_group[t] = grp
+            group_data[grp] = teams
+        state = self._make_state(group_data, team_group)
+        outcomes = src.terminal_outcomes(state)
+        # Top 7 by points already chosen (top_*_3rd). 8th slot from the
+        # 5 tied teams → alphabetical 'aaa_3rd' wins.
+        assert outcomes["aaa_3rd"] == ["advance"]
+        # bbb..eee all eliminated.
+        for prefix in ("bbb", "ccc", "ddd", "eee"):
+            assert outcomes[f"{prefix}_3rd"] == ["eliminated"]
+
+    def test_no_3rd_place_promotion_when_count_zero(self):
+        # Custom group-stage entry with best_third_place_count=0 keeps
+        # current strict top-2 behavior. Use a synthetic context.
+        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, LeagueContext
+
+        # Temporarily install a 0-count context.
+        original = LEAGUE_CONTEXTS.get("WC_GS")
+        LEAGUE_CONTEXTS["WC_GS"] = LeagueContext(
+            code="WC_GS", matchdays_total=3, format="group_advance",
+            thresholds=original.thresholds if original else [],
+            boundary_summary="test",
+            best_third_place_count=0,
+        )
+        try:
+            src = self._wc_source()
+            team_group = {}
+            group_data = {}
+            for gi in range(2):
+                grp = f"GROUP_{chr(ord('A') + gi)}"
+                teams = [
+                    (f"team_{gi}_1st", 9, 5, 8),
+                    (f"team_{gi}_2nd", 6, 2, 5),
+                    (f"team_{gi}_3rd", 3, 0, 3),
+                    (f"team_{gi}_4th", 0, -5, 1),
+                ]
+                for t, *_ in teams:
+                    team_group[t] = grp
+                group_data[grp] = teams
+            state = self._make_state(group_data, team_group)
+            outcomes = src.terminal_outcomes(state)
+            # 3rd placers all eliminated; no promotion.
+            assert outcomes["team_0_3rd"] == ["eliminated"]
+            assert outcomes["team_1_3rd"] == ["eliminated"]
+        finally:
+            if original:
+                LEAGUE_CONTEXTS["WC_GS"] = original
+
+    def test_4th_place_never_advances(self):
+        # Even with high points, 4th place in own group stays eliminated.
+        src = self._wc_source()
+        team_group = {}
+        group_data = {}
+        # GROUP_A: super-stacked group where everyone has high points.
+        teams = [
+            ("Alpha", 9, 10, 12),
+            ("Beta", 7, 5, 8),
+            ("Gamma", 5, 0, 6),
+            ("Delta", 4, -2, 5),  # 4th place but solid record
+        ]
+        for t, *_ in teams:
+            team_group[t] = "GROUP_A"
+        group_data["GROUP_A"] = teams
+        # 11 weak groups so Delta would dominate any 3rd-placer
+        for gi in range(11):
+            grp = f"GROUP_{chr(ord('B') + gi)}"
+            t = [(f"w_{gi}_{j}", 1, -10, 0) for j in range(4)]
+            for ti, *_ in t:
+                team_group[ti] = grp
+            group_data[grp] = t
+        state = self._make_state(group_data, team_group)
+        outcomes = src.terminal_outcomes(state)
+        # Delta is 4th in her own group, regardless of stats — must be eliminated.
+        assert outcomes["Delta"] == ["eliminated"]

@@ -1160,13 +1160,6 @@ class GroupStageSoccerSource(SoccerSource):
     group-stage leverage covers the advance/eliminate decision only,
     not the downstream knockout-path differential. Tracked in #53.
 
-    WC 2026 48-team format limitation: the top 2 + 8-best-3rd-place
-    advancement rule isn't modeled — only top-2-per-group counts as
-    advance. Teams who would advance via the 3rd-place tiebreaker
-    (points → goal diff → goals scored → fair play) read as
-    eliminated. Materially: 8 of 32 advancing teams (~25%) are
-    misclassified for the 2026 WC. Tracked in #52.
-
     Wiring expectation: the plugin instantiates GroupStageSoccerSource
     for the same `config_key` as KnockoutSoccerSource for tournaments
     that have a group stage, and KnockoutSoccerSource filters
@@ -1304,11 +1297,22 @@ class GroupStageSoccerSource(SoccerSource):
         return out
 
     def terminal_outcomes(self, state: Dict[str, Any]) -> Dict[str, List[str]]:
-        """Top-N-per-group advancement. Within each group, sort by
-        (points desc, goal_diff desc, goals_for desc) — FIFA's standard
-        group-stage tiebreaker, minus the head-to-head and fair-play
-        layers that we don't track here. Top _GROUP_ADVANCE_TOP_N teams
-        get "advance"; the rest get "eliminated".
+        """Two-stage advancement: top-2 per group always advance, then
+        for formats that admit best-3rd-place advancement (WC 2026,
+        EURO since 2016) the top-N third-place teams across all groups
+        also advance.
+
+        Within each group, sort by (points desc, goal_diff desc,
+        goals_for desc) — FIFA's group-stage tiebreaker minus
+        head-to-head and fair-play layers we don't track. Top
+        _GROUP_ADVANCE_TOP_N get "advance"; the third-place team is
+        held back for the global best-3rd ranking; everyone below 3rd
+        is eliminated.
+
+        Best-3rd ranking uses the same tiebreaker chain (points → GD →
+        GF) with an alphabetical fallback for true ties — FIFA falls
+        back to fair-play points then drawing of lots, neither of which
+        we track. See #52.
         """
         from collections import defaultdict
         team_group = state.get("_team_group", {})
@@ -1321,13 +1325,46 @@ class GroupStageSoccerSource(SoccerSource):
                 continue
             by_group[group].append((team, row))
 
+        # How many third-place teams advance? Read from LEAGUE_CONTEXTS
+        # via the source's group-stage code so EURO (4) and WC (8) get
+        # their format-specific count without per-source if/else.
+        from ..scoring import LEAGUE_CONTEXTS
+        gs_code = self._group_stage_context_code()
+        ctx = LEAGUE_CONTEXTS.get(gs_code)
+        n_best_third = ctx.best_third_place_count if ctx else 0
+
         outcomes: Dict[str, List[str]] = {}
+        # Hold the 3rd-place team from each group for the global ranking.
+        third_placers: List[Tuple[str, Dict[str, int]]] = []
         for group, teams in by_group.items():
             teams.sort(key=lambda kv: (
                 -kv[1]["points"],
                 -(kv[1]["gf"] - kv[1]["ga"]),
                 -kv[1]["gf"],
             ))
-            for i, (team, _row) in enumerate(teams):
-                outcomes[team] = ["advance"] if i < _GROUP_ADVANCE_TOP_N else ["eliminated"]
+            for i, (team, row) in enumerate(teams):
+                if i < _GROUP_ADVANCE_TOP_N:
+                    outcomes[team] = ["advance"]
+                elif i == _GROUP_ADVANCE_TOP_N:
+                    # 3rd place — eliminate provisionally; promoted below
+                    # if it ranks high enough in the cross-group sort.
+                    outcomes[team] = ["eliminated"]
+                    third_placers.append((team, row))
+                else:
+                    outcomes[team] = ["eliminated"]
+
+        # Promote the top-N 3rd-place teams. Alphabetical name as
+        # deterministic tiebreaker — FIFA uses fair-play points / drawing
+        # of lots here, neither of which we model. Deterministic
+        # tiebreaker keeps replay results stable.
+        if n_best_third > 0 and third_placers:
+            third_placers.sort(key=lambda kv: (
+                -kv[1]["points"],
+                -(kv[1]["gf"] - kv[1]["ga"]),
+                -kv[1]["gf"],
+                kv[0],
+            ))
+            for team, _row in third_placers[:n_best_third]:
+                outcomes[team] = ["advance"]
+
         return outcomes
