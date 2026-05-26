@@ -30,7 +30,7 @@ caller skips this module entirely.
 from __future__ import annotations
 
 import random
-from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
     from .sources.base import GameRow, MatchResult, SportSource
@@ -254,6 +254,119 @@ def monte_carlo_importance_batch(
         for team, outcome in queries:
             row = _RESULT_ROW[_classify_target_result(target_result, team, home, away)]
             col = 0 if outcome in outcomes.get(team, []) else 1
+            tables[(team, outcome)][row][col] += 1
+
+    return {q: abs(kendall_tau_c(t)) for q, t in tables.items()}
+
+
+def monte_carlo_importance_batch_chain(
+    primary: "SportSource",
+    target_match: "GameRow",
+    queries: Sequence[Tuple[str, str]],
+    downstream: "SportSource",
+    seed_fn: Callable[[Dict[str, Any]], Dict[str, Any]],
+    n_sims: int = DEFAULT_N_SIMS,
+    rng: Optional[random.Random] = None,
+) -> Dict[Tuple[str, str], float]:
+    """Importance batch with a cross-source advancement chain.
+
+    Same shape as `monte_carlo_importance_batch` but runs a SECOND
+    simulation phase per sim: after the primary source drains, the
+    `seed_fn(primary_state)` callback builds the downstream's initial
+    state (typically a knockout bracket whose participants the primary's
+    standings determined), the downstream's remaining_matches are
+    drained, and the per-team outcomes of both sources are merged
+    before the tau-c contingency table is updated.
+
+    Motivation: international soccer tournaments (#53). The group source
+    ranks teams within their groups; the knockout source models the
+    post-group bracket. A group winner faces a structurally different
+    LAST_32 opponent than a runner-up, so group-game leverage on R16+
+    bands requires cross-source advancement, not just within-source
+    outcomes. The single-source `monte_carlo_importance_batch` cannot
+    express this and would return 0 leverage on every downstream band.
+
+    Contract:
+      - Primary and downstream MUST emit disjoint outcome vocabularies.
+        Otherwise the merge double-counts (a team labeled "advance" by
+        both sources would have two entries in the merged list, but
+        tau-c bucketing is membership-based so the duplicate is a no-op
+        for the query column; it's still a smell). Today the
+        GroupStageSoccerSource emits `advance` / `eliminated` and the
+        KnockoutSoccerSource emits `round_of_16` / `quarterfinal` /
+        `semifinal` / `final` / `winner` — disjoint by design.
+      - `seed_fn` returns a state dict consumable by
+        `downstream.remaining_matches` / `sample_result` / `apply_result`
+        / `terminal_outcomes`. The downstream's own `initial_state` is
+        NOT called by the chain — the seed is the entry point.
+      - Strength estimation is shared (one call to
+        `primary.estimate_strengths()` covers both phases). Today the
+        SoccerSource subclasses both inherit identical
+        `estimate_strengths` from the same fixture pool; if a future
+        chain consumer needs source-specific strengths, the contract
+        will need to be revisited.
+
+    Returns `{(team, outcome): |tau_c|}` keyed by the input queries.
+    """
+    if not getattr(primary, "supports_importance", False):
+        raise ValueError(
+            f"{type(primary).__name__} does not support importance simulation; "
+            "check supports_importance before calling."
+        )
+    if not getattr(downstream, "supports_importance", False):
+        raise ValueError(
+            f"{type(downstream).__name__} does not support importance simulation; "
+            "check supports_importance before calling."
+        )
+    rng = rng or random.Random()
+    strengths = primary.estimate_strengths()
+    primary_base = primary.initial_state()
+
+    home = target_match.home
+    away = target_match.away
+
+    tables: Dict[Tuple[str, str], List[List[int]]] = {
+        q: [[0, 0], [0, 0], [0, 0]] for q in queries
+    }
+
+    for _ in range(n_sims):
+        # Phase 1: drain primary from the target match. Same dedupe-and-
+        # drain-until-empty loop as monte_carlo_importance_batch.
+        target_result = primary.sample_result(primary_base, target_match, strengths, rng)
+        primary_state = primary.apply_result(primary_base, target_match, target_result)
+        while True:
+            rem = [m for m in primary.remaining_matches(primary_state)
+                   if not _same_match(m, target_match)]
+            if not rem:
+                break
+            for m in rem:
+                r = primary.sample_result(primary_state, m, strengths, rng)
+                primary_state = primary.apply_result(primary_state, m, r)
+
+        # Phase 2: seed and drain downstream. No target-match dedupe here:
+        # the target match lives in primary's fixture pool, not the
+        # downstream's bracket, so collision is impossible by design.
+        downstream_state = seed_fn(primary_state)
+        while True:
+            rem = downstream.remaining_matches(downstream_state)
+            if not rem:
+                break
+            for m in rem:
+                r = downstream.sample_result(downstream_state, m, strengths, rng)
+                downstream_state = downstream.apply_result(downstream_state, m, r)
+
+        # Phase 3: per-team outcome union and contingency-table update.
+        primary_outcomes = primary.terminal_outcomes(primary_state)
+        downstream_outcomes = downstream.terminal_outcomes(downstream_state)
+        all_teams = set(primary_outcomes) | set(downstream_outcomes)
+        merged: Dict[str, List[str]] = {
+            t: primary_outcomes.get(t, []) + downstream_outcomes.get(t, [])
+            for t in all_teams
+        }
+
+        for team, outcome in queries:
+            row = _RESULT_ROW[_classify_target_result(target_result, team, home, away)]
+            col = 0 if outcome in merged.get(team, []) else 1
             tables[(team, outcome)][row][col] += 1
 
     return {q: abs(kendall_tau_c(t)) for q, t in tables.items()}
