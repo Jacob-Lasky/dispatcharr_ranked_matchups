@@ -9207,3 +9207,281 @@ class TestComputeGroupStandings:
         d = {"points": 3, "gf": 9, "ga": 0}  # lower points -> ranks below all
         rows = sorted([a, b, c, d], key=k)
         assert rows == [a, b, c, d]
+
+
+class TestFdCacheBatching:
+    """The plugin's _action_refresh enables ~10+ soccer competitions and
+    FD.org's free tier allows 10 calls/min. Before this batching, every
+    SoccerSource instance fetched its own /v4/competitions/<code>/matches
+    AND /v4/competitions/<code>/standings, blowing the per-minute quota
+    every refresh (the WC fixtures fetch in particular landed 11th in the
+    iteration and was reliably rate-limited).
+
+    Two caches replace the per-instance fetch pattern:
+      - _TIER_FIXTURES_CACHE: one /v4/matches call returns fixtures for
+        every competition on the tier; SoccerSource._fetch_fixtures
+        filters by fd_code instead of making its own call.
+      - _SEASON_MATCHES_CACHE: per-competition full-season schedule,
+        keyed by fd_code so sibling sources (wc_groups + wc_knockout)
+        share one fetch.
+
+    plugin._action_refresh calls `_clear_fd_caches()` at the top so each
+    refresh sees fresh data.
+    """
+
+    def setup_method(self):
+        from dispatcharr_ranked_matchups.sources import soccer
+        soccer._clear_fd_caches()
+
+    def teardown_method(self):
+        from dispatcharr_ranked_matchups.sources import soccer
+        soccer._clear_fd_caches()
+
+    def test_tier_fixtures_makes_one_http_call_for_many_sources(self, monkeypatch):
+        # Five different fd_codes calling _fetch_fixtures must result in
+        # exactly ONE underlying /v4/matches HTTP call. Before batching
+        # this was five separate /v4/competitions/<code>/matches calls.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        call_log = []
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return self._payload
+
+        def fake_get(url, **kwargs):
+            call_log.append({"url": url, "params": kwargs.get("params")})
+            # Tier-wide response with matches across 5 comps.
+            return FakeResponse({"matches": [
+                {"competition": {"code": "PL"}, "id": 1},
+                {"competition": {"code": "ELC"}, "id": 2},
+                {"competition": {"code": "BL1"}, "id": 3},
+                {"competition": {"code": "PD"}, "id": 4},
+                {"competition": {"code": "SA"}, "id": 5},
+                {"competition": {"code": "PL"}, "id": 6},
+            ]})
+
+        monkeypatch.setattr(soccer.requests, "get", fake_get)
+
+        # Each source independently asks for its own fixtures.
+        for comp in ("epl", "championship", "bundesliga", "la_liga", "serie_a"):
+            src = soccer.SoccerSource(comp, fd_api_key="testkey", odds_api_key="")
+            fixtures = src._fetch_fixtures(days_ahead=7)
+            assert isinstance(fixtures, list)
+
+        # ONE underlying /v4/matches call regardless of how many sources asked.
+        assert len(call_log) == 1
+        assert call_log[0]["url"].endswith("/v4/matches")
+        # Date params are present so FD scopes the response correctly.
+        params = call_log[0]["params"] or {}
+        assert "dateFrom" in params and "dateTo" in params
+
+    def test_tier_fixtures_filters_by_fd_code(self, monkeypatch):
+        # SoccerSource._fetch_fixtures returns only matches whose
+        # competition.code matches self.config.fd_code.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        payload = {"matches": [
+            {"competition": {"code": "PL"},  "id": 11, "homeTeam": {"name": "Wrexham AFC"}},
+            {"competition": {"code": "ELC"}, "id": 12},
+            {"competition": {"code": "BL1"}, "id": 13},
+            {"competition": {"code": "PL"},  "id": 14, "homeTeam": {"name": "Hull City"}},
+        ]}
+
+        class FakeResponse:
+            def raise_for_status(self): pass
+            def json(self): return payload
+
+        monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: FakeResponse())
+
+        pl_src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
+        elc_src = soccer.SoccerSource("championship", fd_api_key="testkey", odds_api_key="")
+
+        pl_fixtures = pl_src._fetch_fixtures(days_ahead=7)
+        elc_fixtures = elc_src._fetch_fixtures(days_ahead=7)
+
+        assert [m["id"] for m in pl_fixtures] == [11, 14]
+        assert [m["id"] for m in elc_fixtures] == [12]
+
+    def test_tier_fixtures_skips_matches_without_competition_code(self, monkeypatch):
+        # Defensive: a FD.org schema regression that drops the
+        # `competition.code` field on a match must not crash the cache
+        # build, and that match must not silently route to the wrong
+        # source.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        class FakeResponse:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"matches": [
+                    {"competition": {"code": "PL"}, "id": 21},
+                    {"competition": {},             "id": 22},   # missing code
+                    {"id": 23},                                    # missing competition entirely
+                    {"competition": {"code": None}, "id": 24},   # explicit null
+                    {"competition": {"code": "PL"}, "id": 25},
+                ]}
+
+        monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: FakeResponse())
+
+        src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
+        out = src._fetch_fixtures(days_ahead=7)
+        assert [m["id"] for m in out] == [21, 25]
+
+    def test_tier_fixtures_returns_empty_on_http_error(self, monkeypatch):
+        # 429 / 5xx / network failure must return [] for every source
+        # rather than raising — keeps the rest of the refresh
+        # pipeline functioning.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        def raising_get(*a, **k):
+            raise soccer.requests.RequestException("boom")
+
+        monkeypatch.setattr(soccer.requests, "get", raising_get)
+
+        src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
+        assert src._fetch_fixtures(days_ahead=7) == []
+
+    def test_tier_fixtures_empty_api_key_returns_empty(self, monkeypatch):
+        # No key configured: no HTTP call should fire.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        calls = []
+        monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: calls.append(1) or None)
+
+        src = soccer.SoccerSource("epl", fd_api_key="", odds_api_key="")
+        assert src._fetch_fixtures(days_ahead=7) == []
+        assert calls == []
+
+    def test_season_matches_shared_across_sibling_sources(self, monkeypatch):
+        # GroupStageSoccerSource and KnockoutSoccerSource both keyed off
+        # fd_code="WC" must share one /v4/competitions/WC/matches call,
+        # not two. Before batching, each instance's
+        # `_all_matches_cache = None` led to independent fetches even
+        # though they pull identical data.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        call_log = []
+
+        class FakeResponse:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"matches": [
+                    {"id": 100, "stage": "GROUP_STAGE", "group": "GROUP_A",
+                     "homeTeam": {"name": "Mexico"}, "awayTeam": {"name": "South Africa"},
+                     "utcDate": "2026-06-11T19:00:00Z", "status": "SCHEDULED",
+                     "score": {}, "matchday": 1},
+                ]}
+
+        def fake_get(url, **kwargs):
+            call_log.append(url)
+            return FakeResponse()
+
+        monkeypatch.setattr(soccer.requests, "get", fake_get)
+
+        groups = soccer.GroupStageSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
+        knockout = soccer.KnockoutSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
+
+        # Both sources ask for the full season.
+        ms_a = groups._fetch_all_season_matches()
+        ms_b = knockout._fetch_all_season_matches()
+
+        # Exactly ONE call to /v4/competitions/WC/matches.
+        wc_calls = [u for u in call_log if "/v4/competitions/WC/matches" in u]
+        assert len(wc_calls) == 1
+        # Both sources see the same data.
+        assert ms_a == ms_b
+        assert len(ms_a) == 1
+
+    def test_clear_fd_caches_resets_both(self, monkeypatch):
+        # After _clear_fd_caches(), the next fetch must repopulate the
+        # caches from FD.org. This is what _action_refresh relies on to
+        # avoid serving stale data between refresh cycles.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        call_log = []
+
+        class FakeResponse:
+            def raise_for_status(self): pass
+            def json(self):
+                return {"matches": [
+                    {"competition": {"code": "PL"}, "id": 50},
+                ]}
+
+        monkeypatch.setattr(soccer.requests, "get", lambda url, **k: (call_log.append(url), FakeResponse())[1])
+
+        src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
+
+        # First call populates the tier cache.
+        src._fetch_fixtures(days_ahead=7)
+        assert len(call_log) == 1
+
+        # Second call hits cache, no new HTTP.
+        src._fetch_fixtures(days_ahead=7)
+        assert len(call_log) == 1
+
+        # Clear, then next call refetches.
+        soccer._clear_fd_caches()
+        src._fetch_fixtures(days_ahead=7)
+        assert len(call_log) == 2
+
+    def test_instance_level_cache_still_wins_for_test_injection(self, monkeypatch):
+        # Existing tests inject fake season data via
+        # `src._all_matches_cache = [...]`. That MUST keep working —
+        # if the module cache shadowed the instance attribute, the
+        # injection becomes a no-op and 200+ existing tests silently
+        # stop testing what they think they test.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        def boom_get(*a, **k):
+            raise AssertionError("HTTP should never be called when instance cache is set")
+
+        monkeypatch.setattr(soccer.requests, "get", boom_get)
+
+        src = soccer.GroupStageSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
+        injected = [{"id": 999, "stage": "GROUP_STAGE"}]
+        src._all_matches_cache = injected
+        out = src._fetch_all_season_matches()
+        assert out is injected
+
+    def test_season_matches_independent_cache_per_fd_code(self, monkeypatch):
+        # Two different competitions (WC and EC) each get their own
+        # entry in the module cache — they do NOT collapse into one.
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        call_log = []
+
+        class FakeResponse:
+            def __init__(self, code):
+                self._code = code
+            def raise_for_status(self): pass
+            def json(self):
+                return {"matches": [{"id": 1, "_marker": self._code}]}
+
+        def fake_get(url, **kwargs):
+            call_log.append(url)
+            if "/WC/" in url:
+                return FakeResponse("WC")
+            if "/EC/" in url:
+                return FakeResponse("EC")
+            raise AssertionError(f"unexpected URL: {url}")
+
+        monkeypatch.setattr(soccer.requests, "get", fake_get)
+
+        wc = soccer.GroupStageSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
+        ec = soccer.GroupStageSoccerSource("euros", fd_api_key="testkey", odds_api_key="")
+
+        wc_matches = wc._fetch_all_season_matches()
+        ec_matches = ec._fetch_all_season_matches()
+
+        # Each fd_code gets its own fetch — no cross-contamination.
+        assert len(call_log) == 2
+        assert wc_matches[0]["_marker"] == "WC"
+        assert ec_matches[0]["_marker"] == "EC"
+        # Cached: repeat calls don't refetch.
+        wc._fetch_all_season_matches()
+        ec._fetch_all_season_matches()
+        assert len(call_log) == 2
