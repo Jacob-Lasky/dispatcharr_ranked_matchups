@@ -1127,3 +1127,193 @@ class TestComputePastSlotEnd:
         past_end = plugin._compute_past_slot_end(prog_end, settings)
         assert past_end.tzinfo is not None
         assert past_end.utcoffset().total_seconds() == 0
+
+
+class TestOrdinal:
+    def test_first(self, plugin):
+        assert plugin._ordinal(1) == "1st"
+
+    def test_second(self, plugin):
+        assert plugin._ordinal(2) == "2nd"
+
+    def test_third(self, plugin):
+        assert plugin._ordinal(3) == "3rd"
+
+    def test_fourth(self, plugin):
+        assert plugin._ordinal(4) == "4th"
+
+    def test_teens_always_th(self, plugin):
+        # 11/12/13 break the simple last-digit rule.
+        assert plugin._ordinal(11) == "11th"
+        assert plugin._ordinal(12) == "12th"
+        assert plugin._ordinal(13) == "13th"
+
+    def test_twenties(self, plugin):
+        assert plugin._ordinal(21) == "21st"
+        assert plugin._ordinal(22) == "22nd"
+        assert plugin._ordinal(23) == "23rd"
+        assert plugin._ordinal(24) == "24th"
+
+    def test_typical_league_positions(self, plugin):
+        # Cover the full EPL range (20-team league).
+        assert plugin._ordinal(20) == "20th"
+
+
+class TestBuildStandingsPostureLine:
+    def _table(self):
+        # Minimal EPL-shaped table — 3 teams enough to exercise the path.
+        return [
+            {"name": "Manchester City FC", "position": 2, "points": 70, "played": 35},
+            {"name": "Manchester United FC", "position": 3, "points": 69, "played": 35},
+            {"name": "Bournemouth FC", "position": 14, "points": 41, "played": 35},
+        ]
+
+    def test_none_when_no_table(self, plugin):
+        g = {"home": "X", "away": "Y", "extra": {}}
+        assert plugin._build_standings_posture_line(g) is None
+
+    def test_none_when_neither_team_in_table(self, plugin):
+        g = {
+            "home": "Promoted Club A",
+            "away": "Promoted Club B",
+            "extra": {"standings_table": self._table()},
+        }
+        assert plugin._build_standings_posture_line(g) is None
+
+    def test_both_teams_close_in_table(self, plugin):
+        g = {
+            "home": "Manchester City FC",
+            "away": "Manchester United FC",
+            "extra": {"standings_table": self._table()},
+        }
+        line = plugin._build_standings_posture_line(g)
+        assert line == "Manchester City FC 2nd, 70 pts. Manchester United FC 3rd, 69 pts — 1 pt behind."
+
+    def test_both_teams_wide_gap(self, plugin):
+        g = {
+            "home": "Manchester City FC",
+            "away": "Bournemouth FC",
+            "extra": {"standings_table": self._table()},
+        }
+        line = plugin._build_standings_posture_line(g)
+        assert line == "Manchester City FC 2nd, 70 pts. Bournemouth FC 14th, 41 pts — 29 pts behind."
+
+    def test_away_team_ahead(self, plugin):
+        # When home team is lower-ranked, away team's gap reads "ahead".
+        g = {
+            "home": "Bournemouth FC",
+            "away": "Manchester City FC",
+            "extra": {"standings_table": self._table()},
+        }
+        line = plugin._build_standings_posture_line(g)
+        assert line == "Bournemouth FC 14th, 41 pts. Manchester City FC 2nd, 70 pts — 29 pts ahead."
+
+    def test_tied_on_points_no_gd_cached(self, plugin):
+        # Older caches (pre-#10) won't have goal_difference; fall back to
+        # the bare framing.
+        table = [
+            {"name": "A FC", "position": 1, "points": 70, "played": 35},
+            {"name": "B FC", "position": 2, "points": 70, "played": 35},
+        ]
+        g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
+        line = plugin._build_standings_posture_line(g)
+        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts — level on points."
+
+    def test_tied_on_points_away_gd_better(self, plugin):
+        # B has the better GD — reads "... GD ahead" for the away team.
+        table = [
+            {"name": "A FC", "position": 1, "points": 70, "played": 35, "goal_difference": 15},
+            {"name": "B FC", "position": 2, "points": 70, "played": 35, "goal_difference": 22},
+        ]
+        g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
+        line = plugin._build_standings_posture_line(g)
+        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts — level on points, 7 GD ahead."
+
+    def test_tied_on_points_home_gd_better(self, plugin):
+        # A (home) has better GD — away reads "behind on GD".
+        table = [
+            {"name": "A FC", "position": 1, "points": 70, "played": 35, "goal_difference": 22},
+            {"name": "B FC", "position": 2, "points": 70, "played": 35, "goal_difference": 15},
+        ]
+        g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
+        line = plugin._build_standings_posture_line(g)
+        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts — level on points, 7 GD behind."
+
+    def test_tied_on_everything(self, plugin):
+        table = [
+            {"name": "A FC", "position": 1, "points": 70, "played": 35, "goal_difference": 22},
+            {"name": "B FC", "position": 2, "points": 70, "played": 35, "goal_difference": 22},
+        ]
+        g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
+        line = plugin._build_standings_posture_line(g)
+        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts — level on points and goal difference."
+
+    def test_one_pt_uses_singular(self, plugin):
+        # 1 → "1 pt", not "1 pts".
+        table = [
+            {"name": "A FC", "position": 1, "points": 70, "played": 35},
+            {"name": "B FC", "position": 2, "points": 69, "played": 35},
+        ]
+        g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
+        line = plugin._build_standings_posture_line(g)
+        assert "1 pt behind" in line
+        assert "1 pts" not in line
+
+    def test_only_home_in_table(self, plugin):
+        g = {
+            "home": "Manchester City FC",
+            "away": "Promoted Cold-Start Club",
+            "extra": {"standings_table": self._table()},
+        }
+        line = plugin._build_standings_posture_line(g)
+        assert line == "Manchester City FC 2nd, 70 pts."
+
+    def test_only_away_in_table(self, plugin):
+        g = {
+            "home": "Promoted Cold-Start Club",
+            "away": "Manchester City FC",
+            "extra": {"standings_table": self._table()},
+        }
+        line = plugin._build_standings_posture_line(g)
+        assert line == "Manchester City FC 2nd, 70 pts."
+
+    def test_missing_position_skips_team(self, plugin):
+        # Defensive: if FD.org returns an entry with no position, treat as
+        # "team not in standings" rather than rendering "Nonepth".
+        table = [
+            {"name": "A FC", "position": None, "points": 70, "played": 35},
+            {"name": "B FC", "position": 2, "points": 69, "played": 35},
+        ]
+        g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
+        line = plugin._build_standings_posture_line(g)
+        assert line == "B FC 2nd, 69 pts."
+
+    def test_missing_home_away_returns_none(self, plugin):
+        g = {"home": "", "away": "", "extra": {"standings_table": self._table()}}
+        assert plugin._build_standings_posture_line(g) is None
+
+    def test_integration_with_build_description(self, plugin):
+        # End-to-end: the new section appears between matchday and impact.
+        g = {
+            "home": "Manchester City FC",
+            "away": "Manchester United FC",
+            "sport_prefix": "EPL",
+            "closeness": None,
+            "spread": None,
+            "extra": {
+                "matchday": 35,
+                "matchdays_total": 38,
+                "standings_table": self._table(),
+                "impact_narratives": ["Manchester City could clinch the title with a win."],
+                "fd_competition_code": "PL",
+            },
+            "favorites_matched": [],
+        }
+        desc = plugin._build_description(g, tagline="title race", placeholder=False)
+        sections = desc.split("\n\n")
+        # Matchday should precede the standings posture line, which should
+        # precede the impact narrative.
+        md_idx = next(i for i, s in enumerate(sections) if s.startswith("Matchday 35"))
+        st_idx = next(i for i, s in enumerate(sections) if "70 pts" in s)
+        nar_idx = next(i for i, s in enumerate(sections) if "clinch the title" in s)
+        assert md_idx < st_idx < nar_idx

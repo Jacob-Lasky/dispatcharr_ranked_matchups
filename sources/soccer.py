@@ -347,6 +347,7 @@ class SoccerSource(SportSource):
                             "position": e["position"],
                             "points": e.get("points"),
                             "played": e.get("playedGames"),
+                            "goal_difference": e.get("goalDifference"),
                         }
                         for e in table_full
                     ],
@@ -392,6 +393,7 @@ class SoccerSource(SportSource):
                     "position": pos,
                     "points": row.get("points"),
                     "playedGames": row.get("playedGames"),
+                    "goalDifference": row.get("goalDifference"),
                 })
         return out, rich
 
