@@ -791,6 +791,55 @@ def _compress_to_10(raw: float) -> float:
     return 10.0 * math.tanh(raw / _FINAL_KNEE)
 
 
+# Minimum batch size for adaptive normalization to engage. With fewer
+# samples than this the in-batch median is too noisy to scale against —
+# fall through to absolute compression in that case.
+_ADAPTIVE_MIN_SAMPLES = 5
+
+# Target: median raw in the batch maps to ~5 stars. tanh(1/1.6) ≈ 0.55,
+# so 10 × tanh(median / (scale × 1.6)) where scale = median / 5 yields:
+#   tanh(5/1.6) ≈ 0.998 × 10 = 9.98 — too steep, the median outlier saturates.
+# Instead use scale = median itself and target factor 1.6 to land median at:
+#   10 × tanh(median / median / 1.6) = 10 × tanh(0.625) ≈ 10 × 0.555 = 5.55.
+# Below the median compresses to under 5; well above saturates near 10.
+_ADAPTIVE_TARGET_FACTOR = 1.6
+
+
+def adaptive_compress(raw_scores: List[float]) -> List[float]:
+    """Season-relative normalization (see #7).
+
+    Each raw score gets compressed to 0-10 using a scale derived from the
+    batch's median raw score. Effect: top games in any given refresh feel
+    like top games regardless of where in the season they fall — early-
+    season low-stakes weeks no longer compress to all-low; late-season
+    saturation no longer flattens every game to ★10.
+
+    Falls back to absolute compression when the batch has fewer than
+    _ADAPTIVE_MIN_SAMPLES games (median is too noisy on small batches).
+
+    Median scale anchors at minimum 1.0 so a uniformly-low batch doesn't
+    collapse to all 10s via division-by-near-zero.
+    """
+    if len(raw_scores) < _ADAPTIVE_MIN_SAMPLES:
+        return [_compress_to_10(r) for r in raw_scores]
+    sorted_raws = sorted(raw_scores)
+    n = len(sorted_raws)
+    # Median that handles even-length batches without statistics import.
+    median_raw = (
+        sorted_raws[n // 2]
+        if n % 2
+        else (sorted_raws[n // 2 - 1] + sorted_raws[n // 2]) / 2.0
+    )
+    scale = max(float(median_raw), 1.0)
+    out: List[float] = []
+    for r in raw_scores:
+        if r <= 0:
+            out.append(0.0)
+        else:
+            out.append(10.0 * math.tanh(r / (scale * _ADAPTIVE_TARGET_FACTOR)))
+    return out
+
+
 # Spread (point-spread sports) fallback: scale where 0 = full
 # closeness, _SPREAD_BLOWOUT = zero closeness. Anchored to 14 because
 # the pre-B.3 formula maxed at spread=14 too — keeps NCAAF / NCAAM
