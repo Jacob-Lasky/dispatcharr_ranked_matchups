@@ -230,3 +230,106 @@ class TestExtractJson:
     def test_garbage_raises(self):
         with pytest.raises(Exception):
             _extract_json("not json at all")
+
+
+class TestTeamAliases:
+    """#4: broadcaster-side abbreviations expand the keyword set so EPG
+    titles using 'Man United' match the canonical 'Manchester United'."""
+
+    def test_manchester_united_expansion(self):
+        from dispatcharr_ranked_matchups.matcher import _team_keywords
+        kws = _team_keywords("Manchester United")
+        kws_lower = [k.lower() for k in kws]
+        assert "manchester united" in kws_lower  # original name
+        assert "man united" in kws_lower  # alias
+        assert "man utd" in kws_lower
+        # Generic-last-word skip protects against false matches:
+        assert "united" not in kws_lower
+
+    def test_manchester_united_fc_form_also_aliased(self):
+        # FD.org returns 'Manchester United FC' — alias key is the
+        # FC-stripped form, but lookup tries both.
+        from dispatcharr_ranked_matchups.matcher import _team_keywords
+        kws = _team_keywords("Manchester United FC")
+        kws_lower = [k.lower() for k in kws]
+        assert "man united" in kws_lower
+        assert "man utd" in kws_lower
+
+    def test_paris_sg_expansion(self):
+        from dispatcharr_ranked_matchups.matcher import _team_keywords
+        kws = _team_keywords("Paris Saint-Germain")
+        kws_lower = [k.lower() for k in kws]
+        assert "paris sg" in kws_lower
+        assert "psg" in kws_lower
+
+    def test_no_alias_for_unknown_team_safe(self):
+        from dispatcharr_ranked_matchups.matcher import _team_keywords
+        kws = _team_keywords("Some Unknown FC")
+        kws_lower = [k.lower() for k in kws]
+        # Original + stripped should be there; no aliases.
+        assert "some unknown fc" in kws_lower
+        assert "some unknown" in kws_lower
+        # No false-positive aliases like "Man Utd" leaking in.
+        assert "man utd" not in kws_lower
+
+    def test_regex_filter_matches_via_alias(self):
+        # End-to-end: a Brentford vs Man United EPG title matches.
+        from dispatcharr_ranked_matchups.matcher import _regex_filter, ChannelCandidate
+        from datetime import datetime, timezone
+        c = ChannelCandidate(
+            channel_id=1, channel_name="DAZN UK 7",
+            program_title="LIVE: Brentford vs Man United",
+            program_start=datetime(2026, 5, 24, tzinfo=timezone.utc),
+            program_end=datetime(2026, 5, 24, 2, tzinfo=timezone.utc),
+        )
+        out = _regex_filter([c], "Brentford FC", "Manchester United FC")
+        assert len(out) == 1, "alias 'Man United' should match canonical 'Manchester United FC'"
+
+
+class TestLoadTeamAliases:
+    """Validate team_aliases.json shape so the JSON loader doesn't silently
+    drop entries due to a missing list or stringly-typed value."""
+
+    def test_json_is_valid(self):
+        import json, os
+        path = os.path.join(os.path.dirname(__file__), "..", "team_aliases.json")
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        # At least a handful of marquee teams present.
+        for k in ("Manchester United", "Paris Saint-Germain", "Real Madrid", "Boston Celtics"):
+            assert k in raw
+
+    def test_no_empty_alias_lists(self):
+        import json, os
+        path = os.path.join(os.path.dirname(__file__), "..", "team_aliases.json")
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        for key, vals in raw.items():
+            if key.startswith("_"):
+                continue
+            assert isinstance(vals, list) and len(vals) > 0, \
+                f"empty alias list for {key}"
+            assert all(isinstance(v, str) and v.strip() for v in vals), \
+                f"non-string or empty alias in {key}: {vals}"
+
+
+class TestMatcherPromptIncludesForeignLanguageHints:
+    """#4: MATCHER_SYSTEM_PROMPT should give the LLM hints for German,
+    Spanish, Italian, French, Portuguese matchday/highlights vocabulary
+    so it matches foreign-language EPG titles correctly."""
+
+    def test_prompt_mentions_german_spieltag(self):
+        from dispatcharr_ranked_matchups.matcher import MATCHER_SYSTEM_PROMPT
+        assert "Spieltag" in MATCHER_SYSTEM_PROMPT
+
+    def test_prompt_mentions_spanish_jornada(self):
+        from dispatcharr_ranked_matchups.matcher import MATCHER_SYSTEM_PROMPT
+        assert "jornada" in MATCHER_SYSTEM_PROMPT
+
+    def test_prompt_mentions_italian_giornata(self):
+        from dispatcharr_ranked_matchups.matcher import MATCHER_SYSTEM_PROMPT
+        assert "giornata" in MATCHER_SYSTEM_PROMPT
+
+    def test_prompt_mentions_french_journee(self):
+        from dispatcharr_ranked_matchups.matcher import MATCHER_SYSTEM_PROMPT
+        assert "journee" in MATCHER_SYSTEM_PROMPT

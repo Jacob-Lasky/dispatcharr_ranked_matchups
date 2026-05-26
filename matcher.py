@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import urllib.request
@@ -26,6 +27,40 @@ from typing import Any, Dict, List, Optional, Tuple
 from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.matcher")
+
+
+# Team-name aliases — broadcaster-side abbreviations broadcasters use in
+# EPG titles ("Man United", "Man Utd") that don't appear in Football-Data.org's
+# canonical names ("Manchester United FC"). Loaded once per process from
+# team_aliases.json. See #4.
+_ALIASES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "team_aliases.json")
+
+
+def _load_team_aliases() -> Dict[str, List[str]]:
+    """Load team-name aliases from team_aliases.json.
+
+    Missing or malformed file logs a warning and returns empty dict — the
+    matcher still works without aliases, just with the v1 keyword set.
+    """
+    try:
+        with open(_ALIASES_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        logger.warning("[matcher] team_aliases.json missing at %s; matcher aliases disabled", _ALIASES_PATH)
+        return {}
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("[matcher] team_aliases.json load failed (%s); matcher aliases disabled", e)
+        return {}
+    out: Dict[str, List[str]] = {}
+    for key, vals in raw.items():
+        if key.startswith("_"):
+            continue
+        if isinstance(vals, list) and all(isinstance(v, str) for v in vals):
+            out[key] = vals
+    return out
+
+
+_TEAM_ALIASES = _load_team_aliases()
 
 # Last-word tokens we never use as a standalone keyword fallback. 'state' /
 # 'college' / 'university' are college-football generic; the soccer
@@ -73,6 +108,12 @@ def _team_keywords(team_name: str) -> List[str]:
     Drops the last-word fallback for generic-suffix names so 'Manchester
     United' never reduces to just 'United' (which would false-match
     'Brentford v West Ham United').
+
+    Pulls broadcaster aliases from team_aliases.json — "Manchester United"
+    expands to include "Man United" / "Man Utd" / "Man U" / "MUFC" so
+    abbreviated EPG titles still match. Lookup tries the canonical name
+    AND its trailing-suffix-stripped form to catch FD.org names that
+    arrive with "FC" / "AFC" appended.
     """
     name = team_name.strip()
     keywords = [name]
@@ -80,6 +121,7 @@ def _team_keywords(team_name: str) -> List[str]:
 
     # Strip trailing club tag for soccer-style names so 'Brentford FC' also
     # matches 'Brentford' in a channel/program title.
+    stripped: Optional[str] = None
     if len(parts) >= 2 and parts[-1].lower() in TEAM_SUFFIX_TOKENS:
         stripped = " ".join(parts[:-1])
         keywords.append(stripped)
@@ -92,6 +134,14 @@ def _team_keywords(team_name: str) -> List[str]:
         # First two words (only meaningful for 3+ word names; for 2-word names
         # this duplicates the full name and gets deduped below).
         keywords.append(" ".join(parts[:2]))
+
+    # Broadcaster aliases (#4). Look up both the original name AND the
+    # FC-stripped form because the JSON has "Manchester United" but FD.org
+    # returns "Manchester United FC".
+    for lookup in (name, stripped):
+        if lookup and lookup in _TEAM_ALIASES:
+            keywords.extend(_TEAM_ALIASES[lookup])
+
     return list(dict.fromkeys(keywords))
 
 
@@ -237,7 +287,16 @@ MATCHER_SYSTEM_PROMPT = (
     "return the channel_id of the EPG entry that's broadcasting THIS game. "
     "Use full team-name disambiguation (e.g., 'Penn State Nittany Lions vs Ohio State Buckeyes' "
     "matches 'Penn State at Ohio State'; 'NC State Wolfpack vs Notre Dame Fighting Irish' "
-    "matches 'NC State at Notre Dame'). If none of the candidates plausibly broadcasts the "
+    "matches 'NC State at Notre Dame'). "
+    # #4: non-English EPG titles. Foreign-language EPG entries are common
+    # for European soccer (German DAZN, Spanish Movistar, Italian Sky,
+    # French Canal+, Portuguese SportTV). Match on team names even when
+    # the surrounding 'matchday' vocabulary is in another language:
+    "EPG titles in other languages are common — match team names even when surrounding "
+    "text is foreign. Common 'matchday' translations: DE Spieltag, ES jornada, "
+    "IT giornata, FR journee, PT jornada. Common 'highlights' translations: "
+    "DE Zusammenfassung, ES resumen, IT sintesi, FR resume. "
+    "If none of the candidates plausibly broadcasts the "
     "game, return null for that game. "
     "Output ONLY a JSON object: {\"<game_id>\": <channel_id_or_null>, ...}. "
     "No prose, no markdown."

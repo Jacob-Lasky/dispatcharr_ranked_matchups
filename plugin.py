@@ -75,8 +75,43 @@ SPORTSDB_KEY_PATH = os.path.join(PLUGIN_DIR, "sportsdb_api_key")
 SPORTSDB_DEFAULT_KEY = "3"
 
 # Window relative to game start in which the EPG should show the game.
-EPG_PRE_MIN = 30      # 30 min before game starts
-EPG_POST_HOURS = 4    # 4 hours after game starts (covers OT)
+# DEFAULT is calibrated for NCAAF / NFL where broadcasters air long
+# pre-game shows + 4h covers overtime. Soccer wants a TIGHTER match
+# window so the matcher doesn't false-positive on pre-game wrap-up
+# programs that share both team names. See #4.
+EPG_PRE_MIN = 30      # 30 min before game starts (default; matches NCAAF / NFL pre-show + OT)
+EPG_POST_HOURS = 4    # 4 hours after game starts (default; covers OT)
+
+# Per-sport match-window override (used by _build_epg_lookup to constrain
+# the regex pre-filter's time bucket). The ProgramData slot we emit for
+# our virtual channel still uses the defaults above — those control
+# user-facing display, not match recall. See #4.
+#
+# Soccer leagues / international tournaments. Soccer games run ~95-120 min
+# (90 reg + halftime + stoppage); add ~10 min for extra time + penalties
+# in knockouts. 5 min pre + 2.5h post covers the actual broadcast window
+# without sweeping in pre-game preview shows from earlier in the day.
+_SOCCER_PREFIXES = frozenset({
+    "EPL", "EFL", "UCL",
+    "BL1", "LaLiga", "SerieA", "Ligue1",
+    "Eredivisie", "PrimeiraLiga", "BSA",
+    "WC", "EURO",
+    "MLS", "NWSL", "LigaMX",
+    "NCAAMS", "NCAAWS",
+})
+_MATCH_WINDOW_OVERRIDE_PRE_MIN: Dict[str, int] = {p: 5 for p in _SOCCER_PREFIXES}
+_MATCH_WINDOW_OVERRIDE_POST_HOURS: Dict[str, float] = {p: 2.5 for p in _SOCCER_PREFIXES}
+
+
+def _epg_match_window(sport_prefix: Optional[str]) -> Tuple[int, float]:
+    """Returns (pre_min, post_hours) for the EPG match-window pre-filter.
+
+    Defaults to the NCAAF/NFL-tuned (30, 4); soccer prefixes get (5, 2.5);
+    unknown prefixes fall back to the default. See #4.
+    """
+    pre = _MATCH_WINDOW_OVERRIDE_PRE_MIN.get(sport_prefix or "", EPG_PRE_MIN)
+    post = _MATCH_WINDOW_OVERRIDE_POST_HOURS.get(sport_prefix or "", float(EPG_POST_HOURS))
+    return pre, post
 
 # Marker we put in tvg_id of cloned channels so we can find/clean them up later
 # without needing a custom_properties field on the Channel model.
@@ -973,8 +1008,12 @@ def _build_epg_lookup():
     from django.db.models import Q
 
     def lookup(game) -> List[ChannelCandidate]:
-        window_start = game.start_time - timedelta(minutes=EPG_PRE_MIN)
-        window_end = game.start_time + timedelta(hours=EPG_POST_HOURS)
+        # Per-sport match window — soccer needs a tighter window to avoid
+        # false-matching pre-game preview shows earlier in the day; NCAAF
+        # / NFL keep the wide default for long pre-game shows + OT. See #4.
+        pre_min, post_hours = _epg_match_window(game.sport_prefix)
+        window_start = game.start_time - timedelta(minutes=pre_min)
+        window_end = game.start_time + timedelta(hours=post_hours)
 
         all_kws = _team_keywords(game.home) + _team_keywords(game.away)
         if not all_kws:
