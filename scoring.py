@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 # Trailing club-tag tokens (FC/AFC/etc) and generic second-words (United/City/
 # etc) live in _util so matcher.py can use them without importing scoring.
@@ -427,6 +427,24 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         code="WC_GS", matchdays_total=3, format="group_advance",
         thresholds=[
             (_GROUP_ADVANCE_SENTINEL, "advance", 4.0),
+            # Downstream-cascade labels carried through by the #53
+            # cross-source chain. When the chain is active (pre-
+            # tournament window, before FD.org populates real
+            # LAST_32 teams), GroupStageSoccerSource's importance
+            # query covers BOTH the group-advance signal AND the
+            # downstream-bracket signal, so a group-stage game whose
+            # result shifts the team's LAST_32 path-strength contributes
+            # cascade weight too. Weights mirror the WC knockout context
+            # entries; when the chain is inactive (single-source path),
+            # GroupStageSoccerSource.terminal_outcomes doesn't emit
+            # these labels and the leverage is 0 — net contribution 0,
+            # the addition is safe.
+            ("LAST_32",        "last_32",       0.5),
+            ("LAST_16",        "round_of_16",   1.5),
+            ("QUARTER_FINALS", "quarterfinal",  3.0),
+            ("SEMI_FINALS",    "semifinal",     5.0),
+            ("FINAL",          "final",         8.0),
+            ("WINNER",         "winner",       15.0),
         ],
         # WC 2026 format: 12 groups × 4 teams, top 2 + 8 best 3rd-place
         # = 32 advancing teams → LAST_32. Best-3rd advancement is ~25%
@@ -1146,7 +1164,7 @@ def compute_match_importance(
     Returns (0.0, [], []) when the league has no outcome bands (e.g., a
     knockout-only competition routed into this path by mistake).
     """
-    from .simulation import monte_carlo_importance_batch
+    from .simulation import monte_carlo_importance_batch, monte_carlo_importance_batch_chain
     if not getattr(source, "supports_importance", False):
         return 0.0, [], []
     if not league_ctx.thresholds:
@@ -1169,9 +1187,31 @@ def compute_match_importance(
         for _, label, _ in league_ctx.thresholds:
             queries.append((team, label))
 
-    leverages = monte_carlo_importance_batch(
-        source, match, queries, n_sims=n_sims, rng=rng,
+    # Chain routing (#53): if the source declares a cross-source chain
+    # AND that chain is currently active (pre-tournament FD.org state
+    # for WC group games), route through the chain simulator so the
+    # downstream knockout-cascade labels in league_ctx.thresholds get
+    # real leverage values. When the chain is inactive (or absent),
+    # the single-source path returns 0 on those labels, which is the
+    # correct degenerate behavior (the primary source doesn't emit
+    # downstream labels alone).
+    chain_fn = getattr(source, "cross_source_chain", None)
+    chain_raw = chain_fn() if callable(chain_fn) else None
+    chain = cast(
+        Optional[Tuple[Any, Callable[[Dict[str, Any]], Dict[str, Any]]]],
+        chain_raw,
     )
+    if chain is not None:
+        downstream, seed_fn = chain
+        leverages = monte_carlo_importance_batch_chain(
+            source, match, queries,
+            downstream=downstream, seed_fn=seed_fn,
+            n_sims=n_sims, rng=rng,
+        )
+    else:
+        leverages = monte_carlo_importance_batch(
+            source, match, queries, n_sims=n_sims, rng=rng,
+        )
 
     # Map label → weight once so the contribution loop is single-pass.
     weight_by_label: Dict[str, float] = {
