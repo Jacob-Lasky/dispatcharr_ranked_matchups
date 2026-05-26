@@ -337,6 +337,43 @@ def _parse_favorites(raw: str) -> List[str]:
     return [t.strip() for t in raw.split(",") if t.strip()]
 
 
+# Curation presets (#9). Each preset bundles a Weights tuning + a max_games
+# cap so users don't have to tune 9 individual knobs to get a "vibe":
+#
+# - "manual": read individual weight + max_games settings (V0 behavior).
+# - "high_curation": narrow to ~10 high-leverage games; weights emphasize
+#   structural importance + rank, downweight favorites/spread so they don't
+#   dominate the list when the user wants tight curation.
+# - "balanced": ~25 games with default weights — mirrors the v0 default.
+# - "high_coverage": ~50 games with permissive weights so smaller-stakes
+#   matchups still show up even on quiet days.
+#
+# Manual mode and a non-manual preset are mutually exclusive in spirit but
+# not enforced. Picking a preset overrides individual weight + max_games
+# settings during refresh; users who tune individual knobs should leave the
+# preset on "manual".
+_CURATION_PRESETS: Dict[str, Dict[str, float]] = {
+    "high_curation": {
+        "rank": 1.5, "spread": 2.0, "favorite": 4.0, "rivalry": 1.5,
+        "tournament": 2.0, "narrative": 0.0, "importance": 4.0,
+        "max_games": 10,
+    },
+    "balanced": {
+        # Mirrors Weights() dataclass defaults — kept here for the SAME
+        # reason _build_weights pulls from Weights(): if defaults change,
+        # the "balanced" preset SHOULD track them. DRY check pinned by tests.
+        "rank": 1.0, "spread": 3.0, "favorite": 6.0, "rivalry": 2.0,
+        "tournament": 1.5, "narrative": 0.0, "importance": 3.0,
+        "max_games": 25,
+    },
+    "high_coverage": {
+        "rank": 0.7, "spread": 4.0, "favorite": 8.0, "rivalry": 2.5,
+        "tournament": 1.0, "narrative": 0.0, "importance": 2.5,
+        "max_games": 50,
+    },
+}
+
+
 def _build_weights(settings: Dict[str, Any]):
     # Source of truth for default values is scoring.Weights's dataclass
     # declaration. Do NOT duplicate the numbers here — when a default
@@ -344,6 +381,24 @@ def _build_weights(settings: Dict[str, Any]):
     # uses the old value until somebody runs the tests.
     from .scoring import Weights
     d = Weights()
+
+    # Preset path: if a non-manual preset is selected, individual weight_*
+    # settings are IGNORED and the preset bundle wins. Manual (or any
+    # unrecognized preset name) falls through to the individual-setting
+    # path so power-users keep their tuning.
+    preset_key = str(settings.get("curation_preset", "manual") or "manual").lower()
+    if preset_key != "manual" and preset_key in _CURATION_PRESETS:
+        p = _CURATION_PRESETS[preset_key]
+        return Weights(
+            rank=float(p["rank"]),
+            spread=float(p["spread"]),
+            favorite=float(p["favorite"]),
+            rivalry=float(p["rivalry"]),
+            tournament=float(p["tournament"]),
+            narrative=float(p["narrative"]),
+            importance=float(p["importance"]),
+        )
+
     return Weights(
         rank=float(settings.get("weight_rank", d.rank)),
         spread=float(settings.get("weight_spread", d.spread)),
@@ -353,6 +408,19 @@ def _build_weights(settings: Dict[str, Any]):
         narrative=float(settings.get("weight_narrative", d.narrative)),
         importance=float(settings.get("weight_importance", d.importance)),
     )
+
+
+def _resolve_max_games(settings: Dict[str, Any]) -> int:
+    """Returns max_games for the curated list, honoring an active preset.
+
+    Non-manual preset → preset's max_games cap wins over individual setting.
+    Manual / unrecognized → read the user's max_games setting (default 25,
+    matching the balanced preset).
+    """
+    preset_key = str(settings.get("curation_preset", "manual") or "manual").lower()
+    if preset_key != "manual" and preset_key in _CURATION_PRESETS:
+        return int(_CURATION_PRESETS[preset_key]["max_games"])
+    return int(settings.get("max_games", 25))
 
 
 def _build_sources(settings: Dict[str, Any]):
@@ -648,7 +716,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     favorites = _parse_favorites(settings.get("favorites", ""))
     weights = _build_weights(settings)
     lookahead = int(settings.get("lookahead_days", 7))
-    max_games = int(settings.get("max_games", 25))
+    max_games = _resolve_max_games(settings)
 
     sources = _build_sources(settings)
     if not sources:
