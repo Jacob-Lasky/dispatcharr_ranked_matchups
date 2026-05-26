@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them on interestingness, matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching.",
   "author": "Jake (with Claude)",
   "license": "MIT",
