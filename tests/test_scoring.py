@@ -715,11 +715,15 @@ class TestComputeMatchImportanceChainRouting:
     def test_routes_to_chain_when_cross_source_chain_returns_tuple(
         self, monkeypatch,
     ):
-        # Patch BOTH simulator entry points to record which one was
-        # called. The chain function must fire; the regular batch must
-        # not.
+        # Patch BOTH simulator entry points. Confirm the chain function
+        # fires (not the regular batch) AND that the queries passed in
+        # include the downstream-cascade labels — otherwise WC_GS
+        # could silently drop the cascade labels and this routing test
+        # would still pass while production produces 0 contribution
+        # on R16+ bands.
         from dispatcharr_ranked_matchups import simulation
         called: Dict[str, int] = {"batch": 0, "chain": 0}
+        captured_queries: List[List[Tuple[str, str]]] = []
 
         def fake_batch(source, match, queries, n_sims, rng=None):
             called["batch"] += 1
@@ -728,6 +732,7 @@ class TestComputeMatchImportanceChainRouting:
         def fake_chain(source, match, queries, downstream, seed_fn,
                        n_sims, rng=None):
             called["chain"] += 1
+            captured_queries.append(list(queries))
             return {q: 0.0 for q in queries}
 
         monkeypatch.setattr(simulation, "monte_carlo_importance_batch", fake_batch)
@@ -750,6 +755,16 @@ class TestComputeMatchImportanceChainRouting:
         )
         assert called["chain"] == 1
         assert called["batch"] == 0
+        # Each playing team queried against EVERY threshold label,
+        # including the downstream cascade. If anyone strips cascade
+        # labels from WC_GS, this assertion catches it.
+        seen_labels = {label for _team, label in captured_queries[0]}
+        assert "advance" in seen_labels
+        assert "round_of_16" in seen_labels
+        assert "quarterfinal" in seen_labels
+        assert "semifinal" in seen_labels
+        assert "final" in seen_labels
+        assert "winner" in seen_labels
 
     def test_routes_to_batch_when_cross_source_chain_returns_none(
         self, monkeypatch,
