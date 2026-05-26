@@ -311,10 +311,10 @@ class MlsCupSource(BestOfNSeriesSource):
         Single-game-elim stages (MLS_WC, MLS_CSF, MLS_CF, MLS_CUP) also
         need PK dedup. ESPN sometimes publishes two events when a game
         goes to PKs (one with the regulation tie, one with the PK
-        result): see `_dedupe_pk_shootout_pairs` in
-        `ncaa_soccer_cup.py` for the same shape. We import that helper
-        rather than re-implementing; the dedup criterion is sport-
-        agnostic for single-game-elim brackets.
+        result): see `dedupe_pk_shootout_pairs` in
+        `sources/_soccer_bracket_helpers.py` (the canonical impl shared
+        with ncaa_soccer_cup). The dedup criterion is sport-agnostic
+        for single-game-elim brackets.
 
         Best-of-3 stages are NOT deduped on (stage, participants):
         the same teams legitimately play 2-3 games in a series, so
@@ -442,62 +442,14 @@ class MlsCupSource(BestOfNSeriesSource):
         }
 
 
-def _dedupe_pk_shootout_pairs(
-    records: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """Collapse multiple events at the same (stage, participants) tuple
-    into the single decisive event. ESPN occasionally publishes two
-    records for a soccer bracket game that goes to OT / PKs: one with
-    the regulation tie (e.g., 0-0) and a second with the PK shootout
-    final score (e.g., 3-2). Both can show up as FINISHED records.
-
-    NOTE: this is duplicated from `sources/ncaa_soccer_cup.py` while
-    issues #24 and #30 part B land as independent PRs. Once both
-    merge, the helper will be extracted to a shared module and both
-    call sites updated: DO NOT diverge the two implementations in
-    the meantime. Tracked in #69.
-
-    Preference order when multiple records collide on (stage,
-    frozenset(home, away)):
-      1. SCHEDULED records lose to any FINISHED record.
-      2. Among FINISHED records, non-tie outcomes beat tie outcomes.
-      3. Among non-tie FINISHED records, the LATEST start_time wins.
-    """
-    buckets: Dict[Tuple[str, FrozenSet[str]], List[Dict[str, Any]]] = {}
-    for rec in records:
-        key = (rec["stage"], frozenset((rec["home"], rec["away"])))
-        buckets.setdefault(key, []).append(rec)
-
-    out: List[Dict[str, Any]] = []
-    for key, bucket in buckets.items():
-        if len(bucket) == 1:
-            out.append(bucket[0])
-            continue
-        out.append(_pick_decisive_event(bucket))
-    return out
-
-
-def _pick_decisive_event(bucket: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Apply the (FINISHED > SCHEDULED, non-tie > tie, latest > earliest)
-    preference order. Bucket has 2+ records guaranteed.
-    """
-    finished = [r for r in bucket if r.get("status") == "FINISHED"]
-    if not finished:
-        return max(
-            bucket,
-            key=lambda r: r.get("start_time") or datetime.min.replace(tzinfo=timezone.utc),
-        )
-    non_tie = [
-        r for r in finished
-        if r.get("home_goals") is not None
-        and r.get("away_goals") is not None
-        and r["home_goals"] != r["away_goals"]
-    ]
-    pool = non_tie if non_tie else finished
-    return max(
-        pool,
-        key=lambda r: r.get("start_time") or datetime.min.replace(tzinfo=timezone.utc),
-    )
+# Bracket dedup helpers are shared with ncaa_soccer_cup -- canonical
+# impls live in _soccer_bracket_helpers. Re-export under the legacy
+# names so any tests / call sites grepping for
+# `_dedupe_pk_shootout_pairs` in this module still find it.
+from ._soccer_bracket_helpers import (
+    dedupe_pk_shootout_pairs as _dedupe_pk_shootout_pairs,
+    pick_decisive_event as _pick_decisive_event,
+)
 
 
 def _assign_matchdays_and_dedupe(
