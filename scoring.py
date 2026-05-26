@@ -746,6 +746,42 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
         ],
         boundary_summary="WC → Divisional → Conf Championship → Super Bowl → Champion",
     ),
+    # Issue #30 part A: MLS conference standings importance. Playoff
+    # seeding is per-conference (top 9 from Eastern, top 9 from Western
+    # in the 14-9 modern format), not aggregate league points — so the
+    # threshold bands MUST be per-conference. Two separate sources
+    # (MlsEastSource / MlsWestSource) route to MLS_EAST / MLS_WEST
+    # respectively; cutoffs are the same on both because the historical
+    # playoff lines have stayed within a couple of points of each other
+    # across conferences in the 34-game era.
+    #
+    # MLS uses 3 W / 1 D / 0 L standings points, so format="points_count"
+    # with the threshold field = standings_points. Bands keyed against
+    # the modern 34-game regular season:
+    #   - ~30 pts: playoff bubble (~9th seed line)
+    #   - ~45 pts: playoff secured (top-7 lock, no Wild Card stress)
+    #   - ~55 pts: top-4 home-field advantage for R1 best-of-3
+    #   - ~70 pts: Supporters' Shield pace (best record in MLS)
+    "MLS_EAST": LeagueContext(
+        code="MLS_EAST", matchdays_total=34, format="points_count",
+        thresholds=[
+            (30, "playoff_bubble",       1.5),
+            (45, "playoff_secured",      2.5),
+            (55, "top_4_home_field",     4.0),
+            (70, "shield_contender",     5.0),
+        ],
+        boundary_summary="30+ pts → bubble · 45+ → secured · 55+ → top-4 home field · 70+ → Shield contender (East)",
+    ),
+    "MLS_WEST": LeagueContext(
+        code="MLS_WEST", matchdays_total=34, format="points_count",
+        thresholds=[
+            (30, "playoff_bubble",       1.5),
+            (45, "playoff_secured",      2.5),
+            (55, "top_4_home_field",     4.0),
+            (70, "shield_contender",     5.0),
+        ],
+        boundary_summary="30+ pts → bubble · 45+ → secured · 55+ → top-4 home field · 70+ → Shield contender (West)",
+    ),
 }
 
 

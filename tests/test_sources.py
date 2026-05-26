@@ -4061,10 +4061,13 @@ class TestMlsSourceIdentity:
         assert src.sport_prefix == "MLS"
         assert src.sport_label == "MLS"
 
-    def test_does_not_support_importance_in_v1(self):
-        """V1 explicitly omits the importance simulator path. The
-        flag stays False; future MLS importance work (filed as a
-        follow-up) will flip this on."""
+    def test_does_not_support_importance(self):
+        """MlsSource is the closeness-only base class for NwslSource
+        and LigaMxSource. MLS itself is now handled by MlsEastSource +
+        MlsWestSource (issue #30 part A), which DO support importance.
+        MlsSource the class stays importance-free so NWSL / Liga MX
+        keep the V1 minimal shape until their own follow-ups land.
+        """
         assert self._make().supports_importance is False
 
 
@@ -5147,6 +5150,487 @@ class TestNflPlayoffSource:
         depths = [KNOCKOUT_ROUND_DEPTH[stage] for stage, _, _ in ctx.thresholds]
         for i in range(len(depths) - 1):
             assert depths[i] < depths[i + 1]
+
+
+# =====================================================================
+# Issue #30 part A: MLS conference-standings importance
+# =====================================================================
+
+class TestMlsStandingsIdentity:
+    """MlsEastSource / MlsWestSource: per-conference standings importance.
+    Pin identity (sport prefix, supports_importance, count field) before
+    exercising conference-routing logic."""
+
+    @staticmethod
+    def _east():
+        from dispatcharr_ranked_matchups.sources.mls_standings import MlsEastSource
+        return MlsEastSource()
+
+    @staticmethod
+    def _west():
+        from dispatcharr_ranked_matchups.sources.mls_standings import MlsWestSource
+        return MlsWestSource()
+
+    def test_east_routes_to_mls_east_context(self):
+        e = self._east()
+        assert e.league_context_code == "MLS_EAST"
+        assert e._conference == "East"
+
+    def test_west_routes_to_mls_west_context(self):
+        w = self._west()
+        assert w.league_context_code == "MLS_WEST"
+        assert w._conference == "West"
+
+    def test_sport_prefix_is_shared(self):
+        # Top Matchups group surfaces all MLS games under a single MLS
+        # prefix; conference identity is internal routing only.
+        assert self._east().sport_prefix == "MLS"
+        assert self._west().sport_prefix == "MLS"
+        assert self._east().sport_label == self._west().sport_label
+
+    def test_count_field_is_standings_points(self):
+        # 3 W / 1 D / 0 L means raw wins understate draw-heavy teams.
+        # Threshold cascade must read standings_points, not wins.
+        assert self._east()._count_field == "standings_points"
+        assert self._west()._count_field == "standings_points"
+
+    def test_supports_importance(self):
+        assert self._east().supports_importance is True
+        assert self._west().supports_importance is True
+
+
+class TestMlsStandingsContexts:
+    """Pin LEAGUE_CONTEXTS entries for MLS_EAST / MLS_WEST so a threshold
+    tweak doesn't silently drift away from the issue's spec
+    (~30 bubble / 45 secured / 55 top-4 / 70 Shield)."""
+
+    def test_mls_east_and_west_exist(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        assert "MLS_EAST" in LEAGUE_CONTEXTS
+        assert "MLS_WEST" in LEAGUE_CONTEXTS
+
+    def test_both_use_points_count_format(self):
+        # 3/1/0 scheme means win-count alone is misleading; format must
+        # be points_count to threshold against standings_points.
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        assert LEAGUE_CONTEXTS["MLS_EAST"].format == "points_count"
+        assert LEAGUE_CONTEXTS["MLS_WEST"].format == "points_count"
+
+    def test_threshold_cutoffs_match_spec(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        cutoffs_east = [c for c, _, _ in LEAGUE_CONTEXTS["MLS_EAST"].thresholds]
+        cutoffs_west = [c for c, _, _ in LEAGUE_CONTEXTS["MLS_WEST"].thresholds]
+        assert cutoffs_east == [30, 45, 55, 70]
+        assert cutoffs_west == [30, 45, 55, 70]
+
+    def test_threshold_weights_are_monotonic_increasing(self):
+        # Out-of-order weights would let a marginal team outscore an
+        # elite one. Cross-sport consequence calibration requires the
+        # deeper-outcome weight to dominate.
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        for code in ("MLS_EAST", "MLS_WEST"):
+            weights = [w for _, _, w in LEAGUE_CONTEXTS[code].thresholds]
+            for i in range(len(weights) - 1):
+                assert weights[i] < weights[i + 1], (
+                    f"{code} weights {weights} not monotonic at {i}"
+                )
+
+    def test_matchdays_total_matches_modern_season(self):
+        # MLS modern regular season is 34 games per team.
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        assert LEAGUE_CONTEXTS["MLS_EAST"].matchdays_total == 34
+        assert LEAGUE_CONTEXTS["MLS_WEST"].matchdays_total == 34
+
+
+class TestMlsStandingsRecordResult:
+    """The 3 / 1 / 0 standings-points credit. Mirrors ncaa_soccer's
+    record path because both apply the same soccer scheme — pin
+    independently so regression in one doesn't drag the other."""
+
+    @staticmethod
+    def _make():
+        from dispatcharr_ranked_matchups.sources.mls_standings import MlsEastSource
+        return MlsEastSource()
+
+    @staticmethod
+    def _row():
+        return {"wins": 0, "losses": 0, "pf": 0, "pa": 0, "games_played": 0}
+
+    def test_win_credits_three_to_winner(self):
+        src = self._make()
+        teams = {"Atlanta United FC": self._row(),
+                 "Inter Miami CF": self._row()}
+        src._record_result_into_state(
+            teams, "Atlanta United FC", "Inter Miami CF", 2, 1,
+        )
+        assert teams["Atlanta United FC"]["standings_points"] == 3
+        assert teams["Inter Miami CF"]["standings_points"] == 0
+        assert teams["Atlanta United FC"]["wins"] == 1
+        assert teams["Inter Miami CF"]["losses"] == 1
+
+    def test_draw_credits_one_each(self):
+        src = self._make()
+        teams = {"Charlotte FC": self._row(),
+                 "Orlando City SC": self._row()}
+        src._record_result_into_state(
+            teams, "Charlotte FC", "Orlando City SC", 1, 1,
+        )
+        # Pin both invariants: 1 pt each AND no W/L update. Regression
+        # cost would be a tied game showing as a loss in the cascade.
+        assert teams["Charlotte FC"]["standings_points"] == 1
+        assert teams["Orlando City SC"]["standings_points"] == 1
+        assert teams["Charlotte FC"]["wins"] == 0
+        assert teams["Charlotte FC"]["losses"] == 0
+        assert teams["Charlotte FC"]["draws"] == 1
+        assert teams["Orlando City SC"]["draws"] == 1
+
+    def test_loss_credits_zero(self):
+        src = self._make()
+        teams = {"Toronto FC": self._row(), "FC Cincinnati": self._row()}
+        src._record_result_into_state(
+            teams, "Toronto FC", "FC Cincinnati", 0, 2,
+        )
+        assert teams["Toronto FC"]["standings_points"] == 0
+        assert teams["FC Cincinnati"]["standings_points"] == 3
+
+
+class TestMlsStandingsSampleResultAllowsDraws:
+    """MLS regular-season games CAN end in regulation draws (the league
+    dropped the shootout tiebreaker in 2000). Confirm sample_result
+    does NOT coin-flip ties into wins the way base PointsBasedSportSource
+    does for NCAAF / NCAAM."""
+
+    def test_sample_result_can_produce_ties(self):
+        import random
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        from dispatcharr_ranked_matchups.sources.mls_standings import MlsEastSource
+        src = MlsEastSource()
+        strengths = {
+            "Atlanta United FC": {"pf_per_game": 1.0, "pa_per_game": 1.0},
+            "Inter Miami CF":    {"pf_per_game": 1.0, "pa_per_game": 1.0},
+        }
+        gr = GameRow(
+            sport_prefix="MLS", sport_label="MLS",
+            home="Atlanta United FC", away="Inter Miami CF",
+            rank_home=None, rank_away=None,
+            start_time=datetime(2025, 6, 1, tzinfo=timezone.utc),
+        )
+        rng = random.Random(42)
+        # With λ≈1 and 200 samples, Poisson generates ties at ~30% rate.
+        # At least one tie distinguishes soccer sample_result from the
+        # NCAAF/NCAAM force-a-winner shape.
+        ties = 0
+        for _ in range(200):
+            res = src.sample_result({}, gr, strengths, rng)
+            if res.home_goals == res.away_goals:
+                ties += 1
+        assert ties > 0, (
+            "MLS sample_result must allow regulation draws; "
+            "force-a-winner shape would be a regression to NCAAF behavior"
+        )
+
+
+class TestMlsStandingsConferenceFilter:
+    """Conference-aware filter on _fetch_full_season_games: only intra-
+    conference games are returned so the simulator's `_teams` dict stays
+    single-conference (terminal_outcomes assumes uniform thresholds
+    across all tracked teams)."""
+
+    def test_filters_to_own_conference_intra_games(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map",
+            lambda: {"A": "East", "B": "East", "C": "West", "D": "West"},
+        )
+        calls = {"n": 0}
+        def fake_get(url, *_, **__):
+            calls["n"] += 1
+            if calls["n"] != 1:
+                return {"events": []}
+            return {"events": [
+                # (1) A vs B — intra-East, should appear
+                {"id": 1, "date": "2025-04-01T19:00:00Z",
+                 "season": {"slug": "regular-season"},
+                 "competitions": [{
+                     "status": {"type": {"completed": True, "state": "post"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"displayName": "A"}, "score": "2"},
+                         {"homeAway": "away", "team": {"displayName": "B"}, "score": "1"},
+                     ],
+                 }]},
+                # (2) A vs C — cross-conf, should be filtered out
+                {"id": 2, "date": "2025-04-01T19:00:00Z",
+                 "season": {"slug": "regular-season"},
+                 "competitions": [{
+                     "status": {"type": {"completed": True, "state": "post"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"displayName": "A"}, "score": "1"},
+                         {"homeAway": "away", "team": {"displayName": "C"}, "score": "1"},
+                     ],
+                 }]},
+                # (3) C vs D — intra-West, should be filtered out for East
+                {"id": 3, "date": "2025-04-01T19:00:00Z",
+                 "season": {"slug": "regular-season"},
+                 "competitions": [{
+                     "status": {"type": {"completed": True, "state": "post"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"displayName": "C"}, "score": "0"},
+                         {"homeAway": "away", "team": {"displayName": "D"}, "score": "2"},
+                     ],
+                 }]},
+            ]}
+        monkeypatch.setattr(mod, "_http_get", fake_get)
+        monkeypatch.setattr(mod, "SEASON_START_MONTH", 4)
+        monkeypatch.setattr(mod, "SEASON_END_MONTH", 4)
+        src = MlsEastSource(season_year=2025)
+        games = src._fetch_full_season_games()
+        ids = {g["id"] for g in games}
+        # Only the A-vs-B intra-East game survives.
+        assert ids == {1}, f"expected only intra-East game, got {ids}"
+
+    def test_fetch_upcoming_emits_home_team_in_conference(self, monkeypatch):
+        """fetch_upcoming emits a game only when HOME team is in own
+        conference; cross-conf games surface via the home team's source.
+        Pin this so registered East+West don't double-emit cross-conf
+        games."""
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsWestSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map",
+            lambda: {"East1": "East", "West1": "West"},
+        )
+        def fake_get(url, *_, **__):
+            return {"events": [
+                {"id": "g1", "date": "2030-04-01T19:00:00Z",
+                 "season": {"slug": "regular-season"},
+                 "competitions": [{
+                     "status": {"type": {"completed": False, "state": "pre"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"displayName": "East1"}},
+                         {"homeAway": "away", "team": {"displayName": "West1"}},
+                     ],
+                 }]},
+                {"id": "g2", "date": "2030-04-01T19:00:00Z",
+                 "season": {"slug": "regular-season"},
+                 "competitions": [{
+                     "status": {"type": {"completed": False, "state": "pre"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"displayName": "West1"}},
+                         {"homeAway": "away", "team": {"displayName": "East1"}},
+                     ],
+                 }]},
+            ]}
+        monkeypatch.setattr(mod, "_http_get", fake_get)
+        src = MlsWestSource()
+        games = src.fetch_upcoming(days_ahead=0)
+        ids = {(g.extra or {}).get("espn_event_id") for g in games}
+        assert ids == {"g2"}, (
+            f"West source must emit only home-in-West games, got {ids}"
+        )
+
+    def test_late_season_bubble_match_produces_nonzero_importance(self):
+        """Issue #30 acceptance: a bubble-line matchup with enough
+        remaining matches in the season produces nonzero playoff_bubble
+        leverage. Uses a stub state to bypass ESPN's thin future-
+        fixtures publishing (see module docstring's "Known limitation"
+        — live mid-season importance reads near 0 because ESPN MLS
+        publishes only ~1-2 weeks of future games, so the simulator
+        can't propagate; this test pins the simulator pipeline
+        independent of the data-availability quirk).
+        """
+        import random
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        from dispatcharr_ranked_matchups.scoring import (
+            LEAGUE_CONTEXTS, compute_match_importance,
+        )
+
+        class _StubEast(MlsEastSource):
+            def initial_state(self):
+                # Nashville at 29 pts, one game from the 30 pt bubble.
+                # Inter Miami at 26, also within reach. A single match
+                # result genuinely moves Nashville above or below the
+                # threshold — leverage should be nonzero.
+                return {
+                    "_applied": frozenset(),
+                    "_teams": {
+                        "Nashville SC": {
+                            "wins": 9, "losses": 4, "pf": 18, "pa": 12,
+                            "games_played": 15, "standings_points": 29,
+                            "draws": 2,
+                        },
+                        "Inter Miami CF": {
+                            "wins": 8, "losses": 5, "pf": 16, "pa": 14,
+                            "games_played": 15, "standings_points": 26,
+                            "draws": 2,
+                        },
+                        "Atlanta United FC": {
+                            "wins": 4, "losses": 8, "pf": 10, "pa": 16,
+                            "games_played": 15, "standings_points": 15,
+                            "draws": 3,
+                        },
+                        "CF Montréal": {
+                            "wins": 5, "losses": 7, "pf": 11, "pa": 14,
+                            "games_played": 15, "standings_points": 18,
+                            "draws": 3,
+                        },
+                        "Charlotte FC": {
+                            "wins": 6, "losses": 6, "pf": 13, "pa": 13,
+                            "games_played": 15, "standings_points": 21,
+                            "draws": 3,
+                        },
+                    },
+                }
+
+            def remaining_matches(self, state):
+                applied = state.get("_applied", frozenset())
+                base = [
+                    GameRow("MLS", "MLS", "Inter Miami CF", "CF Montréal",
+                            None, None, datetime(2026, 10, 1, tzinfo=timezone.utc),
+                            extra={"game_id": "r2"}),
+                    GameRow("MLS", "MLS", "Atlanta United FC", "Nashville SC",
+                            None, None, datetime(2026, 10, 8, tzinfo=timezone.utc),
+                            extra={"game_id": "r3"}),
+                    GameRow("MLS", "MLS", "Charlotte FC", "Inter Miami CF",
+                            None, None, datetime(2026, 10, 15, tzinfo=timezone.utc),
+                            extra={"game_id": "r4"}),
+                    GameRow("MLS", "MLS", "Nashville SC", "CF Montréal",
+                            None, None, datetime(2026, 10, 22, tzinfo=timezone.utc),
+                            extra={"game_id": "r5"}),
+                ]
+                return [m for m in base if m.extra["game_id"] not in applied]
+
+            def estimate_strengths(self):
+                return {
+                    "Nashville SC":      {"pf_per_game": 1.2, "pa_per_game": 0.8},
+                    "Inter Miami CF":    {"pf_per_game": 1.1, "pa_per_game": 0.9},
+                    "Atlanta United FC": {"pf_per_game": 0.7, "pa_per_game": 1.1},
+                    "CF Montréal":       {"pf_per_game": 0.7, "pa_per_game": 0.9},
+                    "Charlotte FC":      {"pf_per_game": 0.9, "pa_per_game": 0.9},
+                }
+
+        ctx = LEAGUE_CONTEXTS["MLS_EAST"]
+        src = _StubEast()
+        target = GameRow(
+            "MLS", "MLS", "Nashville SC", "Inter Miami CF",
+            None, None, datetime(2026, 9, 30, tzinfo=timezone.utc),
+            extra={"game_id": "target"},
+        )
+        points, _, hits = compute_match_importance(
+            src, target, ctx, n_sims=300, rng=random.Random(42),
+        )
+        # Bubble-line match must register nonzero leverage. Seed 42 with
+        # n_sims=300 gives a reproducible ~0.5-1.0 point reading on
+        # this scenario; pinning >= 0.05 keeps the assertion resilient
+        # to Poisson sampling noise across Python implementations.
+        assert points >= 0.05, f"expected nonzero bubble leverage, got {points}"
+        assert "playoff_bubble" in hits, (
+            f"expected playoff_bubble in thresholds hit, got {hits}"
+        )
+
+    def test_conference_map_parses_espn_standings_shape(self, monkeypatch):
+        """Pin the parser against ESPN's actual /standings response
+        shape so a schema drift (e.g., abbreviation renamed,
+        children[] nesting changed) fails loudly here instead of
+        silently returning an empty conference map (which would
+        cascade into 0 emitted games + 0 importance with no error).
+        """
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        # Realistic ESPN shape: top-level "children" list with two
+        # entries, each carrying a standings.entries[].team.displayName.
+        fixture = {
+            "children": [
+                {
+                    "abbreviation": "East",
+                    "name": "Eastern Conference",
+                    "standings": {"entries": [
+                        {"team": {"displayName": "Atlanta United FC"}},
+                        {"team": {"displayName": "Inter Miami CF"}},
+                    ]},
+                },
+                {
+                    "abbreviation": "West",
+                    "name": "Western Conference",
+                    "standings": {"entries": [
+                        {"team": {"displayName": "LA Galaxy"}},
+                        {"team": {"displayName": "LAFC"}},
+                    ]},
+                },
+                # A third child with a non-East/West abbreviation should
+                # be silently ignored (defensive against ESPN adding new
+                # buckets like an exhibition group).
+                {
+                    "abbreviation": "Other",
+                    "name": "Exhibition",
+                    "standings": {"entries": [
+                        {"team": {"displayName": "Bogus Team"}},
+                    ]},
+                },
+            ],
+        }
+        monkeypatch.setattr(mod, "_http_get", lambda *_a, **_k: fixture)
+        cmap = mod._fetch_conference_map()
+        assert cmap == {
+            "Atlanta United FC": "East",
+            "Inter Miami CF":    "East",
+            "LA Galaxy":         "West",
+            "LAFC":              "West",
+        }, f"unexpected conference map: {cmap}"
+
+    def test_conference_map_returns_empty_on_endpoint_failure(self, monkeypatch):
+        """When _http_get returns None (ESPN down / network error /
+        4xx), the conference map MUST be empty rather than partial.
+        An empty map cascades to 0 emitted games — graceful degradation
+        rather than misclassified teams getting the wrong conference's
+        threshold bands.
+        """
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(mod, "_http_get", lambda *_a, **_k: None)
+        assert mod._fetch_conference_map() == {}
+
+    def test_filters_out_non_regular_season(self, monkeypatch):
+        """Playoff games (season.slug != 'regular-season') must be filtered
+        out so the Cup bracket (sibling #30 part B) doesn't pollute
+        regular-season threshold computation."""
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map",
+            lambda: {"A": "East", "B": "East"},
+        )
+        calls = {"n": 0}
+        def fake_get(url, *_, **__):
+            calls["n"] += 1
+            if calls["n"] != 1:
+                return {"events": []}
+            return {"events": [
+                {"id": 100, "date": "2025-04-01T19:00:00Z",
+                 "season": {"slug": "eastern-conference-playoffs---round-one"},
+                 "competitions": [{
+                     "status": {"type": {"completed": True, "state": "post"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"displayName": "A"}, "score": "2"},
+                         {"homeAway": "away", "team": {"displayName": "B"}, "score": "1"},
+                     ],
+                 }]},
+            ]}
+        monkeypatch.setattr(mod, "_http_get", fake_get)
+        monkeypatch.setattr(mod, "SEASON_START_MONTH", 4)
+        monkeypatch.setattr(mod, "SEASON_END_MONTH", 4)
+        src = MlsEastSource(season_year=2025)
+        games = src._fetch_full_season_games()
+        assert games == [], "playoff-slug games must be filtered from season fetch"
 
 
 # =====================================================================

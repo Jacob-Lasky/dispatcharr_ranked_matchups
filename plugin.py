@@ -461,7 +461,7 @@ def _resolve_max_games(settings: Dict[str, Any]) -> int:
 def _build_sources(settings: Dict[str, Any]):
     from .sources import (
         GroupStageSoccerSource, KnockoutSoccerSource, MlbPlayoffSource, MlbRegularSource,
-        MlsSource, NwslSource, LigaMxSource,
+        MlsEastSource, MlsWestSource, NwslSource, LigaMxSource,
         NbaPlayoffSource, NbaRegularSource,
         WnbaPlayoffSource, WnbaRegularSource,
         NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
@@ -611,14 +611,18 @@ def _build_sources(settings: Dict[str, Any]):
             logger.warning("[nba] could not seed playoff strengths: %s", exc)
         sources.append(nba_po)
 
-    # MLS — ESPN schedule + Odds API closeness. V1 surfaces games with
-    # favorite + closeness signals only; no standings-based importance
-    # because conference standings bands and the MLS Cup mixed-format
-    # bracket (best-of-3 R1 + single-leg subsequent rounds) are both
-    # follow-ups. Closeness still requires the Odds API key — without
-    # it MLS games surface but with no closeness signal.
+    # MLS — issue #30 part A: register MlsEastSource + MlsWestSource
+    # for per-conference standings importance (playoff seeding is per-
+    # conference, not aggregate league). The closeness-only MlsSource
+    # stays as the base class for NwslSource / LigaMxSource but is NOT
+    # registered for MLS here; the East/West sources own the MLS
+    # emission and carry the same closeness signal forward via the
+    # shared Odds API helpers from mls.py. MLS Cup playoff bracket
+    # (mixed best-of-3 R1 + single-leg later rounds) is filed under
+    # #30 part B.
     if settings.get("enable_mls", False):
-        sources.append(MlsSource(odds_api_key=odds_key or ""))
+        sources.append(MlsEastSource(odds_api_key=odds_key or ""))
+        sources.append(MlsWestSource(odds_api_key=odds_key or ""))
 
     # NWSL — same V1 minimal pattern as MLS (schedule + closeness).
     # Subclasses MlsSource with NWSL-specific endpoint and Odds API

@@ -142,9 +142,9 @@
     {
       "id": "enable_mls",
       "type": "boolean",
-      "label": "MLS (regular season + Cup playoffs)",
+      "label": "MLS (regular season)",
       "default": false,
-      "help_text": "MLS games surface with favorite + closeness scoring only in V1 — no standings-based importance yet (conference structure and the mixed-format MLS Cup bracket are follow-ups). Uses ESPN's unofficial site.api.espn.com for the schedule. The Odds API key enables closeness via the soccer_usa_mls market; without it, MLS games appear but with no closeness signal."
+      "help_text": "MLS regular season with per-conference standings importance. Playoff seeding is per-conference (top 9 from Eastern + top 9 from Western), so threshold bands run separately on each conference: 30+ standings points (3 W / 1 D / 0 L) = playoff bubble, 45+ = playoff secured, 55+ = top-4 home-field advantage in R1 best-of-3, 70+ = Supporters' Shield contender. ESPN's unofficial site.api.espn.com for schedule + /standings for conference rosters; The Odds API key enables closeness via soccer_usa_mls. MLS Cup playoff bracket (mixed best-of-3 R1 + single-leg later rounds) is filed as a follow-up (#30 part B)."
     },
     {
       "id": "enable_nwsl",
