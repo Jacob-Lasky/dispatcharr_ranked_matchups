@@ -1129,6 +1129,35 @@ class TestComputePastSlotEnd:
         assert past_end.utcoffset().total_seconds() == 0
 
 
+class TestEpgMatchWindow:
+    """#4: per-sport match-window override. Soccer uses (5, 2.5) to avoid
+    false-positives on pre-game preview programs; NCAAF / NFL keep
+    (30, 4) for long pre-game shows + OT."""
+
+    def test_default_window_for_unknown_sport(self, plugin):
+        pre, post = plugin._epg_match_window("UNKNOWN")
+        assert pre == plugin.EPG_PRE_MIN
+        assert post == plugin.EPG_POST_HOURS
+
+    def test_default_window_for_none(self, plugin):
+        pre, post = plugin._epg_match_window(None)
+        assert pre == plugin.EPG_PRE_MIN
+        assert post == plugin.EPG_POST_HOURS
+
+    def test_soccer_leagues_tight_window(self, plugin):
+        for prefix in ("EPL", "EFL", "UCL", "BL1", "LaLiga", "SerieA",
+                       "Ligue1", "WC", "EURO", "MLS", "NWSL", "LigaMX"):
+            pre, post = plugin._epg_match_window(prefix)
+            assert pre == 5, f"{prefix} should use tight pre-window of 5 min"
+            assert post == 2.5, f"{prefix} should use 2.5h post-window"
+
+    def test_ncaaf_keeps_default(self, plugin):
+        # NCAAF needs the long pre-show + OT window.
+        pre, post = plugin._epg_match_window("CFB")
+        assert pre == 30
+        assert post == 4
+
+
 class TestCurationPresets:
     def test_manual_preset_uses_individual_weights(self, plugin):
         settings = {
