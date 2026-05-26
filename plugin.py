@@ -1122,7 +1122,10 @@ def _build_subtitle(g: Dict[str, Any], tagline: str) -> str:
     matchday = extra.get("matchday")
     matchdays_total = extra.get("matchdays_total")
     if matchday and matchdays_total:
-        parts.append(f"matchday {matchday}/{matchdays_total}")
+        # Lowercase "catch-up" prefix for sub-title (consistent with the
+        # rest of the subtitle's lowercase fragments). See #3.
+        prefix = "catch-up matchday" if _is_catchup_matchday(g) else "matchday"
+        parts.append(f"{prefix} {matchday}/{matchdays_total}")
     elif extra.get("week"):  # NCAAF / NCAAM week-based sports
         parts.append(f"week {extra['week']}")
     spread_desc = _close_game_descriptor(g.get("closeness"), g.get("spread"))
@@ -1141,6 +1144,35 @@ def _league_context_for(g: Dict[str, Any]):
     from .scoring import LEAGUE_CONTEXTS
     fd_code = (g.get("extra") or {}).get("fd_competition_code")
     return LEAGUE_CONTEXTS.get(fd_code) if fd_code else None
+
+
+# A fixture's matchday is "catch-up" when it's at least this many rounds
+# behind the league's current matchday (= max playedGames across the table).
+# 1 isn't enough — normal weekly scheduling routinely puts midweek games at
+# matchday N-1 vs weekend games at matchday N. 2 catches genuine
+# rescheduled-postponed fixtures (FA Cup, weather) without false-firing.
+_CATCHUP_MATCHDAY_GAP = 2
+
+
+def _is_catchup_matchday(g: Dict[str, Any]) -> bool:
+    """True when this fixture's matchday is ≥ _CATCHUP_MATCHDAY_GAP rounds
+    behind the rest of the league.
+
+    The league's "current matchday" is derived from `max(played)` across the
+    cached standings table. Returns False for non-league fixtures (no
+    standings table → no current-matchday signal) and for caches that
+    predate the 'played' field. See #3.
+    """
+    extra = g.get("extra") or {}
+    matchday = extra.get("matchday")
+    if not isinstance(matchday, int):
+        return False
+    table = extra.get("standings_table") or []
+    played_counts = [e.get("played") for e in table if isinstance(e.get("played"), int)]
+    if not played_counts:
+        return False
+    league_current = max(played_counts)
+    return matchday <= league_current - _CATCHUP_MATCHDAY_GAP
 
 
 _ORDINAL_SUFFIXES = ("th", "st", "nd", "rd")
@@ -1305,7 +1337,13 @@ def _build_description(
     )
     matchday_line_parts: List[str] = []
     if matchday and matchdays_total:
-        matchday_line_parts.append(f"Matchday {matchday} of {matchdays_total}.")
+        # "Catch-up matchday X of Y" when fixture is meaningfully behind
+        # the league's current pacing — see _is_catchup_matchday and #3.
+        # Without the label, an end-of-season "Matchday 40 of 46" reads as
+        # if the team has 6 games left when really it's a postponement
+        # being replayed late and they have 1.
+        label = "Catch-up matchday" if _is_catchup_matchday(g) else "Matchday"
+        matchday_line_parts.append(f"{label} {matchday} of {matchdays_total}.")
     if league_ctx and league_ctx.boundary_summary:
         matchday_line_parts.append(league_ctx.boundary_summary + ".")
     if matchday_line_parts:
