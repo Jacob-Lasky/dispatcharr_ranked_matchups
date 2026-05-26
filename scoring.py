@@ -247,6 +247,23 @@ KNOCKOUT_ROUND_DEPTH: Dict[str, int] = {
 }
 
 
+# FIFA World Cup knockout cascade thresholds. Shared by:
+#   - WC: the knockout source's own context (post-group bracket).
+#   - WC_GS: the group-stage context, which inherits these labels so
+#     the #53 cross-source chain can attribute downstream-cascade
+#     leverage to group games. If WC weights change, BOTH contexts
+#     need the updated values; sharing via this constant prevents
+#     drift between the knockout source and the group-stage chain.
+_WC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
+    ("LAST_32",        "last_32",       0.5),
+    ("LAST_16",        "round_of_16",   1.5),
+    ("QUARTER_FINALS", "quarterfinal",  3.0),
+    ("SEMI_FINALS",    "semifinal",     5.0),
+    ("FINAL",          "final",         8.0),
+    ("WINNER",         "winner",       15.0),
+]
+
+
 LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     "PL": LeagueContext(
         code="PL", matchdays_total=38,
@@ -388,14 +405,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # consequence.
     "WC": LeagueContext(
         code="WC", matchdays_total=0, format="knockout",
-        thresholds=[
-            ("LAST_32",        "last_32",       0.5),
-            ("LAST_16",        "round_of_16",   1.5),
-            ("QUARTER_FINALS", "quarterfinal",  3.0),
-            ("SEMI_FINALS",    "semifinal",     5.0),
-            ("FINAL",          "final",         8.0),
-            ("WINNER",         "winner",       15.0),
-        ],
+        thresholds=list(_WC_KNOCKOUT_THRESHOLDS),
         boundary_summary="R32 → R16 → QF → SF → Final → Champion (FIFA World Cup)",
     ),
     "EC": LeagueContext(
@@ -425,27 +435,18 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     # gap above.
     "WC_GS": LeagueContext(
         code="WC_GS", matchdays_total=3, format="group_advance",
-        thresholds=[
-            (_GROUP_ADVANCE_SENTINEL, "advance", 4.0),
-            # Downstream-cascade labels carried through by the #53
-            # cross-source chain. When the chain is active (pre-
-            # tournament window, before FD.org populates real
-            # LAST_32 teams), GroupStageSoccerSource's importance
-            # query covers BOTH the group-advance signal AND the
-            # downstream-bracket signal, so a group-stage game whose
-            # result shifts the team's LAST_32 path-strength contributes
-            # cascade weight too. Weights mirror the WC knockout context
-            # entries; when the chain is inactive (single-source path),
-            # GroupStageSoccerSource.terminal_outcomes doesn't emit
-            # these labels and the leverage is 0 — net contribution 0,
-            # the addition is safe.
-            ("LAST_32",        "last_32",       0.5),
-            ("LAST_16",        "round_of_16",   1.5),
-            ("QUARTER_FINALS", "quarterfinal",  3.0),
-            ("SEMI_FINALS",    "semifinal",     5.0),
-            ("FINAL",          "final",         8.0),
-            ("WINNER",         "winner",       15.0),
-        ],
+        # `advance` is the group-stage's own signal; the WC knockout
+        # cascade is inherited from `_WC_KNOCKOUT_THRESHOLDS` so the
+        # #53 cross-source chain can attribute downstream-cascade
+        # leverage to group games. When the chain is inactive
+        # (single-source path), GroupStageSoccerSource.terminal_outcomes
+        # doesn't emit the cascade labels; the leverage on them
+        # degenerates to 0 and the contribution sums to 0. The
+        # addition is safe in both states.
+        thresholds=(
+            [(_GROUP_ADVANCE_SENTINEL, "advance", 4.0)]
+            + list(_WC_KNOCKOUT_THRESHOLDS)
+        ),
         # WC 2026 format: 12 groups × 4 teams, top 2 + 8 best 3rd-place
         # = 32 advancing teams → LAST_32. Best-3rd advancement is ~25%
         # of advancing teams and was the #52 follow-up to #20.
