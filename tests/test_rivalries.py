@@ -43,7 +43,7 @@ class TestIsRivalry:
         assert rivalries.is_rivalry("Liverpool FC", "Manchester United FC", "EPL")
 
     def test_order_independent(self):
-        # Same pair, swapped — should still match.
+        # Same pair, swapped: should still match.
         assert rivalries.is_rivalry("Manchester United FC", "Liverpool FC", "EPL")
 
     def test_case_insensitive(self):
@@ -79,13 +79,13 @@ class TestIsRivalry:
         assert rivalries.is_rivalry("New York Yankees", "Boston Red Sox", "MLB")
 
     def test_la_classico_either_name(self):
-        # Real Madrid vs Barcelona — full names + abbreviations.
+        # Real Madrid vs Barcelona: full names + abbreviations.
         assert rivalries.is_rivalry("Real Madrid", "Barcelona", "LaLiga")
         assert rivalries.is_rivalry("Real Madrid CF", "FC Barcelona", "LaLiga")
 
     def test_paris_sg_abbreviation(self):
         # SportsDB returns "Paris SG"; FD.org returns "Paris Saint-Germain FC".
-        # JSON has both forms — both should match Marseille.
+        # JSON has both forms: both should match Marseille.
         assert rivalries.is_rivalry("Paris SG", "Olympique de Marseille", "Ligue1")
         assert rivalries.is_rivalry("Paris Saint-Germain FC", "Marseille", "Ligue1")
 
@@ -94,7 +94,7 @@ class TestIsRivalry:
         assert not rivalries.is_rivalry("Liverpool FC", "Manchester United FC", "MLS")
 
     def test_handles_one_word_team_name_substring(self):
-        # NCAA Football "Texas vs Oklahoma" — bare 1-word names. Both
+        # NCAA Football "Texas vs Oklahoma": bare 1-word names. Both
         # appear in many other team names ("UT-Austin Texas Longhorns"),
         # but the JSON entries are exact-bare so they only match teams
         # whose name actually contains "Texas".

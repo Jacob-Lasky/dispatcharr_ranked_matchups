@@ -1,4 +1,4 @@
-"""NBA source — ESPN's unofficial `site.api.espn.com` API. No key required.
+"""NBA source: ESPN's unofficial `site.api.espn.com` API. No key required.
 
 stats.nba.com would be the official source for NBA data, but it's behind
 a WAF that blocks most homelab egress (including pocket-dev's). ESPN's
@@ -6,12 +6,12 @@ unofficial scoreboard endpoint is the practical fallback: same shape as
 NCAA Baseball / NCAA Soccer in this codebase, and stable enough for a
 TV-guide curator. If ESPN ever changes its endpoint, `fetch_upcoming`
 and the importance interfaces return [] and NBA silently drops out of
-the guide for that refresh — graceful-degrade is already the contract.
+the guide for that refresh: graceful-degrade is already the contract.
 
 Two source classes:
   - `NbaRegularSource(PointsBasedSportSource)`: 82-game regular season,
     raw win count as the threshold field (LEAGUE_CONTEXTS["NBA"] is
-    format="win_count"). No OT bonus point — NBA OT wins count as
+    format="win_count"). No OT bonus point: NBA OT wins count as
     normal wins. Thresholds at 40 (play-in bubble) / 50 (comfortable
     in) / 55 (top-3 seed pace) / 65 (historic).
   - `NbaPlayoffSource(BestOfNSeriesSource)`: best-of-7 each round, 4
@@ -163,11 +163,11 @@ def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     (cancellations, postponements with no competitors) AND for
     non-bracket exhibition games like the All-Star Tournament
     (which ESPN labels season.type==2 alongside real regular-season
-    games — see competition.type.abbreviation == "ALLSTAR").
+    games: see competition.type.abbreviation == "ALLSTAR").
 
     Returned `competition.type.abbreviation` values:
       - "STD"     -> regular-season game
-      - "FINAL"   -> playoff game (ESPN's confusing label — applies
+      - "FINAL"   -> playoff game (ESPN's confusing label: applies
                      to every playoff round, not just the Finals)
       - "ALLSTAR" -> All-Star Tournament (rejected here)
     """
@@ -217,7 +217,7 @@ def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         ap = None
 
     if status == "FINISHED" and (hp is None or ap is None):
-        # Status says FINISHED but a score is missing — demote so the
+        # Status says FINISHED but a score is missing: demote so the
         # simulator doesn't seed a phantom 0-0 result.
         status = "SCHEDULED"
         hp = None
@@ -355,7 +355,7 @@ class NbaRegularSource(PointsBasedSportSource):
                     if rec["id"] in seen:
                         continue
                     # The base PointsBasedSportSource doesn't read the
-                    # season_type or notes fields — strip them so the
+                    # season_type or notes fields: strip them so the
                     # downstream contract stays tight.
                     seen[rec["id"]] = {
                         k: v for k, v in rec.items()
@@ -378,7 +378,7 @@ class NbaPlayoffSource(BestOfNSeriesSource):
     conference series.
 
     Stage routing comes from parsing the `competition.notes[0].headline`
-    field on each ESPN scoreboard event — there's no structured stage
+    field on each ESPN scoreboard event: there's no structured stage
     field on the API.
     """
 
@@ -388,7 +388,7 @@ class NbaPlayoffSource(BestOfNSeriesSource):
 
     def __init__(self, season_end_year: Optional[int] = None) -> None:
         self.season_end_year = season_end_year or _default_season_end_year()
-        # Caches for the importance interface — same pattern as NhlPlayoffSource.
+        # Caches for the importance interface: same pattern as NhlPlayoffSource.
         self._initial_state_cache: Optional[Dict[str, Any]] = None
         self._strengths_cache: Optional[Dict[str, Dict[str, float]]] = None
         self._bracket_games_cache: Optional[List[Dict[str, Any]]] = None
@@ -484,13 +484,13 @@ class NbaPlayoffSource(BestOfNSeriesSource):
     def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
         """Pull the entire postseason schedule and normalize each game
         to the bracket per-game record shape. Stage comes from parsing
-        the ESPN headline ("East 1st Round - Game 3", etc.) — that's
+        the ESPN headline ("East 1st Round - Game 3", etc.): that's
         the only place ESPN exposes round information.
 
         Iteration window: April 1 (early play-in) through July 1 (latest
         possible Game-7 NBA Finals tail) of the season-end calendar year.
         That's a small enough window (~90 days) that the per-day cost
-        is bounded — playoff days have at most 4 games (R1) and often
+        is bounded: playoff days have at most 4 games (R1) and often
         just 1 (Finals), so the dedupe map stays small.
         """
         if self._bracket_games_cache is not None:

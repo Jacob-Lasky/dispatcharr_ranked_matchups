@@ -29,7 +29,7 @@ from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.matcher")
 
 
-# Team-name aliases — broadcaster-side abbreviations broadcasters use in
+# Team-name aliases: broadcaster-side abbreviations broadcasters use in
 # EPG titles ("Man United", "Man Utd") that don't appear in Football-Data.org's
 # canonical names ("Manchester United FC"). Loaded once per process from
 # team_aliases.json. See #4.
@@ -39,7 +39,7 @@ _ALIASES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "team_a
 def _load_team_aliases() -> Dict[str, List[str]]:
     """Load team-name aliases from team_aliases.json.
 
-    Missing or malformed file logs a warning and returns empty dict — the
+    Missing or malformed file logs a warning and returns empty dict: the
     matcher still works without aliases, just with the v1 keyword set.
     """
     try:
@@ -109,7 +109,7 @@ def _team_keywords(team_name: str) -> List[str]:
     United' never reduces to just 'United' (which would false-match
     'Brentford v West Ham United').
 
-    Pulls broadcaster aliases from team_aliases.json — "Manchester United"
+    Pulls broadcaster aliases from team_aliases.json: "Manchester United"
     expands to include "Man United" / "Man Utd" / "Man U" / "MUFC" so
     abbreviated EPG titles still match. Lookup tries the canonical name
     AND its trailing-suffix-stripped form to catch FD.org names that
@@ -292,7 +292,7 @@ MATCHER_SYSTEM_PROMPT = (
     # for European soccer (German DAZN, Spanish Movistar, Italian Sky,
     # French Canal+, Portuguese SportTV). Match on team names even when
     # the surrounding 'matchday' vocabulary is in another language:
-    "EPG titles in other languages are common — match team names even when surrounding "
+    "EPG titles in other languages are common: match team names even when surrounding "
     "text is foreign. Common 'matchday' translations: DE Spieltag, ES jornada, "
     "IT giornata, FR journee, PT jornada. Common 'highlights' translations: "
     "DE Zusammenfassung, ES resumen, IT sintesi, FR resume. "
@@ -325,7 +325,7 @@ def match_games_to_channels(
             continue
 
         # Tier 1 (strongest signal): channels whose NAME contains both teams.
-        # These are dedicated match channels — typically multiple regional /
+        # These are dedicated match channels: typically multiple regional /
         # quality variants of the same fixture. Stack all of them.
         strict = _regex_filter_channel_name(candidates, game.home, game.away)
         if strict:
@@ -344,7 +344,7 @@ def match_games_to_channels(
             continue
 
         # Tier 2: program-title regex, with previews ('Next Game:', 'Preview:',
-        # 'Pre-game ...') stripped — those mark team-branded home channels
+        # 'Pre-game ...') stripped: those mark team-branded home channels
         # that surface upcoming-game EPG cards but don't broadcast the match.
         filtered = _strip_preview_titles(
             _regex_filter(candidates, game.home, game.away)
@@ -365,7 +365,7 @@ def match_games_to_channels(
             if wider:
                 ambiguous.append((i, game, wider))
         else:
-            # Multiple regex matches survived preview stripping — Claude resolves.
+            # Multiple regex matches survived preview stripping: Claude resolves.
             ambiguous.append((i, game, filtered))
 
     if ambiguous and api_key:
@@ -409,7 +409,7 @@ def match_games_to_channels(
             results[idx].channel_ids = [chosen.channel_id]
             results[idx].method = "llm"
     elif ambiguous:
-        # No API key — best-effort: pick first candidate to surface SOMETHING.
+        # No API key: best-effort: pick first candidate to surface SOMETHING.
         for idx, _game, cands in ambiguous:
             if cands:
                 c = cands[0]

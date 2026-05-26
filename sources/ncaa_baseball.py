@@ -1,9 +1,9 @@
-"""NCAA Baseball source — ESPN's unofficial `site.api.espn.com` API.
+"""NCAA Baseball source: ESPN's unofficial `site.api.espn.com` API.
 
 No API key required. ESPN's API is undocumented but stable enough for
 a homelab TV-guide curator. If it ever 404s, `fetch_upcoming` and
 `_fetch_full_season_games` return [] and the affected sport silently
-drops out of the guide for that refresh cycle — graceful-degrade is
+drops out of the guide for that refresh cycle: graceful-degrade is
 already the contract.
 
 Two source classes ship under the `enable_ncaa_baseball` toggle:
@@ -11,8 +11,8 @@ Two source classes ship under the `enable_ncaa_baseball` toggle:
     win-count importance. Tournament-bubble through national-seed bands
     (see LEAGUE_CONTEXTS["BSB"]).
   - `NcaaBaseballPlayoffSource(BestOfNSeriesSource)`: postseason.
-    Currently models the best-of-3 stages — Super Regional and MCWS
-    Championship Final — both of which carry clean ESPN game-number
+    Currently models the best-of-3 stages: Super Regional and MCWS
+    Championship Final: both of which carry clean ESPN game-number
     metadata. Regional (4-team double-elim per site) and the 8-team
     MCWS bracket in Omaha are tracked in #43: ESPN headlines on those
     stages carry no game-number or bracket-position metadata, requiring
@@ -106,7 +106,7 @@ def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
 
 def _is_postseason_event(event: Dict[str, Any]) -> bool:
     """ESPN tags NCAA Baseball / Softball postseason events with
-    `season.type` in the 3-6 range — each stage gets its own type
+    `season.type` in the 3-6 range: each stage gets its own type
     value (verified against live 2026 data):
       - 2: Regular season (NOT postseason).
       - 3: Regional round (4-team double-elim per site).
@@ -121,11 +121,11 @@ def _is_postseason_event(event: Dict[str, Any]) -> bool:
     MCWS bracket stages are headline-metadata-poor and tracked in #43.
 
     DO NOT use the `notes[].headline` "Championship" substring as a
-    postseason discriminator — D1 conference tournaments in May use
+    postseason discriminator: D1 conference tournaments in May use
     that same word and are NOT postseason. season.type is the
     authoritative tag from ESPN.
 
-    DO NOT narrow to `type == 3` only — that was the original (wrong)
+    DO NOT narrow to `type == 3` only: that was the original (wrong)
     assumption from the issue body and would mute Super Regional and
     Finals coverage entirely (those are types 4 and 6).
     """
@@ -175,7 +175,7 @@ def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     except (TypeError, ValueError):
         ap = None
 
-    # If "FINISHED" but scores are missing, demote to SCHEDULED — the
+    # If "FINISHED" but scores are missing, demote to SCHEDULED: the
     # importance simulator must not seed a 0-0 result.
     if status == "FINISHED" and (hp is None or ap is None):
         status = "SCHEDULED"
@@ -204,7 +204,7 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
     contention.
 
     Postseason games (season.type=3 in ESPN's tags) are filtered out
-    of both fetch_upcoming and _fetch_full_season_games — NcaaBaseball
+    of both fetch_upcoming and _fetch_full_season_games: NcaaBaseball
     PlayoffSource owns those. Otherwise the regular-season win count
     would inflate by postseason wins, breaking the threshold bands.
     """
@@ -292,7 +292,7 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
         endpoint. Dedupe by event id. Returns the canonical shape
         PointsBasedSportSource expects.
 
-        DO NOT use the `dates=YYYYMMDD-YYYYMMDD` range syntax — empirically
+        DO NOT use the `dates=YYYYMMDD-YYYYMMDD` range syntax: empirically
         ESPN's scoreboard endpoint silently caps range responses at 25
         events regardless of the `limit` parameter. Single-day queries
         (`dates=YYYYMMDD`) return ALL games for that day (~70-100 during
@@ -309,7 +309,7 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
         season_end = (season_end_first + timedelta(days=31)).replace(day=1) - timedelta(days=1)
         end = min(now + timedelta(days=7), season_end)
         if end < season_start:
-            # Off-season / pre-season — no games yet.
+            # Off-season / pre-season: no games yet.
             return []
         day = season_start
         while day <= end:
@@ -318,7 +318,7 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
                 for event in data.get("events") or []:
                     if _is_postseason_event(event):
                         # Postseason win/loss counts must NOT flow into
-                        # the regular-season Monte Carlo — would corrupt
+                        # the regular-season Monte Carlo: would corrupt
                         # the win-count threshold bands. See class
                         # docstring.
                         continue
@@ -362,7 +362,7 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
 
 
 # =====================================================================
-# NcaaBaseballPlayoffSource — best-of-3 stages (Super Regional + MCWS Final)
+# NcaaBaseballPlayoffSource: best-of-3 stages (Super Regional + MCWS Final)
 # =====================================================================
 
 
@@ -372,7 +372,7 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
 # if ESPN ever drops the " - Game " separator (or pluralizes "Final"
 # on baseball the way they do for "Finals" on softball) the parser
 # returns (None, None) and the events fall through to the favorite +
-# rank-pair signals only — same graceful-degrade contract as the
+# rank-pair signals only: same graceful-degrade contract as the
 # rest of the source.
 _SUPER_REGIONAL_MARKER = "Super Regional - Game "
 _FINALS_MARKER = "Championship Final - Game "
@@ -382,7 +382,7 @@ def _parse_baseball_playoff_headline(headline: str) -> Tuple[Optional[str], Opti
     """Map an ESPN postseason headline to (stage, game_index). Returns
     (None, None) for Regional games (no game number, no bracket position)
     and MCWS 8-team bracket games ("Men's College World Series - Double
-    Elimination Round" / "Elimination Game") — those stages are tracked
+    Elimination Round" / "Elimination Game"): those stages are tracked
     in #43.
 
     Patterns observed in 2025-2026 ESPN data:
@@ -449,7 +449,7 @@ class _BaseballPlayoffStrengthsMixin:
         lam_away = max(0.1, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
         home_runs = _poisson(lam_home, rng)
         away_runs = _poisson(lam_away, rng)
-        # NCAA postseason has no draws — coin-flip the +1 to break the tie.
+        # NCAA postseason has no draws: coin-flip the +1 to break the tie.
         if home_runs == away_runs:
             if rng.random() < 0.5:
                 home_runs += 1
@@ -475,7 +475,7 @@ class NcaaBaseballPlayoffSource(_BaseballPlayoffStrengthsMixin, BestOfNSeriesSou
     Strength sharing: pre-postseason, the plugin pulls regular-season
     strength estimates from NcaaBaseballRegularSource and seeds them
     via `set_regular_season_strengths`. Without this hook, postseason
-    sampling falls back to the 6-runs-per-team default — workable but
+    sampling falls back to the 6-runs-per-team default: workable but
     less informative than per-team Poisson rates from the 55-game
     regular season.
     """
@@ -526,7 +526,7 @@ class NcaaBaseballPlayoffSource(_BaseballPlayoffStrengthsMixin, BestOfNSeriesSou
         sweep as the regular-season source but with `_is_postseason_event`
         flipped (filter IN postseason). Headlines are then parsed via
         `_parse_baseball_playoff_headline`; only the modeled stages
-        (Super Regional + MCWS Finals) survive — Regional and 8-team
+        (Super Regional + MCWS Finals) survive: Regional and 8-team
         MCWS bracket games are silently dropped here AND from the
         regular-season source's sibling fetch. Those stages are tracked
         in #43.
@@ -582,7 +582,7 @@ class NcaaBaseballPlayoffSource(_BaseballPlayoffStrengthsMixin, BestOfNSeriesSou
         away_team = _team_canonical_name(away.get("team") or {})
         # TBD-vs-TBD games appear in ESPN's data before participants are
         # determined (e.g., Finals before the MCWS bracket resolves).
-        # Skip them — the bracket source can't track a placeholder team
+        # Skip them: the bracket source can't track a placeholder team
         # and the EPG client doesn't surface a "TBD" matchup usefully.
         if not home_team or not away_team:
             return None
@@ -707,12 +707,12 @@ class NcaaBaseballPlayoffSource(_BaseballPlayoffStrengthsMixin, BestOfNSeriesSou
 
 
 # =====================================================================
-# NcaaBaseballPlayoffBracketSource — Regional + 8-team MCWS double-elim
+# NcaaBaseballPlayoffBracketSource: Regional + 8-team MCWS double-elim
 # =====================================================================
 
 
 # Site name is everything between "NCAA Baseball Championship - " and
-# " Regional" — e.g., "Auburn Regional" from
+# " Regional": e.g., "Auburn Regional" from
 # "NCAA Baseball Championship - Auburn Regional - Game 1".
 _REGIONAL_SITE_REGEX = re.compile(
     r"NCAA Baseball Championship - (?P<site>[^-]+? Regional)\b"
@@ -743,10 +743,10 @@ _MCWS_BRACKET_MARKERS = (
 def _parse_baseball_bracket_headline(headline: str) -> Tuple[Optional[str], Optional[str]]:
     """Map an ESPN postseason headline to (stage, partial_grouping_key).
 
-    For Regional games, returns ("BSB_REG", "<site> Regional") — the
+    For Regional games, returns ("BSB_REG", "<site> Regional"): the
     grouping_key is the site label parsed from the headline.
 
-    For 8-team MCWS bracket games, returns ("MCWS", None) — the
+    For 8-team MCWS bracket games, returns ("MCWS", None): the
     sub-bracket assignment can't be determined from one headline alone;
     `_classify_mcws_sub_brackets` does the chronological grouping later
     in `_fetch_bracket_games` once all MCWS events are collected.
@@ -756,13 +756,13 @@ def _parse_baseball_bracket_headline(headline: str) -> Tuple[Optional[str], Opti
     non-postseason / unclassifiable.
 
     DO NOT collapse the Regional / MCWS branches into a single regex
-    — Regional headlines carry the site name in a structured position
+   : Regional headlines carry the site name in a structured position
     that we can extract; MCWS bracket headlines don't have any
     sub-bracket hint, so the partition is purely chronological.
     """
     if not headline:
         return None, None
-    # Best-of-3 stages are owned by the sibling playoff source — explicitly
+    # Best-of-3 stages are owned by the sibling playoff source: explicitly
     # skip them here so the bracket source doesn't try to claim them.
     if _SUPER_REGIONAL_MARKER in headline or _FINALS_MARKER in headline:
         return None, None
@@ -799,7 +799,7 @@ def _classify_mcws_sub_brackets(
 
     Returns a dict {team_name: "MCWS_sub1" | "MCWS_sub2"}.
 
-    DO NOT partition by UTC date — MCWS evening games in Omaha
+    DO NOT partition by UTC date: MCWS evening games in Omaha
     (CT) routinely cross UTC midnight (a 7:30 PM CT game is 12:30 AM
     UTC the next day), which would split a single MCWS broadcast day
     across two UTC dates and put opening-day pairings into different
@@ -888,11 +888,11 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
       - MCWS: "MCWS_sub1" / "MCWS_sub2" assigned by the day-partition
         heuristic in `_classify_mcws_sub_brackets`.
 
-    The bracket source emits records for BSB_REG and MCWS only — the
+    The bracket source emits records for BSB_REG and MCWS only: the
     best-of-3 BSB_SR and MCWS_F headlines are explicitly skipped so the
     sibling source owns them without duplication.
 
-    Strength sharing: same hook as the sibling — the plugin seeds
+    Strength sharing: same hook as the sibling: the plugin seeds
     per-team strengths via `set_regular_season_strengths` from the
     regular-season source. Without seeding, the 6-runs-per-team
     Poisson default applies.
@@ -945,7 +945,7 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        # First sweep — collect ALL upcoming bracket events so MCWS
+        # First sweep: collect ALL upcoming bracket events so MCWS
         # sub-bracket grouping can use the full chronological context.
         raw_events: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
         for offset in range(days_ahead + 1):

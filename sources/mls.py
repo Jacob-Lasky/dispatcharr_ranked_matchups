@@ -1,4 +1,4 @@
-"""MLS source — ESPN's unofficial `site.api.espn.com` for the schedule
+"""MLS source: ESPN's unofficial `site.api.espn.com` for the schedule
 + The Odds API for closeness. MLS games surface with `favorite +
 closeness` scoring only; standings-based importance is filed as #30.
 
@@ -10,7 +10,7 @@ Scope:
     The Odds API.
   - **No** `supports_importance` flag. MLS Cup playoff bracket is
     structurally awkward (best-of-3 first round, single-leg subsequent
-    rounds — neither BestOfNSeriesSource nor AggregateLegSource fits
+    rounds: neither BestOfNSeriesSource nor AggregateLegSource fits
     cleanly); conference-standings importance needs its own bands.
     Both are tracked in #30.
   - The Odds API sport key is `soccer_usa_mls`. The Odds API team
@@ -40,7 +40,7 @@ ODDS_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "soccer_usa_mls"
 
 # Reuse the canonical TEAM_SUFFIX_TOKENS from _util.py: ("afc","fc","cf","sc").
-# DO NOT add "united" here — it's a substantive body word for several MLS
+# DO NOT add "united" here: it's a substantive body word for several MLS
 # franchises (Atlanta United, D.C. United, Minnesota United, New York
 # Red Bulls' historical "Metrostars United" naming), and stripping it
 # collapses different teams together. Same constraint as the soccer.py
@@ -50,7 +50,7 @@ ODDS_SPORT_KEY = "soccer_usa_mls"
 def _http_get(url: str, timeout: float = 15.0, **params: Any) -> Optional[Any]:
     """HTTP GET wrapper that logs on non-2xx and returns parsed JSON or
     None on any failure. Used for both ESPN (returns dict) and Odds API
-    (returns list of dicts) calls — return type is union, caller does
+    (returns list of dicts) calls: return type is union, caller does
     its own shape check."""
     try:
         r = requests.get(url, timeout=timeout, params=params or None)
@@ -65,7 +65,7 @@ def _http_get(url: str, timeout: float = 15.0, **params: Any) -> Optional[Any]:
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
     """ESPN soccer returns `team.displayName` ("Atlanta United FC",
-    "LA Galaxy"). Use that as the canonical join key — it matches
+    "LA Galaxy"). Use that as the canonical join key: it matches
     most EPG provider titles. Fall back to nickname / abbreviation
     only if displayName is missing."""
     name = (team_obj.get("displayName") or "").strip()
@@ -95,7 +95,7 @@ def _h2h_to_closeness(
       divide by total_implied -> normalized P_home, P_away
       closeness = 2 * min(P_home, P_away)
 
-    A 3-way market (home / draw / away) excludes the draw — closeness
+    A 3-way market (home / draw / away) excludes the draw: closeness
     measures the "either of the two teams could win" intuition, which
     isn't affected by draw probability. Pre-game blowouts (80/15/5)
     -> closeness 0.10; pickem 45/10/45 -> closeness 0.90.
@@ -121,7 +121,7 @@ def _h2h_to_closeness(
             implied["home"] = 1.0 / price
         elif nrm == _normalize_for_fuzzy(away_lc) or _normalize_for_fuzzy(away_lc) in nrm:
             implied["away"] = 1.0 / price
-        # Skip "draw" — closeness uses only home + away.
+        # Skip "draw": closeness uses only home + away.
     if "home" not in implied or "away" not in implied:
         return None
     # Devig over home + away only (the draw probability would lower
@@ -141,7 +141,7 @@ class MlsSource(SportSource):
 
     Class attrs `_ESPN_SLUG`, `_ODDS_SPORT_KEY`, `_FD_CODE`,
     `_SPORT_PREFIX`, `_SPORT_LABEL` parameterize the league. NwslSource
-    and LigaMxSource subclass this and override these five attrs — the
+    and LigaMxSource subclass this and override these five attrs: the
     rest of the fetch/closeness machinery is shared.
     """
 

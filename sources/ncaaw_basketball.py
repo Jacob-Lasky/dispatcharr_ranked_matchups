@@ -1,4 +1,4 @@
-"""NCAA Women's Basketball source — ESPN's unofficial site.api.espn.com.
+"""NCAA Women's Basketball source: ESPN's unofficial site.api.espn.com.
 No API key required.
 
 Two source classes:
@@ -79,7 +79,7 @@ def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
 def _default_season_end_year() -> int:
     """Season runs Nov YYYY through April YYYY+1. The "season year" is
     the calendar year the tournament ends in (matching ESPN's convention
-    for tournaments — the 2024-25 season ends with the March 2025 NCG)."""
+    for tournaments: the 2024-25 season ends with the March 2025 NCG)."""
     now = datetime.now(timezone.utc)
     # Pre-November: still in previous season's offseason.
     return now.year + 1 if now.month >= SEASON_START_MONTH else now.year
@@ -129,7 +129,7 @@ def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not comps:
         return None
     comp = comps[0]
-    # No All-Star filter needed for NCAA — there's no All-Star Game in
+    # No All-Star filter needed for NCAA: there's no All-Star Game in
     # college basketball. competition.type.abbreviation is always STD
     # for regular season, and the tournament uses headline-based
     # stage routing.
@@ -225,7 +225,7 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
                 if rec is None:
                     continue
                 # Both regular-season AND tournament games surface here.
-                # Filtering by season.type isn't strictly necessary — we
+                # Filtering by season.type isn't strictly necessary: we
                 # surface postseason games in fetch_upcoming so the user's
                 # guide picks them up; the playoff source covers the
                 # importance-cascade side separately.
@@ -255,7 +255,7 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
 
     def _fetch_rankings(self) -> Dict[str, int]:
         """Return {team_location: rank} from ESPN's AP poll. Empty
-        dict if missing — rank-pair signal sits out the cycle."""
+        dict if missing: rank-pair signal sits out the cycle."""
         data = _http_get(f"{ESPN_BASE}/rankings")
         if not data:
             return {}
@@ -283,7 +283,7 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
         """Walk every day from season start through min(today + 7d,
         regular season end). Filter to regular-season games only
         (season.type == 2) so the tournament doesn't pollute the
-        win-count importance signal — the playoff source has its own
+        win-count importance signal: the playoff source has its own
         bracket-based importance."""
         seen: Dict[Any, Dict[str, Any]] = {}
         # Season starts early-November of (end_year - 1).

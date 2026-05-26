@@ -1,12 +1,12 @@
-"""NCAA Softball source — ESPN's unofficial site.api.espn.com.
+"""NCAA Softball source: ESPN's unofficial site.api.espn.com.
 No API key required.
 
 Two source classes ship under the `enable_ncaa_softball` toggle:
   - `NcaaSoftballRegularSource(PointsBasedSportSource)`: regular-season
     win-count importance (LEAGUE_CONTEXTS["SBL"]).
   - `NcaaSoftballPlayoffSource(BestOfNSeriesSource)`: postseason.
-    Currently models the best-of-3 stages — Super Regional and WCWS
-    Championship Finals — both with clean ESPN game-number metadata.
+    Currently models the best-of-3 stages: Super Regional and WCWS
+    Championship Finals: both with clean ESPN game-number metadata.
     Regional (4-team double-elim per site) and the 8-team WCWS bracket
     in OKC are tracked in #43: ESPN headlines on those stages are
     "Women's College World Series - Double Elimination Round" with no
@@ -26,7 +26,7 @@ Rankings poll: ESPN exposes the ESPN.com/USA Softball Collegiate
 Top 25 (the canonical D1 softball poll). Used for the rank-pair
 signal on upcoming matchups.
 
-Per-day iteration is required — ESPN's range syntax silently caps
+Per-day iteration is required: ESPN's range syntax silently caps
 at 25 events. D1 softball can produce 60+ games on a Saturday
 during peak season; per-day single-date queries return all of
 them.
@@ -164,12 +164,12 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
     """D1 NCAA Softball regular-season importance.
 
     Win-count threshold bands tuned against historical NCAA Tournament
-    selection criteria (64-team field — same field size as baseball).
+    selection criteria (64-team field: same field size as baseball).
     The selection committee weights RPI + strength-of-schedule + wins,
     but win-count alone is a strong proxy for tournament status.
 
     Postseason games (season.type=3) are filtered out of both
-    fetch_upcoming and _fetch_full_season_games — NcaaSoftballPlayoff
+    fetch_upcoming and _fetch_full_season_games: NcaaSoftballPlayoff
     Source owns those. Otherwise the regular-season win count would
     inflate by postseason wins, breaking the threshold bands.
     """
@@ -300,7 +300,7 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
 
 
 # =====================================================================
-# NcaaSoftballPlayoffSource — best-of-3 stages (Super Regional + WCWS Finals)
+# NcaaSoftballPlayoffSource: best-of-3 stages (Super Regional + WCWS Finals)
 # =====================================================================
 
 
@@ -314,7 +314,7 @@ _FINALS_MARKER = "Championship Finals - Game "
 def _parse_softball_playoff_headline(headline: str) -> Tuple[Optional[str], Optional[int]]:
     """Map an ESPN softball postseason headline to (stage, game_index).
     Returns (None, None) for unmodeled stages (Regional, 8-team WCWS
-    bracket — both lack headline game metadata in ESPN's data; see #43).
+    bracket: both lack headline game metadata in ESPN's data; see #43).
 
     Patterns observed in 2025-2026 ESPN data:
       - "NCAA Softball Championship - Lincoln Super Regional - Game 1"
@@ -598,7 +598,7 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
 
 
 # =====================================================================
-# NcaaSoftballPlayoffBracketSource — Regional + 8-team WCWS double-elim
+# NcaaSoftballPlayoffBracketSource: Regional + 8-team WCWS double-elim
 # =====================================================================
 
 
@@ -632,7 +632,7 @@ def _parse_softball_bracket_headline(headline: str) -> Tuple[Optional[str], Opti
     """Map an ESPN softball postseason headline to (stage, partial_grouping_key).
 
     For Regional games, returns ("SB_REG", "<site> Regional"). For 8-team
-    WCWS bracket games, returns ("WCWS", None) — the sub-bracket
+    WCWS bracket games, returns ("WCWS", None): the sub-bracket
     assignment is resolved chronologically by `_classify_wcws_sub_brackets`.
 
     Returns (None, None) for best-of-3 SB_SR / WCWS_F headlines (owned by

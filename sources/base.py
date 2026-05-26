@@ -5,7 +5,7 @@ ranks (if any) and returns GameRow records. The plugin then scores each row
 and matches it to a Dispatcharr channel via EPG.
 
 Sources optionally implement a Monte Carlo importance interface (Lahvička
-2012) — 7 methods plus a `supports_importance` flag. Sources that flip the
+2012): 7 methods plus a `supports_importance` flag. Sources that flip the
 flag MUST override all 7; the simulator (simulation.py) inspects the flag
 before calling and falls through gracefully when it's false.
 """
@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class GameRow:
     """One upcoming game from one sport. Sport-agnostic."""
-    sport_prefix: str           # "CFB", "CBB", "EPL", "EFL", etc. — used in channel name
+    sport_prefix: str           # "CFB", "CBB", "EPL", "EFL", etc.: used in channel name
     sport_label: str            # Full label, e.g., "NCAA Football"
     home: str                   # team name
     away: str
@@ -35,9 +35,9 @@ class GameRow:
     # 1.0 = pick'em (both teams equally likely to win); 0.0 = blowout.
     # Soccer populates this from the h2h moneyline market (devigged
     # probabilities, then 2 * min(p_home, p_away)). NCAAF / NCAAM still
-    # populate `spread` instead — score_game normalizes either path into
+    # populate `spread` instead: score_game normalizes either path into
     # the same [0, 1] effective closeness, but ONE of these two fields
-    # is None on every GameRow. DO NOT set both — keeps the contract
+    # is None on every GameRow. DO NOT set both: keeps the contract
     # "closeness wins if present, fall back to spread otherwise" honest.
     closeness: Optional[float] = None
     is_rivalry: bool = False             # known rivalry
@@ -49,7 +49,7 @@ class MatchResult:
     """One sampled match outcome. Used by the Monte Carlo importance simulator.
 
     Integer goals/points; ties (draws) are encoded as home_goals == away_goals
-    (legal in soccer, vanishingly rare in NCAAF — sources that ban draws
+    (legal in soccer, vanishingly rare in NCAAF: sources that ban draws
     should never sample one). Sub-game state (penalty shootouts in cup
     knockouts, OT in CFB) is encoded in `extra` per source; the simulator
     core only reads the goal counts.
@@ -137,7 +137,7 @@ class SportSource(ABC):
         match: GameRow,
         result: MatchResult,
     ) -> Dict[str, Any]:
-        """Return a new state with `match`'s `result` applied. Pure — the
+        """Return a new state with `match`'s `result` applied. Pure: the
         simulator depends on apply_result NOT mutating the input so that one
         `initial_state()` can seed many sampled seasons."""
         raise NotImplementedError(f"{type(self).__name__} does not support importance simulation")

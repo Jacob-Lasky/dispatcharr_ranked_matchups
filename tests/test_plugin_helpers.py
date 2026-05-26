@@ -17,7 +17,7 @@ PKG_NAME = os.path.basename(REPO_ROOT)
 
 def _load_plugin_module():
     """Load `plugin.py` as a submodule of the (already-stub-registered)
-    package. Need to stub the Django imports it does at top-level too — but
+    package. Need to stub the Django imports it does at top-level too: but
     actually plugin.py only does Django imports lazily inside functions, so
     top-level load is safe."""
     if f"{PKG_NAME}.plugin" in sys.modules:
@@ -48,7 +48,7 @@ class TestActionRefreshClearsFdCaches:
     """The FD.org batching refactor pins module-level caches into
     `sources/soccer.py` and relies on `_action_refresh` to wipe them at
     the top of every refresh. Without the wipe, a long-running plugin
-    instance serves stale fixtures on the second and later refreshes —
+    instance serves stale fixtures on the second and later refreshes:
     silent staleness, no error.
 
     This integration test asserts the contract directly: pre-populate
@@ -81,12 +81,12 @@ class TestActionRefreshClearsFdCaches:
 
         # Both caches must be wiped.
         assert soccer._TIER_FIXTURES_CACHE is None, (
-            "_action_refresh did not call _clear_fd_caches() — tier "
+            "_action_refresh did not call _clear_fd_caches(): tier "
             "fixtures cache survived the refresh boundary, which would "
             "cause stale FD.org data on every refresh after the first."
         )
         assert "SENTINEL" not in soccer._SEASON_MATCHES_CACHE, (
-            "_action_refresh did not call _clear_fd_caches() — season "
+            "_action_refresh did not call _clear_fd_caches(): season "
             "matches cache survived the refresh boundary."
         )
 
@@ -112,7 +112,7 @@ class TestActionRefreshClearsFdCaches:
 
         plugin._action_refresh({"lookahead_days": 7})
         assert order == ["clear", "build_sources"], (
-            f"unexpected order: {order} — cache clear must fire BEFORE "
+            f"unexpected order: {order}: cache clear must fire BEFORE "
             "source building so the first source's fetch sees fresh data"
         )
 
@@ -208,7 +208,7 @@ class TestBuildWeights:
         # [0, 1] coinflip-ness measure (devigged bookmaker probabilities
         # for soccer; spread normalized for NCAAF / NCAAM). Default
         # bumped 0.1 → 3.0 because the underlying range shrank from
-        # [0, 7] to [0, 1] — same per-game magnitude (~3 raw for a
+        # [0, 7] to [0, 1]: same per-game magnitude (~3 raw for a
         # pick'em) preserved across the formula change.
         assert w.spread == 3.0
         # favorite is bumped to 6.0 to push favorite-involved games up
@@ -237,7 +237,7 @@ class TestBuildWeights:
         # Phase A tuning: _build_weights had hardcoded fallback values
         # that drifted from scoring.Weights's dataclass defaults. When
         # the dataclass was bumped, runtime kept the old values until a
-        # test caught it. This test pins them together — any future
+        # test caught it. This test pins them together: any future
         # divergence here will fail loudly on every commit.
         from dispatcharr_ranked_matchups.scoring import Weights
         defaults = Weights()
@@ -262,7 +262,7 @@ class TestBuildWeights:
             "weight_rank": 1.0,
         })
         assert w.rank == 1.0
-        # Stale keys silently dropped — no AttributeError, no surprise
+        # Stale keys silently dropped: no AttributeError, no surprise
         # contribution.
         assert not hasattr(w, "stakes")
         assert not hasattr(w, "impact_favorite")
@@ -343,7 +343,7 @@ class TestResolveKey:
 class TestBuildSignalsScoreFromPayload:
     def test_legacy_payload_without_score_raw(self, plugin):
         # Old caches don't have score_raw; we fall back to summing the
-        # breakdown (same scale as raw) — NOT to `score` (which is 0-10 scale).
+        # breakdown (same scale as raw): NOT to `score` (which is 0-10 scale).
         g = {
             "score": 7.6,
             "score_breakdown": {"rank_pair": 5.0, "favorite": 4.0},
@@ -554,7 +554,7 @@ class TestStreamSortKey:
     failed probe (0x0 resolution) must sort last regardless of name."""
 
     def test_valid_probe_beats_name_keyword(self, plugin):
-        # Probed 720p vs name-only "Sport UHD" — probed wins.
+        # Probed 720p vs name-only "Sport UHD": probed wins.
         probed_720 = plugin._stream_sort_key(
             {"width": 1280, "height": 720, "resolution": "1280x720"},
             "ESPN",
@@ -631,7 +631,7 @@ class TestEpgSourceConfig:
     """Regression: source_type='dummy' triggers Dispatcharr's joke-filler EPG
     overlay (Rush Hour, What's For Dinner?, etc.) on top of our real
     ProgramData. The constants must NEVER drift back to dummy. See
-    EPGGridAPIView in apps/epg/api_views.py — it filters on
+    EPGGridAPIView in apps/epg/api_views.py: it filters on
     epg_data__epg_source__source_type='dummy' to decide which channels need
     on-the-fly placeholder text generation."""
 
@@ -643,7 +643,7 @@ class TestEpgSourceConfig:
         assert plugin.EPG_SOURCE_TYPE == "xmltv"
 
     def test_source_is_inactive(self, plugin):
-        # is_active=False so the EPG refresh task skips us — we have no URL
+        # is_active=False so the EPG refresh task skips us: we have no URL
         # to fetch, and we write ProgramData ourselves on apply.
         assert plugin.EPG_SOURCE_IS_ACTIVE is False
 
@@ -689,7 +689,7 @@ class TestPluginKey:
         #
         # This test reads plugin.py source directly and refuses the
         # exact failing pattern. Format-fragile by design: if the line
-        # is reflowed across lines, the assertion needs updating —
+        # is reflowed across lines, the assertion needs updating:
         # which is a feature, not a bug. Forces a re-think.
         src = open(plugin.__file__).read()
         assert "PLUGIN_KEY = __package__" not in src, (
@@ -705,7 +705,7 @@ class TestPluginKey:
         # right or wrong; it had to do with __package__ resolving to
         # Dispatcharr's wrapper namespace at runtime. In pytest's
         # importlib setup, __package__ is the conftest stub, which is
-        # already correct by accident — so the other PLUGIN_KEY tests
+        # already correct by accident: so the other PLUGIN_KEY tests
         # would have passed even on the broken `PLUGIN_KEY = __package__`
         # code. This test reproduces the loader-wrap scenario directly:
         # write a tiny plugin.py-equivalent into tmp_path with the
@@ -761,7 +761,7 @@ class TestOwnedTvgIdQ:
     orphan EPGSources visible in the UI with status='error'.
 
     The function builds Django Q objects with lazy import (do NOT
-    hoist `from django.db.models import Q` to module level — the test
+    hoist `from django.db.models import Q` to module level: the test
     suite relies on plugin.py keeping Django imports inside function
     bodies; see tests/conftest.py)."""
 
@@ -854,7 +854,7 @@ class TestBuildDescription:
 
     Six blocks, joined by blank lines:
       1. Placeholder note (when placeholder=True).
-      2. Headline: "A/An {tagline} — {spread_desc}." (each piece optional).
+      2. Headline: "A/An {tagline}: {spread_desc}." (each piece optional).
       3. Matchday + league boundary summary.
       4. Favorite-impact narratives.
       5. Favorite-is-playing line ("X is your favorite." / "Your favorites: ...").
@@ -877,7 +877,7 @@ class TestBuildDescription:
 
     def test_placeholder_note_appears_first(self, plugin):
         out = plugin._build_description(self._g(), "", placeholder=True)
-        # Leading underscore = markdown italic — the renderer relies on
+        # Leading underscore = markdown italic: the renderer relies on
         # the placeholder note being italic, not plain text.
         assert out.startswith("_Channel match pending")
         assert "next refresh" in out
@@ -912,7 +912,7 @@ class TestBuildDescription:
     def test_headline_with_closeness_toss_up(self, plugin):
         # closeness >= 0.7 → "toss-up". Em-dash separates the two parts.
         out = plugin._build_description(self._g(closeness=0.8), "title race", False)
-        assert "A title race — toss-up." in out
+        assert "A title race: toss-up." in out
 
     def test_headline_with_only_spread_no_tagline(self, plugin):
         # spread alone (no tagline) still produces a headline line
@@ -923,7 +923,7 @@ class TestBuildDescription:
 
     def test_headline_terminates_with_period(self, plugin):
         out = plugin._build_description(self._g(), "title race", False)
-        # The period is intentional — without it, EPG clients sometimes
+        # The period is intentional: without it, EPG clients sometimes
         # run the headline into the following block.
         assert out.split("\n\n", 1)[0].endswith(".")
 
@@ -1053,7 +1053,7 @@ class TestBuildDescription:
             channel_name_current="ESPN",
         )
         out = plugin._build_description(g, "title race", placeholder=True)
-        # Use .find() to pin order — earlier marker must have lower index.
+        # Use .find() to pin order: earlier marker must have lower index.
         pos_placeholder = out.find("Channel match pending")
         pos_headline = out.find("A title race")
         pos_matchday = out.find("Matchday 5")
@@ -1077,7 +1077,7 @@ class TestFormatMatchup:
 
     def test_no_star_prefix(self, plugin):
         # The matchup string explicitly omits the ★ score prefix that the
-        # channel name carries — the EPG title should read like a real
+        # channel name carries: the EPG title should read like a real
         # program guide entry, not a debug breadcrumb.
         result = plugin._format_matchup("Auburn", "Vanderbilt")
         assert "★" not in result
@@ -1092,7 +1092,7 @@ class TestBuildProgramTitle:
         assert title == "Upcoming: Auburn vs Vanderbilt, Fri 7:30 PM EDT"
 
     def test_upcoming_without_kickoff_omits_separator(self, plugin):
-        # Empty kickoff_local string falls back to just the matchup —
+        # Empty kickoff_local string falls back to just the matchup:
         # no trailing comma.
         title = plugin._build_program_title("upcoming", "Auburn vs Vanderbilt", "")
         assert title == "Upcoming: Auburn vs Vanderbilt"
@@ -1114,7 +1114,7 @@ class TestBuildProgramTitle:
             plugin._build_program_title("inplay", "Auburn vs Vanderbilt", "")
 
     def test_truncation_at_255_chars(self, plugin):
-        # ProgramData.title is varchar(255) — anything longer gets
+        # ProgramData.title is varchar(255): anything longer gets
         # truncated with ellipsis. The Upcoming prefix + matchup + a
         # very long team name combo must not blow the column.
         long_team = "A" * 300
@@ -1256,7 +1256,7 @@ class TestCurationPresets:
         assert w.favorite == 4.0
 
     def test_balanced_preset_matches_default_weights(self, plugin):
-        # Balanced preset == scoring.Weights() defaults — DRY check that
+        # Balanced preset == scoring.Weights() defaults: DRY check that
         # prevents the preset drifting silently as defaults change.
         from dispatcharr_ranked_matchups.scoring import Weights
         d = Weights()
@@ -1294,7 +1294,7 @@ class TestCurationPresets:
         }) == 7
 
     def test_resolve_max_games_preset_wins(self, plugin):
-        # User set max_games=999 but picked high_curation — preset wins.
+        # User set max_games=999 but picked high_curation: preset wins.
         assert plugin._resolve_max_games({
             "curation_preset": "high_curation", "max_games": 999,
         }) == 10
@@ -1326,17 +1326,17 @@ class TestIsCatchupMatchday:
         assert plugin._is_catchup_matchday(g) is False
 
     def test_current_matchday_is_not_catchup(self, plugin):
-        # League at MD46, fixture at MD46 — normal final round.
+        # League at MD46, fixture at MD46: normal final round.
         g = {"extra": {"matchday": 46, "standings_table": self._table(46)}}
         assert plugin._is_catchup_matchday(g) is False
 
     def test_one_behind_is_not_catchup(self, plugin):
-        # League at MD46, fixture at MD45 — normal weekly lag (midweek game).
+        # League at MD46, fixture at MD45: normal weekly lag (midweek game).
         g = {"extra": {"matchday": 45, "standings_table": self._table(46)}}
         assert plugin._is_catchup_matchday(g) is False
 
     def test_two_behind_is_catchup(self, plugin):
-        # League at MD46, fixture at MD44 — postponed by 2 weeks.
+        # League at MD46, fixture at MD44: postponed by 2 weeks.
         g = {"extra": {"matchday": 44, "standings_table": self._table(46)}}
         assert plugin._is_catchup_matchday(g) is True
 
@@ -1356,7 +1356,7 @@ class TestIsCatchupMatchday:
         assert plugin._is_catchup_matchday(g) is False
 
     def test_partial_played_uses_what_we_have(self, plugin):
-        # Some entries have 'played', some don't — use the ones that do.
+        # Some entries have 'played', some don't: use the ones that do.
         table = [
             {"name": "A", "position": 1, "points": 70, "played": 46},
             {"name": "B", "position": 2, "points": 69},  # missing
@@ -1431,7 +1431,7 @@ class TestOrdinal:
 
 class TestBuildStandingsPostureLine:
     def _table(self):
-        # Minimal EPL-shaped table — 3 teams enough to exercise the path.
+        # Minimal EPL-shaped table: 3 teams enough to exercise the path.
         return [
             {"name": "Manchester City FC", "position": 2, "points": 70, "played": 35},
             {"name": "Manchester United FC", "position": 3, "points": 69, "played": 35},
@@ -1457,7 +1457,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Manchester City FC 2nd, 70 pts. Manchester United FC 3rd, 69 pts — 1 pt behind."
+        assert line == "Manchester City FC 2nd, 70 pts. Manchester United FC 3rd, 69 pts: 1 pt behind."
 
     def test_both_teams_wide_gap(self, plugin):
         g = {
@@ -1466,7 +1466,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Manchester City FC 2nd, 70 pts. Bournemouth FC 14th, 41 pts — 29 pts behind."
+        assert line == "Manchester City FC 2nd, 70 pts. Bournemouth FC 14th, 41 pts: 29 pts behind."
 
     def test_away_team_ahead(self, plugin):
         # When home team is lower-ranked, away team's gap reads "ahead".
@@ -1476,7 +1476,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Bournemouth FC 14th, 41 pts. Manchester City FC 2nd, 70 pts — 29 pts ahead."
+        assert line == "Bournemouth FC 14th, 41 pts. Manchester City FC 2nd, 70 pts: 29 pts ahead."
 
     def test_tied_on_points_no_gd_cached(self, plugin):
         # Older caches (pre-#10) won't have goal_difference; fall back to
@@ -1487,27 +1487,27 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts — level on points."
+        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points."
 
     def test_tied_on_points_away_gd_better(self, plugin):
-        # B has the better GD — reads "... GD ahead" for the away team.
+        # B has the better GD: reads "... GD ahead" for the away team.
         table = [
             {"name": "A FC", "position": 1, "points": 70, "played": 35, "goal_difference": 15},
             {"name": "B FC", "position": 2, "points": 70, "played": 35, "goal_difference": 22},
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts — level on points, 7 GD ahead."
+        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points, 7 GD ahead."
 
     def test_tied_on_points_home_gd_better(self, plugin):
-        # A (home) has better GD — away reads "behind on GD".
+        # A (home) has better GD: away reads "behind on GD".
         table = [
             {"name": "A FC", "position": 1, "points": 70, "played": 35, "goal_difference": 22},
             {"name": "B FC", "position": 2, "points": 70, "played": 35, "goal_difference": 15},
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts — level on points, 7 GD behind."
+        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points, 7 GD behind."
 
     def test_tied_on_everything(self, plugin):
         table = [
@@ -1516,7 +1516,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts — level on points and goal difference."
+        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points and goal difference."
 
     def test_one_pt_uses_singular(self, plugin):
         # 1 → "1 pt", not "1 pts".
@@ -1694,7 +1694,7 @@ class TestPluginStopTeardown:
                 spawned.append(kw.get("name") or "<unnamed>")
                 super().__init__(*a, **kw)
             def start(self):
-                # Don't actually start — we don't want a live thread
+                # Don't actually start: we don't want a live thread
                 # touching DB / FD in tests.
                 pass
 
@@ -1712,7 +1712,7 @@ class TestPluginStopTeardown:
             inst1.stop()
             inst2 = plugin.Plugin()
 
-            # Second spawn happened — no skipped instantiation.
+            # Second spawn happened: no skipped instantiation.
             assert len(spawned) == 2
         finally:
             plugin._scheduler_thread = saved_thread
@@ -1723,14 +1723,14 @@ class TestDedupSeriesGames:
     """Best-of-N playoff series sources (NHL / NBA / MLB / NCAA tournaments)
     return every scheduled series game from fetch_upcoming. Without
     dedup, a Carolina vs Montreal best-of-7 becomes 4-7 redundant
-    virtual channels — same matchup, different dates. The user-facing
+    virtual channels: same matchup, different dates. The user-facing
     fix Jake hit live on 2026-05-26: keep ONLY the chronologically
     earliest game per (sport_prefix, team-pair) key; let the next
     refresh after the game finishes promote the subsequent series
     game.
 
     The dedup MUST key on `frozenset({home, away})` not `(home, away)`
-    — NHL playoff games 2 and 4 swap home-ice (the lower-seed gets
+   : NHL playoff games 2 and 4 swap home-ice (the lower-seed gets
     "Carolina at Montreal" alternating with "Montreal at Carolina"),
     and a strict ordered key would treat them as distinct.
     """
@@ -1777,7 +1777,7 @@ class TestDedupSeriesGames:
         assert len(out_g) == 1
         # The earliest survives.
         assert out_g[0].start_time.day == 27
-        # The corresponding source survives too — parallel index preserved.
+        # The corresponding source survives too: parallel index preserved.
         assert out_s == ["s1"]
 
     def test_home_ice_swap_treated_as_same_series(self, plugin):
@@ -1792,7 +1792,7 @@ class TestDedupSeriesGames:
         out_g, out_s, n = plugin._dedup_series_games(games, ["a", "b"])
         assert n == 1
         assert len(out_g) == 1
-        # The May 28 game (with Montreal at Carolina) survives — earlier.
+        # The May 28 game (with Montreal at Carolina) survives: earlier.
         assert out_g[0].home == "Montreal"
         assert out_g[0].away == "Carolina"
 

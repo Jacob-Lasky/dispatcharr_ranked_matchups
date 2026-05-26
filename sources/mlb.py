@@ -1,37 +1,37 @@
-"""MLB source — official `statsapi.mlb.com` for both regular-season schedule
+"""MLB source: official `statsapi.mlb.com` for both regular-season schedule
 and the postseason bracket. No API key required.
 
 Two source classes:
   - `MlbRegularSource(PointsBasedSportSource)`: regular season. Uses raw win
-    count (no OT/SO bonus like NHL — MLB extra-innings winners get a normal
+    count (no OT/SO bonus like NHL: MLB extra-innings winners get a normal
     +1 W); LEAGUE_CONTEXTS["MLB"] has format="win_count" with thresholds at
     85 (wildcard bubble) / 90 (division lead) / 95 (elite) / 100 (historic).
   - `MlbPlayoffSource(BestOfNSeriesSource)`: full postseason. Mixed series
     lengths per round (Wild Card best-of-3, Division Series best-of-5,
-    LCS / World Series best-of-7) — model leans on the BestOfNSeriesSource
+    LCS / World Series best-of-7): model leans on the BestOfNSeriesSource
     per-stage series-length hook (`_series_length_for_stage`).
 
 API quirks captured here:
   - `/api/v1/schedule?sportId=1&season=YYYY&gameType=R` returns the entire
     regular season in a single response (≈2430 games). No per-day or
-    per-team iteration needed — unlike ESPN unofficial endpoints where
+    per-team iteration needed: unlike ESPN unofficial endpoints where
     multi-day ranges silently cap at 25 events.
   - `/api/v1/schedule/postseason?season=YYYY` returns every postseason
     game with `seriesDescription` ("AL Wild Card Series", "NL Division
     Series", "World Series", etc.) and `seriesGameNumber` (1..N) per game.
     Future-round games are not emitted until participants are decided;
     e.g., during LCS week the World Series ties don't exist in the
-    response. That tracks issue #17's NHL CUP_FINAL story — filed as a
+    response. That tracks issue #17's NHL CUP_FINAL story: filed as a
     follow-up for MLB World Series leverage during LCS.
   - `gameType` values: R=regular, F=Wild Card, D=Division Series,
     L=League Championship Series, W=World Series. (Plus S=spring,
-    P=preseason, A=allstar, I=intersquad — all filtered out.)
+    P=preseason, A=allstar, I=intersquad: all filtered out.)
   - `status.abstractGameState` is "Final" for FINISHED, "Preview" or
     "Live" otherwise. We treat anything not Final as SCHEDULED for
     importance purposes.
   - Team names come from `teams.home.team.name` (e.g., "Cleveland
     Guardians"). The `team.abbreviation` field is empty in the schedule
-    endpoint — use full name as the canonical key.
+    endpoint: use full name as the canonical key.
 
 The plugin opts into MLB via the `enable_mlb` boolean in `plugin.json`.
 Off by default.
@@ -63,7 +63,7 @@ _DEFAULT_RUNS_AGAINST = 4.5
 
 
 # seriesDescription → KO_STAGES label. Both leagues feed into the same
-# stage entry (AL and NL Wild Card both go to "WC") — the bracket
+# stage entry (AL and NL Wild Card both go to "WC"): the bracket
 # inference in BracketSportSource groups by (stage, team-pair), so AL/NL
 # bracket halves stay independent because they involve different teams.
 _SERIES_DESC_TO_STAGE: Dict[str, str] = {
@@ -86,18 +86,18 @@ _MLB_SERIES_LENGTHS: Dict[str, int] = {
 
 # MLB World Series 2-3-2 home pattern: top seed (AL/NL winner with the
 # better regular-season record) hosts games 1, 2, 6, 7; the other side
-# hosts games 3, 4, 5. NHL uses 2-2-1-1-1 — different sport, different
+# hosts games 3, 4, 5. NHL uses 2-2-1-1-1: different sport, different
 # home rotation, same shape of pattern array (True = top-seed home).
 MLB_WS_HOME_PATTERN: Tuple[bool, ...] = (True, True, False, False, False, True, True)
 
 # Sentinel team names for the synthesized WS placeholder tie. Same
 # pattern as nhl.py's CUP_FINAL sentinels (#17). The mlb postseason
 # endpoint omits the WS series from its response until both LCS series
-# resolve — so during LCS week the WS cascade reads 0 leverage even on
+# resolve: so during LCS week the WS cascade reads 0 leverage even on
 # an LCS Game-7. The placeholder lets the importance simulator
 # propagate counterfactual LCS winners into WS → WS_WINNER. DO NOT
 # change these strings without also updating _build_bracket's
-# placeholder-detection branch — the names are the join key. See #27.
+# placeholder-detection branch: the names are the join key. See #27.
 _WS_TOP_SENTINEL = "LCS_AL_WINNER"
 _WS_BOT_SENTINEL = "LCS_NL_WINNER"
 
@@ -139,9 +139,9 @@ class MlbRegularSource(PointsBasedSportSource):
 
     Uses raw `wins` as the threshold field (LEAGUE_CONTEXTS["MLB"] is
     format="win_count"). Unlike NHL, MLB has no OT-loss consolation
-    point — a 10-inning loss is still just a loss. Extra innings start
+    point: a 10-inning loss is still just a loss. Extra innings start
     with a runner on second base since 2020, but for our importance
-    sample_result the tie-breaker is a simple coin-flip — the resulting
+    sample_result the tie-breaker is a simple coin-flip: the resulting
     +1 boost gets attributed as a normal regulation win/loss.
 
     Goal-sampling: Poisson(λ) per side with the standard
@@ -172,7 +172,7 @@ class MlbRegularSource(PointsBasedSportSource):
         """Pull the next-N-day regular-season schedule via the single
         `/schedule` endpoint with a startDate/endDate filter. MLB's
         schedule endpoint reliably honors date ranges (no silent cap
-        like ESPN's). Closeness signal is left None — there is no Odds
+        like ESPN's). Closeness signal is left None: there is no Odds
         API integration for MLB in V1; structural importance carries.
         """
         today = datetime.now(timezone.utc).date()
@@ -216,7 +216,7 @@ class MlbRegularSource(PointsBasedSportSource):
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
         """Fetch the entire regular-season schedule in one shot. MLB's
         schedule endpoint returns the full season (~2430 games) reliably
-        as a single response — no per-team iteration needed.
+        as a single response: no per-team iteration needed.
         """
         url = (
             f"{MLB_API_BASE}/schedule?sportId=1&gameType=R&season={self.season}"
@@ -276,7 +276,7 @@ class MlbPlayoffSource(BestOfNSeriesSource):
 
     Per-game sampling: Poisson runs per side; tied regulation gets a
     coin-flip +1 (extra innings, treated as a normal W/L for the
-    importance signal). Unlike NHL, there's no shootout — but the
+    importance signal). Unlike NHL, there's no shootout: but the
     distinction doesn't matter because MLB doesn't have a consolation
     point: `wins`-based count_field for the regular season, but
     BestOfNSeriesSource doesn't read either count field at all (series
@@ -479,7 +479,7 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         # series have published games (= participants are known) but the
         # endpoint hasn't yet populated the World Series. statsapi.mlb.com
         # only emits the WS series after both LCS resolve, which leaves
-        # the ws_winner band reading 0 leverage during LCS week — exactly
+        # the ws_winner band reading 0 leverage during LCS week: exactly
         # when LCS-Game-7 leverage should be maxing out. Mirrors the NHL
         # CUP_FINAL fix in #17.
         lcs_pair_set: set = set()
@@ -503,7 +503,7 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         like 778411).
 
         The sentinels are stable across refreshes within one importance
-        run — they're matched by _build_bracket below to wire feeds_from
+        run: they're matched by _build_bracket below to wire feeds_from
         to the two LCS series.
         """
         games: List[Dict[str, Any]] = []
@@ -533,7 +533,7 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         WS placeholder tie (whose participants are sentinel names, which
         the participant-set inference in the base class can't match
         against the actual LCS participants). Same shape as
-        NhlPlayoffSource._build_bracket — see #17 and #27.
+        NhlPlayoffSource._build_bracket: see #17 and #27.
         """
         bracket = super()._build_bracket(games)
         lcs_ties = bracket.get("LCS", [])
@@ -552,7 +552,7 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         # corresponding LCS series. Bracket order from _build_bracket is
         # deterministic per frozenset insertion order; we treat LCS[0] as
         # the "top" feeder and LCS[1] as the "bottom" feeder. Without
-        # league-affiliation data this assignment is arbitrary — what
+        # league-affiliation data this assignment is arbitrary: what
         # matters for importance computation is that BOTH sentinels are
         # cascaded into the WS_WINNER depth, not which league each one
         # came from.

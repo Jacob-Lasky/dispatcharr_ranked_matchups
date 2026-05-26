@@ -1,4 +1,4 @@
-"""MLS Cup playoff bracket — issue #30 part B.
+"""MLS Cup playoff bracket: issue #30 part B.
 
 Mixed-format postseason that neither AggregateLegSource nor a uniform
 best-of-N source handles cleanly:
@@ -13,7 +13,7 @@ best-of-N source handles cleanly:
     higher seed
   - Champion (`MLS_CUP_WINNER`): synthetic depth, the cup winner
 
-Per-stage series-length routing via `_series_length_for_stage` —
+Per-stage series-length routing via `_series_length_for_stage`:
 inherited from PR #51 (Phase F's BestOfNSeriesSource extension that
 NCAA Baseball uses for the mixed Super Regional / MCWS Final bracket).
 The same hook handles MLS's mix of best-of-3 R1 and single-leg
@@ -36,7 +36,7 @@ playoff goal-scoring rates from `MlsEastSource` / `MlsWestSource`
 1.4/1.4 league-average prior.
 
 Best-of-3 matchday inference: ESPN doesn't tag MLS R1 events with a
-game number on the event object — the `competition.notes[0].headline`
+game number on the event object: the `competition.notes[0].headline`
 carries series state ("LA leads series 1-0") but not the specific
 game index. Matchday is inferred from chronological ordering within
 each (stage, frozenset(participants)) tuple in `_fetch_bracket_games`,
@@ -134,7 +134,7 @@ def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
 
 def _default_season_year() -> int:
     """MLS season is named by the calendar year. Pre-October reads as
-    the prior season's playoffs (which wrap in early December — January
+    the prior season's playoffs (which wrap in early December to January
     onward is offseason). Post-October reads as the current calendar
     year's playoffs in progress.
     """
@@ -151,7 +151,7 @@ class MlsCupSource(BestOfNSeriesSource):
 
     Wild Card is the entry stage in modern MLS playoffs (since the 2024
     14-9 format expanded the field). Teams with a R1 bye (top 7 seeds
-    of each conference) skip the WC tier — their `round_reached` enters
+    of each conference) skip the WC tier: their `round_reached` enters
     at MLS_R1 depth.
     """
 
@@ -220,7 +220,7 @@ class MlsCupSource(BestOfNSeriesSource):
             "pa_per_game": _DEFAULT_GOALS_AGAINST,
         }
 
-    # ---------- sample_result (force a winner — bracket games) ----------
+    # ---------- sample_result (force a winner: bracket games) ----------
 
     def sample_result(
         self,
@@ -229,7 +229,7 @@ class MlsCupSource(BestOfNSeriesSource):
         strengths: Dict[str, Dict[str, float]],
         rng: random.Random,
     ) -> MatchResult:
-        """Bracket games CANNOT end in draws — MLS postseason goes to
+        """Bracket games CANNOT end in draws: MLS postseason goes to
         OT then PKs if needed. Same shape as NcaaSoccerCupSource's
         sample_result and distinct from the regular-season
         MlsStandingsSourceBase sample_result which allows draws (1
@@ -244,7 +244,7 @@ class MlsCupSource(BestOfNSeriesSource):
         home_goals = _poisson(lam_home, rng)
         away_goals = _poisson(lam_away, rng)
         if home_goals == away_goals:
-            # PK shootouts are roughly coin-flips at the MLS level —
+            # PK shootouts are roughly coin-flips at the MLS level:
             # no additional bias beyond the Poisson means.
             if rng.random() < 0.5:
                 home_goals += 1
@@ -256,7 +256,7 @@ class MlsCupSource(BestOfNSeriesSource):
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Emit upcoming playoff bracket games. Per-day sweep with the
-        same slug filter that `_fetch_bracket_games` uses — only events
+        same slug filter that `_fetch_bracket_games` uses: only events
         whose `season.slug` is in `SLUG_TO_STAGE` surface here, so
         regular-season games (filtered out earlier in `MlsEastSource` /
         `MlsWestSource`) don't reappear via this source.
@@ -304,19 +304,19 @@ class MlsCupSource(BestOfNSeriesSource):
         """Pull the playoff window (Oct 1 - Dec 15 of season_year) and
         emit one canonical record per bracket game. Matchday inference
         for best-of-3 series: walk dates ascending and count games per
-        (stage, frozenset(participants)) tuple — first chronological
+        (stage, frozenset(participants)) tuple: first chronological
         appearance is game 1, second is game 2, third is game 3.
         Single-leg stages always emit matchday=1.
 
         Single-game-elim stages (MLS_WC, MLS_CSF, MLS_CF, MLS_CUP) also
         need PK dedup. ESPN sometimes publishes two events when a game
         goes to PKs (one with the regulation tie, one with the PK
-        result) — see `_dedupe_pk_shootout_pairs` in
+        result): see `_dedupe_pk_shootout_pairs` in
         `ncaa_soccer_cup.py` for the same shape. We import that helper
         rather than re-implementing; the dedup criterion is sport-
         agnostic for single-game-elim brackets.
 
-        Best-of-3 stages are NOT deduped on (stage, participants) —
+        Best-of-3 stages are NOT deduped on (stage, participants):
         the same teams legitimately play 2-3 games in a series, so
         collapsing them would lose the matchday cascade. PK dedup is
         applied per-matchday inside the best-of-3 grouping.
@@ -342,7 +342,7 @@ class MlsCupSource(BestOfNSeriesSource):
             )
             if isinstance(data, dict):
                 for event in data.get("events") or []:
-                    # Pass matchday=None — the inference loop below
+                    # Pass matchday=None: the inference loop below
                     # assigns it per (stage, participants) tuple.
                     rec = self._extract_bracket_record(event, matchday=None)
                     if rec is None or rec["game_id"] is None:
@@ -399,7 +399,7 @@ class MlsCupSource(BestOfNSeriesSource):
         completed = bool(status_type.get("completed"))
         state = (status_type.get("state") or "").lower()
         # ESPN publishes phantom placeholder games for best-of-3
-        # series that clinch in 2 games — the unnecessary game-3
+        # series that clinch in 2 games: the unnecessary game-3
         # has state="post" + completed=False + score=0-0. Skip
         # these entirely; emitting them (even as SCHEDULED) would
         # inject a never-going-to-happen game into the simulator's
@@ -431,7 +431,7 @@ class MlsCupSource(BestOfNSeriesSource):
         return {
             "game_id": event.get("id"),
             "stage": stage,
-            "matchday": matchday,  # may be None — inference assigns later
+            "matchday": matchday,  # may be None: inference assigns later
             "home": home_team,
             "away": away_team,
             "home_goals": hg,
@@ -454,7 +454,7 @@ def _dedupe_pk_shootout_pairs(
     NOTE: this is duplicated from `sources/ncaa_soccer_cup.py` while
     issues #24 and #30 part B land as independent PRs. Once both
     merge, the helper will be extracted to a shared module and both
-    call sites updated — DO NOT diverge the two implementations in
+    call sites updated: DO NOT diverge the two implementations in
     the meantime. Tracked in #69.
 
     Preference order when multiple records collide on (stage,

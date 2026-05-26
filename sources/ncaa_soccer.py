@@ -1,7 +1,7 @@
-"""NCAA Soccer source — ESPN's unofficial API.
+"""NCAA Soccer source: ESPN's unofficial API.
 
 One source class, parametrized on `gender` ("m" or "w"). The same
-structure / endpoints / threshold semantics apply to both — only the
+structure / endpoints / threshold semantics apply to both: only the
 URL slug (`usa.ncaa.m.1` vs `usa.ncaa.w.1`) and the LEAGUE_CONTEXTS
 code (`NCAA_MSOC` vs `NCAA_WSOC`) differ. Both seasons run roughly
 August - early December, with the College Cup (NCAA Tournament) in
@@ -11,11 +11,11 @@ Key difference from NCAA Baseball: SOCCER HAS DRAWS. The standings-
 points scheme is 3 / 1 / 0 (win / draw / loss). `_count_field` is
 "standings_points" so the LEAGUE_CONTEXTS bands threshold against
 that field instead of raw wins. A team going 13-3-8 (Saint Louis
-men's, 2025) has only 13 wins but 47 standings points — without the
+men's, 2025) has only 13 wins but 47 standings points: without the
 draws credit the win-count thresholds would misclassify them as
 bubble when they're a national seed contender.
 
-College Cup postseason bracket is NOT modeled — same shape as the
+College Cup postseason bracket is NOT modeled: same shape as the
 WC / EURO knockout (single-leg elimination), so the existing
 KnockoutSoccerSource machinery can absorb it when wired up.
 fetch_upcoming still surfaces postseason games via rank + favorite
@@ -178,7 +178,7 @@ class NcaaSoccerSource(PointsBasedSportSource):
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Per-day scoreboard sweep (ESPN's date-range syntax silently
-        caps at 25 events — see ncaa_baseball.py)."""
+        caps at 25 events: see ncaa_baseball.py)."""
         rankings = self._fetch_rankings()
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
@@ -270,11 +270,11 @@ class NcaaSoccerSource(PointsBasedSportSource):
                 ranks[name] = rank
         return ranks
 
-    # ---------- sample_result (allows ties — draws are legitimate) ----------
+    # ---------- sample_result (allows ties: draws are legitimate) ----------
 
     def sample_result(self, state, match, strengths, rng):
         """Sample Poisson goals per side. Soccer regulation outcomes
-        include draws — DO NOT coin-flip a tied score into a win.
+        include draws: DO NOT coin-flip a tied score into a win.
         The base PointsBasedSportSource.sample_result forces a non-tie
         outcome for NCAAF / NCAAM / NHL where regulation ties resolve
         into overtime; for college soccer the regulation tie IS the
@@ -282,7 +282,7 @@ class NcaaSoccerSource(PointsBasedSportSource):
         into_state).
 
         NCAA regular-season soccer DOES play one 10-minute overtime if
-        regulation ends tied, but it's GOLDEN GOAL — meaning a regulation
+        regulation ends tied, but it's GOLDEN GOAL: meaning a regulation
         tie that survives OT is still a draw in the standings. We model
         that by just sampling regulation; the small chance of OT-broken
         ties is folded into the Poisson noise.
@@ -314,7 +314,7 @@ class NcaaSoccerSource(PointsBasedSportSource):
         standings_points credit and a 'draws' counter (used by the
         threshold cascade and the cache.json display).
         """
-        del result_extra  # not used — soccer ties are part of regulation
+        del result_extra  # not used: soccer ties are part of regulation
         h = teams[home]
         a = teams[away]
         h.setdefault("draws", 0)
@@ -336,7 +336,7 @@ class NcaaSoccerSource(PointsBasedSportSource):
             h["losses"] += 1
             a["standings_points"] += 3
         else:
-            # Draw — 1 standings point each, no W/L update.
+            # Draw: 1 standings point each, no W/L update.
             h["draws"] += 1
             a["draws"] += 1
             h["standings_points"] += 1

@@ -218,7 +218,7 @@ class BracketSportSource(SportSource):
                 # Cross-check: when downstream resolved participants differ
                 # from the source-published draw, the simulated tie's key
                 # uses the simulated teams. tie_results may not yet have an
-                # entry for the simulated tie_key — _emit_remaining_games_for_tie
+                # entry for the simulated tie_key: _emit_remaining_games_for_tie
                 # is responsible for handling that gracefully (treat as fresh).
                 tie = tie_results.get(tk) or self._new_tie_record(tie_meta)
                 games = self._emit_remaining_games_for_tie(
@@ -426,10 +426,10 @@ class BracketSportSource(SportSource):
 
         Two cases where the published names diverge from the simulated
         ones:
-          1. UCL-style counterfactual — an upstream sim flipped a feeder,
+          1. UCL-style counterfactual: an upstream sim flipped a feeder,
              putting a different team into this tie than FD.org's draw
              published.
-          2. WC chain seed (#53) — the entry tie's participants come from
+          2. WC chain seed (#53): the entry tie's participants come from
              the group-stage chain rather than FD.org; downstream-round
              tie_metas carry placeholder names ("L32_W1" etc.) that have
              to be resolved at lookup time, not at synthesis time.
@@ -452,7 +452,7 @@ class BracketSportSource(SportSource):
 
 
 # =====================================================================
-# AggregateLegSource — two-leg knockout (UEFA cup soccer)
+# AggregateLegSource: two-leg knockout (UEFA cup soccer)
 # =====================================================================
 
 class AggregateLegSource(BracketSportSource):
@@ -480,7 +480,7 @@ class AggregateLegSource(BracketSportSource):
         # ties run 2 legs except the FINAL (1 leg). International tournaments
         # (WC, EURO) run 1 leg per round including non-finals. Single source
         # of truth: count the games FD.org publishes for the tie. DO NOT
-        # branch on `stage == KO_STAGES[-1]` — that misclassifies single-leg
+        # branch on `stage == KO_STAGES[-1]`: that misclassifies single-leg
         # non-finals (WC LAST_16, EURO QF, etc.) as incomplete forever and
         # the round_reached cascade never fires.
         games_in_tie = len(tie_meta.get("games") or [])
@@ -584,7 +584,7 @@ class AggregateLegSource(BracketSportSource):
 
 
 # =====================================================================
-# BestOfNSeriesSource — best-of-N playoff series (NHL / NBA / MLB)
+# BestOfNSeriesSource: best-of-N playoff series (NHL / NBA / MLB)
 # =====================================================================
 
 class BestOfNSeriesSource(BracketSportSource):
@@ -604,7 +604,7 @@ class BestOfNSeriesSource(BracketSportSource):
     Subclasses set `SERIES_LENGTH` (e.g., 7 for NHL/NBA, varies for MLB).
     Game emission walks games in matchday order: a series at 2-1 emits
     the game-4 record (if applied=false), then game-5 / game-6 / game-7
-    conditional on the series staying alive — but only games actually
+    conditional on the series staying alive: but only games actually
     listed in the tie_meta's games[] are emitted. Subclasses generate
     those records (with home/away pattern) in `_fetch_bracket_games`.
     """
@@ -679,7 +679,7 @@ class BestOfNSeriesSource(BracketSportSource):
     def _is_decisive_game(self, tie, game_index, games_in_tie) -> bool:
         # Every series game can be a clincher (OT triggers per game, not
         # per series). For series sports this is "is this game a regular
-        # match that could go to OT" — always True; the actual OT decision
+        # match that could go to OT": always True; the actual OT decision
         # lives in the subclass `sample_result`.
         del tie, game_index, games_in_tie
         return True
@@ -764,7 +764,7 @@ class BestOfNSeriesSource(BracketSportSource):
 
 
 # =====================================================================
-# DoubleEliminationSource — N-team double-elimination bracket
+# DoubleEliminationSource: N-team double-elimination bracket
 # =====================================================================
 
 class DoubleEliminationSource(BracketSportSource):
@@ -793,20 +793,20 @@ class DoubleEliminationSource(BracketSportSource):
         of teams through one shared loss-tracking state, rather than a
         pair through a shared series-wins state.
       - `_build_bracket` groups games by `_tie_grouping_key(game)` (a
-        subclass-provided string from the source headline — e.g.,
+        subclass-provided string from the source headline: e.g.,
         "Auburn Regional" or "MCWS_sub1"), not by team-pair set.
       - `apply_result` looks up the tie via the game's `grouping_key`
         (carried in the GameRow `extra`), with a defensive fallback to
         membership-superset search.
       - `_advance_round_reached` is called once per eliminated team, not
         once per tie. The base method's `(winner, loser)` signature is
-        idempotent under multiple calls with the same winner — each
+        idempotent under multiple calls with the same winner: each
         loser still caps at `stage_depth`, the winner is still set to
         `winner_depth` via `max()`.
       - Source-driven only: `_emit_remaining_games_for_tie` emits the
         source-published games (in chronological order) that haven't
         been applied yet. It does NOT synthesize speculative future
-        games from the double-elim game tree — that's a #43 follow-up
+        games from the double-elim game tree: that's a #43 follow-up
         once live source data is wired in.
 
     Subclass contract: implement `_fetch_bracket_games` (inherited) AND
@@ -889,7 +889,7 @@ class DoubleEliminationSource(BracketSportSource):
         # Every game in a double-elim CAN be a tie-ending game (the one
         # that puts the last 1-loss team at 2 losses), so always True.
         # The base class contract uses this for ET / extra-innings hooks
-        # in subclass sample_result — baseball / softball use no shootout
+        # in subclass sample_result: baseball / softball use no shootout
         # so it doesn't matter, but stay consistent with BestOfNSeries.
         del tie, game_index, games_in_tie
         return True
@@ -901,7 +901,7 @@ class DoubleEliminationSource(BracketSportSource):
         records carrying the full participant set. feeds_from wiring is
         intentionally empty for double-elim: each sub-bracket tie is an
         entry tie at its stage (this class doesn't connect Regional →
-        Super Regional structurally — that handoff lives in the
+        Super Regional structurally: that handoff lives in the
         regular-season-strength sharing already on the playoff sources).
         """
         by_stage: Dict[str, Dict[str, Dict[str, Any]]] = {

@@ -7,10 +7,10 @@ returned prose to `ProgramData.description` instead of the deterministic
 
 Failure modes (missing key, API error, non-200, malformed body, network
 timeout, JSON decode) all return `fallback_description` unchanged. The cache
-file is a sidecar — cache.json's structured fields (score, breakdown,
+file is a sidecar: cache.json's structured fields (score, breakdown,
 score_notes) stay deterministic and untouched.
 
-The HTTP call is intentionally `urllib` (stdlib only) — Dispatcharr does not
+The HTTP call is intentionally `urllib` (stdlib only): Dispatcharr does not
 ship the `anthropic` SDK and we do not want to add a transitive dependency
 for a 30-line wrapper.
 """
@@ -46,7 +46,7 @@ Hard rules:
 - 2-3 sentences. Max ~50 words.
 - Skip generic openings ("This match features..."). Drop the reader into the
   stakes.
-- If a favorite team for this user is playing, that's a "personal interest" —
+- If a favorite team for this user is playing, that's a "personal interest":
   ground the preview in their angle.
 - Plain text only. No markdown, no asterisks, no bullet points.
 """
@@ -107,7 +107,7 @@ def _standings_window(table: List[Dict[str, Any]], focus_positions: List[Any]) -
 def build_llm_context(g: Dict[str, Any], tagline: str, boundary_summary: str = "") -> str:
     """Build the user-message context block for the LLM.
 
-    Pulls only from data already in the cache row — no new API calls. The
+    Pulls only from data already in the cache row: no new API calls. The
     standings window includes the two teams playing plus their immediate
     neighbors, so the model can write "one point above the drop zone" without
     being told the threshold name.
@@ -233,7 +233,7 @@ def llm_describe_or_fallback(
 
     Mutates `cache` in place on a successful call (caller is responsible for
     persisting the cache dict to disk). The enable-flag, the API-key existence
-    check, and the placeholder skip are the caller's job — this function
+    check, and the placeholder skip are the caller's job: this function
     assumes it should attempt the call.
     """
     context = build_llm_context(g, tagline, boundary_summary)

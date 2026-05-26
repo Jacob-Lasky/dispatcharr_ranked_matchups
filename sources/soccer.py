@@ -1,11 +1,11 @@
-"""European football (soccer) source — Football-Data.org for fixtures + standings,
+"""European football (soccer) source: Football-Data.org for fixtures + standings,
 The Odds API for spreads.
 
 Free tier coverage on Football-Data.org includes:
   - PL  (Premier League)
-  - ELC (English Football League Championship — i.e., the second tier)
+  - ELC (English Football League Championship: i.e., the second tier)
   - CL  (UEFA Champions League)
-  + Bundesliga, La Liga, Serie A, Ligue 1, etc. — easy to add later.
+  + Bundesliga, La Liga, Serie A, Ligue 1, etc.: easy to add later.
 
 Soccer rank: there's no AP poll, so we use **league position** as the rank.
 Wrexham 6th, Hull 7th → "6v7" matchup, both fighting for the playoff spot.
@@ -49,12 +49,12 @@ ODDS_BASE = "https://api.the-odds-api.com/v4"
 #
 # Two caches replace the per-source-instance fetch pattern:
 #
-#   _TIER_FIXTURES_CACHE  — one /v4/matches call returns fixtures for
+#   _TIER_FIXTURES_CACHE : one /v4/matches call returns fixtures for
 #                           every competition on the tier in a single
 #                           date window. SoccerSource._fetch_fixtures
 #                           filters this by self.config.fd_code instead
 #                           of calling /v4/competitions/<code>/matches.
-#   _SEASON_MATCHES_CACHE — full-season matches per competition (used
+#   _SEASON_MATCHES_CACHE: full-season matches per competition (used
 #                           by the Monte Carlo importance simulator).
 #                           Keyed by fd_code so sibling sources
 #                           (wc_groups + wc_knockout) share one fetch
@@ -175,7 +175,7 @@ def _fetch_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[Dict]:
     the same competition's schedule.
 
     NOTE: there's no /v4/matches-equivalent that returns full-season
-    history per competition in one shot — /v4/matches is date-bounded.
+    history per competition in one shot: /v4/matches is date-bounded.
     So this remains a per-competition call, but at most ONE call per
     distinct fd_code per refresh, regardless of how many sources
     consume it.
@@ -206,7 +206,7 @@ def _fetch_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[Dict]:
 # a "position prior." Without the seed, MD1-3 produces tied scores (no
 # rank_pair signal, no stakes signal) and the algorithm has nothing but
 # favorites + spread to work with. See TUNING_REPORT.md finding #2.
-# DO NOT raise this above ~5 — by MD5 enough matches have played that
+# DO NOT raise this above ~5: by MD5 enough matches have played that
 # the current-season position is a stronger signal than the prior year's.
 # Public (no underscore) because the sim harness imports it to mirror
 # this exact cutoff in its standings_as_of replay; a divergence would
@@ -228,7 +228,7 @@ def _h2h_to_closeness(
       closeness     = 2 * min(p_home, p_away)
 
     The draw probability is intentionally not part of the closeness
-    formula — "either team could win" is what we care about, and the
+    formula: "either team could win" is what we care about, and the
     draw outcome is its own state. A 33/34/33 split → closeness 0.66,
     not 1.0; that's correct (a draw-heavy market isn't a coinflip).
     """
@@ -308,7 +308,7 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         sport_label="UEFA Champions League",
         odds_sport_key="soccer_uefa_champs_league",
         use_position_as_rank=False,  # group/knockout standings don't map cleanly
-        # total_matchdays=0 — knockout, not a fixed-length season
+        # total_matchdays=0: knockout, not a fixed-length season
     ),
     # Top-flight European league competitions. All available on
     # Football-Data.org's free tier (verified 2026-05-25). Each is a
@@ -367,7 +367,7 @@ COMPETITIONS: Dict[str, SoccerCompetitionConfig] = {
         use_position_as_rank=False,
     ),
     # Additional Football-Data.org free-tier leagues. Same config
-    # shape as the top-flight European leagues above — pure data
+    # shape as the top-flight European leagues above: pure data
     # additions, no source code changes. UEFA Europa League and
     # Conference League are NOT on the FD.org free tier (only Champions
     # League is), so they're not included here.
@@ -495,7 +495,7 @@ class SoccerSource(SportSource):
                     "raw_position_home": rh,
                     "raw_position_away": ra,
                     "fd_competition_code": self.config.fd_code,
-                    # Standings is position-based (not poll-based) — the WHY
+                    # Standings is position-based (not poll-based): the WHY
                     # renderer uses this to skip "both top-N" framing that's
                     # meaningless when every team in the league is already
                     # "ranked" (e.g. all 20 EPL teams are top-25).
@@ -568,7 +568,7 @@ class SoccerSource(SportSource):
 
         Trade-off: teams promoted INTO this league won't appear in the
         seed (they were in a different competition last year) and stay
-        unranked through the seed window. That's correct — they have no
+        unranked through the seed window. That's correct: they have no
         positional signal anyway. The 17 carry-over teams get realistic
         ranks; the 3 promoted teams fall back to the existing
         one-ranked-one-unranked rank-pair path.
@@ -582,7 +582,7 @@ class SoccerSource(SportSource):
         seed_by_team, seed_table = self._fetch_standings(season=prev_year)
         if not seed_table:
             return current_by_team, current_table
-        # Reset playedGames to 0 — the seed represents a fresh season's
+        # Reset playedGames to 0: the seed represents a fresh season's
         # prior, not last year's residual. Downstream consumers
         # (build_impact_narratives, the matcher's rank cap) read these
         # numbers; the importance simulator builds its own standings from
@@ -688,8 +688,8 @@ class SoccerSource(SportSource):
                      home: str, away: str) -> Optional[float]:
         """Match Football-Data.org team names to The Odds API team names with
         a fuzzy fallback. Football-Data uses 'Wrexham AFC', Odds API uses
-        'Wrexham' — strip common suffixes and try lowercase substring.
-        Generic over whatever value the odds_map carries — pre-B.3 was
+        'Wrexham': strip common suffixes and try lowercase substring.
+        Generic over whatever value the odds_map carries: pre-B.3 was
         spread floats, post-B.3 is closeness floats."""
         h_lc = home.lower()
         a_lc = away.lower()
@@ -834,7 +834,7 @@ class SoccerSource(SportSource):
     def initial_state(self) -> Dict[str, Any]:
         """Standings snapshot as of the moment importance is computed. Built
         from finished matches in the season (NOT from the FD.org standings
-        endpoint — that endpoint can include in-progress results that
+        endpoint: that endpoint can include in-progress results that
         de-sync from the fixture list, and the simulator needs the two to
         agree).
 
@@ -887,7 +887,7 @@ class SoccerSource(SportSource):
     @staticmethod
     def _mutate_apply(state: Dict[str, Any], home: str, away: str, hg: int, ag: int) -> None:
         """Apply one finished result to a state dict in place. Used by
-        `initial_state` (where mutation is fine — we own the new state) and
+        `initial_state` (where mutation is fine: we own the new state) and
         `apply_result` (which copies first to preserve immutability)."""
         h = state[home]
         a = state[away]
@@ -946,7 +946,7 @@ class SoccerSource(SportSource):
         rate; mirror for away goals.
 
         `state` is part of the SportSource ABC signature but unused by the
-        league-shape Poisson model — team strengths fully determine the
+        league-shape Poisson model: team strengths fully determine the
         rates. KnockoutSoccerSource overrides this and DOES read state
         (to look up leg 1's result when sampling leg 2). Reference the
         param explicitly to silence "unused parameter" hints.
@@ -967,7 +967,7 @@ class SoccerSource(SportSource):
         match: GameRow,
         result: MatchResult,
     ) -> Dict[str, Any]:
-        """Return a NEW state with `match`'s `result` applied. Pure — the
+        """Return a NEW state with `match`'s `result` applied. Pure: the
         simulator depends on this NOT mutating `state` so one initial_state
         can seed many sampled seasons.
         """
@@ -986,7 +986,7 @@ class SoccerSource(SportSource):
 
     def terminal_outcomes(self, state: Dict[str, Any]) -> Dict[str, List[str]]:
         """{team: [outcome_labels]} at the final standings encoded in
-        `state`. Sorts by (points desc, goal_diff desc, gf desc) — the
+        `state`. Sorts by (points desc, goal_diff desc, gf desc): the
         standard soccer tiebreak. Assigns labels based on
         `LEAGUE_CONTEXTS[fd_code].thresholds`.
 
@@ -1000,7 +1000,7 @@ class SoccerSource(SportSource):
             return {team: [] for team in state if team != "_applied"}
         # DO NOT use this method for knockout-format contexts (UCL, etc.).
         # The cutoff in knockout thresholds is a stage string ("LAST_16"),
-        # not an int position — the `pos > cutoff` comparison below would
+        # not an int position: the `pos > cutoff` comparison below would
         # TypeError. The factory in plugin.py routes knockout configs to
         # KnockoutSoccerSource; falling here means a misroute. Return empty
         # so importance silently produces 0 (consistent with "no league
@@ -1008,7 +1008,7 @@ class SoccerSource(SportSource):
         if ctx.format != "league":
             logger.warning(
                 "[soccer:%s] SoccerSource.terminal_outcomes called on a non-league "
-                "context (format=%s); returning empty. This is a wiring bug — the "
+                "context (format=%s); returning empty. This is a wiring bug: the "
                 "factory should route this competition to KnockoutSoccerSource.",
                 self.config.fd_code, ctx.format,
             )
@@ -1058,13 +1058,13 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
     """
 
     # Stage tuple ordered by depth (earlier rounds first). PLAYOFFS and
-    # LAST_32 are both at depth 0 — UEFA cup competitions use PLAYOFFS as
+    # LAST_32 are both at depth 0: UEFA cup competitions use PLAYOFFS as
     # the entry round (pos 9-24 face the league phase's top 8); the new
     # 48-team FIFA World Cup uses LAST_32. The ordering matters only for
     # feeds_from inference (each tie looks back through earlier stages);
     # since no single competition uses both PLAYOFFS and LAST_32, they
     # don't collide. EURO and FIFA pre-2026 tournaments simply have
-    # neither stage populated — _build_bracket skips empty stages.
+    # neither stage populated: _build_bracket skips empty stages.
     KO_STAGES = (
         "PLAYOFFS",
         "LAST_32",
@@ -1089,10 +1089,10 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
         sibling GroupStageSoccerSource. Knockout fixtures (PLAYOFFS,
         LAST_32 / LAST_16 / QF / SF / FINAL / THIRD_PLACE) pass through.
 
-        Safe for non-tournament competitions (UCL, UEL, UECL) — their
+        Safe for non-tournament competitions (UCL, UEL, UECL): their
         FD.org fixtures never carry stage="GROUP_STAGE" so the filter
         is a no-op there. The filter is keyed off `extra.stage` set by
-        SoccerSource.fetch_upcoming, NOT off `self.KO_STAGES` — that
+        SoccerSource.fetch_upcoming, NOT off `self.KO_STAGES`: that
         keeps the filter robust even if FD.org introduces a knockout
         stage label we haven't seen yet (better to over-emit a new
         knockout stage than to under-emit a known one).
@@ -1110,18 +1110,18 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
         shape. Bakes the penalty-shootout +1 boost into home_goals/away_goals
         so the aggregate sum reflects the actual tie winner (FD.org stores
         `fullTime` as the score that decided the leg, and the shootout
-        outcome lives in `score.penalties` — we apply the +1 here so the
+        outcome lives in `score.penalties`: we apply the +1 here so the
         downstream aggregate computation in AggregateLegSource doesn't
         need to know about shootout semantics).
 
         Matchday normalization: FD.org's `matchday` is competition-relative.
         For UEFA cup two-leg ties it doubles as the leg index (1 = leg 1,
-        2 = leg 2 — works directly). For international tournaments (WC,
+        2 = leg 2: works directly). For international tournaments (WC,
         EURO) it's the overall tournament-day counter (e.g., matchday=7
         for the EURO 2024 final), which DOES NOT map to a leg index. We
         normalize per-tie here: matchday becomes the 1-indexed leg position
         within the tie, ordered chronologically. DO NOT pass FD's matchday
-        through unchanged for single-leg-per-round competitions — the
+        through unchanged for single-leg-per-round competitions: the
         AggregateLegSource records the score into `leg2` instead of
         `leg1` and the tie never marks itself complete.
         """
@@ -1219,7 +1219,7 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
         Returns a state dict in the shape `BracketSportSource.
         initial_state` produces: keys `_applied`, `_tie_results`,
         `_bracket`, `_round_reached`. Compatible with `remaining_matches`,
-        `sample_result`, `apply_result`, `terminal_outcomes` as-is —
+        `sample_result`, `apply_result`, `terminal_outcomes` as-is:
         seed_from_chain is the entry point INSTEAD of `initial_state`,
         not in addition to it.
         """
@@ -1295,7 +1295,7 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
         Aggregate-tie detection uses leg 1's score from `state["_tie_results"]`
         for 2-leg decisive legs; for 1-leg FINAL it's the regulation score
         directly. Non-decisive legs (leg 1 of a 2-leg tie) return regulation
-        goals only — the simulator will re-enter via sample_result for leg 2
+        goals only: the simulator will re-enter via sample_result for leg 2
         which carries the decisive logic.
         """
         h = self._strength_for(strengths, match.home)
@@ -1348,7 +1348,7 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
             return MatchResult(home_goals=home_goals, away_goals=away_goals, extra=result_extra)
 
         # Penalty shootout: +1 to winner. Encodes a non-draw outcome for
-        # tau-c classification. Symmetric 70% per-shot model — pen shootouts
+        # tau-c classification. Symmetric 70% per-shot model: pen shootouts
         # are dominated by variance; per-team skill barely shifts results
         # at the calibration precision used.
         pen_winner = self._sample_penalty_shootout(rng)
@@ -1373,7 +1373,7 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
 
 
 # =====================================================================
-# GroupStageSoccerSource — international-tournament group importance
+# GroupStageSoccerSource: international-tournament group importance
 # =====================================================================
 
 
@@ -1397,9 +1397,9 @@ class GroupStandings(NamedTuple):
 # WC 2026 LAST_32 bracket pairings, source: FIFA published schedule
 # (matches M73-M88). Each entry: (home_slot, away_slot).
 # Slot kinds:
-#   ("group_winner", "<letter>")     — 1st place in that group
-#   ("group_runner_up", "<letter>")  — 2nd place in that group
-#   ("best_third", frozenset(...))   — best-3rd-placer from any of the
+#   ("group_winner", "<letter>")    : 1st place in that group
+#   ("group_runner_up", "<letter>") : 2nd place in that group
+#   ("best_third", frozenset(...))  : best-3rd-placer from any of the
 #                                      listed groups (FIFA Annex C
 #                                      constraint preventing same-group
 #                                      LAST_32 rematches)
@@ -1460,7 +1460,7 @@ class GroupStageSoccerSource(SoccerSource):
     Each tournament has N parallel groups of 4 teams, each playing 6
     games (each team plays 3 games). `terminal_outcomes` classifies
     each team as `"advance"` (top 2 in its group) or `"eliminated"`.
-    Outcome labels are intentionally hardcoded — the group-stage
+    Outcome labels are intentionally hardcoded: the group-stage
     classification ("did I finish top-2 in MY group") doesn't fit the
     flat-position-threshold shape that league sources use, so we bypass
     LEAGUE_CONTEXTS.thresholds' cutoff field and provide our own
@@ -1468,7 +1468,7 @@ class GroupStageSoccerSource(SoccerSource):
 
     Cross-source `feeds_from` to KnockoutSoccerSource (a group winner
     structurally faces a different LAST_16 opponent than a runner-up)
-    is NOT modeled — the simulator doesn't currently support cross-
+    is NOT modeled: the simulator doesn't currently support cross-
     source advancement chains. The two sources run independently, so
     group-stage leverage covers the advance/eliminate decision only,
     not the downstream knockout-path differential. Tracked in #53.
@@ -1485,7 +1485,7 @@ class GroupStageSoccerSource(SoccerSource):
     # ---------- fetch_upcoming: filter to GROUP_STAGE ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Only emit group-stage fixtures — knockout fixtures are owned
+        """Only emit group-stage fixtures: knockout fixtures are owned
         by the sibling KnockoutSoccerSource for the same competition.
 
         Remaps `extra.fd_competition_code` from the base "WC" / "EC"
@@ -1575,7 +1575,7 @@ class GroupStageSoccerSource(SoccerSource):
             if not home or not away or fd_id is None:
                 continue
             if home not in state or away not in state:
-                continue  # defensive — team_group_map should have covered them
+                continue  # defensive: team_group_map should have covered them
             applied.append(fd_id)
             self._mutate_apply(state, home, away, int(hg), int(ag))
         state["_applied"] = frozenset(applied)
@@ -1723,7 +1723,7 @@ class GroupStageSoccerSource(SoccerSource):
 
         Two cases where None is returned:
           1. No paired knockout source was registered (not a tournament
-             with a follow-on bracket — most competitions).
+             with a follow-on bracket: most competitions).
           2. The knockout source's `_fetch_bracket_games()` returned
              non-empty, meaning FD.org has populated the bracket with
              real team names (the group stage has ended and FIFA's
@@ -1820,7 +1820,7 @@ class GroupStageSoccerSource(SoccerSource):
         # reserved slots. Greedy fails on cases where the strongest-
         # first pick locks out a later slot (e.g., the {ABCDEFGH}
         # qualification set has only 3 candidates for M82's {A,E,H,I,J}
-        # slot — if A, E, and H are all consumed by earlier slots,
+        # slot: if A, E, and H are all consumed by earlier slots,
         # M82 stalls). Backtracking DFS tries each slot in canonical
         # order, attempts each unassigned 3rd-placer whose group is
         # allowed (strongest-first to preserve the FIFA tiebreaker

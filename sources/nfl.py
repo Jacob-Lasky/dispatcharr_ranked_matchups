@@ -1,4 +1,4 @@
-"""NFL source — ESPN's unofficial site.api.espn.com. No API key required.
+"""NFL source: ESPN's unofficial site.api.espn.com. No API key required.
 
 Two source classes:
   - `NflRegularSource(PointsBasedSportSource)`: 17-game season since
@@ -50,7 +50,7 @@ _DEFAULT_POINTS_AGAINST = 22.0
 
 # NFL regular season runs early-September through early-January; playoffs
 # January through early-February. ESPN tags `season.year` by the FINAL
-# calendar year of the season (e.g., "2025" for the 2024 season — the
+# calendar year of the season (e.g., "2025" for the 2024 season: the
 # Super Bowl was in February 2025).
 SEASON_START_MONTH = 9   # September
 PLAYOFF_END_MONTH = 2    # February (Super Bowl)
@@ -125,7 +125,7 @@ def _parse_stage_from_headline(headline: Optional[str]) -> Optional[Dict[str, An
 def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Convert one ESPN scoreboard event into the canonical record.
     Filters out the Pro Bowl (tagged competition.type.abbreviation
-    == "ALLSTAR" — same NBA/WNBA trap)."""
+    == "ALLSTAR": same NBA/WNBA trap)."""
     comps = event.get("competitions") or []
     if not comps:
         return None
@@ -191,7 +191,7 @@ class NflRegularSource(PointsBasedSportSource):
     """NFL regular-season importance via PointsBasedSportSource.
 
     Uses raw `wins` (LEAGUE_CONTEXTS["NFL"] is format="win_count"). NFL
-    has 17 games per team since 2021 — the 7th playoff seed cutoff has
+    has 17 games per team since 2021: the 7th playoff seed cutoff has
     settled around 9-10 wins. Bands tuned to the modern 17-game era;
     pre-2021 seasons would have lower cutoffs but the curator only
     surfaces current games anyway.
@@ -255,7 +255,7 @@ class NflRegularSource(PointsBasedSportSource):
         """Walk every day of the regular season (early-September through
         early-January of the next calendar year). Filter to
         season.type == 2 so playoffs don't leak into the win-count
-        importance signal — the playoff source covers that separately.
+        importance signal: the playoff source covers that separately.
         """
         seen: Dict[Any, Dict[str, Any]] = {}
         # NFL season starts early-September of (end_year - 1).
@@ -299,7 +299,7 @@ class NflPlayoffSource(BestOfNSeriesSource):
     as March Madness, just with 4 rounds instead of 6).
 
     Stages: WC -> DIV -> CONF -> SB. Each "series" is one game;
-    clinching wins == 1. Cross-conference until the Super Bowl —
+    clinching wins == 1. Cross-conference until the Super Bowl:
     AFC and NFC ladders feed independently until the SB pairs the
     two conference winners.
     """

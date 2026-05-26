@@ -63,7 +63,7 @@ _FIELD_AWAY_SENTINEL = "Field"
 # Plugin sport_prefix -> substring that must appear in SportsDB's strLeague or
 # strSport for the result to be accepted. Disambiguates same-name cross-sport
 # collisions (e.g. "Alabama vs Auburn" is both a football and basketball
-# fixture). Missing entries mean no disambiguation — date filter alone.
+# fixture). Missing entries mean no disambiguation: date filter alone.
 _SPORT_HINT: dict[str, str] = {
     "CFB": "NCAA",
     "CBB": "NCAA",
@@ -142,7 +142,7 @@ def _date_in_tolerance(event_date_str: str, expected_dt: datetime) -> bool:
 def _hint_matches(event: dict, sport_prefix: Optional[str]) -> bool:
     """Verify the SportsDB event matches the expected sport, if we have a hint.
 
-    Falls open (returns True) when the prefix isn't in the hint map — better
+    Falls open (returns True) when the prefix isn't in the hint map: better
     to accept a slightly-wrong match than to miss every game from an unmapped
     sport.
     """
@@ -180,7 +180,7 @@ def resolve_thumb_url(
     """Search SportsDB for a matchup event and return its strThumb URL.
 
     Returns None when:
-      - away == "Field" (field-event sentinel — no h2h matchup)
+      - away == "Field" (field-event sentinel: no h2h matchup)
       - the search returns no events
       - no event matches both the date tolerance AND the sport hint
       - the matched event has no strThumb
@@ -250,7 +250,7 @@ class ThumbCache:
 
     Negative entries (URL is None) are cached too so we don't re-probe every
     apply, but with a shorter TTL than positives because SportsDB indexes
-    fixtures gradually — a miss this morning can be a hit by evening.
+    fixtures gradually: a miss this morning can be a hit by evening.
     """
 
     def __init__(self, cache_path: str):

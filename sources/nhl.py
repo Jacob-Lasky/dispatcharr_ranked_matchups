@@ -1,4 +1,4 @@
-"""NHL source — official `api-web.nhle.com` for both regular-season standings
+"""NHL source: official `api-web.nhle.com` for both regular-season standings
 and Stanley Cup playoffs. No API key required.
 
 Two source classes:
@@ -14,7 +14,7 @@ Two source classes:
 API quirks captured here:
   - `/v1/standings/now` returns HTTP 307 to `/v1/standings/{date}`.
     `requests.get` with `allow_redirects=True` (the default) handles it,
-    but the request must be made WITHOUT `compressed=False` — Cloudflare
+    but the request must be made WITHOUT `compressed=False`: Cloudflare
     in front of api-web.nhle.com returns gzip-encoded responses and
     `requests` only decodes them when `Accept-Encoding: gzip` is sent
     (which it does by default).
@@ -53,7 +53,7 @@ NHL_API_BASE = "https://api-web.nhle.com/v1"
 
 # All 32 active NHL franchises by their api-web abbreviation. Used by
 # NhlRegularSource to walk per-team season schedules and dedupe games
-# by ID — there's no league-wide season-fetch endpoint on api-web, but
+# by ID: there's no league-wide season-fetch endpoint on api-web, but
 # 32 sequential team-schedule calls complete in well under a minute and
 # the importance refresh runs at most every 6 hours.
 NHL_TEAM_ABBREVS: Tuple[str, ...] = (
@@ -154,7 +154,7 @@ class NhlRegularSource(PointsBasedSportSource):
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Pull next-N-day schedule via `/v1/schedule/{date}` and emit
-        GameRows. Closeness is left None — there is no Odds API
+        GameRows. Closeness is left None: there is no Odds API
         integration for NHL in V1. The structural importance signal
         carries the score on its own.
         """
@@ -223,7 +223,7 @@ class NhlRegularSource(PointsBasedSportSource):
                 ag = (g.get("awayTeam") or {}).get("score")
                 # api-web marks finished games as "OFF" (final) or "FINAL"
                 # depending on the firmware version; both are terminal.
-                # Active live games have state == "LIVE" — we treat them
+                # Active live games have state == "LIVE": we treat them
                 # as SCHEDULED for the simulator (don't seed in-progress
                 # results because the score is still moving).
                 is_final = state in ("OFF", "FINAL") and hg is not None and ag is not None
@@ -350,7 +350,7 @@ NHL_HOME_PATTERN: Tuple[bool, ...] = (True, True, False, False, True, False, Tru
 # placeholder lets the importance simulator propagate counterfactual
 # CONF_FINAL winners into the CUP_FINAL → CUP_WINNER cascade. DO NOT
 # change these strings without also updating `_build_bracket`'s
-# placeholder-detection branch — the names are the join key. Bit me on
+# placeholder-detection branch: the names are the join key. Bit me on
 # the first round of #17 work before I made this constant.
 _CUP_FINAL_TOP_SENTINEL = "CF_A_WINNER"
 _CUP_FINAL_BOT_SENTINEL = "CF_B_WINNER"
@@ -365,7 +365,7 @@ class NhlPlayoffSource(BestOfNSeriesSource):
     series/{season}/{seriesLetter}`.
 
     Per-game sampling uses the same Poisson goal model as the regular
-    season, but each individual game gets its own OT/SO resolution —
+    season, but each individual game gets its own OT/SO resolution:
     a series can run 7 games with a mix of regulation, OT, and SO
     decisions. Series winners propagate through `_round_reached` to
     drive the terminal_outcomes label cascade (R1 → R2 → CONF_FINAL →
@@ -376,7 +376,7 @@ class NhlPlayoffSource(BestOfNSeriesSource):
     SERIES_LENGTH = 7
     supports_importance = True
 
-    # NHL playoffs don't have a "WINNER" depth above CUP_FINAL — that
+    # NHL playoffs don't have a "WINNER" depth above CUP_FINAL: that
     # synthetic label IS the cup winner. _winner_advance_label maps
     # CUP_FINAL → CUP_WINNER explicitly.
 
@@ -475,7 +475,7 @@ class NhlPlayoffSource(BestOfNSeriesSource):
     ) -> None:
         """Hook for the plugin to share regular-season strength estimates
         with the playoff source. Without this, every playoff team gets
-        the league-average prior — accurate enough for early-round
+        the league-average prior: accurate enough for early-round
         importance but loses the team-skill signal a 60-game baseline
         provides."""
         self._team_strengths_from_regular = strengths
@@ -505,7 +505,7 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         home_goals = _poisson(lam_home, rng)
         away_goals = _poisson(lam_away, rng)
         # Playoff OT is sudden-death continuous (no SO), so a tied
-        # regulation always resolves in OT. We still need a winner —
+        # regulation always resolves in OT. We still need a winner:
         # add +1 to a coin-flipped side (slight bias by strength? skip
         # for V1; pen-shootout variance dominates the calibration).
         if home_goals == away_goals:
@@ -553,7 +553,7 @@ class NhlPlayoffSource(BestOfNSeriesSource):
 
             # Per-series schedule for the actual game records. URL is
             # `/v1/schedule/playoff-series/{full_season}/{lower_letter}`
-            # — empirically confirmed against the live host. NB: this
+            #: empirically confirmed against the live host. NB: this
             # uses the full 8-digit season, not the end-year used by
             # the bracket endpoint above.
             series_url = (
@@ -596,7 +596,7 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         # CONF_FINAL series have known participants but the bracket
         # endpoint hasn't yet populated the SCF series with teams. The
         # endpoint emits a Round-4 stub with topSeedTeam/bottomSeedTeam
-        # = None during the conference-finals week — the loop above
+        # = None during the conference-finals week: the loop above
         # silently skips that stub (because _team_canonical_name returns
         # "" for the None teams). Without this placeholder, the cup_winner
         # leverage signal reads 0 during the very week when it matters
@@ -609,7 +609,7 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         # cf_emitted > 0 (data exists) rather than ==14 (all games published)
         # because the schedule endpoint emits games as they're scheduled,
         # not all up-front. The 2-series count comes from grouping inside
-        # _build_bracket — easier to check via the actual game emission.
+        # _build_bracket: easier to check via the actual game emission.
         cf_series_with_teams = sum(
             1 for s in bracket_data.get("series", []) or []
             if _NHL_ROUND_TO_STAGE.get(s.get("playoffRound") or 0) == "CONF_FINAL"
@@ -632,7 +632,7 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         (which are positive 8-digit numbers like 2025030323).
 
         The sentinels are stable across refreshes within one importance
-        run — they're matched by _build_bracket below to wire feeds_from
+        run: they're matched by _build_bracket below to wire feeds_from
         to the two CONF_FINAL series.
         """
         games: List[Dict[str, Any]] = []
@@ -663,7 +663,7 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         names, which the participant-set inference in the base class
         can't match against the actual CONF_FINAL participants).
 
-        Called by BracketSportSource.initial_state — we call super for
+        Called by BracketSportSource.initial_state: we call super for
         the standard structural pass, then post-process the placeholder
         if it's present.
         """
@@ -681,11 +681,11 @@ class NhlPlayoffSource(BestOfNSeriesSource):
             return bracket  # not a placeholder, leave alone
 
         # Wire feeds_from explicitly: each sentinel resolves to the winner
-        # of its corresponding CONF_FINAL series. Order matters — sentinel
+        # of its corresponding CONF_FINAL series. Order matters: sentinel
         # _CUP_FINAL_TOP_SENTINEL maps to CONF_FINAL[0]'s winner; bottom
         # to CONF_FINAL[1]. Order within the bracket comes from
         # _build_bracket's grouping pass which is deterministic per
-        # frozenset insertion order — stable enough for a 2-series
+        # frozenset insertion order: stable enough for a 2-series
         # check. For home-ice priority in the placeholder, we assume
         # CONF_FINAL[0]'s winner gets games 1/2/5/7 at home (the higher
         # regular-season seed normally would; without seeding data, the

@@ -1,4 +1,4 @@
-"""Liga MX source — ESPN unofficial + Odds API closeness.
+"""Liga MX source: ESPN unofficial + Odds API closeness.
 
 Same minimal pattern as MlsSource: schedule + closeness only. No
 standings-based importance or Liguilla playoff bracket (#30).
@@ -6,9 +6,9 @@ standings-based importance or Liguilla playoff bracket (#30).
 Liga MX runs two seasons per calendar year (Apertura ≈ Jul-Dec,
 Clausura ≈ Jan-May), each followed by a 12-team Liguilla playoff.
 Season slug values surface as `extra.season_slug`:
-  - "torneo-apertura"  — fall season
-  - "torneo-clausura"  — spring season
-  - "liguilla"         — playoff round (single-leg + two-leg ties)
+  - "torneo-apertura" : fall season
+  - "torneo-clausura" : spring season
+  - "liguilla"        : playoff round (single-leg + two-leg ties)
 
 Liga MX Odds API key: `soccer_mexico_ligamx`. ESPN slug: `soccer/mex.1`.
 Relevant for US viewers via Univision / Telemundo EPG entries.

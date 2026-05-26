@@ -1,4 +1,4 @@
-"""Field-event source — racing and golf.
+"""Field-event source: racing and golf.
 
 Racing and golf don't fit the team-based GameRow model because they're
 field events: one race or tournament with 20+ competitors and a
@@ -14,7 +14,7 @@ Design:
     as MAJOR). The scoring layer's `tournament` signal handles the
     rest; both labels map to non-zero stage_score so field events
     always surface in the guide when toggled on.
-  - No importance simulation, no closeness, no rank — the rarity of
+  - No importance simulation, no closeness, no rank: the rarity of
     these events (~1/week) means just-show-it-up is the right product.
     The matcher fuzzy-matches the event name against EPG titles.
 
@@ -83,7 +83,7 @@ class FieldEventSource(SportSource):
         """Pull events scheduled in the next N days via the ESPN
         scoreboard range endpoint. Field-event sports have low enough
         volume that range queries (which silently cap at 25 for team
-        sports) work fine — ESPN returns the whole window unfiltered.
+        sports) work fine: ESPN returns the whole window unfiltered.
         """
         today = datetime.now(timezone.utc).date()
         end = today + timedelta(days=days_ahead)
@@ -153,7 +153,7 @@ def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
 
 
 class F1Source(FieldEventSource):
-    """Formula 1 — ~24 Grands Prix per year. Each weekend covers
+    """Formula 1: ~24 Grands Prix per year. Each weekend covers
     practice + qualifying + race; ESPN's scoreboard usually returns
     one event per GP date with the race itself."""
 
@@ -167,7 +167,7 @@ class F1Source(FieldEventSource):
 
 
 class NascarSource(FieldEventSource):
-    """NASCAR Cup Series — ~36 races per year, including the Daytona
+    """NASCAR Cup Series: ~36 races per year, including the Daytona
     500 (season opener) and the Coca-Cola 600. Both are 'crown jewels'
     but currently every race is EVENT-tier (no MAJOR_REGEX set)."""
 
@@ -192,7 +192,7 @@ _GOLF_MAJOR_RE: Pattern[str] = re.compile(
 
 
 class GolfSource(FieldEventSource):
-    """PGA Tour — ~45 tournaments per year. Four majors get the
+    """PGA Tour: ~45 tournaments per year. Four majors get the
     MAJOR tier; everything else is EVENT-tier. The MAJOR_REGEX
     intentionally catches both "The Open" and "British Open"
     framings; ESPN has inconsistently used both."""
@@ -213,7 +213,7 @@ _UFC_PPV_RE: Pattern[str] = re.compile(r"^\s*UFC\s+\d+\b", re.IGNORECASE)
 
 
 class UfcSource(FieldEventSource):
-    """UFC — one EPG entry per fight night card. The card itself is
+    """UFC: one EPG entry per fight night card. The card itself is
     the broadcast unit; ESPN's `event.name` carries the headliner
     framing ("UFC 309: Jones vs. Miocic", "UFC Fight Night:
     Sandhagen vs. Figueiredo").
@@ -232,7 +232,7 @@ class UfcSource(FieldEventSource):
 
 # Tennis Grand Slams + marquee year-end events. ESPN's tennis
 # scoreboard returns whole tournaments (each entry spans 1-2 weeks),
-# not individual matches — so tennis fits the FieldEventSource model
+# not individual matches: so tennis fits the FieldEventSource model
 # the same way racing and golf do. The four Slams plus the year-end
 # Finals get the MAJOR tier; regular tour events stay EVENT.
 _TENNIS_MAJOR_RE: Pattern[str] = re.compile(
@@ -243,7 +243,7 @@ _TENNIS_MAJOR_RE: Pattern[str] = re.compile(
 
 
 class AtpSource(FieldEventSource):
-    """ATP Tour — men's professional tennis. One entry per active
+    """ATP Tour: men's professional tennis. One entry per active
     tournament. Grand Slams (Wimbledon / Australian Open / French
     Open / US Open) and ATP Finals get MAJOR; regular tour stops
     stay EVENT."""
@@ -256,7 +256,7 @@ class AtpSource(FieldEventSource):
 
 
 class WtaSource(FieldEventSource):
-    """WTA Tour — women's professional tennis. Same shape and same
+    """WTA Tour: women's professional tennis. Same shape and same
     Grand Slam roster as ATP (the Slams are shared events). MAJOR
     detection is identical."""
 
