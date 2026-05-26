@@ -1293,18 +1293,29 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("[ranked_matchups] created ChannelGroup id=%s name=%r",
                     target_group.id, group_name)
 
-    # Migrate / clean up any virtual channels in old groups
+    # Migrate any virtual channels in old groups INTO the target group, in
+    # place. DO NOT delete + recreate — Channel.id is the stable handle that
+    # ChannelProfileMembership, IPTV-client playlist caches, and the user's
+    # pinned-channel state all key off. A delete-then-create cycle silently
+    # orphans every one of those: profile memberships are gone (Dispatcharr
+    # auto-adds new channels to existing profiles ONLY at profile-creation
+    # time, never on channel-creation), and IPTV clients that cached the old
+    # tvg-id render an empty slot for the renamed channel until the user
+    # manually refreshes — exactly what bit us during the #1 live-verify.
+    #
+    # The .update() bypasses Django's post_save signal (mirroring the same
+    # signal-bypass pattern at apps/channels/signals.py:60 / our epg_data
+    # write at the bottom of the loop). The downstream main loop will hit
+    # the "existing" branch keyed by tvg_id and update name / channel_number
+    # / logo / streams in place. ChannelStream rows are FK'd to Channel, so
+    # they survive the channel_group change untouched.
     migrated_from_old_group = 0
     deleted_old_groups = 0
     if not dry_run and foreign_owned_groups:
         for old_g in foreign_owned_groups:
             old_chans = Channel.objects.filter(_owned_tvg_id_q(), channel_group=old_g)
             n = old_chans.count()
-            # We re-create everything fresh anyway (cache index drives target chnum),
-            # so just delete the old virtual channels here. Their stream + EPG
-            # links cascade.
-            ChannelStream.objects.filter(channel__in=old_chans).delete()
-            old_chans.delete()
+            old_chans.update(channel_group=target_group)
             migrated_from_old_group += n
             # If the old group is now empty AND was named like a Top Matchups
             # (heuristic: contains 'matchup' or 'top' in name), delete it too.
@@ -1812,8 +1823,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     if migrated_from_old_group or deleted_old_groups or deleted_old_sources:
         rename_msg = (
             f" Migrated from old target: {migrated_from_old_group} channel(s) "
-            f"removed from {deleted_old_groups} old group(s), {deleted_old_sources} "
-            f"old EPGSource(s) deleted."
+            f"moved (same Channel.id) from {deleted_old_groups} old group(s), "
+            f"{deleted_old_sources} old EPGSource(s) deleted."
         )
     # `placeholders` is a *subset* of (created + updated) — placeholder games
     # go through the same upsert path as matched ones, so they're already

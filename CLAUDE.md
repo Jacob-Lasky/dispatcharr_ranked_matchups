@@ -158,10 +158,18 @@ buckets against the threshold cutoff.
   `tvg_id` prefix `ranked_matchups:` — otherwise it matches games against
   our own virtual channels (whose EPG titles literally contain the team
   names). Fixed in `_build_epg_lookup()`.
-- **Group rename migration**: when user changes the target group name,
-  apply detects old virtual channels (any group, by tvg_id prefix) and
-  cleans them up + the orphaned dummy EPGSource. Don't break this — the user
-  has a habit of renaming `Top Matchups` → `!Top Matchups` etc.
+- **Group rename migration MUST preserve `Channel.id`**: when user changes
+  the target group name, apply detects old virtual channels (any group, by
+  tvg_id prefix) and **moves** them into the new target group via
+  `.update(channel_group=target_group)`, NOT delete + recreate. Channel.id
+  is the stable handle that `ChannelProfileMembership` (Dispatcharr only
+  auto-adds new channels to profiles at PROFILE-creation time, never on
+  channel-creation, so a recreate orphans every membership) and IPTV-client
+  playlist caches both key off. A delete-then-create cycle silently makes
+  the channel disappear from the user's IPTV guide until they manually
+  refresh — exactly the regression that bit #1 live-verify. The user has a
+  habit of renaming `Top Matchups` → `!Top Matchups` etc; every rename
+  cycle must be a no-op for downstream consumers.
 - **Soccer team-name suffixes**: Football-Data.org returns "Hull City AFC",
   "Manchester City FC". The favorites matcher uses a `TEAM_QUALIFIER_TOKENS`
   whitelist (FC, AFC, City, United, etc.) so the bare name "Hull" matches
