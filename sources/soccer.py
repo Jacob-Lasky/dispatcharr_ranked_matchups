@@ -24,13 +24,43 @@ import logging
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple, TypedDict
 
 import requests
 
-from .base import GameRow, MatchResult, SportSource
+from .base import GameRow, MatchResult, SoccerTeamRow, SportSource
 from .bracket import AggregateLegSource
 from .._util import parse_iso_utc, poisson_sample as _poisson
+
+
+class SoccerLeagueState(TypedDict):
+    """State shape for `SoccerSource.initial_state` (and every consumer:
+    apply_result, remaining_matches, terminal_outcomes). Single home for
+    the contract the points/gf/ga/played per-team row contributes to.
+
+    `_applied` is the set of fd_ids (match identifiers) already folded
+    into the per-team rows. `_teams` is the per-team standings table.
+
+    See `GroupStageState` for the group-stage extension that adds the
+    team->group lookup `_team_group`."""
+    _applied: FrozenSet[Any]
+    _teams: Dict[str, SoccerTeamRow]
+
+
+class GroupStageState(SoccerLeagueState):
+    """State shape for `GroupStageSoccerSource.initial_state` (WC, EURO,
+    other international group-stage tournaments). Extends `SoccerLeagueState`
+    with `_team_group` so terminal_outcomes can group teams by their
+    drawn group when classifying advance / eliminated. The team-group
+    map is computed once from FD.org's group-stage fixture metadata
+    and frozen at `initial_state` time -- mutations to `_teams` during
+    simulation never touch it.
+
+    Subclassing SoccerLeagueState (rather than redeclaring the shared
+    fields) means `GroupStageSoccerSource` can safely inherit
+    `SoccerSource.apply_result` and `_mutate_apply` -- a GroupStageState
+    IS-A SoccerLeagueState at the type level."""
+    _team_group: Dict[str, str]
 from ..scoring import LEAGUE_CONTEXTS, TEAM_SUFFIX_TOKENS
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.soccer")
@@ -836,13 +866,15 @@ class SoccerSource(SportSource):
         from finished matches in the season (NOT from the FD.org standings
         endpoint: that endpoint can include in-progress results that
         de-sync from the fixture list, and the simulator needs the two to
-        agree).
+        agree). Returns the structurally-typed `SoccerLeagueState` shape
+        (return annotation is Dict[str, Any] to stay compatible with
+        bracket-subclass overrides via MRO; consumers should treat the
+        returned dict as `SoccerLeagueState`).
 
-        State shape:
+        State shape (`SoccerLeagueState`):
           {
             "_applied": frozenset of fd_ids already reflected in points/gf/ga,
-            <team_name>: {"played": int, "points": int, "gf": int, "ga": int},
-            ...
+            "_teams": {<team_name>: SoccerTeamRow, ...},
           }
 
         Teams that appear in the fixture list but haven't played yet still
@@ -852,18 +884,23 @@ class SoccerSource(SportSource):
         if self._initial_state_cache is not None:
             return self._initial_state_cache
         matches = self._fetch_all_season_matches()
-        state: Dict[str, Any] = {"_applied": frozenset()}
+        teams: Dict[str, SoccerTeamRow] = {}
         applied: List[Any] = []
-        teams_seen: set = set()
         # Seed every team that appears anywhere in the season fixtures with
         # a zero row, so apply_result doesn't need to defensively create
         # rows for newly-encountered teams.
         for m in matches:
             for side in ("homeTeam", "awayTeam"):
                 name = (m.get(side) or {}).get("name")
-                if name and name not in teams_seen:
-                    teams_seen.add(name)
-                    state[name] = {"played": 0, "points": 0, "gf": 0, "ga": 0}
+                if name and name not in teams:
+                    teams[name] = SoccerTeamRow(played=0, points=0, gf=0, ga=0)
+        # Construct as plain dict so the producer's return type stays
+        # `Dict[str, Any]` (TypedDict and Dict[str, Any] are not subtype-
+        # compatible at the static-check level; the MRO collision with
+        # BracketSportSource forces the loose return type). Consumers
+        # that want the narrower static type can `cast(SoccerLeagueState,
+        # state)` -- the runtime shape is exactly that.
+        state: Dict[str, Any] = {"_applied": frozenset(), "_teams": teams}
         # Apply FINISHED matches to populate the standings snapshot.
         for m in matches:
             if m.get("status") != "FINISHED":
@@ -888,9 +925,15 @@ class SoccerSource(SportSource):
     def _mutate_apply(state: Dict[str, Any], home: str, away: str, hg: int, ag: int) -> None:
         """Apply one finished result to a state dict in place. Used by
         `initial_state` (where mutation is fine: we own the new state) and
-        `apply_result` (which copies first to preserve immutability)."""
-        h = state[home]
-        a = state[away]
+        `apply_result` (which copies first to preserve immutability).
+
+        Accepts either `SoccerLeagueState` or `GroupStageState` (both
+        carry the `_teams` dict the implementation reads); both narrow
+        to `Dict[str, SoccerTeamRow]` at the team-row access path so
+        pyright catches field-name typos like `row["pts"]` for `points`."""
+        teams: Dict[str, SoccerTeamRow] = state["_teams"]
+        h = teams[home]
+        a = teams[away]
         h["played"] += 1
         a["played"] += 1
         h["gf"] += hg
@@ -909,7 +952,7 @@ class SoccerSource(SportSource):
         """All matches not yet applied. The simulator uses this to know
         which matches still need sampling after applying the target match.
         """
-        applied = state.get("_applied", frozenset())
+        applied = state["_applied"]
         matches = self._fetch_all_season_matches()
         out: List[GameRow] = []
         for m in matches:
@@ -970,18 +1013,22 @@ class SoccerSource(SportSource):
         """Return a NEW state with `match`'s `result` applied. Pure: the
         simulator depends on this NOT mutating `state` so one initial_state
         can seed many sampled seasons.
+
+        Splat-copies the input state so subclass metadata (e.g.,
+        `_team_group` from GroupStageState) is preserved; then deeply
+        copies the two team rows we'll mutate. Other teams are shared
+        by reference, which is safe because we never write back through
+        them in this update.
         """
-        # Shallow-copy the state dict plus the two team rows we'll mutate.
-        # Other teams are shared by reference; cheap and correct because
-        # we never write back through them in this update.
-        new_state = dict(state)
-        new_state[match.home] = dict(state[match.home])
-        new_state[match.away] = dict(state[match.away])
+        new_teams: Dict[str, SoccerTeamRow] = dict(state["_teams"])
+        new_teams[match.home] = dict(new_teams[match.home])  # type: ignore[typeddict-item]
+        new_teams[match.away] = dict(new_teams[match.away])  # type: ignore[typeddict-item]
+        new_state: Dict[str, Any] = {**state, "_teams": new_teams}
         self._mutate_apply(new_state, match.home, match.away,
                            result.home_goals, result.away_goals)
         fd_id = match.extra.get("fd_id") if isinstance(match.extra, dict) else None
         if fd_id is not None:
-            new_state["_applied"] = state.get("_applied", frozenset()) | {fd_id}
+            new_state["_applied"] = state["_applied"] | {fd_id}
         return new_state
 
     def terminal_outcomes(self, state: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -996,8 +1043,9 @@ class SoccerSource(SportSource):
         decides aggregation per the cross-sport sum rule.
         """
         ctx = LEAGUE_CONTEXTS.get(self.config.fd_code)
+        teams_dict: Dict[str, SoccerTeamRow] = state["_teams"]
         if ctx is None:
-            return {team: [] for team in state if team != "_applied"}
+            return {team: [] for team in teams_dict}
         # DO NOT use this method for knockout-format contexts (UCL, etc.).
         # The cutoff in knockout thresholds is a stage string ("LAST_16"),
         # not an int position: the `pos > cutoff` comparison below would
@@ -1012,8 +1060,8 @@ class SoccerSource(SportSource):
                 "factory should route this competition to KnockoutSoccerSource.",
                 self.config.fd_code, ctx.format,
             )
-            return {team: [] for team in state if team != "_applied"}
-        teams = [(name, row) for name, row in state.items() if name != "_applied"]
+            return {team: [] for team in teams_dict}
+        teams = list(teams_dict.items())
         teams.sort(
             key=lambda kv: (
                 -kv[1]["points"],
@@ -1389,8 +1437,8 @@ class GroupStandings(NamedTuple):
     Tuple-unpackable for legacy call sites; field-accessible for new ones.
     See the helper's docstring for field semantics.
     """
-    by_group: Dict[str, List[Tuple[str, Dict[str, int]]]]
-    best_third_order: List[Tuple[str, Dict[str, int]]]
+    by_group: Dict[str, List[Tuple[str, SoccerTeamRow]]]
+    best_third_order: List[Tuple[str, SoccerTeamRow]]
     n_best_third_advance: int
 
 
@@ -2072,15 +2120,18 @@ class GroupStageSoccerSource(SoccerSource):
             return self._initial_state_cache
         team_group = self._team_group_map()
         matches = self._fetch_all_season_matches()
+        # Seed every group-stage participant with a zero row so apply_result
+        # doesn't need to defensively create rows.
+        teams: Dict[str, SoccerTeamRow] = {
+            team: SoccerTeamRow(played=0, points=0, gf=0, ga=0)
+            for team in team_group
+        }
         state: Dict[str, Any] = {
             "_applied": frozenset(),
             "_team_group": team_group,
+            "_teams": teams,
         }
         applied: List[Any] = []
-        # Seed every group-stage participant with a zero row so apply_result
-        # doesn't need to defensively create rows.
-        for team in team_group:
-            state[team] = {"played": 0, "points": 0, "gf": 0, "ga": 0}
         # Apply FINISHED group-stage matches.
         for m in matches:
             if m.get("stage") != "GROUP_STAGE":
@@ -2097,7 +2148,7 @@ class GroupStageSoccerSource(SoccerSource):
             fd_id = m.get("id")
             if not home or not away or fd_id is None:
                 continue
-            if home not in state or away not in state:
+            if home not in state["_teams"] or away not in state["_teams"]:
                 continue  # defensive: team_group_map should have covered them
             applied.append(fd_id)
             self._mutate_apply(state, home, away, int(hg), int(ag))
@@ -2107,7 +2158,7 @@ class GroupStageSoccerSource(SoccerSource):
 
     def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
         """Only emit GROUP_STAGE matches the simulator hasn't applied yet."""
-        applied = state.get("_applied", frozenset())
+        applied = state["_applied"]
         out: List[GameRow] = []
         for m in self._fetch_all_season_matches():
             if m.get("stage") != "GROUP_STAGE":
@@ -2133,7 +2184,7 @@ class GroupStageSoccerSource(SoccerSource):
         return out
 
     @staticmethod
-    def _fifa_tiebreaker_key(row: Dict[str, int]) -> Tuple[int, int, int]:
+    def _fifa_tiebreaker_key(row: SoccerTeamRow) -> Tuple[int, int, int]:
         """FIFA's group-stage tiebreaker chain (points, goal diff, goals
         for), negated for descending sort. The same chain governs the
         within-group ranking AND the cross-group best-3rd-place ranking
@@ -2171,17 +2222,16 @@ class GroupStageSoccerSource(SoccerSource):
         from collections import defaultdict
         from ..scoring import LEAGUE_CONTEXTS
 
-        team_group = state.get("_team_group", {})
-        by_group: Dict[str, List[Tuple[str, Dict[str, int]]]] = defaultdict(list)
-        for team, row in state.items():
-            if team in ("_applied", "_team_group"):
-                continue
+        team_group: Dict[str, str] = state["_team_group"]
+        teams_dict: Dict[str, SoccerTeamRow] = state["_teams"]
+        by_group: Dict[str, List[Tuple[str, SoccerTeamRow]]] = defaultdict(list)
+        for team, row in teams_dict.items():
             group = team_group.get(team)
             if group is None:
                 continue
             by_group[group].append((team, row))
 
-        third_placers: List[Tuple[str, Dict[str, int]]] = []
+        third_placers: List[Tuple[str, SoccerTeamRow]] = []
         for teams in by_group.values():
             teams.sort(key=lambda kv: self._fifa_tiebreaker_key(kv[1]))
             if len(teams) > _GROUP_ADVANCE_TOP_N:
@@ -2330,7 +2380,7 @@ class GroupStageSoccerSource(SoccerSource):
             return None
 
         # Build the team -> group-letter lookup for the 3rd-placers.
-        team_group_map = primary_state.get("_team_group", {})
+        team_group_map = primary_state["_team_group"]
 
         def _letter_of(team: str) -> Optional[str]:
             grp = team_group_map.get(team)

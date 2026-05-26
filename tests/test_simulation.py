@@ -106,10 +106,10 @@ class FakeSource(SportSource):
         return self.strengths_map
 
     def initial_state(self) -> Dict[str, Any]:
-        state: Dict[str, Any] = {"_applied": frozenset()}
-        for t in self.teams:
-            state[t] = {"played": 0, "points": 0, "gf": 0, "ga": 0}
-        return state
+        teams: Dict[str, Dict[str, int]] = {
+            t: {"played": 0, "points": 0, "gf": 0, "ga": 0} for t in self.teams
+        }
+        return {"_applied": frozenset(), "_teams": teams}
 
     def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
         applied = state.get("_applied", frozenset())
@@ -123,11 +123,11 @@ class FakeSource(SportSource):
         return MatchResult(home_goals=_poisson(lam_h, rng), away_goals=_poisson(lam_a, rng))
 
     def apply_result(self, state, match, result):
-        new_state = dict(state)
-        new_state[match.home] = dict(state[match.home])
-        new_state[match.away] = dict(state[match.away])
-        h = new_state[match.home]
-        a = new_state[match.away]
+        new_teams = dict(state["_teams"])
+        new_teams[match.home] = dict(new_teams[match.home])
+        new_teams[match.away] = dict(new_teams[match.away])
+        h = new_teams[match.home]
+        a = new_teams[match.away]
         h["played"] += 1
         a["played"] += 1
         h["gf"] += result.home_goals
@@ -141,13 +141,14 @@ class FakeSource(SportSource):
         else:
             h["points"] += 1
             a["points"] += 1
+        new_state = {"_applied": state.get("_applied", frozenset()), "_teams": new_teams}
         fd_id = match.extra.get("fd_id")
         if fd_id is not None:
             new_state["_applied"] = state.get("_applied", frozenset()) | {fd_id}
         return new_state
 
     def terminal_outcomes(self, state):
-        teams = [(name, row) for name, row in state.items() if name != "_applied"]
+        teams = [(name, row) for name, row in state["_teams"].items()]
         teams.sort(key=lambda kv: (-kv[1]["points"], -(kv[1]["gf"] - kv[1]["ga"]), -kv[1]["gf"]))
         out: Dict[str, List[str]] = {n: [] for n, _ in teams}
         if teams:
@@ -402,7 +403,7 @@ class FakePlayoffSource(SportSource):
 def _group_winner_seed_fn(primary_state: Dict[str, Any]) -> Dict[str, Any]:
     """Map primary FakeSource standings to playoff seeding. Top finisher
     qualifies; the bottom finisher is eliminated_in_playoffs."""
-    teams = [(n, r) for n, r in primary_state.items() if n != "_applied"]
+    teams = list(primary_state["_teams"].items())
     teams.sort(key=lambda kv: (-kv[1]["points"], -(kv[1]["gf"] - kv[1]["ga"]), -kv[1]["gf"]))
     if not teams:
         return {"qualified": [], "eliminated": []}
@@ -524,7 +525,7 @@ class TestMonteCarloImportanceBatchChain:
         # which is 6 games × 2 teams = matches).
         for state in captured:
             for team in ("Alpha", "Beta", "Gamma", "Delta"):
-                assert state[team]["played"] == 3
+                assert state["_teams"][team]["played"] == 3
 
 
 # ---------- _same_match ----------
