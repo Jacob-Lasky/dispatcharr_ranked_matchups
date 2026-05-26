@@ -2386,6 +2386,37 @@ class Plugin:
             logger.warning("[ranked_matchups] could not read settings from DB: %s", e)
         return {}
 
+    def stop(self, context: Optional[Dict[str, Any]] = None) -> None:
+        """Tear down the scheduler thread when the loader disables /
+        reloads / deletes the plugin. The Dispatcharr plugin loader
+        contract calls this on every lifecycle change (Plugins.md). The
+        thread keeps polling settings from Postgres on a 5-min loop;
+        without this teardown each reload leaks one thread per uwsgi
+        worker, each holding a DB connection, until Postgres's
+        max_connections cap is hit and every API request 500s with
+        "FATAL: sorry, too many clients already" (#82).
+
+        Signal-then-join: the scheduler loop polls
+        `_scheduler_stop.wait(timeout=...)` between work units, so
+        setting the event drops the loop out at its next wake-up.
+        Join with a short timeout because the loader's reload path
+        blocks on stop() and we don't want a stuck thread to wedge
+        the whole reload.
+        """
+        del context  # unused; conform to loader's stop(context) shape
+        _scheduler_stop.set()
+        global _scheduler_thread
+        t = _scheduler_thread
+        if t is not None and t.is_alive():
+            t.join(timeout=5.0)
+            if t.is_alive():
+                logger.warning(
+                    "[ranked_matchups] scheduler thread did not exit "
+                    "within 5s of stop signal; loader will proceed but "
+                    "the daemon thread will linger until process exit"
+                )
+        _scheduler_thread = None
+
     def run(self, action: Optional[str] = None,
             params: Optional[Dict[str, Any]] = None,
             context: Optional[Dict[str, Any]] = None):

@@ -1587,3 +1587,133 @@ class TestBuildStandingsPostureLine:
         st_idx = next(i for i, s in enumerate(sections) if "70 pts" in s)
         nar_idx = next(i for i, s in enumerate(sections) if "clinch the title" in s)
         assert md_idx < st_idx < nar_idx
+
+
+class TestPluginStopTeardown:
+    """The Plugin class spawns a daemon scheduler thread in __init__.
+    Without a stop() teardown, plugin reloads leak one thread per
+    uwsgi worker per reload; each thread holds a Postgres connection
+    via its 5-min settings-polling loop. Over a day of reloads, the
+    embedded Postgres's `max_connections=200` cap is hit and every
+    API request 500s with "FATAL: sorry, too many clients already"
+    (#82, reproduced live in the running Dispatcharr container on
+    2026-05-26).
+
+    Plugin.stop() signals the stop event and joins the thread so each
+    reload sees the old thread cleanly exit before the new one starts.
+    """
+
+    def test_stop_signals_and_clears_thread(self, plugin):
+        # Use a stub thread so the test isn't gated on Django being
+        # available (the real _scheduler_loop hits PluginConfig.objects
+        # on the first iteration).
+        import threading
+
+        class StubThread:
+            def __init__(self):
+                self._alive = True
+                self.join_calls = 0
+            def is_alive(self):
+                return self._alive
+            def join(self, timeout=None):
+                self.join_calls += 1
+                # Simulate the loop responding to _scheduler_stop being
+                # set: as soon as the stop event is set, the thread
+                # exits. (In production the loop calls
+                # _scheduler_stop.wait() between work units.)
+                if plugin._scheduler_stop.is_set():
+                    self._alive = False
+
+        stub = StubThread()
+        # Save/restore the module-level globals around the test so we
+        # don't disturb other tests that exercise the scheduler.
+        saved_thread = plugin._scheduler_thread
+        saved_stop_set = plugin._scheduler_stop.is_set()
+        try:
+            plugin._scheduler_thread = stub
+            plugin._scheduler_stop.clear()
+            inst = plugin.Plugin.__new__(plugin.Plugin)  # skip __init__'s thread spawn
+
+            inst.stop()
+
+            # Event was set, join was called, thread exited, module
+            # global was cleared.
+            assert plugin._scheduler_stop.is_set()
+            assert stub.join_calls == 1
+            assert not stub.is_alive()
+            assert plugin._scheduler_thread is None
+        finally:
+            plugin._scheduler_thread = saved_thread
+            if saved_stop_set:
+                plugin._scheduler_stop.set()
+            else:
+                plugin._scheduler_stop.clear()
+
+    def test_stop_is_safe_when_thread_already_dead(self, plugin):
+        # Defensive: stop() called twice in a row (e.g., loader unload
+        # races with disable signal) must not raise on the second call
+        # even though the thread is already gone.
+        saved_thread = plugin._scheduler_thread
+        saved_stop_set = plugin._scheduler_stop.is_set()
+        try:
+            plugin._scheduler_thread = None
+            plugin._scheduler_stop.clear()
+            inst = plugin.Plugin.__new__(plugin.Plugin)
+            inst.stop()  # no-op path: thread is None
+            inst.stop()  # repeated: still no-op
+            assert plugin._scheduler_thread is None
+        finally:
+            plugin._scheduler_thread = saved_thread
+            if saved_stop_set:
+                plugin._scheduler_stop.set()
+            else:
+                plugin._scheduler_stop.clear()
+
+    def test_stop_accepts_context_argument(self, plugin):
+        # The Dispatcharr loader contract is `stop(self, context)`.
+        # Plugins.md confirms: the loader passes the context dict on
+        # every lifecycle stop. The signature must accept it without
+        # complaint.
+        inst = plugin.Plugin.__new__(plugin.Plugin)
+        # No-context call AND with-context call both work.
+        inst.stop()
+        inst.stop({"settings": {}})
+        inst.stop(None)
+
+    def test_subsequent_init_after_stop_creates_fresh_thread(self, plugin, monkeypatch):
+        # After stop(), a new Plugin() must be able to spawn a fresh
+        # scheduler thread. This is the reload cycle: loader calls
+        # stop() then re-instantiates Plugin().
+        import threading
+
+        spawned = []
+        real_thread = threading.Thread
+
+        class TrackingThread(real_thread):
+            def __init__(self, *a, **kw):
+                spawned.append(kw.get("name") or "<unnamed>")
+                super().__init__(*a, **kw)
+            def start(self):
+                # Don't actually start — we don't want a live thread
+                # touching DB / FD in tests.
+                pass
+
+        monkeypatch.setattr(plugin.threading, "Thread", TrackingThread)
+        saved_thread = plugin._scheduler_thread
+        try:
+            plugin._scheduler_thread = None
+            plugin._scheduler_stop.clear()
+            # First instantiation: spawns scheduler thread.
+            inst1 = plugin.Plugin()
+            assert len(spawned) == 1
+            assert spawned[0] == "ranked_matchups-scheduler"
+
+            # Now stop + re-instantiate (the reload path).
+            inst1.stop()
+            inst2 = plugin.Plugin()
+
+            # Second spawn happened — no skipped instantiation.
+            assert len(spawned) == 2
+        finally:
+            plugin._scheduler_thread = saved_thread
+            plugin._scheduler_stop.clear()
