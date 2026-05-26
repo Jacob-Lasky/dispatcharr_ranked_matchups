@@ -1129,6 +1129,99 @@ class TestComputePastSlotEnd:
         assert past_end.utcoffset().total_seconds() == 0
 
 
+class TestIsCatchupMatchday:
+    def _table(self, max_played):
+        # Synthetic table where most teams played `max_played` and a couple
+        # played slightly less (normal weekly drift).
+        return [
+            {"name": "A", "position": 1, "points": 70, "played": max_played},
+            {"name": "B", "position": 2, "points": 69, "played": max_played},
+            {"name": "C", "position": 3, "points": 65, "played": max_played - 1},
+        ]
+
+    def test_no_matchday_returns_false(self, plugin):
+        g = {"extra": {"standings_table": self._table(46)}}
+        assert plugin._is_catchup_matchday(g) is False
+
+    def test_no_standings_returns_false(self, plugin):
+        # Knockout fixtures (UCL etc) have matchday but no standings table.
+        g = {"extra": {"matchday": 5}}
+        assert plugin._is_catchup_matchday(g) is False
+
+    def test_current_matchday_is_not_catchup(self, plugin):
+        # League at MD46, fixture at MD46 — normal final round.
+        g = {"extra": {"matchday": 46, "standings_table": self._table(46)}}
+        assert plugin._is_catchup_matchday(g) is False
+
+    def test_one_behind_is_not_catchup(self, plugin):
+        # League at MD46, fixture at MD45 — normal weekly lag (midweek game).
+        g = {"extra": {"matchday": 45, "standings_table": self._table(46)}}
+        assert plugin._is_catchup_matchday(g) is False
+
+    def test_two_behind_is_catchup(self, plugin):
+        # League at MD46, fixture at MD44 — postponed by 2 weeks.
+        g = {"extra": {"matchday": 44, "standings_table": self._table(46)}}
+        assert plugin._is_catchup_matchday(g) is True
+
+    def test_southampton_ipswich_real_case(self, plugin):
+        # The case from the issue: Southampton vs Ipswich MD40 while most
+        # of the league is at MD46.
+        g = {"extra": {"matchday": 40, "standings_table": self._table(46)}}
+        assert plugin._is_catchup_matchday(g) is True
+
+    def test_missing_played_field_returns_false(self, plugin):
+        # Older caches predating #10 might not have 'played' on every row.
+        table = [
+            {"name": "A", "position": 1, "points": 70},
+            {"name": "B", "position": 2, "points": 69},
+        ]
+        g = {"extra": {"matchday": 40, "standings_table": table}}
+        assert plugin._is_catchup_matchday(g) is False
+
+    def test_partial_played_uses_what_we_have(self, plugin):
+        # Some entries have 'played', some don't — use the ones that do.
+        table = [
+            {"name": "A", "position": 1, "points": 70, "played": 46},
+            {"name": "B", "position": 2, "points": 69},  # missing
+            {"name": "C", "position": 3, "points": 65, "played": 46},
+        ]
+        g = {"extra": {"matchday": 40, "standings_table": table}}
+        assert plugin._is_catchup_matchday(g) is True
+
+    def test_integration_description_uses_catchup_label(self, plugin):
+        g = {
+            "home": "Southampton FC", "away": "Ipswich Town FC",
+            "sport_prefix": "EPL",
+            "closeness": None, "spread": None,
+            "extra": {
+                "matchday": 40, "matchdays_total": 46,
+                "fd_competition_code": "PL",
+                "standings_table": [
+                    {"name": "X", "position": 1, "points": 90, "played": 46},
+                    {"name": "Y", "position": 2, "points": 85, "played": 46},
+                ],
+                "impact_narratives": [],
+            },
+            "favorites_matched": [],
+        }
+        desc = plugin._build_description(g, tagline="", placeholder=False)
+        assert "Catch-up matchday 40 of 46" in desc
+        assert "Matchday 40 of 46" not in desc.replace("Catch-up matchday 40 of 46", "")
+
+    def test_integration_subtitle_uses_catchup_prefix(self, plugin):
+        g = {
+            "home": "Southampton FC", "away": "Ipswich Town FC",
+            "extra": {
+                "matchday": 40, "matchdays_total": 46,
+                "standings_table": [
+                    {"name": "X", "position": 1, "points": 90, "played": 46},
+                ],
+            },
+        }
+        sub = plugin._build_subtitle(g, tagline="")
+        assert "catch-up matchday 40/46" in sub
+
+
 class TestOrdinal:
     def test_first(self, plugin):
         assert plugin._ordinal(1) == "1st"
