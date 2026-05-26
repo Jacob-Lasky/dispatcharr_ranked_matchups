@@ -22,6 +22,40 @@ Raw signal contributions are summed and compressed to a 0-10 ★ score using a
 tanh curve so top games asymptote without losing differentiation among the
 rest.
 
+## Why I built this
+
+My background is in data science and I love sports, and I'm pretty agnostic to
+what sports I watch. But I'm busy enough that it's hard to keep track of every
+league and every championship and... well, you get it. So I figured it would
+be cool to get a curated list of the best games that are on right now, and
+thus this plugin was born.
+
+It's **deterministic** (it uses math to get the same answer each time) and
+**tunable** so you can increase or decrease the weight of specific signals.
+
+The most interesting part, for my fellow nerds, is from a fascinating paper
+(Lahvička, J. (2012). *Football match importance via a contingency-table
+coefficient*) that strives to answer how important game X is to team Y's
+season. Or, in plain language: "in 1,000 simulated alternate universes, how
+much does the way this match goes shift the probability of this team hitting
+this outcome?" The plugin runs that simulation per match per refresh. Full
+math walk-through in [SCORING.md](SCORING.md).
+
+I wanted to release this before the World Cup and I am completely open to
+feedback. I hope you use this plugin and that it helps raise your favorite
+teams and interesting games to the very top of your focus. Happy watching!
+
+### Community
+
+Released on the Dispatcharr Discord: [tools-and-addons announcement post](https://discord.com/channels/1340492560220684331/1508938899865604167/1508938899865604167).
+Feedback, sport-coverage requests, signal-tuning experiences, and bug reports
+all welcome there, or as a GitHub issue here.
+
+### AI disclaimer
+
+This was written with help from AI. The math and ideas are mine;
+implementation and testing are done by AI.
+
 ## Example output
 
 ```
