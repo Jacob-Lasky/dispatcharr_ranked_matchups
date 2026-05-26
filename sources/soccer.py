@@ -1450,6 +1450,529 @@ _WC2026_FINAL_PAIRINGS: List[Tuple[int, int]] = [
     (0, 1),     # M103 = W101 vs W102
 ]
 
+# FIFA Annex C deterministic 3rd-placer slot assignment.
+#
+# Given the set of 8 group letters whose 3rd-placers advance (one of
+# C(12,8) = 495 combinations), FIFA's published Annex C deterministically
+# maps each 3rd-placer to a specific reserved LAST_32 slot. The greedy
+# backtracking below `_assign` produces a VALID assignment that satisfies
+# the same-group exclusion constraints, but it may pick a different
+# permutation than Annex C's canonical mapping. The leverage signal on
+# group games is correct in DIRECTION (the bracket validity is preserved)
+# but its MAGNITUDE may be off because the simulated R16 opponent differs
+# from the canonical one.
+#
+# This table is the canonical lookup. _build_bracket_seed prefers it,
+# falling back to backtracking if a row is missing (defensive against
+# transcription bugs; the table is parametrized-test verified at
+# tests/test_annex_c_table.py to cover all 495 combinations).
+#
+# Source: en.wikipedia.org/wiki/Template:2026_FIFA_World_Cup_third-place_table
+# (which transcribes from FIFA's "FIFA World Cup 2026 Regulations" PDF,
+# Annex C, May 2025 edition). Parsed and verified by tools/parse_annex_c.py.
+# Format: frozenset(group letters whose 3rd-placers advance) ->
+#   tuple of (l32_match_idx, side, source_group_letter), one per slot.
+# All 8 slots are the AWAY side of their respective LAST_32 match per
+# `_WC2026_LAST_32_PAIRINGS`. l32_match_idx maps to:
+#   1->M74, 4->M77, 6->M79, 7->M80, 8->M81, 9->M82, 12->M85, 14->M87.
+_WC2026_THIRD_PLACER_SLOT_TABLE: Dict[FrozenSet[str], Tuple[Tuple[int, str, str], ...]] = {
+    frozenset("ABCDEFGH"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","D")),
+    frozenset("ABCDEFGI"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABCDEFGJ"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABCDEFGK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABCDEFGL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDEFHI"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","D")),
+    frozenset("ABCDEFHJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","D")),
+    frozenset("ABCDEFHK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","D")),
+    frozenset("ABCDEFHL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","F"), (14,"away","L")),
+    frozenset("ABCDEFIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABCDEFIK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","I")),
+    frozenset("ABCDEFIL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ABCDEFJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABCDEFJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDEFKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ABCDEGHI"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABCDEGHJ"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABCDEGHK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABCDEGHL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDEGIJ"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCDEGIK"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCDEGIL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDEGJK"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","J")),
+    frozenset("ABCDEGJL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDEGKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDEHIJ"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABCDEHIK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","I")),
+    frozenset("ABCDEHIL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ABCDEHJK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABCDEHJL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDEHKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ABCDEIJK"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABCDEIJL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDEIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","I"), (14,"away","L")),
+    frozenset("ABCDEJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDFGHI"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","D")),
+    frozenset("ABCDFGHJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","D")),
+    frozenset("ABCDFGHK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","D")),
+    frozenset("ABCDFGHL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","H"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDFGIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCDFGIK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCDFGIL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDFGJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","J")),
+    frozenset("ABCDFGJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDFGKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDFHIJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","D")),
+    frozenset("ABCDFHIK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","F"), (14,"away","I")),
+    frozenset("ABCDFHIL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","F"), (14,"away","L")),
+    frozenset("ABCDFHJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","D")),
+    frozenset("ABCDFHJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","H"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDFHKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","F"), (14,"away","L")),
+    frozenset("ABCDFIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABCDFIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDFIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","I"), (14,"away","L")),
+    frozenset("ABCDFJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDGHIJ"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCDGHIK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCDGHIL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDGHJK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","J")),
+    frozenset("ABCDGHJL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDGHKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDGIJK"): ((1,"away","D"), (4,"away","G"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABCDGIJL"): ((1,"away","D"), (4,"away","G"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDGIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCDGJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDHIJK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABCDHIJL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDHIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","I"), (14,"away","L")),
+    frozenset("ABCDHJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCDIJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCEFGHI"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABCEFGHJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABCEFGHK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABCEFGHL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCEFGIJ"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCEFGIK"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCEFGIL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCEFGJK"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","J")),
+    frozenset("ABCEFGJL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCEFGKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCEFHIJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABCEFHIK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","I")),
+    frozenset("ABCEFHIL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ABCEFHJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABCEFHJL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCEFHKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ABCEFIJK"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABCEFIJL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCEFIKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","I"), (14,"away","L")),
+    frozenset("ABCEFJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCEGHIJ"): ((1,"away","C"), (4,"away","G"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABCEGHIK"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCEGHIL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCEGHJK"): ((1,"away","C"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABCEGHJL"): ((1,"away","C"), (4,"away","G"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCEGHKL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCEGIJK"): ((1,"away","C"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABCEGIJL"): ((1,"away","C"), (4,"away","G"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCEGIKL"): ((1,"away","A"), (4,"away","C"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCEGJKL"): ((1,"away","C"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCEHIJK"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABCEHIJL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCEHIKL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","I"), (14,"away","L")),
+    frozenset("ABCEHJKL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCEIJKL"): ((1,"away","A"), (4,"away","C"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCFGHIJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCFGHIK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABCFGHIL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCFGHJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","J")),
+    frozenset("ABCFGHJL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCFGHKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCFGIJK"): ((1,"away","F"), (4,"away","G"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABCFGIJL"): ((1,"away","F"), (4,"away","G"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCFGIKL"): ((1,"away","C"), (4,"away","F"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCFGJKL"): ((1,"away","F"), (4,"away","G"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCFHIJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABCFHIJL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCFHIKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","I"), (14,"away","L")),
+    frozenset("ABCFHJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCFIJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCGHIJK"): ((1,"away","C"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABCGHIJL"): ((1,"away","C"), (4,"away","G"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCGHIKL"): ((1,"away","C"), (4,"away","H"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABCGHJKL"): ((1,"away","C"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCGIJKL"): ((1,"away","C"), (4,"away","G"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABCHIJKL"): ((1,"away","C"), (4,"away","H"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDEFGHI"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABDEFGHJ"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABDEFGHK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ABDEFGHL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDEFGIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABDEFGIK"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABDEFGIL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDEFGJK"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","J")),
+    frozenset("ABDEFGJL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDEFGKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDEFHIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABDEFHIK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","I")),
+    frozenset("ABDEFHIL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ABDEFHJK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABDEFHJL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDEFHKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ABDEFIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABDEFIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDEFIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","I"), (14,"away","L")),
+    frozenset("ABDEFJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDEGHIJ"): ((1,"away","D"), (4,"away","G"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABDEGHIK"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABDEGHIL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDEGHJK"): ((1,"away","D"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABDEGHJL"): ((1,"away","D"), (4,"away","G"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDEGHKL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDEGIJK"): ((1,"away","D"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABDEGIJL"): ((1,"away","D"), (4,"away","G"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDEGIKL"): ((1,"away","A"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDEGJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDEHIJK"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABDEHIJL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDEHIKL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","I"), (14,"away","L")),
+    frozenset("ABDEHJKL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDEIJKL"): ((1,"away","A"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDFGHIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABDFGHIK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABDFGHIL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDFGHJK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","J")),
+    frozenset("ABDFGHJL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","J"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDFGHKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDFGIJK"): ((1,"away","D"), (4,"away","G"), (6,"away","F"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABDFGIJL"): ((1,"away","D"), (4,"away","G"), (6,"away","F"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDFGIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDFGJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","F"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDFHIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABDFHIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDFHIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","I"), (14,"away","L")),
+    frozenset("ABDFHJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDFIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDGHIJK"): ((1,"away","D"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABDGHIJL"): ((1,"away","D"), (4,"away","G"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDGHIKL"): ((1,"away","D"), (4,"away","H"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABDGHJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDGIJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABDHIJKL"): ((1,"away","D"), (4,"away","H"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABEFGHIJ"): ((1,"away","F"), (4,"away","G"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABEFGHIK"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ABEFGHIL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABEFGHJK"): ((1,"away","F"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","E")),
+    frozenset("ABEFGHJL"): ((1,"away","F"), (4,"away","G"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABEFGHKL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABEFGIJK"): ((1,"away","F"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABEFGIJL"): ((1,"away","F"), (4,"away","G"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABEFGIKL"): ((1,"away","A"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABEFGJKL"): ((1,"away","F"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABEFHIJK"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABEFHIJL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABEFHIKL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","I"), (14,"away","L")),
+    frozenset("ABEFHJKL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABEFIJKL"): ((1,"away","A"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABEGHIJK"): ((1,"away","A"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABEGHIJL"): ((1,"away","A"), (4,"away","G"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABEGHIKL"): ((1,"away","A"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABEGHJKL"): ((1,"away","A"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABEGIJKL"): ((1,"away","A"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABEHIJKL"): ((1,"away","A"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABFGHIJK"): ((1,"away","F"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ABFGHIJL"): ((1,"away","F"), (4,"away","G"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABFGHIKL"): ((1,"away","A"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("ABFGHJKL"): ((1,"away","F"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABFGIJKL"): ((1,"away","F"), (4,"away","G"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABFHIJKL"): ((1,"away","A"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("ABGHIJKL"): ((1,"away","A"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACDEFGHI"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","D")),
+    frozenset("ACDEFGHJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","D")),
+    frozenset("ACDEFGHK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","D")),
+    frozenset("ACDEFGHL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","E"), (8,"away","F"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDEFGIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ACDEFGIK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ACDEFGIL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDEFGJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ACDEFGJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","E"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDEFGKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDEFHIJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","D")),
+    frozenset("ACDEFHIK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","F"), (9,"away","A"), (12,"away","E"), (14,"away","I")),
+    frozenset("ACDEFHIL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","F"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ACDEFHJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","D")),
+    frozenset("ACDEFHJL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","E"), (8,"away","F"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACDEFHKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","F"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ACDEFIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ACDEFIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACDEFIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ACDEFJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACDEGHIJ"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ACDEGHIK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ACDEGHIL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDEGHJK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ACDEGHJL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","E"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDEGHKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDEGIJK"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ACDEGIJL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDEGIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDEGJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDEHIJK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ACDEHIJL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACDEHIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ACDEHJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACDEIJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACDFGHIJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","D")),
+    frozenset("ACDFGHIK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","F"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ACDFGHIL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","F"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDFGHJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","D")),
+    frozenset("ACDFGHJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","H"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDFGHKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","F"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDFGIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ACDFGIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDFGIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDFGJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDFHIJK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","F"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ACDFHIJL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","F"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACDFHIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","F"), (14,"away","L")),
+    frozenset("ACDFHJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","F"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACDFIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACDGHIJK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ACDGHIJL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDGHIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDGHJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDGIJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","I"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACDHIJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACEFGHIJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ACEFGHIK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ACEFGHIL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACEFGHJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ACEFGHJL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACEFGHKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACEFGIJK"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ACEFGIJL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACEFGIKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACEFGJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACEFHIJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ACEFHIJL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACEFHIKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ACEFHJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACEFIJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACEGHIJK"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ACEGHIJL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACEGHIKL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACEGHJKL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACEGIJKL"): ((1,"away","C"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACEHIJKL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACFGHIJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ACFGHIJL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACFGHIKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACFGHJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACFGIJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","I"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ACFHIJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ACGHIJKL"): ((1,"away","C"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ADEFGHIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ADEFGHIK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ADEFGHIL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADEFGHJK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","E")),
+    frozenset("ADEFGHJL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADEFGHKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADEFGIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ADEFGIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADEFGIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADEFGJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADEFHIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","I")),
+    frozenset("ADEFHIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ADEFHIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","E"), (14,"away","L")),
+    frozenset("ADEFHJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","E"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ADEFIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ADEGHIJK"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ADEGHIJL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADEGHIKL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADEGHJKL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADEGIJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ADEHIJKL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ADFGHIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("ADFGHIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADFGHIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADFGHJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADFGIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","I"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("ADFHIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("ADGHIJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("AEFGHIJK"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","I")),
+    frozenset("AEFGHIJL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","I"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("AEFGHIKL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("AEFGHJKL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","A"), (12,"away","G"), (14,"away","L")),
+    frozenset("AEFGIJKL"): ((1,"away","F"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("AEFHIJKL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("AEGHIJKL"): ((1,"away","A"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("AFGHIJKL"): ((1,"away","F"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","A"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCDEFGHI"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","E")),
+    frozenset("BCDEFGHJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","D")),
+    frozenset("BCDEFGHK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","E")),
+    frozenset("BCDEFGHL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","E"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDEFGIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","E")),
+    frozenset("BCDEFGIK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","E"), (12,"away","G"), (14,"away","I")),
+    frozenset("BCDEFGIL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","E"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDEFGJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","E")),
+    frozenset("BCDEFGJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","E"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDEFGKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","E"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDEFHIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","E")),
+    frozenset("BCDEFHIK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","E"), (14,"away","I")),
+    frozenset("BCDEFHIL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","E"), (14,"away","L")),
+    frozenset("BCDEFHJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","E")),
+    frozenset("BCDEFHJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","E"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCDEFHKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","E"), (14,"away","L")),
+    frozenset("BCDEFIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","E"), (12,"away","J"), (14,"away","I")),
+    frozenset("BCDEFIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","E"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCDEFIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","E"), (14,"away","L")),
+    frozenset("BCDEFJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","E"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCDEGHIJ"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","E")),
+    frozenset("BCDEGHIK"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","I")),
+    frozenset("BCDEGHIL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDEGHJK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","E")),
+    frozenset("BCDEGHJL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDEGHKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDEGIJK"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","I")),
+    frozenset("BCDEGIJL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDEGIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDEGJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDEHIJK"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","I")),
+    frozenset("BCDEHIJL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCDEHIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","I"), (14,"away","L")),
+    frozenset("BCDEHJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCDEIJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCDFGHIJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","D")),
+    frozenset("BCDFGHIK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","I")),
+    frozenset("BCDFGHIL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDFGHJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","D")),
+    frozenset("BCDFGHJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","J"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDFGHKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDFGIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","I")),
+    frozenset("BCDFGIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDFGIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDFGJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDFHIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","I")),
+    frozenset("BCDFHIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCDFHIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","I"), (14,"away","L")),
+    frozenset("BCDFHJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCDFIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCDGHIJK"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","I")),
+    frozenset("BCDGHIJL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDGHIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDGHJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDGIJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCDHIJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCEFGHIJ"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","E")),
+    frozenset("BCEFGHIK"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","I")),
+    frozenset("BCEFGHIL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCEFGHJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","E")),
+    frozenset("BCEFGHJL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCEFGHKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCEFGIJK"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","I")),
+    frozenset("BCEFGIJL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCEFGIKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCEFGJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCEFHIJK"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","I")),
+    frozenset("BCEFHIJL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCEFHIKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","I"), (14,"away","L")),
+    frozenset("BCEFHJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCEFIJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCEGHIJK"): ((1,"away","C"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","I")),
+    frozenset("BCEGHIJL"): ((1,"away","C"), (4,"away","G"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCEGHIKL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCEGHJKL"): ((1,"away","C"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCEGIJKL"): ((1,"away","C"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCEHIJKL"): ((1,"away","C"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCFGHIJK"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","I")),
+    frozenset("BCFGHIJL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCFGHIKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCFGHJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCFGIJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BCFHIJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BCGHIJKL"): ((1,"away","C"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BDEFGHIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","E")),
+    frozenset("BDEFGHIK"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","I")),
+    frozenset("BDEFGHIL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDEFGHJK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","E")),
+    frozenset("BDEFGHJL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","E"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDEFGHKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDEFGIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","I")),
+    frozenset("BDEFGIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDEFGIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDEFGJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDEFHIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","I")),
+    frozenset("BDEFHIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BDEFHIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","I"), (14,"away","L")),
+    frozenset("BDEFHJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BDEFIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BDEGHIJK"): ((1,"away","D"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","I")),
+    frozenset("BDEGHIJL"): ((1,"away","D"), (4,"away","G"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BDEGHIKL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDEGHJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BDEGIJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BDEHIJKL"): ((1,"away","D"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BDFGHIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","I")),
+    frozenset("BDFGHIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","I"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDFGHIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDFGHJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDFGIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","I"), (7,"away","K"), (8,"away","B"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("BDFHIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BDGHIJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BEFGHIJK"): ((1,"away","F"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","I")),
+    frozenset("BEFGHIJL"): ((1,"away","F"), (4,"away","G"), (6,"away","E"), (7,"away","I"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BEFGHIKL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("BEFGHJKL"): ((1,"away","F"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BEFGIJKL"): ((1,"away","F"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BEFHIJKL"): ((1,"away","F"), (4,"away","H"), (6,"away","E"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("BEGHIJKL"): ((1,"away","B"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("BFGHIJKL"): ((1,"away","F"), (4,"away","G"), (6,"away","H"), (7,"away","K"), (8,"away","B"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("CDEFGHIJ"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","E")),
+    frozenset("CDEFGHIK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","H"), (12,"away","G"), (14,"away","I")),
+    frozenset("CDEFGHIL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","E"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDEFGHJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","E")),
+    frozenset("CDEFGHJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","E"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDEFGHKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDEFGIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","J"), (12,"away","G"), (14,"away","I")),
+    frozenset("CDEFGIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","E"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDEFGIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","I"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDEFGJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDEFHIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","H"), (12,"away","J"), (14,"away","I")),
+    frozenset("CDEFHIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","E"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("CDEFHIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","E"), (14,"away","L")),
+    frozenset("CDEFHJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("CDEFIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","E"), (9,"away","I"), (12,"away","J"), (14,"away","L")),
+    frozenset("CDEGHIJK"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","I")),
+    frozenset("CDEGHIJL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","I"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDEGHIKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDEGHJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDEGIJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDEHIJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("CDFGHIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","I")),
+    frozenset("CDFGHIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","I"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDFGHIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDFGHJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDFGIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","I"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("CDFHIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","C"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("CDGHIJKL"): ((1,"away","C"), (4,"away","D"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("CEFGHIJK"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","I")),
+    frozenset("CEFGHIJL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CEFGHIKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CEFGHJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("CEFGIJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("CEFHIJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("CEGHIJKL"): ((1,"away","C"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("CFGHIJKL"): ((1,"away","C"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("DEFGHIJK"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","I")),
+    frozenset("DEFGHIJL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","I"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("DEFGHIKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("DEFGHJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","J"), (9,"away","H"), (12,"away","G"), (14,"away","L")),
+    frozenset("DEFGIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("DEFHIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("DEGHIJKL"): ((1,"away","D"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+    frozenset("DFGHIJKL"): ((1,"away","D"), (4,"away","F"), (6,"away","H"), (7,"away","K"), (8,"away","I"), (9,"away","J"), (12,"away","G"), (14,"away","L")),
+    frozenset("EFGHIJKL"): ((1,"away","F"), (4,"away","G"), (6,"away","E"), (7,"away","K"), (8,"away","I"), (9,"away","H"), (12,"away","J"), (14,"away","L")),
+}
+
 
 class GroupStageSoccerSource(SoccerSource):
     """Group-stage Monte Carlo importance for international tournaments
@@ -1773,14 +2296,13 @@ class GroupStageSoccerSource(SoccerSource):
 
         FIFA's official Annex C codifies a deterministic 495-scenario
         lookup table that pins the exact 3rd-placer slot assignment
-        for every combination of 8-advancing-groups. This
-        implementation uses a greedy approximation that honors the
-        same-group exclusion constraints. Slot ASSIGNMENTS may
-        differ from FIFA's canonical mapping, but bracket VALIDITY
-        (no same-group rematches at LAST_32) is preserved, and the
-        leverage signal for group games on R16+ outcomes is
-        approximate-but-nonzero. Filed as a follow-up: encoding the
-        full Annex C lookup table for exact bracket reconstruction.
+        for every combination of 8-advancing-groups. We prefer that
+        table (`_WC2026_THIRD_PLACER_SLOT_TABLE`) so leverage signal
+        magnitudes for group games on R16+ outcomes match FIFA's
+        canonical bracket. The backtracking DFS below remains as a
+        fallback for keys missing from the table -- this should never
+        fire in practice but is defensive against transcription bugs
+        in the table itself.
 
         Downstream rounds (LAST_16 → FINAL) use placeholder names
         wired via feeds_from per `_WC2026_LAST_16_PAIRINGS` and
@@ -1817,15 +2339,21 @@ class GroupStageSoccerSource(SoccerSource):
             return None
 
         # Constraint-respecting assignment of best-3rd-placers to
-        # reserved slots. Greedy fails on cases where the strongest-
-        # first pick locks out a later slot (e.g., the {ABCDEFGH}
-        # qualification set has only 3 candidates for M82's {A,E,H,I,J}
-        # slot: if A, E, and H are all consumed by earlier slots,
-        # M82 stalls). Backtracking DFS tries each slot in canonical
-        # order, attempts each unassigned 3rd-placer whose group is
-        # allowed (strongest-first to preserve the FIFA tiebreaker
-        # bias when multiple solutions exist), recurses, and unwinds
-        # on dead ends. Bounded by n_slots = 8 reserved slots.
+        # reserved slots. PRIMARY path: lookup in
+        # _WC2026_THIRD_PLACER_SLOT_TABLE keyed by the frozenset of
+        # advancing group letters. The table encodes FIFA's published
+        # canonical mapping, so leverage magnitudes match the real
+        # bracket.
+        #
+        # FALLBACK path (table miss): backtracking DFS in canonical
+        # slot order, attempting each unassigned 3rd-placer whose
+        # group is allowed (strongest-first to preserve the FIFA
+        # tiebreaker bias when multiple valid solutions exist),
+        # recursing, and unwinding on dead ends. Bounded by
+        # n_slots = 8. This produces a VALID but possibly non-
+        # canonical assignment; it should not fire in production
+        # because the table is parametrized-test-verified to cover
+        # all C(12,8) = 495 keys.
         qualifying_thirds = list(
             standings.best_third_order[:standings.n_best_third_advance]
         )
@@ -1836,27 +2364,49 @@ class GroupStageSoccerSource(SoccerSource):
                     third_slots.append((l32_idx, side, slot[1]))
 
         third_assignments: Dict[Tuple[int, str], str] = {}
-        used: set = set()
 
-        def _assign(slot_idx: int) -> bool:
-            if slot_idx == len(third_slots):
-                return True
-            l32_idx, side, allowed = third_slots[slot_idx]
-            for team, _row in qualifying_thirds:
-                if team in used:
-                    continue
-                letter = _letter_of(team)
-                if letter is None or letter not in allowed:
-                    continue
+        # Try the Annex C lookup first.
+        team_by_letter: Dict[str, str] = {}
+        for team, _row in qualifying_thirds:
+            letter = _letter_of(team)
+            if letter is not None:
+                team_by_letter[letter] = team
+        advancing_letters = frozenset(team_by_letter.keys())
+        canonical = _WC2026_THIRD_PLACER_SLOT_TABLE.get(advancing_letters)
+        if canonical is not None and len(team_by_letter) == 8:
+            for l32_idx, side, source_letter in canonical:
+                team = team_by_letter.get(source_letter)
+                if team is None:
+                    # Table key matched but a letter isn't in
+                    # team_by_letter -- treat as table miss and fall
+                    # through to backtracking. Shouldn't be reachable.
+                    third_assignments.clear()
+                    canonical = None
+                    break
                 third_assignments[(l32_idx, side)] = team
-                used.add(team)
-                if _assign(slot_idx + 1):
-                    return True
-                del third_assignments[(l32_idx, side)]
-                used.remove(team)
-            return False
 
-        _assign(0)
+        if not third_assignments:
+            used: set = set()
+
+            def _assign(slot_idx: int) -> bool:
+                if slot_idx == len(third_slots):
+                    return True
+                l32_idx, side, allowed = third_slots[slot_idx]
+                for team, _row in qualifying_thirds:
+                    if team in used:
+                        continue
+                    letter = _letter_of(team)
+                    if letter is None or letter not in allowed:
+                        continue
+                    third_assignments[(l32_idx, side)] = team
+                    used.add(team)
+                    if _assign(slot_idx + 1):
+                        return True
+                    del third_assignments[(l32_idx, side)]
+                    used.remove(team)
+                return False
+
+            _assign(0)
 
         # Construct LAST_32 entry ties.
         l32_ties: List[Dict[str, Any]] = []
