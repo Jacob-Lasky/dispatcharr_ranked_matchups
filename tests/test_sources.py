@@ -8465,3 +8465,208 @@ class TestGroupStageBestThirdPlace:
         outcomes = src.terminal_outcomes(state)
         # Delta is 4th in her own group, regardless of stats — must be eliminated.
         assert outcomes["Delta"] == ["eliminated"]
+
+
+class TestComputeGroupStandings:
+    """`_compute_group_standings` is the positional-data source of truth for
+    both `terminal_outcomes` (advance/eliminated labels) and #53's
+    `_build_bracket_seed` (cross-group bracket slot assignments). The
+    contract: per-group order is by FIFA tiebreaker (pts → GD → GF),
+    best-3rd order is the same chain plus alphabetical-name as the
+    last-resort, and the 3rd-place advancement count comes from
+    LEAGUE_CONTEXTS keyed off the group-stage code.
+    """
+
+    @staticmethod
+    def _wc_source():
+        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
+        return GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+
+    @staticmethod
+    def _euro_source():
+        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
+        return GroupStageSoccerSource("euros", fd_api_key="x", odds_api_key="")
+
+    @staticmethod
+    def _make_state(group_data, team_group):
+        """Same shape as TestGroupStageBestThirdPlace's helper: per-team
+        rows with points / gf / ga; the helper computes gd = gf - ga."""
+        state = {"_applied": set(), "_team_group": team_group}
+        for _grp, rows in group_data.items():
+            for team, points, gd, gf in rows:
+                state[team] = {"points": points, "gf": gf, "ga": gf - gd, "_played": 3}
+        return state
+
+    def test_by_group_sorted_by_fifa_tiebreaker(self):
+        # GROUP_A: Bravo (9 pts) > Alpha (6) > Charlie (3) > Delta (0).
+        # Insertion order is shuffled to confirm the sort, not the input order.
+        src = self._wc_source()
+        team_group = {t: "GROUP_A" for t in ("Alpha", "Bravo", "Charlie", "Delta")}
+        group_data = {"GROUP_A": [
+            ("Delta", 0, -5, 1),
+            ("Bravo", 9, 5, 8),
+            ("Charlie", 3, 0, 3),
+            ("Alpha", 6, 2, 5),
+        ]}
+        state = self._make_state(group_data, team_group)
+        by_group, _, _ = src._compute_group_standings(state)
+        # Position 0 is the group winner; teams at positions 0..3.
+        assert [t for t, _ in by_group["GROUP_A"]] == ["Bravo", "Alpha", "Charlie", "Delta"]
+
+    def test_by_group_tiebreaker_gd_then_gf(self):
+        # All four teams tied on 4 pts. GD breaks first (alpha=+3, bravo=+1,
+        # charlie=0, delta=-4); within identical GD, GF breaks.
+        src = self._wc_source()
+        team_group = {t: "GROUP_A" for t in ("Alpha", "Bravo", "Charlie", "Delta")}
+        group_data = {"GROUP_A": [
+            ("Alpha", 4, 3, 5),
+            ("Bravo", 4, 1, 3),
+            ("Charlie", 4, 0, 2),
+            ("Delta", 4, -4, 1),
+        ]}
+        state = self._make_state(group_data, team_group)
+        by_group, _, _ = src._compute_group_standings(state)
+        assert [t for t, _ in by_group["GROUP_A"]] == ["Alpha", "Bravo", "Charlie", "Delta"]
+
+    def test_best_third_order_cross_group_alphabetical_fallback(self):
+        # Two 3rd-placers tied on (pts, gd, gf). Alphabetical name decides.
+        src = self._wc_source()
+        team_group = {
+            "Alpha_1": "GROUP_A", "Alpha_2": "GROUP_A",
+            "Alpha_3rd": "GROUP_A", "Alpha_4": "GROUP_A",
+            "Bravo_1": "GROUP_B", "Bravo_2": "GROUP_B",
+            "Bravo_3rd": "GROUP_B", "Bravo_4": "GROUP_B",
+        }
+        group_data = {
+            "GROUP_A": [
+                ("Alpha_1", 9, 5, 8), ("Alpha_2", 6, 2, 5),
+                ("Alpha_3rd", 3, 0, 3), ("Alpha_4", 0, -5, 1),
+            ],
+            "GROUP_B": [
+                ("Bravo_1", 9, 5, 8), ("Bravo_2", 6, 2, 5),
+                ("Bravo_3rd", 3, 0, 3), ("Bravo_4", 0, -5, 1),
+            ],
+        }
+        state = self._make_state(group_data, team_group)
+        _, best_third_order, _ = src._compute_group_standings(state)
+        # Both 3rd-placers identical on pts/gd/gf; "Alpha_3rd" < "Bravo_3rd"
+        # by string ordering, so Alpha_3rd is the stronger 3rd-placer.
+        names = [t for t, _ in best_third_order]
+        assert names == ["Alpha_3rd", "Bravo_3rd"]
+
+    def test_n_best_third_reads_wc_context(self):
+        # World Cup config maps to WC_GS in LEAGUE_CONTEXTS with
+        # best_third_place_count=8.
+        src = self._wc_source()
+        _, _, n = src._compute_group_standings(
+            {"_applied": set(), "_team_group": {}}
+        )
+        assert n == 8
+
+    def test_n_best_third_reads_euro_context(self):
+        # EURO 2024+ config maps to EC_GS with best_third_place_count=4.
+        src = self._euro_source()
+        _, _, n = src._compute_group_standings(
+            {"_applied": set(), "_team_group": {}}
+        )
+        assert n == 4
+
+    def test_metadata_keys_excluded_from_standings(self):
+        # _applied / _team_group are state-shape markers, not teams.
+        src = self._wc_source()
+        team_group = {"Alpha": "GROUP_A", "Bravo": "GROUP_A"}
+        group_data = {"GROUP_A": [
+            ("Alpha", 6, 2, 5),
+            ("Bravo", 3, 0, 3),
+        ]}
+        state = self._make_state(group_data, team_group)
+        by_group, _, _ = src._compute_group_standings(state)
+        # Only the two real teams should appear.
+        assert set(t for t, _ in by_group["GROUP_A"]) == {"Alpha", "Bravo"}
+        # No spurious "_applied" or "_team_group" group entries.
+        assert "_applied" not in by_group
+        assert "_team_group" not in by_group
+
+    def test_group_smaller_than_advance_top_n_yields_no_third_placer(self):
+        # Degenerate 2-team group can't contribute a 3rd-placer.
+        # `_GROUP_ADVANCE_TOP_N` is 2 so positions 0 and 1 exist but not 2.
+        src = self._wc_source()
+        team_group = {"Alpha": "GROUP_A", "Bravo": "GROUP_A"}
+        group_data = {"GROUP_A": [("Alpha", 6, 2, 5), ("Bravo", 3, 0, 3)]}
+        state = self._make_state(group_data, team_group)
+        _, best_third_order, _ = src._compute_group_standings(state)
+        assert best_third_order == []
+
+    def test_terminal_outcomes_consumes_helper_consistently(self):
+        # Sanity check: terminal_outcomes' "advance" / "eliminated" labels
+        # must agree with the positional data the helper returns. If the
+        # two diverge, #53's seed mapper would slot teams labeled "advance"
+        # by terminal_outcomes into 3rd-placer bracket positions (or vice
+        # versa). This test pins the contract.
+        src = self._wc_source()
+        team_group = {t: "GROUP_A" for t in ("Alpha", "Bravo", "Charlie", "Delta")}
+        group_data = {"GROUP_A": [
+            ("Alpha", 9, 5, 8),
+            ("Bravo", 6, 2, 5),
+            ("Charlie", 3, 0, 3),
+            ("Delta", 0, -5, 1),
+        ]}
+        state = self._make_state(group_data, team_group)
+        standings = src._compute_group_standings(state)
+        outcomes = src.terminal_outcomes(state)
+        promoted = {t for t, _ in standings.best_third_order[:standings.n_best_third_advance]}
+        for teams in standings.by_group.values():
+            for i, (team, _row) in enumerate(teams):
+                expected = "advance" if (i < 2 or (i == 2 and team in promoted)) else "eliminated"
+                assert outcomes[team] == [expected], (
+                    f"{team} at position {i}: outcomes={outcomes[team]!r} "
+                    f"expected {expected!r}"
+                )
+
+    def test_named_tuple_supports_tuple_unpacking(self):
+        # Field access via .by_group is the new path; tuple-unpack stays
+        # supported because Phase B's call sites and earlier ones rely on
+        # it. Pin both contracts here.
+        src = self._wc_source()
+        state = {"_applied": set(), "_team_group": {}}
+        standings = src._compute_group_standings(state)
+        # Field access shape.
+        assert standings.by_group == {}
+        assert standings.best_third_order == []
+        assert standings.n_best_third_advance == 8
+        # Tuple-unpack shape.
+        by_group, best_third_order, n_best_third = standings
+        assert by_group == standings.by_group
+        assert best_third_order == standings.best_third_order
+        assert n_best_third == standings.n_best_third_advance
+
+    def test_n_best_third_defaults_to_zero_for_unknown_competition(self):
+        # The fallback for `LEAGUE_CONTEXTS.get(<gs_code>) is None` was
+        # not exercised by the WC / EURO happy paths. Build a source
+        # whose group-stage context code resolves to a key not in
+        # LEAGUE_CONTEXTS and confirm n_best_third_advance defaults to 0.
+        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+
+        # `bundesliga` is a registered competition but Bundesliga is not
+        # a group-stage tournament — its `<fd_code>_GS` ("BL1_GS") has
+        # no LEAGUE_CONTEXTS entry, so the ctx lookup falls through.
+        src = GroupStageSoccerSource("bundesliga", fd_api_key="x", odds_api_key="")
+        assert src._group_stage_context_code() not in LEAGUE_CONTEXTS
+        standings = src._compute_group_standings(
+            {"_applied": set(), "_team_group": {}}
+        )
+        assert standings.n_best_third_advance == 0
+
+    def test_fifa_tiebreaker_key_is_descending_on_all_three_axes(self):
+        # Pin the chain: higher points sort earlier; ties broken by GD,
+        # then GF. Test directly on the static helper so changes to
+        # caller code don't accidentally invert one axis (-pts vs +pts).
+        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
+        k = GroupStageSoccerSource._fifa_tiebreaker_key
+        a = {"points": 6, "gf": 5, "ga": 2}  # gd=+3
+        b = {"points": 6, "gf": 4, "ga": 1}  # gd=+3, lower gf -> ranks below a
+        c = {"points": 6, "gf": 5, "ga": 3}  # gd=+2, lower gd -> ranks below a
+        d = {"points": 3, "gf": 9, "ga": 0}  # lower points -> ranks below all
+        rows = sorted([a, b, c, d], key=k)
+        assert rows == [a, b, c, d]
