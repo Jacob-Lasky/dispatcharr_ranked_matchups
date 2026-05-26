@@ -2,6 +2,7 @@
 from .base import GameRow, SportSource
 from .mlb import MlbPlayoffSource, MlbRegularSource
 from .mls import MlsSource
+from .mls_standings import MlsEastSource, MlsWestSource
 from .nwsl import NwslSource
 from .liga_mx import LigaMxSource
 from .field_event import (
@@ -38,7 +39,8 @@ from .soccer import (
 __all__ = [
     "GameRow", "SportSource",
     "MlbRegularSource", "MlbPlayoffSource",
-    "MlsSource", "NwslSource", "LigaMxSource",
+    "MlsSource", "MlsEastSource", "MlsWestSource",
+    "NwslSource", "LigaMxSource",
     "FieldEventSource", "F1Source", "NascarSource", "GolfSource", "UfcSource",
     "AtpSource", "WtaSource",
     "NbaRegularSource", "NbaPlayoffSource",
