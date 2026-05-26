@@ -24,7 +24,7 @@ import logging
 import random
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 import requests
 
@@ -1034,6 +1034,106 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
                 })
         return out
 
+    # ---------- #53 cross-source chain seeding ----------
+
+    def seed_from_chain(self, seed: Dict[str, Any]) -> Dict[str, Any]:
+        """Build initial bracket state from an explicit per-stage seed
+        rather than from `_fetch_bracket_games()`. The seed is produced
+        by the chain's primary source (`GroupStageSoccerSource.
+        _build_bracket_seed` for WC / EURO) and carries the cross-group
+        LAST_32 pairings plus the placeholder feeds_from wiring for
+        downstream rounds.
+
+        Seed shape:
+        ```
+        {"stages": [
+          {"stage": "LAST_32", "ties": [
+            {"home": "Mexico", "away": "Norway", "matchday": 1,
+             "feeds_from": {}},
+            ...16 entry ties for WC
+          ]},
+          {"stage": "LAST_16", "ties": [
+            {"home": "L32_W1", "away": "L32_W2", "matchday": 1,
+             "feeds_from": {"L32_W1": ("LAST_32", 0),
+                            "L32_W2": ("LAST_32", 1)}},
+            ...8 downstream ties with placeholder participants
+          ]},
+          ...
+        ]}
+        ```
+
+        Downstream-stage ties carry placeholder names (e.g., `L32_W1`)
+        that are resolved at lookup time by `_winner_of` via the
+        feeds_from wiring. Single source of truth for placeholder
+        naming: the seed itself. The bracket machinery does NOT depend
+        on a fixed placeholder convention; it only depends on consistent
+        keying between each tie's `feeds_from` entries and its game's
+        `home`/`away` strings.
+
+        Returns a state dict in the shape `BracketSportSource.
+        initial_state` produces: keys `_applied`, `_tie_results`,
+        `_bracket`, `_round_reached`. Compatible with `remaining_matches`,
+        `sample_result`, `apply_result`, `terminal_outcomes` as-is —
+        seed_from_chain is the entry point INSTEAD of `initial_state`,
+        not in addition to it.
+        """
+        bracket: Dict[str, List[Dict[str, Any]]] = {s: [] for s in self.KO_STAGES}
+        tie_results: Dict[Any, Dict[str, Any]] = {}
+
+        for stage_spec in seed.get("stages", []):
+            stage = stage_spec.get("stage")
+            if stage not in bracket:
+                continue
+            for tie_idx, tie_spec in enumerate(stage_spec.get("ties", [])):
+                home = tie_spec["home"]
+                away = tie_spec["away"]
+                matchday = tie_spec.get("matchday", 1)
+                feeds_from = tie_spec.get("feeds_from", {})
+                teams_set = frozenset({home, away})
+                # Synthetic game_id keyed by (stage, tie_idx, matchday).
+                # Required: AggregateLegSource._emit_remaining_games_for_tie
+                # filters by `game_id in applied`; a None game_id would
+                # cause the synthetic tie to be re-emitted every drain
+                # pass and the sim would never terminate.
+                game_id = f"chain:{stage}:{tie_idx}:leg{matchday}"
+                games = [{
+                    "game_id": game_id,
+                    "stage": stage,
+                    "matchday": matchday,
+                    "home": home,
+                    "away": away,
+                    "home_goals": None,
+                    "away_goals": None,
+                    "status": "SCHEDULED",
+                    "start_time": None,
+                    "extra": {},
+                }]
+                tie_meta = {
+                    "stage": stage,
+                    "teams": teams_set,
+                    "games": games,
+                    "feeds_from": feeds_from,
+                    "is_entry_tie": not feeds_from,
+                }
+                bracket[stage].append(tie_meta)
+                # Populate tie_results ONLY for entry ties (LAST_32 here).
+                # Downstream ties carry placeholder team names; their
+                # tie_results entry is created lazily by remaining_matches
+                # / apply_result once feeds_from resolves to real names.
+                # Eagerly populating with the placeholder set would leave
+                # dead `{L32_W1, L32_W2}`-keyed entries permanently
+                # alongside the real `{Mexico, Portugal}` entry written
+                # by apply_result.
+                if not feeds_from:
+                    tie_results[(stage, teams_set)] = self._new_tie_record(tie_meta)
+
+        return {
+            "_applied": frozenset(),
+            "_tie_results": tie_results,
+            "_bracket": bracket,
+            "_round_reached": {},
+        }
+
     # ---------- soccer-specific sampling: regulation + ET + penalty ----------
 
     def sample_result(
@@ -1146,6 +1246,63 @@ class GroupStandings(NamedTuple):
     by_group: Dict[str, List[Tuple[str, Dict[str, int]]]]
     best_third_order: List[Tuple[str, Dict[str, int]]]
     n_best_third_advance: int
+
+
+# WC 2026 LAST_32 bracket pairings, source: FIFA published schedule
+# (matches M73-M88). Each entry: (home_slot, away_slot).
+# Slot kinds:
+#   ("group_winner", "<letter>")     — 1st place in that group
+#   ("group_runner_up", "<letter>")  — 2nd place in that group
+#   ("best_third", frozenset(...))   — best-3rd-placer from any of the
+#                                      listed groups (FIFA Annex C
+#                                      constraint preventing same-group
+#                                      LAST_32 rematches)
+# Match-index 0 = M73, index 1 = M74, ..., index 15 = M88.
+_WC2026_LAST_32_PAIRINGS: List[Tuple[Tuple[str, Any], Tuple[str, Any]]] = [
+    (("group_runner_up", "A"), ("group_runner_up", "B")),                  # M73
+    (("group_winner", "E"),    ("best_third", frozenset("ABCDF"))),        # M74
+    (("group_winner", "F"),    ("group_runner_up", "C")),                  # M75
+    (("group_winner", "C"),    ("group_runner_up", "F")),                  # M76
+    (("group_winner", "I"),    ("best_third", frozenset("CDFGH"))),        # M77
+    (("group_runner_up", "E"), ("group_runner_up", "I")),                  # M78
+    (("group_winner", "A"),    ("best_third", frozenset("CEFHI"))),        # M79
+    (("group_winner", "L"),    ("best_third", frozenset("EHIJK"))),        # M80
+    (("group_winner", "D"),    ("best_third", frozenset("BEFIJ"))),        # M81
+    (("group_winner", "G"),    ("best_third", frozenset("AEHIJ"))),        # M82
+    (("group_runner_up", "K"), ("group_runner_up", "L")),                  # M83
+    (("group_winner", "H"),    ("group_runner_up", "J")),                  # M84
+    (("group_winner", "B"),    ("best_third", frozenset("EFGIJ"))),        # M85
+    (("group_winner", "J"),    ("group_runner_up", "H")),                  # M86
+    (("group_winner", "K"),    ("best_third", frozenset("DEIJL"))),        # M87
+    (("group_runner_up", "D"), ("group_runner_up", "G")),                  # M88
+]
+
+# Downstream-round tree, by FIFA's published mapping (W-of-MN notation
+# unpacked to 0-based feeder indices in the previous stage).
+# Index 0 = first match of the round; tuple = (feeder_idx_a, feeder_idx_b).
+_WC2026_LAST_16_PAIRINGS: List[Tuple[int, int]] = [
+    (0, 2),     # M89 = W73 vs W75
+    (1, 4),     # M90 = W74 vs W77
+    (3, 5),     # M91 = W76 vs W78
+    (6, 7),     # M92 = W79 vs W80
+    (10, 11),   # M93 = W83 vs W84
+    (8, 9),     # M94 = W81 vs W82
+    (13, 15),   # M95 = W86 vs W88
+    (12, 14),   # M96 = W85 vs W87
+]
+_WC2026_QUARTER_FINALS_PAIRINGS: List[Tuple[int, int]] = [
+    (0, 1),     # M97  = W89 vs W90
+    (4, 5),     # M98  = W93 vs W94
+    (2, 3),     # M99  = W91 vs W92
+    (6, 7),     # M100 = W95 vs W96
+]
+_WC2026_SEMI_FINALS_PAIRINGS: List[Tuple[int, int]] = [
+    (0, 1),     # M101 = W97 vs W98
+    (2, 3),     # M102 = W99 vs W100
+]
+_WC2026_FINAL_PAIRINGS: List[Tuple[int, int]] = [
+    (0, 1),     # M103 = W101 vs W102
+]
 
 
 class GroupStageSoccerSource(SoccerSource):
@@ -1399,3 +1556,223 @@ class GroupStageSoccerSource(SoccerSource):
                 else:
                     outcomes[team] = ["eliminated"]
         return outcomes
+
+    # ---------- #53 cross-source chain wiring ----------
+
+    def set_paired_knockout_source(self, knockout: "KnockoutSoccerSource") -> None:
+        """Register the sibling knockout source for the cross-source
+        chain. Called by the plugin during source instantiation when
+        both group + knockout sources are enabled for the same
+        competition (WC, EURO). Without this wiring,
+        `cross_source_chain` returns None and the simulator runs the
+        single-source path (#53)."""
+        self._paired_knockout = knockout
+
+    def cross_source_chain(
+        self,
+    ) -> Optional[Tuple["KnockoutSoccerSource", Callable[[Dict[str, Any]], Dict[str, Any]]]]:
+        """Return the (downstream, seed_fn) tuple consumed by
+        `monte_carlo_importance_batch_chain`, or None if the chain
+        shouldn't run for this call.
+
+        Two cases where None is returned:
+          1. No paired knockout source was registered (not a tournament
+             with a follow-on bracket — most competitions).
+          2. The knockout source's `_fetch_bracket_games()` returned
+             non-empty, meaning FD.org has populated the bracket with
+             real team names (the group stage has ended and FIFA's
+             draw resolved). In that case the existing single-source
+             knockout path handles importance; the chain would be
+             redundant and potentially conflicting.
+
+        The toggle on `_fetch_bracket_games` is a one-line check that
+        works without time math: while every LAST_32 fixture has null
+        home/away (confirmed pre-tournament for WC 2026 via FD.org
+        probe), `_fetch_bracket_games` filters them out. As soon as
+        FIFA populates teams via FD, the toggle flips.
+        """
+        knockout = getattr(self, "_paired_knockout", None)
+        if knockout is None:
+            return None
+        if knockout._fetch_bracket_games():
+            return None
+
+        # The chain simulator calls seed_fn(primary_state) and passes
+        # the result directly to downstream.remaining_matches / apply /
+        # terminal_outcomes, so seed_fn must return the FULL bracket-
+        # state shape (`_applied`, `_tie_results`, `_bracket`,
+        # `_round_reached`), not the intermediate seed dict that
+        # `_build_bracket_seed` produces. Compose the two steps here so
+        # the simulator's contract is clean (state in, state out) and
+        # each method retains a single responsibility.
+        def chain_seed_fn(primary_state: Dict[str, Any]) -> Dict[str, Any]:
+            seed_dict = self._build_bracket_seed(primary_state)
+            return knockout.seed_from_chain(seed_dict)
+
+        return (knockout, chain_seed_fn)
+
+    def _build_bracket_seed(self, primary_state: Dict[str, Any]) -> Dict[str, Any]:
+        """Map primary group-stage standings to a downstream bracket
+        seed dict consumable by `KnockoutSoccerSource.seed_from_chain`.
+
+        For WC 2026 (the only competition currently wired):
+          - 1st and 2nd place in each group resolve to the matching
+            LAST_32 slot per `_WC2026_LAST_32_PAIRINGS`.
+          - The 8 best-3rd-place teams (per
+            `_compute_group_standings.best_third_order` top
+            `n_best_third_advance`) are assigned to the 8 reserved
+            `best_third` LAST_32 slots via constraint-respecting
+            greedy matching (each slot has an `allowed_groups` set
+            that prevents same-group LAST_32 rematches).
+
+        FIFA's official Annex C codifies a deterministic 495-scenario
+        lookup table that pins the exact 3rd-placer slot assignment
+        for every combination of 8-advancing-groups. This
+        implementation uses a greedy approximation that honors the
+        same-group exclusion constraints. Slot ASSIGNMENTS may
+        differ from FIFA's canonical mapping, but bracket VALIDITY
+        (no same-group rematches at LAST_32) is preserved, and the
+        leverage signal for group games on R16+ outcomes is
+        approximate-but-nonzero. Filed as a follow-up: encoding the
+        full Annex C lookup table for exact bracket reconstruction.
+
+        Downstream rounds (LAST_16 → FINAL) use placeholder names
+        wired via feeds_from per `_WC2026_LAST_16_PAIRINGS` and
+        siblings. Placeholder resolution is the bracket machinery's
+        job (see bracket.py:418 `_winner_of`); this method just
+        wires the references.
+        """
+        standings = self._compute_group_standings(primary_state)
+
+        # Group-key shape in standings.by_group: "GROUP_A" etc. (from
+        # FD.org's `group` field on group-stage matches). Convert
+        # WC2026 slot letters ("A") to group keys ("GROUP_A") for the
+        # winner / runner-up lookups.
+        def _group_key(letter: str) -> str:
+            return f"GROUP_{letter}"
+
+        def _resolve_fixed_slot(slot: Tuple[str, Any]) -> Optional[str]:
+            kind, payload = slot
+            if kind == "group_winner":
+                teams = standings.by_group.get(_group_key(payload), [])
+                return teams[0][0] if teams else None
+            if kind == "group_runner_up":
+                teams = standings.by_group.get(_group_key(payload), [])
+                return teams[1][0] if len(teams) >= 2 else None
+            return None
+
+        # Build the team -> group-letter lookup for the 3rd-placers.
+        team_group_map = primary_state.get("_team_group", {})
+
+        def _letter_of(team: str) -> Optional[str]:
+            grp = team_group_map.get(team)
+            if isinstance(grp, str) and grp.startswith("GROUP_"):
+                return grp[len("GROUP_"):]
+            return None
+
+        # Constraint-respecting assignment of best-3rd-placers to
+        # reserved slots. Greedy fails on cases where the strongest-
+        # first pick locks out a later slot (e.g., the {ABCDEFGH}
+        # qualification set has only 3 candidates for M82's {A,E,H,I,J}
+        # slot — if A, E, and H are all consumed by earlier slots,
+        # M82 stalls). Backtracking DFS tries each slot in canonical
+        # order, attempts each unassigned 3rd-placer whose group is
+        # allowed (strongest-first to preserve the FIFA tiebreaker
+        # bias when multiple solutions exist), recurses, and unwinds
+        # on dead ends. Bounded by n_slots = 8 reserved slots.
+        qualifying_thirds = list(
+            standings.best_third_order[:standings.n_best_third_advance]
+        )
+        third_slots: List[Tuple[int, str, FrozenSet[str]]] = []
+        for l32_idx, (home_slot, away_slot) in enumerate(_WC2026_LAST_32_PAIRINGS):
+            for side, slot in (("home", home_slot), ("away", away_slot)):
+                if slot[0] == "best_third":
+                    third_slots.append((l32_idx, side, slot[1]))
+
+        third_assignments: Dict[Tuple[int, str], str] = {}
+        used: set = set()
+
+        def _assign(slot_idx: int) -> bool:
+            if slot_idx == len(third_slots):
+                return True
+            l32_idx, side, allowed = third_slots[slot_idx]
+            for team, _row in qualifying_thirds:
+                if team in used:
+                    continue
+                letter = _letter_of(team)
+                if letter is None or letter not in allowed:
+                    continue
+                third_assignments[(l32_idx, side)] = team
+                used.add(team)
+                if _assign(slot_idx + 1):
+                    return True
+                del third_assignments[(l32_idx, side)]
+                used.remove(team)
+            return False
+
+        _assign(0)
+
+        # Construct LAST_32 entry ties.
+        l32_ties: List[Dict[str, Any]] = []
+        for l32_idx, (home_slot, away_slot) in enumerate(_WC2026_LAST_32_PAIRINGS):
+            if home_slot[0] == "best_third":
+                home = third_assignments.get((l32_idx, "home"))
+            else:
+                home = _resolve_fixed_slot(home_slot)
+            if away_slot[0] == "best_third":
+                away = third_assignments.get((l32_idx, "away"))
+            else:
+                away = _resolve_fixed_slot(away_slot)
+            if home is None or away is None:
+                # Defensive: incomplete primary_state (e.g., a group
+                # missing from the seed). Skip this tie so the rest of
+                # the bracket still resolves. With a full real
+                # primary_state from FD.org, this should never fire.
+                continue
+            l32_ties.append({
+                "home": home, "away": away,
+                "matchday": 1,
+                "feeds_from": {},
+            })
+
+        # Construct downstream stages with placeholder names + feeds_from.
+        def _placeholder_pair(stage: str, idx: int) -> Tuple[str, str]:
+            return f"{stage}_W{idx*2+1}", f"{stage}_W{idx*2+2}"
+
+        def _downstream_ties(
+            stage: str,
+            pairings: List[Tuple[int, int]],
+            feeder_stage: str,
+        ) -> List[Dict[str, Any]]:
+            ties: List[Dict[str, Any]] = []
+            for tie_idx, (feeder_a, feeder_b) in enumerate(pairings):
+                home, away = _placeholder_pair(stage, tie_idx)
+                ties.append({
+                    "home": home, "away": away,
+                    "matchday": 1,
+                    "feeds_from": {
+                        home: (feeder_stage, feeder_a),
+                        away: (feeder_stage, feeder_b),
+                    },
+                })
+            return ties
+
+        return {
+            "stages": [
+                {"stage": "LAST_32", "ties": l32_ties},
+                {"stage": "LAST_16",
+                 "ties": _downstream_ties("LAST_16", _WC2026_LAST_16_PAIRINGS, "LAST_32")},
+                {"stage": "QUARTER_FINALS",
+                 "ties": _downstream_ties("QUARTER_FINALS",
+                                          _WC2026_QUARTER_FINALS_PAIRINGS,
+                                          "LAST_16")},
+                {"stage": "SEMI_FINALS",
+                 "ties": _downstream_ties("SEMI_FINALS",
+                                          _WC2026_SEMI_FINALS_PAIRINGS,
+                                          "QUARTER_FINALS")},
+                {"stage": "FINAL",
+                 "ties": _downstream_ties("FINAL",
+                                          _WC2026_FINAL_PAIRINGS,
+                                          "SEMI_FINALS")},
+            ],
+        }

@@ -343,6 +343,190 @@ class TestMonteCarloImportanceBatch:
         assert out == {}
 
 
+# ---------- monte_carlo_importance_batch_chain ----------
+
+
+@dataclass
+class FakePlayoffSource(SportSource):
+    """Downstream-only FakeSource for the chain simulator. Has no matches
+    to drain (the seed alone determines outcomes), and emits
+    `qualified` / `eliminated_in_playoffs` outcome labels keyed by the
+    seed-supplied state. Used to test that the chain simulator merges
+    primary and downstream outcomes correctly.
+    """
+    _supports_importance: bool = True
+
+    @property
+    def supports_importance(self) -> bool:  # type: ignore[override]
+        return self._supports_importance
+
+    @property
+    def sport_prefix(self) -> str:
+        return "FAKE_PO"
+
+    @property
+    def sport_label(self) -> str:
+        return "Fake Playoffs"
+
+    def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
+        return []
+
+    @property
+    def outcome_labels(self) -> List[str]:
+        return ["qualified", "eliminated_in_playoffs"]
+
+    def estimate_strengths(self) -> Dict[str, Dict[str, float]]:
+        return {}
+
+    def initial_state(self) -> Dict[str, Any]:
+        return {"qualified": [], "eliminated": []}
+
+    def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
+        return []
+
+    def sample_result(self, state, match, strengths, rng):
+        raise AssertionError("FakePlayoffSource has no matches to sample")
+
+    def apply_result(self, state, match, result):
+        raise AssertionError("FakePlayoffSource has no matches to apply")
+
+    def terminal_outcomes(self, state):
+        out: Dict[str, List[str]] = {}
+        for team in state.get("qualified", []):
+            out[team] = ["qualified"]
+        for team in state.get("eliminated", []):
+            out[team] = ["eliminated_in_playoffs"]
+        return out
+
+
+def _group_winner_seed_fn(primary_state: Dict[str, Any]) -> Dict[str, Any]:
+    """Map primary FakeSource standings to playoff seeding. Top finisher
+    qualifies; the bottom finisher is eliminated_in_playoffs."""
+    teams = [(n, r) for n, r in primary_state.items() if n != "_applied"]
+    teams.sort(key=lambda kv: (-kv[1]["points"], -(kv[1]["gf"] - kv[1]["ga"]), -kv[1]["gf"]))
+    if not teams:
+        return {"qualified": [], "eliminated": []}
+    return {
+        "qualified": [teams[0][0]],
+        "eliminated": [teams[-1][0]],
+    }
+
+
+class TestMonteCarloImportanceBatchChain:
+    def test_chain_emits_downstream_outcomes(self):
+        # The chain should fire `qualified` leverage on Alpha for the
+        # Alpha vs Delta game: Alpha winning strongly correlates with
+        # Alpha finishing top of the table and earning the `qualified`
+        # downstream label.
+        source, target = _make_round_robin()
+        downstream = FakePlayoffSource()
+        out = simulation.monte_carlo_importance_batch_chain(
+            source, target,
+            queries=[("Alpha", "qualified")],
+            downstream=downstream,
+            seed_fn=_group_winner_seed_fn,
+            n_sims=400, rng=random.Random(0),
+        )
+        assert ("Alpha", "qualified") in out
+        # Alpha vs Delta with Alpha as strong powerhouse: nontrivial
+        # leverage on the qualified bucket.
+        assert out[("Alpha", "qualified")] > 0.05
+
+    def test_chain_merges_primary_and_downstream_buckets(self):
+        # Same target match, two queries: one primary-only outcome
+        # (`champion`) and one downstream-only outcome (`qualified`).
+        # Both should report nonzero leverage; both are derived from
+        # the same simulated seasons in one pass.
+        source, target = _make_round_robin()
+        downstream = FakePlayoffSource()
+        out = simulation.monte_carlo_importance_batch_chain(
+            source, target,
+            queries=[("Alpha", "champion"), ("Alpha", "qualified")],
+            downstream=downstream,
+            seed_fn=_group_winner_seed_fn,
+            n_sims=400, rng=random.Random(0),
+        )
+        assert out[("Alpha", "champion")] > 0.05
+        assert out[("Alpha", "qualified")] > 0.05
+
+    def test_chain_query_for_eliminated_team_returns_low_leverage(self):
+        # Querying a downstream outcome that NEVER fires for the team
+        # (e.g., asking about Delta finishing `qualified` — Delta is
+        # the dreadful team and never wins the group) should return
+        # near-zero leverage.
+        source, target = _make_round_robin()
+        downstream = FakePlayoffSource()
+        out = simulation.monte_carlo_importance_batch_chain(
+            source, target,
+            queries=[("Delta", "qualified")],
+            downstream=downstream,
+            seed_fn=_group_winner_seed_fn,
+            n_sims=400, rng=random.Random(0),
+        )
+        # tau-c degenerates to 0 when one column is empty (the outcome
+        # never fires). Permit a tiny epsilon for sampling variance.
+        assert out[("Delta", "qualified")] < 0.05
+
+    def test_chain_unsupported_primary_raises(self):
+        source, target = _make_round_robin()
+        source._supports_importance = False
+        with pytest.raises(ValueError, match="does not support importance"):
+            simulation.monte_carlo_importance_batch_chain(
+                source, target, queries=[("Alpha", "qualified")],
+                downstream=FakePlayoffSource(),
+                seed_fn=_group_winner_seed_fn,
+                n_sims=10,
+            )
+
+    def test_chain_unsupported_downstream_raises(self):
+        source, target = _make_round_robin()
+        downstream = FakePlayoffSource(_supports_importance=False)
+        with pytest.raises(ValueError, match="does not support importance"):
+            simulation.monte_carlo_importance_batch_chain(
+                source, target, queries=[("Alpha", "qualified")],
+                downstream=downstream,
+                seed_fn=_group_winner_seed_fn,
+                n_sims=10,
+            )
+
+    def test_chain_empty_queries_returns_empty_dict(self):
+        source, target = _make_round_robin()
+        out = simulation.monte_carlo_importance_batch_chain(
+            source, target, queries=[],
+            downstream=FakePlayoffSource(),
+            seed_fn=_group_winner_seed_fn,
+            n_sims=50, rng=random.Random(0),
+        )
+        assert out == {}
+
+    def test_chain_seed_fn_receives_drained_primary_state(self):
+        # The seed_fn should see the FULL primary standings (target
+        # match applied + remaining matches drained). Capture the
+        # state via a side-channel and assert.
+        source, target = _make_round_robin()
+        downstream = FakePlayoffSource()
+        captured: List[Dict[str, Any]] = []
+
+        def capturing_seed_fn(state):
+            captured.append(state)
+            return _group_winner_seed_fn(state)
+
+        simulation.monte_carlo_importance_batch_chain(
+            source, target, queries=[("Alpha", "qualified")],
+            downstream=downstream,
+            seed_fn=capturing_seed_fn,
+            n_sims=3, rng=random.Random(0),
+        )
+        # 3 sims => 3 seed_fn invocations.
+        assert len(captured) == 3
+        # Each captured state has all 4 teams played their 3 games each
+        # (round-robin = 6 games; 4 teams playing 3 each = 12 team-games,
+        # which is 6 games × 2 teams = matches).
+        for state in captured:
+            for team in ("Alpha", "Beta", "Gamma", "Delta"):
+                assert state[team]["played"] == 3
+
+
 # ---------- _same_match ----------
 
 class TestSameMatch:
