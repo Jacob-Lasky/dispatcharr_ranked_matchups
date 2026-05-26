@@ -5634,6 +5634,527 @@ class TestMlsStandingsConferenceFilter:
 
 
 # =====================================================================
+# Issue #30 part B: MLS Cup playoff bracket (mixed format)
+# =====================================================================
+
+class TestMlsCupSourceIdentity:
+
+    @staticmethod
+    def _make(bracket_games=None):
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        src = MlsCupSource(season_year=2024)
+        src._bracket_games_cache = bracket_games or []
+        return src
+
+    def test_identity(self):
+        src = self._make()
+        assert src.sport_prefix == "MLS"
+        assert "Cup" in src.sport_label
+        assert src._league_context_code() == "MLS_PO"
+
+    def test_supports_importance(self):
+        assert self._make().supports_importance is True
+
+    def test_ko_stages(self):
+        # MLS-prefixed labels avoid depth collision with NHL "R1" at
+        # depth 0 or MLB "WC" at depth 0.
+        assert self._make().KO_STAGES == (
+            "MLS_WC", "MLS_R1", "MLS_CSF", "MLS_CF", "MLS_CUP",
+        )
+
+    def test_series_lengths_match_mls_format(self):
+        """Mixed format: WC, CSF, CF, MLS_CUP are single-leg; R1 is
+        best-of-3 (clinches at 2 wins). Pin all five — a regression
+        to uniform best-of-N would silently misclassify clinches."""
+        src = self._make()
+        assert src._series_length_for_stage("MLS_WC") == 1
+        assert src._series_length_for_stage("MLS_R1") == 3
+        assert src._series_length_for_stage("MLS_CSF") == 1
+        assert src._series_length_for_stage("MLS_CF") == 1
+        assert src._series_length_for_stage("MLS_CUP") == 1
+        assert src._series_length_for_stage("UNKNOWN") == 1  # fallback
+        assert src._clinching_wins_for_stage("MLS_WC") == 1
+        assert src._clinching_wins_for_stage("MLS_R1") == 2
+        assert src._clinching_wins_for_stage("MLS_CUP") == 1
+
+    def test_winner_advance_label(self):
+        src = self._make()
+        assert src._winner_advance_label("MLS_CUP") == "MLS_CUP_WINNER"
+        assert src._winner_advance_label("MLS_CF") is None
+        assert src._winner_advance_label("MLS_R1") is None
+
+
+class TestMlsCupContexts:
+
+    def test_mls_po_exists_and_is_knockout(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        assert "MLS_PO" in LEAGUE_CONTEXTS
+        assert LEAGUE_CONTEXTS["MLS_PO"].format == "knockout"
+
+    def test_thresholds_use_mls_prefixed_stages(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS["MLS_PO"]
+        stages = [stage for stage, _, _ in ctx.thresholds]
+        assert stages == [
+            "MLS_R1", "MLS_CSF", "MLS_CF", "MLS_CUP", "MLS_CUP_WINNER",
+        ]
+
+    def test_outcome_labels(self):
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        labels = MlsCupSource().outcome_labels
+        for expected in (
+            "round_one", "conf_semis", "conf_final",
+            "mls_cup_final", "mls_cup_winner",
+        ):
+            assert expected in labels, f"missing {expected!r}; got {labels}"
+
+    def test_thresholds_are_depth_ordered(self):
+        from dispatcharr_ranked_matchups.scoring import (
+            LEAGUE_CONTEXTS, KNOCKOUT_ROUND_DEPTH,
+        )
+        ctx = LEAGUE_CONTEXTS["MLS_PO"]
+        depths = [KNOCKOUT_ROUND_DEPTH[s] for s, _, _ in ctx.thresholds]
+        for i in range(len(depths) - 1):
+            assert depths[i] < depths[i + 1]
+
+    def test_weights_are_monotonic_increasing(self):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        weights = [w for _, _, w in LEAGUE_CONTEXTS["MLS_PO"].thresholds]
+        for i in range(len(weights) - 1):
+            assert weights[i] < weights[i + 1]
+
+    def test_mls_specific_depths_present(self):
+        # Every MLS-prefixed stage label must have a KNOCKOUT_ROUND_DEPTH
+        # entry; missing one would silently return -1 from the lookup
+        # and the cascade would silently no-op for that stage.
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        for stage in ("MLS_WC", "MLS_R1", "MLS_CSF", "MLS_CF",
+                      "MLS_CUP", "MLS_CUP_WINNER"):
+            assert stage in KNOCKOUT_ROUND_DEPTH, (
+                f"MLS_PO uses {stage} but KNOCKOUT_ROUND_DEPTH lacks it"
+            )
+
+
+class TestMlsCupSlugRouting:
+
+    def test_slug_to_stage_covers_both_conferences(self):
+        from dispatcharr_ranked_matchups.sources.mls_cup import SLUG_TO_STAGE
+        assert SLUG_TO_STAGE["eastern-conference-playoffs---wild-card"] == "MLS_WC"
+        assert SLUG_TO_STAGE["western-conference-playoffs---wild-card"] == "MLS_WC"
+        assert SLUG_TO_STAGE["eastern-conference-playoffs---round-one"] == "MLS_R1"
+        assert SLUG_TO_STAGE["western-conference-playoffs---round-one"] == "MLS_R1"
+        assert SLUG_TO_STAGE["eastern-conference-playoffs---semifinals"] == "MLS_CSF"
+        assert SLUG_TO_STAGE["western-conference-playoffs---semifinals"] == "MLS_CSF"
+        assert SLUG_TO_STAGE["eastern-conference-playoffs---final"] == "MLS_CF"
+        assert SLUG_TO_STAGE["western-conference-playoffs---final"] == "MLS_CF"
+        assert SLUG_TO_STAGE["mls-cup"] == "MLS_CUP"
+
+    def test_extract_filters_regular_season(self):
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        event = {
+            "id": "reg-1",
+            "date": "2024-08-15T19:00:00Z",
+            "season": {"slug": "regular-season"},
+            "competitions": [{
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"displayName": "Atlanta United FC"}, "score": "2"},
+                    {"homeAway": "away", "team": {"displayName": "Inter Miami CF"}, "score": "1"},
+                ],
+            }],
+        }
+        assert MlsCupSource._extract_bracket_record(event, matchday=1) is None
+
+    def test_extract_filters_phantom_best_of_3_game(self):
+        """ESPN publishes a phantom game-3 (state=post, completed=False,
+        score=0-0) for best-of-3 series that clinch in 2 games. These
+        MUST be filtered out — pinning against the live shape observed
+        on event 722587 in the 2024 R1 (LA Galaxy / Colorado series
+        clinched in 2 games; ESPN's game-3 slot was state=post +
+        completed=False).
+        """
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        phantom = {
+            "id": "722587",
+            "date": "2024-11-09T22:00:00Z",
+            "season": {"slug": "western-conference-playoffs---round-one"},
+            "competitions": [{
+                "status": {"type": {"completed": False, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"displayName": "LA Galaxy"}, "score": "0", "winner": False},
+                    {"homeAway": "away", "team": {"displayName": "Colorado Rapids"}, "score": "0", "winner": False},
+                ],
+            }],
+        }
+        assert MlsCupSource._extract_bracket_record(phantom, matchday=None) is None
+
+    def test_extract_keeps_legitimate_finished_game(self):
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        event = {
+            "id": "722574",
+            "date": "2024-10-26T19:00:00Z",
+            "season": {"slug": "eastern-conference-playoffs---round-one"},
+            "competitions": [{
+                "status": {"type": {"completed": True, "state": "post"}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"displayName": "Atlanta United FC"}, "score": "1"},
+                    {"homeAway": "away", "team": {"displayName": "Inter Miami CF"}, "score": "2"},
+                ],
+            }],
+        }
+        rec = MlsCupSource._extract_bracket_record(event, matchday=1)
+        assert rec is not None
+        assert rec["stage"] == "MLS_R1"
+        assert rec["status"] == "FINISHED"
+        assert rec["home_goals"] == 1
+        assert rec["away_goals"] == 2
+
+    def test_extract_keeps_scheduled_game(self):
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        event = {
+            "id": "future-1",
+            "date": "2030-10-26T19:00:00Z",
+            "season": {"slug": "eastern-conference-playoffs---round-one"},
+            "competitions": [{
+                "status": {"type": {"completed": False, "state": "pre"}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"displayName": "Atlanta United FC"}},
+                    {"homeAway": "away", "team": {"displayName": "Inter Miami CF"}},
+                ],
+            }],
+        }
+        rec = MlsCupSource._extract_bracket_record(event, matchday=None)
+        assert rec is not None
+        assert rec["status"] == "SCHEDULED"
+        assert rec["home_goals"] is None
+        assert rec["away_goals"] is None
+
+
+class TestMlsCupMatchdayInference:
+    """Best-of-3 R1 series get matchdays inferred from chronological
+    order; single-leg stages get matchday=1 + PK dedup."""
+
+    def test_best_of_3_assigns_matchdays_1_2_3(self):
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.mls_cup import (
+            _assign_matchdays_and_dedupe, _MLS_SERIES_LENGTHS,
+        )
+        games = [
+            {"game_id": "1", "stage": "MLS_R1", "matchday": None,
+             "home": "LA", "away": "COL", "home_goals": 5, "away_goals": 0,
+             "status": "FINISHED",
+             "start_time": datetime(2024, 10, 27, tzinfo=timezone.utc),
+             "extra": {}},
+            {"game_id": "2", "stage": "MLS_R1", "matchday": None,
+             "home": "COL", "away": "LA", "home_goals": 4, "away_goals": 1,
+             "status": "FINISHED",
+             "start_time": datetime(2024, 11, 2, tzinfo=timezone.utc),
+             "extra": {}},
+            {"game_id": "3", "stage": "MLS_R1", "matchday": None,
+             "home": "LA", "away": "COL", "home_goals": 2, "away_goals": 0,
+             "status": "FINISHED",
+             "start_time": datetime(2024, 11, 10, tzinfo=timezone.utc),
+             "extra": {}},
+        ]
+        out = _assign_matchdays_and_dedupe(games, _MLS_SERIES_LENGTHS)
+        by_id = {g["game_id"]: g for g in out}
+        assert by_id["1"]["matchday"] == 1
+        assert by_id["2"]["matchday"] == 2
+        assert by_id["3"]["matchday"] == 3
+
+    def test_single_leg_stages_get_matchday_one(self):
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.mls_cup import (
+            _assign_matchdays_and_dedupe, _MLS_SERIES_LENGTHS,
+        )
+        games = [
+            {"game_id": "cup-1", "stage": "MLS_CUP", "matchday": None,
+             "home": "LA", "away": "NY", "home_goals": 2, "away_goals": 1,
+             "status": "FINISHED",
+             "start_time": datetime(2024, 12, 7, tzinfo=timezone.utc),
+             "extra": {}},
+            {"game_id": "wc-1", "stage": "MLS_WC", "matchday": None,
+             "home": "A", "away": "B", "home_goals": 1, "away_goals": 0,
+             "status": "FINISHED",
+             "start_time": datetime(2024, 10, 23, tzinfo=timezone.utc),
+             "extra": {}},
+        ]
+        out = _assign_matchdays_and_dedupe(games, _MLS_SERIES_LENGTHS)
+        for g in out:
+            assert g["matchday"] == 1
+
+    def test_single_leg_pk_shootout_pair_collapses(self):
+        """A regulation 0-0 + a PK shootout result at the same
+        single-leg stage collapses to the non-tie record (reusing
+        the helper from ncaa_soccer_cup)."""
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.mls_cup import (
+            _assign_matchdays_and_dedupe, _MLS_SERIES_LENGTHS,
+        )
+        regulation_tie = {
+            "game_id": "csf-tie", "stage": "MLS_CSF", "matchday": None,
+            "home": "A", "away": "B", "home_goals": 0, "away_goals": 0,
+            "status": "FINISHED",
+            "start_time": datetime(2024, 11, 24, 0, 0, tzinfo=timezone.utc),
+            "extra": {},
+        }
+        pk_result = {
+            "game_id": "csf-pk", "stage": "MLS_CSF", "matchday": None,
+            "home": "A", "away": "B", "home_goals": 1, "away_goals": 0,
+            "status": "FINISHED",
+            "start_time": datetime(2024, 11, 24, 1, 0, tzinfo=timezone.utc),
+            "extra": {},
+        }
+        out = _assign_matchdays_and_dedupe(
+            [regulation_tie, pk_result], _MLS_SERIES_LENGTHS,
+        )
+        assert len(out) == 1
+        assert out[0]["game_id"] == "csf-pk"
+
+    def test_best_of_3_does_not_dedupe_legitimate_repeats(self):
+        """Same teams playing 2-3 games in a best-of-3 series must
+        NOT be collapsed by the PK dedup — pin so a future refactor
+        doesn't accidentally apply dedup to best-of-N stages."""
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.mls_cup import (
+            _assign_matchdays_and_dedupe, _MLS_SERIES_LENGTHS,
+        )
+        games = [
+            {"game_id": "g1", "stage": "MLS_R1", "matchday": None,
+             "home": "A", "away": "B", "home_goals": 2, "away_goals": 1,
+             "status": "FINISHED",
+             "start_time": datetime(2024, 10, 27, tzinfo=timezone.utc),
+             "extra": {}},
+            {"game_id": "g2", "stage": "MLS_R1", "matchday": None,
+             "home": "B", "away": "A", "home_goals": 1, "away_goals": 0,
+             "status": "FINISHED",
+             "start_time": datetime(2024, 11, 2, tzinfo=timezone.utc),
+             "extra": {}},
+        ]
+        out = _assign_matchdays_and_dedupe(games, _MLS_SERIES_LENGTHS)
+        assert len(out) == 2
+
+
+class TestMlsCupCascade:
+    """A team that wins WC → R1 (best-of-3) → CSF → CF → MLS_CUP
+    reaches MLS_CUP_WINNER depth with the full band cascade."""
+
+    @staticmethod
+    def _make(bracket_games):
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        src = MlsCupSource(season_year=2024)
+        src._bracket_games_cache = bracket_games
+        return src
+
+    def test_champion_from_wild_card_cascade(self):
+        from dispatcharr_ranked_matchups.scoring import KNOCKOUT_ROUND_DEPTH
+        games = [
+            # WC: single-leg
+            {"game_id": "wc", "stage": "MLS_WC", "matchday": 1,
+             "home": "Champion", "away": "Eight",
+             "home_goals": 1, "away_goals": 0,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            # R1: best-of-3, Champion wins games 1 + 2 → clinches at 2 wins
+            {"game_id": "r1g1", "stage": "MLS_R1", "matchday": 1,
+             "home": "Champion", "away": "Seven",
+             "home_goals": 2, "away_goals": 0,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            {"game_id": "r1g2", "stage": "MLS_R1", "matchday": 2,
+             "home": "Seven", "away": "Champion",
+             "home_goals": 0, "away_goals": 1,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            # CSF: single-leg
+            {"game_id": "csf", "stage": "MLS_CSF", "matchday": 1,
+             "home": "Champion", "away": "Four",
+             "home_goals": 2, "away_goals": 1,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            # CF: single-leg
+            {"game_id": "cf", "stage": "MLS_CF", "matchday": 1,
+             "home": "Champion", "away": "Two",
+             "home_goals": 1, "away_goals": 0,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+            # MLS Cup: single-leg
+            {"game_id": "cup", "stage": "MLS_CUP", "matchday": 1,
+             "home": "Champion", "away": "Final",
+             "home_goals": 2, "away_goals": 1,
+             "status": "FINISHED", "start_time": None, "extra": {}},
+        ]
+        src = self._make(games)
+        state = src.initial_state()
+        rr = state["_round_reached"]
+        assert rr["Champion"] == KNOCKOUT_ROUND_DEPTH["MLS_CUP_WINNER"]
+        assert rr["Final"] == KNOCKOUT_ROUND_DEPTH["MLS_CUP"]
+        outcomes = src.terminal_outcomes(state)
+        bands = outcomes["Champion"]
+        for expected in (
+            "round_one", "conf_semis", "conf_final",
+            "mls_cup_final", "mls_cup_winner",
+        ):
+            assert expected in bands, f"missing {expected!r}; got {bands}"
+
+
+class TestMlsCupSampleResultNoDraws:
+    """Bracket games go to OT then PKs — sample_result must force a winner."""
+
+    def test_sample_result_never_produces_ties(self):
+        import random
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        src = MlsCupSource(season_year=2024)
+        strengths = {
+            "LA": {"pf_per_game": 1.4, "pa_per_game": 1.4},
+            "NY": {"pf_per_game": 1.4, "pa_per_game": 1.4},
+        }
+        gr = GameRow(
+            sport_prefix="MLS", sport_label="MLS Cup Playoffs",
+            home="LA", away="NY", rank_home=None, rank_away=None,
+            start_time=datetime(2024, 12, 7, tzinfo=timezone.utc),
+        )
+        rng = random.Random(42)
+        ties = 0
+        for _ in range(200):
+            res = src.sample_result({}, gr, strengths, rng)
+            if res.home_goals == res.away_goals:
+                ties += 1
+        assert ties == 0
+
+
+class TestMlsCupFetchUpcoming:
+    """fetch_upcoming surfaces only playoff bracket games (not regular-
+    season). Pin via stub so a slug-table regression surfaces here."""
+
+    def test_fetch_upcoming_emits_only_bracket_games(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import mls_cup as mod
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        calls = {"n": 0}
+        def fake_get(url, *_a, **_kw):
+            calls["n"] += 1
+            if calls["n"] != 1:
+                return {"events": []}
+            return {"events": [
+                # Scheduled bracket game — should emit.
+                {"id": "playoff-1", "date": "2030-10-26T19:00:00Z",
+                 "season": {"slug": "eastern-conference-playoffs---round-one"},
+                 "competitions": [{
+                     "status": {"type": {"completed": False, "state": "pre"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"displayName": "Atlanta United FC"}},
+                         {"homeAway": "away", "team": {"displayName": "Inter Miami CF"}},
+                     ],
+                 }]},
+                # Regular-season game — must be filtered out.
+                {"id": "regular-1", "date": "2030-10-26T22:00:00Z",
+                 "season": {"slug": "regular-season"},
+                 "competitions": [{
+                     "status": {"type": {"completed": False, "state": "pre"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"displayName": "LA Galaxy"}},
+                         {"homeAway": "away", "team": {"displayName": "LAFC"}},
+                     ],
+                 }]},
+            ]}
+        monkeypatch.setattr(mod, "_http_get", fake_get)
+        src = MlsCupSource()
+        games = src.fetch_upcoming(days_ahead=0)
+        ids = {(g.extra or {}).get("espn_event_id") for g in games}
+        assert ids == {"playoff-1"}, (
+            f"only bracket-slug games should emit, got {ids}"
+        )
+        assert games[0].extra["stage"] == "MLS_R1"
+        assert games[0].extra["fd_competition_code"] == "MLS_PO"
+
+    def test_fetch_upcoming_filters_phantom_games(self, monkeypatch):
+        """The EPG emit side must apply the same phantom-game filter
+        as _fetch_bracket_games so unnecessary best-of-3 game-3 slots
+        don't appear in the user's Top Matchups guide either."""
+        from dispatcharr_ranked_matchups.sources import mls_cup as mod
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        calls = {"n": 0}
+        def fake_get(url, *_a, **_kw):
+            calls["n"] += 1
+            if calls["n"] != 1:
+                return {"events": []}
+            return {"events": [
+                # Phantom game-3: state=post, completed=False, 0-0.
+                {"id": "phantom-g3", "date": "2030-11-09T22:00:00Z",
+                 "season": {"slug": "western-conference-playoffs---round-one"},
+                 "competitions": [{
+                     "status": {"type": {"completed": False, "state": "post"}},
+                     "competitors": [
+                         {"homeAway": "home", "team": {"displayName": "LA Galaxy"}, "score": "0"},
+                         {"homeAway": "away", "team": {"displayName": "Colorado Rapids"}, "score": "0"},
+                     ],
+                 }]},
+            ]}
+        monkeypatch.setattr(mod, "_http_get", fake_get)
+        src = MlsCupSource()
+        games = src.fetch_upcoming(days_ahead=0)
+        assert games == [], (
+            "phantom game-3 must not appear in fetch_upcoming output"
+        )
+
+
+class TestMlsCupMatchdayInferenceDefensive:
+    """Matchday inference sort key handles missing start_time by sorting
+    such records to the end (datetime.max). Pin so a malformed event
+    with no start_time doesn't crash the day-loop or scramble matchday
+    ordering for adjacent legitimate games."""
+
+    def test_missing_start_time_does_not_crash(self):
+        from datetime import datetime, timezone
+        from dispatcharr_ranked_matchups.sources.mls_cup import (
+            _assign_matchdays_and_dedupe, _MLS_SERIES_LENGTHS,
+        )
+        # One legit game + one with no start_time at the same stage.
+        games = [
+            {"game_id": "g1", "stage": "MLS_R1", "matchday": None,
+             "home": "A", "away": "B", "home_goals": 2, "away_goals": 1,
+             "status": "FINISHED",
+             "start_time": datetime(2024, 10, 27, tzinfo=timezone.utc),
+             "extra": {}},
+            {"game_id": "g2", "stage": "MLS_R1", "matchday": None,
+             "home": "A", "away": "B", "home_goals": 1, "away_goals": 0,
+             "status": "FINISHED",
+             "start_time": None,  # malformed input — sort to end
+             "extra": {}},
+        ]
+        out = _assign_matchdays_and_dedupe(games, _MLS_SERIES_LENGTHS)
+        assert len(out) == 2
+        # g1 (Oct 27) ordered before g2 (None → sorted last) so g1=1, g2=2.
+        by_id = {g["game_id"]: g for g in out}
+        assert by_id["g1"]["matchday"] == 1
+        assert by_id["g2"]["matchday"] == 2
+
+
+class TestMlsCupStrengthSharing:
+    """Plugin merges East+West strengths into one dict; the cup source
+    queries by team name without caring which conference seeded it."""
+
+    def test_set_strengths_persists(self):
+        from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
+        src = MlsCupSource()
+        merged = {
+            "LA Galaxy": {"pf_per_game": 1.8, "pa_per_game": 0.9},
+            "Inter Miami CF": {"pf_per_game": 2.0, "pa_per_game": 1.1},
+        }
+        src.set_regular_season_strengths(merged)
+        assert src.estimate_strengths() == merged
+
+    def test_strength_for_falls_back_to_prior(self):
+        from dispatcharr_ranked_matchups.sources.mls_cup import (
+            MlsCupSource, _DEFAULT_GOALS_FOR, _DEFAULT_GOALS_AGAINST,
+        )
+        src = MlsCupSource()
+        # No seed set → estimate_strengths returns {}; strength_for
+        # falls through to the league-average prior.
+        assert src.estimate_strengths() == {}
+        result = src._strength_for({}, "Some Unknown Team")
+        assert result["pf_per_game"] == _DEFAULT_GOALS_FOR
+        assert result["pa_per_game"] == _DEFAULT_GOALS_AGAINST
+
+
+# =====================================================================
 # Phase Q: NWSL + Liga MX (subclasses of MlsSource)
 # =====================================================================
 

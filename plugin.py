@@ -461,7 +461,7 @@ def _resolve_max_games(settings: Dict[str, Any]) -> int:
 def _build_sources(settings: Dict[str, Any]):
     from .sources import (
         GroupStageSoccerSource, KnockoutSoccerSource, MlbPlayoffSource, MlbRegularSource,
-        MlsEastSource, MlsWestSource, NwslSource, LigaMxSource,
+        MlsEastSource, MlsWestSource, MlsCupSource, NwslSource, LigaMxSource,
         NbaPlayoffSource, NbaRegularSource,
         WnbaPlayoffSource, WnbaRegularSource,
         NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
@@ -617,12 +617,29 @@ def _build_sources(settings: Dict[str, Any]):
     # stays as the base class for NwslSource / LigaMxSource but is NOT
     # registered for MLS here; the East/West sources own the MLS
     # emission and carry the same closeness signal forward via the
-    # shared Odds API helpers from mls.py. MLS Cup playoff bracket
-    # (mixed best-of-3 R1 + single-leg later rounds) is filed under
-    # #30 part B.
+    # shared Odds API helpers from mls.py.
+    #
+    # Issue #30 part B: MlsCupSource pairs with East+West for strength
+    # sharing. Mixed-format bracket: Wild Card single-leg, R1 best-of-3,
+    # then single-leg CSF / CF / MLS Cup Final. Per-stage series length
+    # via `_series_length_for_stage` (same hook MLB uses for its
+    # WC/LDS/LCS/WS mix). Strengths are merged across both conferences
+    # before seeding the cup source — the MLS Cup Final is cross-
+    # conference, so per-team scoring rates need to be in one dict.
     if settings.get("enable_mls", False):
-        sources.append(MlsEastSource(odds_api_key=odds_key or ""))
-        sources.append(MlsWestSource(odds_api_key=odds_key or ""))
+        mls_east = MlsEastSource(odds_api_key=odds_key or "")
+        mls_west = MlsWestSource(odds_api_key=odds_key or "")
+        sources.append(mls_east)
+        sources.append(mls_west)
+        mls_cup = MlsCupSource()
+        try:
+            merged_strengths: Dict[str, Dict[str, float]] = {}
+            merged_strengths.update(mls_east.estimate_strengths())
+            merged_strengths.update(mls_west.estimate_strengths())
+            mls_cup.set_regular_season_strengths(merged_strengths)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[mls_cup] could not seed playoff strengths: %s", exc)
+        sources.append(mls_cup)
 
     # NWSL — same V1 minimal pattern as MLS (schedule + closeness).
     # Subclasses MlsSource with NWSL-specific endpoint and Odds API
