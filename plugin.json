@@ -91,6 +91,20 @@
       "help_text": "UEFA's quadrennial national-team tournament. Pure knockout in V1 — group-stage importance not yet modeled. R16 → QF → SF → Final → Champion. Requires Football-Data.org key."
     },
     {
+      "id": "enable_intl_friendlies",
+      "type": "boolean",
+      "label": "International Friendlies (Men's)",
+      "default": false,
+      "help_text": "Senior men's national-team friendlies and FIFA-window warm-ups (e.g. a USMNT tune-up the week before the World Cup) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. Add a national team to Favorites to see its friendlies. Offseason → no rows. No API key required."
+    },
+    {
+      "id": "enable_intl_friendlies_women",
+      "type": "boolean",
+      "label": "International Friendlies (Women's)",
+      "default": false,
+      "help_text": "Senior women's national-team friendlies and FIFA-window warm-ups (e.g. a USWNT tune-up) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. Add a national team to Favorites to see its friendlies. Offseason → no rows. No API key required."
+    },
+    {
       "id": "enable_eredivisie",
       "type": "boolean",
       "label": "Eredivisie (Netherlands, top flight)",
