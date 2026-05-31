@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from dispatcharr_ranked_matchups.sources import (
+    InternationalFriendliesSource,
     KnockoutSoccerSource,
     NcaafSource,
     NcaamSource,
@@ -9629,3 +9630,73 @@ class TestTierFixturesChunkingForLongWindows:
         # First chunk's data is still in the result.
         assert "PL" in out
         assert len(out["PL"]) == 1
+
+
+class TestInternationalFriendliesSource:
+    """ESPN national-team friendlies. Exhibition games: no importance
+    simulation, FINISHED games dropped, surfaces via favorite/rivalry only."""
+
+    def test_implements_interface(self):
+        assert issubclass(InternationalFriendliesSource, SportSource)
+
+    def test_no_importance_simulation(self):
+        # Friendlies have no standings table, so the source must NOT claim
+        # importance support: compute_match_importance would have nothing to
+        # threshold against. supports_importance is the base-class default.
+        assert InternationalFriendliesSource(gender="m").supports_importance is False
+
+    def test_gender_constants(self):
+        m = InternationalFriendliesSource(gender="m")
+        w = InternationalFriendliesSource(gender="w")
+        assert m.sport_prefix == "FRIENDLY"
+        assert m.sport_label == "International Friendly"
+        assert m._espn_slug == "fifa.friendly"
+        assert w.sport_prefix == "FRIENDLYW"
+        assert w.sport_label == "Women's International Friendly"
+        assert w._espn_slug == "fifa.friendly.w"
+
+    def test_invalid_gender_raises(self):
+        with pytest.raises(ValueError):
+            InternationalFriendliesSource(gender="x")
+
+    def test_fetch_drops_finished_keeps_scheduled(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import friendlies as friendlies_mod
+
+        def _event(eid, home, away, completed):
+            return {
+                "id": eid,
+                "date": "2026-05-31T19:30Z",
+                "competitions": [{
+                    "status": {"type": {"completed": completed,
+                                        "state": "post" if completed else "pre"}},
+                    "competitors": [
+                        {"homeAway": "home", "score": "1" if completed else None,
+                         "team": {"location": home}},
+                        {"homeAway": "away", "score": "0" if completed else None,
+                         "team": {"location": away}},
+                    ],
+                }],
+            }
+
+        payload = {"events": [
+            _event("1", "United States", "Senegal", completed=False),
+            _event("2", "Brazil", "Panama", completed=True),  # finished -> dropped
+        ]}
+
+        class FakeResp:
+            status_code = 200
+            def json(self): return payload
+
+        monkeypatch.setattr(friendlies_mod.requests, "get",
+                            lambda *a, **kw: FakeResp())
+
+        rows = InternationalFriendliesSource(gender="m").fetch_upcoming(days_ahead=0)
+
+        # Only the scheduled game survives; the finished one is dropped.
+        assert len(rows) == 1
+        row = rows[0]
+        assert (row.home, row.away) == ("United States", "Senegal")
+        assert row.sport_prefix == "FRIENDLY"
+        # No poll for national-team friendlies, no league context.
+        assert row.rank_home is None and row.rank_away is None
+        assert row.extra["espn_league_slug"] == "fifa.friendly"

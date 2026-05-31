@@ -533,6 +533,7 @@ def _build_sources(settings: Dict[str, Any]):
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
         F1Source, NascarSource, GolfSource, UfcSource,
         AtpSource, WtaSource,
+        InternationalFriendliesSource,
     )
     from .sources.soccer import COMPETITIONS
     from .scoring import LEAGUE_CONTEXTS
@@ -601,6 +602,17 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(GroupStageSoccerSource(
             "euros", fd_api_key=fd_key, odds_api_key=odds_key,
         ))
+
+    # International friendlies (ESPN, no API key). Exhibition games with no
+    # standings, so these sources don't support importance simulation; a
+    # friendly surfaces on favorite / rivalry / narrative signals alone. This
+    # is the only path for a pre-tournament national-team warm-up (e.g. a
+    # USMNT friendly the week before the World Cup) to reach the guide: the
+    # world_cup source carries only FD.org tournament fixtures, not friendlies.
+    if settings.get("enable_intl_friendlies", False):
+        sources.append(InternationalFriendliesSource(gender="m"))
+    if settings.get("enable_intl_friendlies_women", False):
+        sources.append(InternationalFriendliesSource(gender="w"))
 
     # Additional FD.org free-tier leagues. Same _make_soccer
     # router; LEAGUE_CONTEXTS uses format="league" so dispatch goes
