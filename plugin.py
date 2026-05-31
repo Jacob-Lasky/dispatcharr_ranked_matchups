@@ -2540,7 +2540,10 @@ def _release_scheduler_lock() -> None:
 
 class Plugin:
     name = "Ranked Matchups (Top Games)"
-    version = "0.1.0"
+    # Single source of truth for the displayed version: the loader uses this
+    # class attr over plugin.json's "version". Keep all three in sync
+    # (this attr, plugin.json, __init__.py __version__).
+    version = "1.0.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
