@@ -7,7 +7,7 @@ import hashlib
 import math
 import random
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 
 def parse_iso_utc(s: Optional[str]) -> Optional[datetime]:
@@ -109,3 +109,84 @@ GENERIC_TEAM_SECOND_WORDS = (
     "forest", "wanderers", "rangers", "palace", "hotspur", "villa",
     "wednesday", "real",
 )
+
+
+# ---------- playoff-series rendering ----------
+#
+# The sport-agnostic `extra["series"]` schema that best-of-N sources populate
+# (NHL today; NBA / MLB / NCAA series can follow the same shape). Both the
+# deterministic EPG description (plugin._build_description) and the LLM context
+# (llm_descriptions.build_llm_context) render from these helpers, so the wording
+# and the model's grounding never drift apart:
+#
+#   {
+#     "title":       str,   # "Stanley Cup Final" (optional, may be "")
+#     "game_number": int,   # this game's number within the series (1-based)
+#     "best_of":     int,   # series length (7 for an NHL round)
+#     "home_wins":   int,   # wins by THIS game's home team
+#     "away_wins":   int,   # wins by THIS game's away team
+#     "results":     [ {game_number, home, away, home_goals, away_goals, ot}, ... ],
+#   }
+#
+# These functions are the ONLY place series state becomes prose. Grounding the
+# LLM with `series_record_text` is what stops Haiku inventing "facing
+# elimination" on a Game 1 (the bug these helpers exist to kill): do not write
+# a parallel series-phrasing path in the description or context builders.
+
+
+def series_phase_text(series: Optional[Dict[str, Any]]) -> str:
+    """Headline phrase for a series game: "Stanley Cup Final, Game 2 of 7", or
+    "Game 2 of 7" when no series title is set. Returns "" when the series dict
+    lacks a usable game_number / best_of."""
+    if not isinstance(series, dict):
+        return ""
+    gnum = series.get("game_number")
+    best_of = series.get("best_of")
+    if not isinstance(gnum, int) or not isinstance(best_of, int) or best_of <= 0:
+        return ""
+    core = f"Game {gnum} of {best_of}"
+    title = (series.get("title") or "").strip()
+    return f"{title}, {core}" if title else core
+
+
+def series_record_text(
+    series: Optional[Dict[str, Any]], home: str, away: str
+) -> str:
+    """One-line series record: "Series tied 1-1" or
+    "Carolina Hurricanes lead the series 2-1". Returns "" when win counts are
+    missing. `home` / `away` are this game's team names (the schema's win
+    counts are already keyed to them)."""
+    if not isinstance(series, dict):
+        return ""
+    hw = series.get("home_wins")
+    aw = series.get("away_wins")
+    if not isinstance(hw, int) or not isinstance(aw, int):
+        return ""
+    if hw == aw:
+        return f"Series tied {hw}-{aw}"
+    leader, hi, lo = (home, hw, aw) if hw > aw else (away, aw, hw)
+    return f"{leader} lead the series {hi}-{lo}"
+
+
+def series_result_lines(series: Optional[Dict[str, Any]]) -> List[str]:
+    """Per-completed-game recap lines, oldest first, e.g.
+    ["Game 1: Carolina Hurricanes 3, Vegas Golden Knights 2 (OT)", ...].
+    Returns [] when no results are recorded. Skips malformed result rows
+    rather than raising: a bad recap should degrade to the record line, never
+    break the refresh."""
+    out: List[str] = []
+    if not isinstance(series, dict):
+        return out
+    for r in series.get("results") or []:
+        if not isinstance(r, dict):
+            continue
+        gn = r.get("game_number")
+        home = r.get("home")
+        away = r.get("away")
+        hg = r.get("home_goals")
+        ag = r.get("away_goals")
+        if None in (gn, home, away, hg, ag):
+            continue
+        tag = " (OT)" if r.get("ot") else ""
+        out.append(f"Game {gn}: {home} {hg}, {away} {ag}{tag}")
+    return out

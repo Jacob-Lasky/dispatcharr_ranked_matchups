@@ -1,10 +1,14 @@
-"""Tests for _util.parse_iso_utc, stable_hash_int, extract_game_number_after_marker."""
+"""Tests for _util.parse_iso_utc, stable_hash_int, extract_game_number_after_marker,
+and the playoff-series rendering helpers."""
 
 from datetime import datetime, timezone
 
 from dispatcharr_ranked_matchups._util import (
     extract_game_number_after_marker,
     parse_iso_utc,
+    series_phase_text,
+    series_record_text,
+    series_result_lines,
     stable_hash_int,
 )
 
@@ -100,3 +104,90 @@ class TestExtractGameNumberAfterMarker:
         assert extract_game_number_after_marker(
             "Super Regional - Game ", "Super Regional - Game "
         ) is None
+
+
+# The series schema these render from is documented in _util.py. CAR is this
+# game's home team, VGK the away team, in every fixture below.
+def _series(**overrides):
+    s = {
+        "title": "Stanley Cup Final",
+        "game_number": 1,
+        "best_of": 7,
+        "home_wins": 0,
+        "away_wins": 0,
+        "results": [],
+    }
+    s.update(overrides)
+    return s
+
+
+class TestSeriesPhaseText:
+    def test_title_and_game_number(self):
+        assert series_phase_text(_series(game_number=2)) == "Stanley Cup Final, Game 2 of 7"
+
+    def test_no_title_drops_prefix(self):
+        assert series_phase_text(_series(title="", game_number=3)) == "Game 3 of 7"
+
+    def test_missing_game_number_returns_empty(self):
+        assert series_phase_text(_series(game_number=None)) == ""
+
+    def test_zero_best_of_returns_empty(self):
+        assert series_phase_text(_series(best_of=0)) == ""
+
+    def test_none_and_non_dict_return_empty(self):
+        assert series_phase_text(None) == ""
+        assert series_phase_text("nope") == ""
+
+
+class TestSeriesRecordText:
+    def test_tied(self):
+        assert series_record_text(_series(home_wins=1, away_wins=1),
+                                  "Carolina Hurricanes", "Vegas Golden Knights") == "Series tied 1-1"
+
+    def test_home_team_leads(self):
+        out = series_record_text(_series(home_wins=2, away_wins=1),
+                                 "Carolina Hurricanes", "Vegas Golden Knights")
+        assert out == "Carolina Hurricanes lead the series 2-1"
+
+    def test_away_team_leads(self):
+        # Win counts are keyed to home/away; when away leads, the AWAY name
+        # must be the subject and the bigger number must come first.
+        out = series_record_text(_series(home_wins=1, away_wins=3),
+                                 "Carolina Hurricanes", "Vegas Golden Knights")
+        assert out == "Vegas Golden Knights lead the series 3-1"
+
+    def test_missing_counts_returns_empty(self):
+        assert series_record_text(_series(home_wins=None), "A", "B") == ""
+
+    def test_none_returns_empty(self):
+        assert series_record_text(None, "A", "B") == ""
+
+
+class TestSeriesResultLines:
+    def test_empty_results(self):
+        assert series_result_lines(_series()) == []
+
+    def test_oldest_first_with_ot_tag(self):
+        s = _series(results=[
+            {"game_number": 1, "home": "Carolina Hurricanes", "away": "Vegas Golden Knights",
+             "home_goals": 3, "away_goals": 2, "ot": False},
+            {"game_number": 2, "home": "Carolina Hurricanes", "away": "Vegas Golden Knights",
+             "home_goals": 1, "away_goals": 2, "ot": True},
+        ])
+        assert series_result_lines(s) == [
+            "Game 1: Carolina Hurricanes 3, Vegas Golden Knights 2",
+            "Game 2: Carolina Hurricanes 1, Vegas Golden Knights 2 (OT)",
+        ]
+
+    def test_malformed_row_skipped(self):
+        # A result missing a score is skipped, not raised: a bad recap degrades
+        # to the surviving rows rather than breaking the description.
+        s = _series(results=[
+            {"game_number": 1, "home": "A", "away": "B", "home_goals": 3, "away_goals": 2},
+            {"game_number": 2, "home": "A", "away": "B"},  # missing scores
+            "garbage",
+        ])
+        assert series_result_lines(s) == ["Game 1: A 3, B 2"]
+
+    def test_none_returns_empty(self):
+        assert series_result_lines(None) == []

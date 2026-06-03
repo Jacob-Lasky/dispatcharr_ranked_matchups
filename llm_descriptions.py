@@ -25,6 +25,8 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
+from ._util import series_phase_text, series_record_text, series_result_lines
+
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
@@ -49,6 +51,14 @@ Hard rules:
 - If a favorite team for this user is playing, that's a "personal interest":
   ground the preview in their angle.
 - Plain text only. No markdown, no asterisks, no bullet points.
+- Do NOT fabricate playoff series facts. The only series facts you may use are
+  the "Series", "Series record", and "Results so far" lines above. Never invent
+  a series score, a game number, or a best-of-N length.
+- Do not write "facing elimination", "must win to force a Game 7", or "their
+  season ends tonight" unless the given Series record makes it literally true
+  (a team one loss from elimination in a best-of-N). If no series lines are
+  given the match may still be a one-off knockout, so general "win or go home"
+  framing is fine, but never assert a series standing or game number.
 """
 
 # How many standings rows above/below each team to include in the context.
@@ -122,6 +132,23 @@ def build_llm_context(g: Dict[str, Any], tagline: str, boundary_summary: str = "
     lines.append(f"Match: {away} at {home}, {kickoff_local}")
     lines.append(f"Competition: {sport_label}")
 
+    # Playoff series grounding (best-of-N sources populate extra["series"]).
+    # This is the load-bearing fix for the false-"elimination" bug: without the
+    # record and game number, the model invents playoff drama. The SYSTEM_PROMPT
+    # hard rule below forbids guessing series state when these lines are absent.
+    series = extra.get("series")
+    series_phase = series_phase_text(series)
+    if series_phase:
+        lines.append(f"Series: {series_phase}")
+    series_record = series_record_text(series, home, away)
+    if series_record:
+        lines.append(f"Series record: {series_record}")
+    series_recap = series_result_lines(series)
+    if series_recap:
+        lines.append("Results so far:")
+        for recap_line in series_recap:
+            lines.append(f"  - {recap_line}")
+
     matchday = extra.get("matchday")
     matchdays_total = extra.get("matchdays_total")
     if matchday and matchdays_total:
@@ -176,11 +203,17 @@ def build_llm_context(g: Dict[str, Any], tagline: str, boundary_summary: str = "
 
 
 def prompt_hash(context: str, model: str) -> str:
-    """Stable short hash used as part of the cache key. Includes the model so
-    a model swap invalidates cached prose without manual cache-bust.
+    """Stable short hash used as part of the cache key. Folds in the model AND
+    the SYSTEM_PROMPT so that a model swap OR a system-prompt edit invalidates
+    cached prose without a manual cache-bust. The system prompt matters because
+    it carries the behavioral rules (e.g. the anti-"elimination" guardrail): a
+    cache keyed only on the user-message context would keep serving prose
+    written under the OLD rules after a prompt tightening.
     """
     h = hashlib.sha256()
     h.update(model.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(SYSTEM_PROMPT.encode("utf-8"))
     h.update(b"\x00")
     h.update(context.encode("utf-8"))
     return h.hexdigest()[:16]

@@ -115,6 +115,41 @@ class TestBuildLlmContext:
         ctx = llm.build_llm_context(_sample_game(), tagline="")
         assert "User's favorite teams playing: Tottenham" in ctx
 
+    def test_series_state_surfaced(self):
+        # Playoff grounding: without these lines the model invents
+        # "elimination" framing (the bug this feature fixes).
+        g = _sample_game()
+        g["home"] = "Carolina Hurricanes"
+        g["away"] = "Vegas Golden Knights"
+        g["extra"]["series"] = {
+            "title": "Stanley Cup Final", "game_number": 3, "best_of": 7,
+            "home_wins": 2, "away_wins": 0,
+            "results": [
+                {"game_number": 1, "home": "Carolina Hurricanes",
+                 "away": "Vegas Golden Knights", "home_goals": 3,
+                 "away_goals": 2, "ot": True},
+            ],
+        }
+        ctx = llm.build_llm_context(g, tagline="")
+        assert "Series: Stanley Cup Final, Game 3 of 7" in ctx
+        assert "Series record: Carolina Hurricanes lead the series 2-0" in ctx
+        assert "Results so far:" in ctx
+        assert "Game 1: Carolina Hurricanes 3, Vegas Golden Knights 2 (OT)" in ctx
+
+    def test_no_series_state_emits_no_series_lines(self):
+        ctx = llm.build_llm_context(_sample_game(), tagline="")
+        assert "Series:" not in ctx
+        assert "Series record:" not in ctx
+
+    def test_system_prompt_forbids_inventing_series_facts(self):
+        # The guardrail string must be present: it's the model-facing half of
+        # the fix (grounding lines are the data half). It targets fabricated
+        # SERIES facts specifically, so single-game knockouts can still be
+        # framed as win-or-go-home.
+        assert "Do NOT fabricate playoff series facts" in llm.SYSTEM_PROMPT
+        assert "facing elimination" in llm.SYSTEM_PROMPT
+        assert "win or go home" in llm.SYSTEM_PROMPT
+
     def test_importance_thresholds_surfaced(self):
         # Phase C.4 renamed the prompt label "Stakes thresholds" →
         # "Outcome bands" to match the importance-signal vocabulary.

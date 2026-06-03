@@ -927,6 +927,52 @@ class TestBuildDescription:
         # run the headline into the following block.
         assert out.split("\n\n", 1)[0].endswith(".")
 
+    # ---------- block 2b: playoff series state ----------
+
+    def test_series_phase_and_record_render(self, plugin):
+        # Game 1 of a tied series: the canonical bug case. The description must
+        # say "Game 1 of 7" and "Series tied", NEVER imply elimination.
+        g = self._g(
+            home="Carolina Hurricanes",
+            away="Vegas Golden Knights",
+            extra={"series": {
+                "title": "Stanley Cup Final", "game_number": 1, "best_of": 7,
+                "home_wins": 0, "away_wins": 0, "results": [],
+            }},
+        )
+        out = plugin._build_description(g, "", False)
+        assert "Stanley Cup Final, Game 1 of 7." in out
+        assert "Series tied 0-0." in out
+        assert "elimination" not in out.lower()
+
+    def test_series_recap_line_renders(self, plugin):
+        g = self._g(
+            home="Carolina Hurricanes",
+            away="Vegas Golden Knights",
+            extra={"series": {
+                "title": "Stanley Cup Final", "game_number": 3, "best_of": 7,
+                "home_wins": 1, "away_wins": 1,
+                "results": [
+                    {"game_number": 1, "home": "Carolina Hurricanes",
+                     "away": "Vegas Golden Knights", "home_goals": 3,
+                     "away_goals": 2, "ot": False},
+                    {"game_number": 2, "home": "Carolina Hurricanes",
+                     "away": "Vegas Golden Knights", "home_goals": 1,
+                     "away_goals": 2, "ot": True},
+                ],
+            }},
+        )
+        out = plugin._build_description(g, "", False)
+        assert "Game 3 of 7." in out
+        assert "Game 1: Carolina Hurricanes 3, Vegas Golden Knights 2" in out
+        assert "(OT)" in out
+
+    def test_no_series_key_renders_no_series_block(self, plugin):
+        # League fixtures (no extra["series"]) must be unaffected.
+        out = plugin._build_description(self._g(extra={"matchday": 7, "matchdays_total": 38}), "", False)
+        assert "of 7." not in out
+        assert "Series" not in out
+
     # ---------- block 3: matchday + league boundary ----------
 
     def test_matchday_line_uses_explicit_totals(self, plugin):

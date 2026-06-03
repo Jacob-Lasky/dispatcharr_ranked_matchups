@@ -69,6 +69,16 @@ NHL_TEAM_ABBREVS: Tuple[str, ...] = (
 _DEFAULT_GOALS_FOR = 3.0
 _DEFAULT_GOALS_AGAINST = 3.0
 
+# api-web `gameState` values that mean the game is over. "OFF" and "FINAL"
+# both appear depending on the host's firmware version; both are terminal.
+# Anything else ("LIVE", "PRE", "FUT") is not a usable final result.
+_FINAL_GAME_STATES = ("OFF", "FINAL")
+
+# `gameOutcome.lastPeriodType` values that mean the game was NOT decided in
+# regulation. Drives both the standings OT/SO-loss consolation point and the
+# "(OT)" tag on the playoff-series recap.
+_NON_REGULATION_PERIODS = ("OT", "SO")
+
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
     """Return "Place Name + Common Name", matching the format Dispatcharr
@@ -221,12 +231,11 @@ class NhlRegularSource(PointsBasedSportSource):
                 state = g.get("gameState")
                 hg = (g.get("homeTeam") or {}).get("score")
                 ag = (g.get("awayTeam") or {}).get("score")
-                # api-web marks finished games as "OFF" (final) or "FINAL"
-                # depending on the firmware version; both are terminal.
                 # Active live games have state == "LIVE": we treat them
                 # as SCHEDULED for the simulator (don't seed in-progress
-                # results because the score is still moving).
-                is_final = state in ("OFF", "FINAL") and hg is not None and ag is not None
+                # results because the score is still moving). See
+                # _FINAL_GAME_STATES for the terminal-state set.
+                is_final = state in _FINAL_GAME_STATES and hg is not None and ag is not None
                 status = "FINISHED" if is_final else "SCHEDULED"
                 last_period = (g.get("gameOutcome") or {}).get("lastPeriodType")
                 seen[gid] = {
@@ -309,7 +318,7 @@ class NhlRegularSource(PointsBasedSportSource):
         h.setdefault("standings_points", 0)
         a.setdefault("standings_points", 0)
         # Loser's OT/SO consolation: 1 standings point.
-        loser_consolation = 1 if last_period in ("OT", "SO") else 0
+        loser_consolation = 1 if last_period in _NON_REGULATION_PERIODS else 0
         if home_pts > away_pts:
             h["standings_points"] += 2
             a["standings_points"] += loser_consolation
@@ -397,6 +406,11 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         self._strengths_cache: Optional[Dict[str, Dict[str, float]]] = None
         self._bracket_games_cache: Optional[List[Dict[str, Any]]] = None
         self._team_strengths_from_regular: Optional[Dict[str, Dict[str, float]]] = None
+        # Per-series completed-game recaps, memoized by series letter so a
+        # 7-day fetch_upcoming that sees the same series on several days hits
+        # the per-series schedule endpoint once. Populated lazily, only for
+        # series that are already underway (see _series_from_status).
+        self._series_results_cache: Dict[str, List[Dict[str, Any]]] = {}
 
     @property
     def sport_prefix(self) -> str:
@@ -439,6 +453,19 @@ class NhlPlayoffSource(BestOfNSeriesSource):
                     start = parse_iso_utc(g.get("startTimeUTC"))
                     if not home or not away or start is None:
                         continue
+                    extra = {
+                        "nhl_game_id": gid,
+                        "fd_competition_code": self._league_context_code(),
+                    }
+                    # Series grounding for the EPG description / LLM context.
+                    # The daily-schedule game already carries a `seriesStatus`
+                    # block (game number, best-of length, per-seed win counts),
+                    # so this costs no extra call for the record line: only the
+                    # completed-game recap hits the per-series schedule, and
+                    # only once a series is underway.
+                    series = self._series_from_status(g)
+                    if series:
+                        extra["series"] = series
                     out.append(GameRow(
                         sport_prefix=self.sport_prefix,
                         sport_label=self.sport_label,
@@ -447,12 +474,114 @@ class NhlPlayoffSource(BestOfNSeriesSource):
                         rank_home=None,
                         rank_away=None,
                         start_time=start,
-                        extra={
-                            "nhl_game_id": gid,
-                            "fd_competition_code": self._league_context_code(),
-                        },
+                        extra=extra,
                     ))
         return out
+
+    def _series_schedule_url(self, series_letter: str) -> str:
+        """URL for a per-series game schedule:
+        `/v1/schedule/playoff-series/{full_season}/{lower_letter}`.
+
+        DO NOT substitute the bracket endpoint's season form here: this endpoint
+        takes the FULL 8-digit season ("20252026"), NOT the end-year ("2026")
+        the `/v1/playoff-bracket/{season}` endpoint uses. Two different season
+        conventions on the same API, confirmed empirically against the live
+        host. The single source of truth for both callers (importance bracket
+        fetch and the EPG-recap fetch).
+        """
+        return f"{NHL_API_BASE}/schedule/playoff-series/{self.season}/{series_letter}"
+
+    def _series_from_status(
+        self, g: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Normalize the daily-schedule `seriesStatus` block into the
+        sport-agnostic `extra['series']` schema that the EPG description and LLM
+        context read (see _util.series_phase_text and friends). Returns None
+        when the block is absent or unusable.
+
+        Win counts arrive keyed by top/bottom SEED, but home ice alternates
+        across a series, so they're re-keyed to THIS game's home/away by
+        matching team abbreviations. `best_of = neededToWin * 2 - 1` (4 wins
+        clinches a best-of-7).
+        """
+        ss = g.get("seriesStatus") or {}
+        gnum = ss.get("gameNumberOfSeries")
+        needed = ss.get("neededToWin")
+        if not isinstance(gnum, int) or not isinstance(needed, int) or needed <= 0:
+            return None
+        top_wins = ss.get("topSeedWins") or 0
+        bot_wins = ss.get("bottomSeedWins") or 0
+        home_abbrev = (g.get("homeTeam") or {}).get("abbrev")
+        top_abbrev = ss.get("topSeedTeamAbbrev")
+        bot_abbrev = ss.get("bottomSeedTeamAbbrev")
+        if home_abbrev == top_abbrev:
+            home_wins, away_wins = top_wins, bot_wins
+        elif home_abbrev == bot_abbrev:
+            home_wins, away_wins = bot_wins, top_wins
+        else:
+            # Abbrev mismatch shouldn't happen on a live playoff feed; record
+            # the seed-keyed counts as-is rather than guess the mapping.
+            home_wins, away_wins = top_wins, bot_wins
+        series: Dict[str, Any] = {
+            "title": ss.get("seriesTitle") or "",
+            "game_number": gnum,
+            "best_of": needed * 2 - 1,
+            "home_wins": home_wins,
+            "away_wins": away_wins,
+            "results": [],
+        }
+        # Only fetch the per-game recap once a game has actually been played;
+        # on Game 1 the record is 0-0 and there is nothing to recap.
+        if home_wins + away_wins > 0:
+            series["results"] = self._fetch_series_results(
+                (ss.get("seriesLetter") or "").lower()
+            )
+        return series
+
+    def _fetch_series_results(self, series_letter: str) -> List[Dict[str, Any]]:
+        """Completed-game results for a playoff series, oldest first, for the
+        EPG-description recap. Reads the same per-series schedule endpoint the
+        importance bracket uses. Memoized per series letter. Best-effort:
+        returns [] on any fetch/parse failure, so the deterministic record line
+        (free from seriesStatus) still renders without it.
+        """
+        if not series_letter:
+            return []
+        cached = self._series_results_cache.get(series_letter)
+        if cached is not None:
+            return cached
+        results: List[Dict[str, Any]] = []
+        try:
+            sched = _http_get(self._series_schedule_url(series_letter))
+            for game in (sched or {}).get("games", []) or []:
+                state = game.get("gameState")
+                ht = game.get("homeTeam") or {}
+                at = game.get("awayTeam") or {}
+                hg = ht.get("score")
+                ag = at.get("score")
+                gn = game.get("gameNumber")
+                if state not in _FINAL_GAME_STATES or hg is None or ag is None:
+                    continue
+                if not isinstance(gn, int):
+                    continue
+                last_period = (game.get("gameOutcome") or {}).get("lastPeriodType")
+                results.append({
+                    "game_number": gn,
+                    "home": _team_canonical_name(ht),
+                    "away": _team_canonical_name(at),
+                    "home_goals": hg,
+                    "away_goals": ag,
+                    "ot": last_period in _NON_REGULATION_PERIODS,
+                })
+            results.sort(key=lambda r: r["game_number"])
+        except Exception as e:  # best-effort enrichment, never break refresh
+            logger.warning(
+                "[ranked_matchups] series-results fetch failed for %s: %s",
+                series_letter, e,
+            )
+            results = []
+        self._series_results_cache[series_letter] = results
+        return results
 
     # ---------- strengths (reused from regular season) ----------
 
@@ -551,16 +680,10 @@ class NhlPlayoffSource(BestOfNSeriesSource):
             if not top_name or not bot_name:
                 continue
 
-            # Per-series schedule for the actual game records. URL is
-            # `/v1/schedule/playoff-series/{full_season}/{lower_letter}`
-            #: empirically confirmed against the live host. NB: this
-            # uses the full 8-digit season, not the end-year used by
-            # the bracket endpoint above.
-            series_url = (
-                f"{NHL_API_BASE}/schedule/playoff-series/"
-                f"{self.season}/{series_letter}"
-            )
-            sched = _http_get(series_url)
+            # Per-series schedule for the actual game records. The
+            # full-8-digit-season vs end-year season-convention gotcha lives in
+            # _series_schedule_url (the single source of truth for this URL).
+            sched = _http_get(self._series_schedule_url(series_letter))
             games = (sched or {}).get("games", []) or []
 
             for g in games:
