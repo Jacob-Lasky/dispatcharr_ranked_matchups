@@ -40,7 +40,13 @@ try:
 except ImportError:  # py < 3.9 fallback (won't hit on Dispatcharr's Python 3.13)
     ZoneInfo = None  # type: ignore
 
-from ._util import parse_iso_utc, stable_hash_int
+from ._util import (
+    parse_iso_utc,
+    series_phase_text,
+    series_record_text,
+    series_result_lines,
+    stable_hash_int,
+)
 
 # Eager-import tasks so the background-thread launchers and inflight Redis
 # helpers are available before any action handler runs. tasks.py used to
@@ -1580,6 +1586,8 @@ def _build_description(
     Layout (each block separated by a blank line):
       1. Placeholder note (only if EPG hasn't matched a source yet)
       2. Headline: tagline + spread descriptor ("A title race: toss-up.")
+      2b. Series state (playoff best-of-N games only): phase + record, then
+          a completed-game recap line. Renders nothing for league fixtures.
       3. Matchday + league boundary summary (where applicable)
       4. Standings posture line (league fixtures only: see #10)
       5. Favorite-impact narratives (rooting framing, both deltas)
@@ -1619,6 +1627,25 @@ def _build_description(
         headline_parts.append(spread_desc)
     if headline_parts:
         sections.append(": ".join(headline_parts) + ".")
+
+    # 2b. Series state for playoff best-of-N games. `extra["series"]` is the
+    # sport-agnostic schema populated by series sources (NHL today). The phase
+    # + record sentence is what tells the reader this is Game 1 of 7 with the
+    # series tied, instead of leaving the framing to guesswork: it's the same
+    # grounding the LLM context uses to avoid hallucinating "elimination".
+    series = extra.get("series")
+    series_phase = series_phase_text(series)
+    series_record = series_record_text(series, g.get("home", ""), g.get("away", ""))
+    if series_phase or series_record:
+        parts = []
+        if series_phase:
+            parts.append(series_phase + ".")
+        if series_record:
+            parts.append(series_record + ".")
+        sections.append(" ".join(parts))
+        recap = series_result_lines(series)
+        if recap:
+            sections.append(" · ".join(recap))
 
     # 3. Matchday line + league boundary reminder. Both are league-based
     # ("why is this a race"). Matchday tells you where in the season we

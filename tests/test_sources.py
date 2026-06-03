@@ -2225,6 +2225,142 @@ class TestNhlPlayoffSource:
         assert s["Avalanche"]["pf_per_game"] == 3.5
 
 
+class TestNhlSeriesGrounding:
+    """fetch_upcoming attaches a normalized extra['series'] block from the
+    daily-schedule seriesStatus, so the EPG description / LLM context can ground
+    "Game N of 7, series record" instead of letting the model guess. The win
+    counts arrive seed-keyed and must be re-keyed to THIS game's home/away.
+    """
+
+    @staticmethod
+    def _src():
+        from dispatcharr_ranked_matchups.sources.nhl import NhlPlayoffSource
+        return NhlPlayoffSource(season="20252026")
+
+    @staticmethod
+    def _daily_game(home_abbrev, away_abbrev, series_status):
+        return {
+            "id": 2025030411,
+            "homeTeam": {"abbrev": home_abbrev},
+            "awayTeam": {"abbrev": away_abbrev},
+            "seriesStatus": series_status,
+        }
+
+    def test_game_1_tied_no_recap_fetch(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import nhl as nhl_mod
+        # A recap fetch on a 0-0 series would be wasted: assert it isn't made.
+        monkeypatch.setattr(nhl_mod, "_http_get",
+                            lambda *a, **k: pytest.fail("should not fetch recap at 0-0"))
+        src = self._src()
+        g = self._daily_game("CAR", "VGK", {
+            "seriesTitle": "Stanley Cup Final", "seriesLetter": "O",
+            "neededToWin": 4, "gameNumberOfSeries": 1,
+            "topSeedTeamAbbrev": "CAR", "topSeedWins": 0,
+            "bottomSeedTeamAbbrev": "VGK", "bottomSeedWins": 0,
+        })
+        series = src._series_from_status(g)
+        assert series["title"] == "Stanley Cup Final"
+        assert series["game_number"] == 1
+        assert series["best_of"] == 7
+        assert series["home_wins"] == 0 and series["away_wins"] == 0
+        assert series["results"] == []
+
+    def test_win_counts_rekeyed_when_home_is_bottom_seed(self):
+        # Home ice alternates; in Game 3 the bottom seed (VGK) hosts. The
+        # top-seed win count must map to the AWAY side here.
+        src = self._src()
+        g = self._daily_game("VGK", "CAR", {
+            "seriesTitle": "Stanley Cup Final", "seriesLetter": "O",
+            "neededToWin": 4, "gameNumberOfSeries": 3,
+            "topSeedTeamAbbrev": "CAR", "topSeedWins": 2,
+            "bottomSeedTeamAbbrev": "VGK", "bottomSeedWins": 0,
+        })
+        # No HTTP: stub the recap fetch so the test stays offline.
+        src._series_results_cache["o"] = []
+        series = src._series_from_status(g)
+        # CAR (top seed, 2 wins) is the AWAY team this game.
+        assert series["home_wins"] == 0  # VGK
+        assert series["away_wins"] == 2  # CAR
+
+    def test_abbrev_mismatch_falls_back_to_seed_keyed_counts(self):
+        # Defensive branch: if the home abbrev matches neither seed (shouldn't
+        # happen on a live feed), record the seed-keyed counts as-is rather
+        # than guess the home/away mapping.
+        src = self._src()
+        src._series_results_cache["o"] = []
+        g = self._daily_game("XXX", "YYY", {
+            "seriesTitle": "Stanley Cup Final", "seriesLetter": "O",
+            "neededToWin": 4, "gameNumberOfSeries": 3,
+            "topSeedTeamAbbrev": "CAR", "topSeedWins": 2,
+            "bottomSeedTeamAbbrev": "VGK", "bottomSeedWins": 1,
+        })
+        series = src._series_from_status(g)
+        assert series["home_wins"] == 2  # top-seed count, unmapped
+        assert series["away_wins"] == 1
+
+    def test_missing_series_status_returns_none(self):
+        src = self._src()
+        assert src._series_from_status({"homeTeam": {"abbrev": "CAR"}}) is None
+
+    def test_fetch_series_results_parses_completed_games(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import nhl as nhl_mod
+        payload = {"games": [
+            {"gameNumber": 1, "gameState": "OFF",
+             "homeTeam": {"placeName": {"default": "Carolina"}, "commonName": {"default": "Hurricanes"}, "score": 3},
+             "awayTeam": {"placeName": {"default": "Vegas"}, "commonName": {"default": "Golden Knights"}, "score": 2},
+             "gameOutcome": {"lastPeriodType": "OT"}},
+            {"gameNumber": 2, "gameState": "FUT",  # not played: skipped
+             "homeTeam": {"placeName": {"default": "Carolina"}, "commonName": {"default": "Hurricanes"}, "score": None},
+             "awayTeam": {"placeName": {"default": "Vegas"}, "commonName": {"default": "Golden Knights"}, "score": None}},
+        ]}
+        monkeypatch.setattr(nhl_mod, "_http_get", lambda *a, **k: payload)
+        src = self._src()
+        results = src._fetch_series_results("o")
+        assert len(results) == 1
+        assert results[0]["game_number"] == 1
+        assert results[0]["home_goals"] == 3 and results[0]["away_goals"] == 2
+        assert results[0]["ot"] is True
+        # Second call is memoized: a failing fetch now must not be consulted.
+        monkeypatch.setattr(nhl_mod, "_http_get",
+                            lambda *a, **k: pytest.fail("memoized, should not refetch"))
+        assert src._fetch_series_results("o") == results
+
+    def test_fetch_series_results_swallows_errors(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import nhl as nhl_mod
+        def boom(*a, **k):
+            raise RuntimeError("network down")
+        monkeypatch.setattr(nhl_mod, "_http_get", boom)
+        src = self._src()
+        # Best-effort: a failed recap fetch returns [] rather than raising.
+        assert src._fetch_series_results("o") == []
+
+    def test_fetch_series_results_empty_letter_short_circuits(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import nhl as nhl_mod
+        monkeypatch.setattr(nhl_mod, "_http_get",
+                            lambda *a, **k: pytest.fail("empty letter must not fetch"))
+        assert self._src()._fetch_series_results("") == []
+
+    def test_fetch_series_results_shootout_counts_as_overtime(self, monkeypatch):
+        # lastPeriodType "SO" (shootout) is non-regulation, same as "OT".
+        from dispatcharr_ranked_matchups.sources import nhl as nhl_mod
+        payload = {"games": [
+            {"gameNumber": 1, "gameState": "FINAL",
+             "homeTeam": {"placeName": {"default": "Carolina"}, "commonName": {"default": "Hurricanes"}, "score": 4},
+             "awayTeam": {"placeName": {"default": "Vegas"}, "commonName": {"default": "Golden Knights"}, "score": 3},
+             "gameOutcome": {"lastPeriodType": "SO"}},
+        ]}
+        monkeypatch.setattr(nhl_mod, "_http_get", lambda *a, **k: payload)
+        results = self._src()._fetch_series_results("o")
+        assert results[0]["ot"] is True
+
+    def test_series_schedule_url_uses_full_season(self):
+        # The per-series endpoint takes the full 8-digit season, NOT the
+        # bracket endpoint's end-year. Pinning this guards the season-convention
+        # gotcha the helper docstring documents.
+        url = self._src()._series_schedule_url("o")
+        assert url.endswith("/schedule/playoff-series/20252026/o")
+
+
 # =====================================================================
 # Phase E: PointsBasedSportSource _count_field generalization
 # =====================================================================
