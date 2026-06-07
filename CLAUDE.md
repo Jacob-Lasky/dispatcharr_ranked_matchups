@@ -45,8 +45,9 @@ downstream is sport-agnostic.
 | File | What it does |
 |---|---|
 | `plugin.json` | Manifest: settings (sports toggles, weights, favorites, schedule), actions. Read by Dispatcharr loader. |
-| `plugin.py` | Plugin class + 4 actions: `refresh`, `apply`, `auto_pipeline`, `show_status`. Daemon scheduler. EPG lookup closure. Channel cloning + dummy EPGSource management. |
-| `scoring.py` | `GameSignals`, `Weights`, `GameScore`. `score_game()` sums per-signal contributions, `_compress_to_10()` does the tanh squash. Helpers: `match_favorites`, `compute_match_importance` (Lahvička Monte Carlo), `format_channel_name`. League thresholds in `LEAGUE_CONTEXTS` dict (position, label, consequence_weight). |
+| `plugin.py` | Plugin class + 5 actions: `refresh`, `apply`, `auto_pipeline`, `show_status`, `preview_names` (renders the name template against sample games). Daemon scheduler. EPG lookup closure. Channel cloning + dummy EPGSource management. |
+| `scoring.py` | `GameSignals`, `Weights`, `GameScore`. `score_game()` sums per-signal contributions, `_compress_to_10()` does the tanh squash. Helpers: `match_favorites`, `compute_match_importance` (Lahvička Monte Carlo), `format_channel_name` (delegates to `naming`), `render_importance_tagline` + `STAGE_BANDS` (bracket-band prettify), `tournament_stage_label`. League thresholds in `LEAGUE_CONTEXTS` dict (position, label, consequence_weight). |
+| `naming.py` | Channel-name templating (Sonarr/Radarr `{group}`-collapse convention). `render_name`, `validate_template`, `build_context`, `preview_lines`, `DEFAULT_NAME_TEMPLATE`, `TOKENS`. Pure: no Django, no `scoring` import. |
 | `simulation.py` | Sport-agnostic Monte Carlo importance per Lahvička (2012). `monte_carlo_importance()` for single (team, outcome); `monte_carlo_importance_batch()` shares one set of N season simulations across K queries. `kendall_tau_c()` is the ordinal-association measure. |
 | `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` → Dispatcharr channel via EPG `ProgramData`. Two-stage: regex (both team keywords in EPG title) → Claude batched fallback. |
 | `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Monte Carlo importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. |

@@ -20,7 +20,10 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+
+from . import naming
 
 # Trailing club-tag tokens (FC/AFC/etc) and generic second-words (United/City/
 # etc) live in _util so matcher.py can use them without importing scoring.
@@ -1260,6 +1263,84 @@ def strip_team_suffix(name: str) -> str:
     return name
 
 
+# Tournament-stage display labels. Keyed by the UPPER-cased `tournament_stage`
+# value a source attaches. Module-level (not a pick_tagline local) so the
+# {tournament} naming token can render the same prettified stage independently.
+_TOURNAMENT_STAGE_LABELS: Dict[str, str] = {
+    "FINAL": "Final",
+    "SEMI_FINALS": "Semifinal", "SEMI_FINAL": "Semifinal",
+    "QUARTER_FINALS": "Quarterfinal", "QUARTER_FINAL": "Quarterfinal",
+    "ROUND_OF_16": "Round of 16", "LAST_16": "Round of 16",
+    "ROUND_OF_32": "Round of 32", "LAST_32": "Round of 32",
+    "PLAYOFF_ROUND": "Playoff", "PLAYOFFS": "Playoff",
+    "EVENT": "Event",
+    "MAJOR": "Major",
+}
+
+
+def tournament_stage_label(tournament_stage: Optional[str]) -> str:
+    """Prettify a `tournament_stage` value, or "" when there's no clean label."""
+    if not tournament_stage:
+        return ""
+    return _TOURNAMENT_STAGE_LABELS.get(tournament_stage.upper(), "")
+
+
+# Bracket / knockout / championship-event importance bands render as a clean
+# human stage name with NO "race" suffix: you reach the Final Four, you do not
+# "race" to it (issue #98). Standings / season-pace bands (title, relegation,
+# playoff, the win-count milestones, seeding) are deliberately NOT listed here;
+# they keep the "<label> race" framing, which reads correctly for a season-long
+# pursuit. Unlisted labels fall back to underscore->space humanize + " race".
+STAGE_BANDS: Dict[str, str] = {
+    "round_one": "Round 1", "round_2": "Round 2",
+    "last_32": "Round of 32", "round_of_32": "Round of 32",
+    "round_of_16": "Round of 16",
+    "sweet_16": "Sweet 16", "elite_8": "Elite Eight", "final_four": "Final Four",
+    "quarterfinal": "Quarterfinal", "semifinal": "Semifinal", "final": "Final",
+    "championship": "Championship", "winner": "Championship",
+    "finals_winner": "Finals",
+    "college_cup_semis": "College Cup Semis", "college_cup_final": "College Cup Final",
+    "conf_semis": "Conf Semifinals", "conf_finals": "Conf Finals",
+    "conf_final": "Conf Final", "conf_champ": "Conf Championship",
+    "cup_final": "Cup Final", "cup_winner": "Cup Final",
+    "mls_cup_final": "MLS Cup Final", "mls_cup_winner": "MLS Cup Final",
+    "omaha_bound": "Road to Omaha", "okc_bound": "Road to OKC",
+    "super_regional": "Super Regional",
+    "cws_final": "CWS Final", "cws_champion": "CWS Final",
+    "wcws_final": "WCWS Final", "wcws_champion": "WCWS Final",
+    "national_final": "National Final", "national_champ": "National Championship",
+    "super_bowl": "Super Bowl", "sb_winner": "Super Bowl",
+    "world_series": "World Series", "ws_winner": "World Series",
+    "division_series": "Division Series", "divisional": "Divisional Round",
+    "nba_finals": "NBA Finals",
+    "wnba_finals": "WNBA Finals", "wnba_semis": "WNBA Semifinals",
+    "wnba_winner": "WNBA Finals",
+}
+
+
+def render_importance_tagline(importance_thresholds: List[str]) -> str:
+    """Render the importance-band tagline from the (deduped) thresholds hit.
+
+    Bracket/event bands (STAGE_BANDS) render as a clean stage name. Everything
+    else humanizes its snake_case and takes the "race" suffix. The suffix is
+    appended once, only when a non-stage band is present, so a pure-bracket
+    game reads "Final Four" and a standings game reads "title race" (issue #98).
+    """
+    labels = list(dict.fromkeys(importance_thresholds))[:2]
+    if not labels:
+        return ""
+    parts: List[str] = []
+    has_race_band = False
+    for label in labels:
+        if label in STAGE_BANDS:
+            parts.append(STAGE_BANDS[label])
+        else:
+            parts.append(label.replace("_", " "))
+            has_race_band = True
+    joined = " / ".join(parts)
+    return f"{joined} race" if has_race_band else joined
+
+
 def pick_tagline(
     score_breakdown: Dict[str, float],
     favorites_matched: List[str],
@@ -1281,25 +1362,14 @@ def pick_tagline(
     with proper labels (title race, relegation, etc.) so we drop the
     rank-pair tagline for standings.
     """
-    if tournament_stage:
-        ts = tournament_stage.upper()
-        stage_labels = {
-            "FINAL": "Final",
-            "SEMI_FINALS": "Semifinal", "SEMI_FINAL": "Semifinal",
-            "QUARTER_FINALS": "Quarterfinal", "QUARTER_FINAL": "Quarterfinal",
-            "ROUND_OF_16": "Round of 16", "LAST_16": "Round of 16",
-            "ROUND_OF_32": "Round of 32", "LAST_32": "Round of 32",
-            "PLAYOFF_ROUND": "Playoff", "PLAYOFFS": "Playoff",
-            "EVENT": "Event",
-            "MAJOR": "Major",
-        }
-        if ts in stage_labels:
-            return stage_labels[ts]
+    stage = tournament_stage_label(tournament_stage)
+    if stage:
+        return stage
 
     if "importance" in score_breakdown and importance_thresholds:
-        labels = list(dict.fromkeys(importance_thresholds))[:2]
-        if labels:
-            return " / ".join(labels) + " race"
+        imp = render_importance_tagline(importance_thresholds)
+        if imp:
+            return imp
 
     if rank_source == "poll" and rank_a is not None and rank_b is not None:
         lo, hi = sorted([rank_a, rank_b])
@@ -1331,38 +1401,52 @@ def format_channel_name(
     home: str,
     away: str,
     tagline: str = "",
+    *,
+    template: Optional[str] = None,
+    rank_source: str = "poll",
+    sport_label: str = "",
+    venue: Optional[str] = None,
+    start_dt: Optional[datetime] = None,
+    tz=None,
 ) -> str:
-    """Build the Dispatcharr channel name in the "B" format:
+    """Render the Dispatcharr channel name from a (user-customizable) template.
 
-        EPL 3v9 ★10.0 · Brentford at Manchester United · title race
-        CFB 1v5 ★8.5 · Ohio State at Penn State · top-5 showdown
-        EFL 4v6 ⭐ ★10.0 · Middlesbrough at Wrexham · playoff race
+    The default template (naming.DEFAULT_NAME_TEMPLATE) renders, e.g.:
 
-    The rank pair is normalized so the better (lower-number) rank always
-    appears first: "1v5" not "5v1": for at-a-glance scanning.
+        CBB ⭐★8.5 · Alabama (15) at St. John's · top-25 matchup
+        CFB ★9.2 · Ohio State (5) at Penn State (1) · top-5 showdown
+        EPL ★10.0 · Brentford at Man United · title race
 
-    Team-name suffixes (FC / AFC / CF / SC) are stripped: 'Manchester
-    United FC' renders as 'Manchester United'.
+    Poll ranks render inline after each team (issue #99); the old "NvN" head
+    prefix is gone. A custom `template` (issue #100) reshapes this freely; see
+    naming.py for the token catalog and the {optional}-collapse rules.
+
+    `signals.rank_a`/`team_a` are the HOME side and `rank_b`/`team_b` the AWAY
+    side (see _build_signals_score_from_payload); ranks only render when
+    `rank_source == "poll"`. Team-name corporate suffixes (FC / AFC / ...) are
+    stripped here before the names enter the template context.
     """
-    parts = [sport_prefix]
-    a, b = signals.rank_a, signals.rank_b
-    if a is not None and b is not None:
-        lo, hi = (a, b) if a <= b else (b, a)
-        parts.append(f"{lo}v{hi}")
-    elif a is not None or b is not None:
-        rank = a if a is not None else b
-        parts.append(f"{rank}vUR")
-
-    if signals.favorite_match:
-        parts.append("⭐")
-
-    parts.append(f"★{score.final:.1f}")
-    head = " ".join(parts)
-
-    matchup = f"{strip_team_suffix(away)} at {strip_team_suffix(home)}"
-    name = f"{head} · {matchup}"
-    if tagline:
-        name = f"{name} · {tagline}"
+    ctx = naming.build_context(
+        sport_prefix=sport_prefix,
+        sport_label=sport_label,
+        home=strip_team_suffix(home),
+        away=strip_team_suffix(away),
+        rank_home=signals.rank_a,
+        rank_away=signals.rank_b,
+        rank_source=rank_source,
+        score_final=score.final,
+        favorite=bool(signals.favorite_match),
+        tagline=tagline,
+        tournament=tournament_stage_label(getattr(signals, "tournament_stage", None)),
+        venue=venue,
+        is_rivalry=bool(getattr(signals, "is_rivalry", False)),
+        start_dt=start_dt,
+        tz=tz,
+    )
+    name = naming.render_name(template or naming.DEFAULT_NAME_TEMPLATE, ctx)
+    # render_name collapses empty {groups}; this mops up any double space a
+    # sparse CUSTOM template leaves between bare-literal separators.
+    name = re.sub(r"\s{2,}", " ", name).strip()
     if len(name) > 250:
         name = name[:247] + "..."
     return name

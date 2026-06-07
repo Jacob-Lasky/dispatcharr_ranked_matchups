@@ -59,7 +59,7 @@ implementation and testing are done by AI.
 ## Example output
 
 ```
-#9000  EPL 3v9 ★10.0: Brentford FC at Manchester United FC
+#9000  EPL ★10.0 · Brentford at Manchester United · title / UCL race
        — both top-10 (#3 vs #9), title / UCL race, toss-up (line +0.5)
 
        Description (what TiviMate/Plex/Jellyfin show):
@@ -73,13 +73,21 @@ implementation and testing are done by AI.
            importance: +17.0
          Source channel: Manchester United
 
-#9002  EFL 4v6 ⭐ ★10.0: Middlesbrough FC at Wrexham AFC
+#9002  EFL ⭐★10.0 · Middlesbrough at Wrexham · playoff / auto-promotion race
        — both top-10 (#4 vs #6), favorite (Wrexham),
          playoff / auto-promotion race, toss-up (line +0.2)
+
+#9100  CFB ★9.2 · Ohio State (5) at Penn State (1) · top-5 showdown
+       — poll-ranked leagues show the rank inline after each team
 ```
 
 Today's games are sorted to the front (lowest channel numbers) so they appear
 first in any IPTV client.
+
+The channel name is fully customizable (see "Channel Naming" in settings). The
+default renders as above: poll ranks appear inline after each team, and any
+empty field (an unranked team, a game with no tagline) collapses cleanly. Use
+the **Test naming convention** action to preview a template before applying it.
 
 ## Sports supported
 
@@ -163,6 +171,7 @@ form will collect everything needed to scope it.
 | `apply` | Create / update virtual channels in the target group, link to source-channel streams, write `ProgramData` descriptions, delete stale ones. | DB (honors `dry_run`) |
 | `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand. | Both |
 | `show_status` | Print the current curated list with per-game score breakdown. No writes. | — |
+| `preview_names` | Render the channel-name template against sample games so you can check the layout before applying. Reports template errors and lists every variable. No writes. | — |
 
 ## How channels are created
 
@@ -170,7 +179,10 @@ The plugin keeps your source channels untouched. Instead it creates **virtual
 channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
 `!` to sort to the top of your group list):
 
-- Channel name: `<SPORT> <RANKS> ★<SCORE>: <AWAY> at <HOME> — <WHY>`
+- Channel name: rendered from a customizable template (default:
+  `{league_short} {favorite_star}★{score} · {away_team}{ (rank_away)} at {home_team}{ (rank_home)}{ · tagline}`).
+  Plain text is literal; a `{group}` collapses entirely when its variable is
+  blank. Set your own under "Channel Naming"; preview with `preview_names`.
 - Streams: cloned via `ChannelStream` from the matched source channel, so
   playback works
 - EPG: a dummy `EPGSource` (auto-created with the same name as the group)

@@ -3,6 +3,37 @@
 All notable changes to this plugin are documented here. Format roughly
 follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
+## [Unreleased]
+
+### Added
+
+- **Customizable channel-name template** (#100). A new "Channel Naming"
+  setting (`name_template`) lets you reshape the channel name with
+  Sonarr/Radarr-style variables: plain text is literal, a `{group}` holds one
+  variable plus any glued literal characters, and the whole group collapses
+  when the variable is blank. Variables include `{league_short}`,
+  `{away_team}`, `{home_team}`, `{rank_away}`, `{rank_home}`, `{rank_pair}`,
+  `{score}`, `{favorite_star}`, `{tagline}`, `{tournament}`, `{venue}`,
+  `{game_date}`, `{start_time}`, `{kickoff}`, and `{rivalry}`. Leave blank for
+  the default. Implemented in the new `naming.py`.
+- **"Test naming convention" action** (`preview_names`, #100). Renders the
+  current template against sample games with no DB writes, reports template
+  errors, and lists every variable, so a template can be checked before it
+  reaches live channels.
+
+### Changed
+
+- **Channel names now show poll ranks inline** after each team, e.g.
+  `Ohio State (5) at Penn State (1)`, replacing the compact `NvN` head prefix
+  that could not say which team held which rank (#99). Ranks only render for
+  poll-ranked leagues (AP / Coaches Top 25); standings-position leagues are
+  unaffected.
+- **Tournament / bracket taglines are humanized** (#98): `omaha_bound` now
+  reads "Road to Omaha", `round_of_32` reads "Round of 32", `elite_8` reads
+  "Elite Eight", and so on, with the incorrect "race" suffix dropped for
+  bracket and championship-event bands. Season-long standings bands keep their
+  "race" framing (title race, relegation race).
+
 ## [1.0.0] — 2026-05-26
 
 First stable release. The plugin has been running daily in production

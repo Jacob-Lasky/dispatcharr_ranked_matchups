@@ -1916,3 +1916,28 @@ class TestDedupSeriesGames:
         assert len(out_g) == 1
         # The one with a real start_time wins.
         assert out_g[0].start_time is not None
+
+
+class TestActionPreviewNames:
+    """The 'Test naming convention' action (#100) renders sample games against
+    the configured template so a user can eyeball the layout before applying.
+    Django-free: it only touches settings, naming.py, and the tz resolver."""
+
+    def test_default_template_previews_ok(self, plugin):
+        r = plugin._action_preview_names({"local_timezone": "UTC"})
+        assert r["status"] == "ok"
+        assert "DEFAULT template" in r["message"]
+        assert "Alabama (15) at St. John's" in r["message"]
+
+    def test_custom_template_is_used(self, plugin):
+        r = plugin._action_preview_names({"name_template": "{away_team} at {home_team}"})
+        assert r["status"] == "ok"
+        assert "your template" in r["message"]
+        assert "Alabama at St. John's" in r["message"]
+
+    def test_invalid_template_errors_and_falls_back_to_default(self, plugin):
+        r = plugin._action_preview_names({"name_template": "{bogus} {away_team}"})
+        assert r["status"] == "error"
+        assert "bogus" in r["message"]
+        # the DEFAULT is still previewed so the user sees working output
+        assert "Alabama (15) at St. John's" in r["message"]

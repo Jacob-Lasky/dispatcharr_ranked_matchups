@@ -217,12 +217,17 @@ class TestScoreGameCloseness:
 
 
 class TestFormatChannelName:
-    def test_rank_pair_normalized_low_first(self):
-        sig = GameSignals(rank_a=9, rank_b=3)
+    def test_inline_ranks_attach_to_each_team(self):
+        # New default (#99): ranks render inline after the team they belong to,
+        # not as a compact "NvN" prefix. rank_a/team_a is HOME, rank_b/team_b
+        # is AWAY, and the matchup renders "away at home".
+        sig = GameSignals(rank_a=9, rank_b=3)  # home rank 9, away rank 3
         score = score_game(GameSignals(rank_a=9, rank_b=3), Weights())
-        name = format_channel_name("EPL", sig, score, "Manchester United", "Brentford FC")
-        # Should render "3v9" not "9v3"
-        assert " 3v9 " in name
+        name = format_channel_name("CFB", sig, score, "Penn State", "Ohio State")
+        assert "Ohio State (3) at Penn State (9)" in name
+        # the retired "NvN" prefix must be gone
+        assert "3v9" not in name
+        assert "9v3" not in name
 
     def test_truncates_to_250(self):
         sig = GameSignals(rank_a=1, rank_b=2)
@@ -238,7 +243,8 @@ class TestFormatChannelName:
         name = format_channel_name("EPL", sig, score, "Manchester United FC", "Brentford FC")
         # "FC" must NOT appear in the rendered matchup
         assert "FC" not in name
-        assert "Brentford at Manchester United" in name
+        # away (Brentford, rank_b=9) at home (Man United, rank_a=3), suffixes gone
+        assert "Brentford (9) at Manchester United (3)" in name
 
     def test_b_format_separator(self):
         sig = GameSignals(rank_a=3, rank_b=9)
@@ -259,10 +265,14 @@ class TestFormatChannelName:
         assert "⭐" in name
 
     def test_one_ranked(self):
-        sig = GameSignals(rank_a=5, rank_b=None)
+        # Only the ranked team gets an inline rank; the unranked opponent stays
+        # bare (no "vUR" marker, no empty parens) thanks to the {group} collapse.
+        sig = GameSignals(rank_a=5, rank_b=None)  # home Texas ranked, away Oklahoma not
         score = score_game(sig, Weights())
         name = format_channel_name("CFB", sig, score, "Texas", "Oklahoma")
-        assert "5vUR" in name
+        assert "Oklahoma at Texas (5)" in name
+        assert "vUR" not in name
+        assert "()" not in name
 
 
 class TestStripTeamSuffix:
