@@ -7,6 +7,16 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ### Added
 
+- **Tuning recipes in SCORING.md** plus an in-settings link to them. The
+  scoring doc now leads with a goal-first cookbook ("I want X, so I change
+  Y") covering favorites-only, nail-biters, marquee-names, fewer cup games,
+  importance balance, adaptive scoring, and coverage, alongside the exact
+  preset bundles and a knob reference. The "Interestingness Weights" settings
+  section now links straight to the recipes so users tuning weights can find
+  worked examples without leaving the plugin. A new `TestScoringDocMatchesCode`
+  pins the documented preset and default-weight tables to `_CURATION_PRESETS`
+  and `scoring.Weights`, so the doc fails its test suite instead of silently
+  drifting when a number changes in code.
 - **Customizable channel-name template** (#100). A new "Channel Naming"
   setting (`name_template`) lets you reshape the channel name with
   Sonarr/Radarr-style variables: plain text is literal, a `{group}` holds one

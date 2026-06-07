@@ -508,25 +508,93 @@ doesn't capture:
 
 ## Tuning
 
-Every weight is a number in the plugin settings page. To tune:
+You do not have to understand the math to get the guide you want. There
+are two layers of control, and most people never leave the first:
 
-- **Want more rank-driven prominence?** Bump `weight_rank` from 1.0 to
-  2.0. Top-25 matchups will score ~2x what they do now.
-- **Want your teams to dominate?** Bump `weight_favorite` from 6.0 to
-  10.0. Every game with one of your teams jumps by 4 raw points
-  (~+1.5 ★).
-- **Tournament games crowding out league games?** Lower
-  `weight_tournament` from 1.5 to 0.5.
-- **Importance feels too dominant?** Lower `weight_importance` from
-  3.0 to 1.0. The Monte Carlo signal scales linearly with this knob.
-- **Want LLM narrative bonuses?** Set `weight_narrative > 0` and
-  provide an Anthropic API key. Default off.
+1. **Curation presets** (the `curation_preset` setting): one dropdown
+   that bundles every weight plus `max_games`. Pick one and you are done.
+2. **Manual weights**: set `curation_preset` to `manual` and the nine
+   individual `weight_*` numbers (plus `max_games`) take over, so you can
+   nudge a single signal.
+
+Picking any preset other than `manual` IGNORES the individual `weight_*`
+settings and `max_games`. If you have hand-tuned weights you want to keep,
+stay on `manual`.
+
+### Recipes: "I want X, so I change Y"
+
+Each recipe is a starting point, not a law. The arrows show the change
+from the default (`balanced`) values. Re-apply after changing settings,
+or wait for the next scheduled refresh, to see the new ordering.
+
+| I want... | Change | Why it works |
+|---|---|---|
+| **Just my teams, short list** | set `favorites`, then `curation_preset` → `high_curation` | Favorites are always included regardless of score; `high_curation` caps the rest at ~10 so your teams sit at the top of a tight list. |
+| **My teams to outrank everything** (manual) | `weight_favorite` 6 → 12 | Each favorite game gains +6 raw (~+1 to +2 ★ depending on compression), enough to jump a favorite above all but the highest-stakes neutral games. |
+| **Nail-biters, I don't care about stakes** | `weight_spread` 3 → 8, `weight_importance` 3 → 0 | Close-game contribution is `closeness × weight`, so a coin-flip now adds up to 8 raw instead of 3; zeroing importance removes the season-stakes signal entirely. (Needs an Odds API key for the closeness data.) |
+| **Marquee names only, ignore standings context** | `weight_rank` 1 → 3, `weight_importance` 3 → 0 | A 1-vs-1 ranked pair jumps from 10 → 30 raw; with importance off, ranking is the dominant driver. Good for a "big names" guide. |
+| **Fewer random cup knockouts crowding the league** | `weight_tournament` 1.5 → 0.5 | A Final drops from 7.5 → 2.5 raw, a Round-of-16 from 2.25 → 0.75, so league games with real stakes stop getting pushed down by early-round cup ties. |
+| **Importance feels too dominant** | `weight_importance` 3 → 1 | The Monte Carlo signal scales linearly with this knob; thirding it lets rank, closeness, and favorites compete on a more even footing. |
+| **Early-season weeks feel flat / late-season everything is ★10** | turn ON `adaptive_scoring` | Switches compression from a fixed curve to a per-refresh one keyed off the batch median, so the top games of any week always read as top games. |
+| **More games on the guide, including smaller stakes** | `curation_preset` → `high_coverage` (or on `manual`, raise `max_games`) | `high_coverage` widens the cap to ~50 and softens the weights so lower-leverage games clear the bar. |
+| **Same curation, just a different list length** | on `manual`, change only `max_games` | `max_games` is the only list-length lever; it trims from the bottom of the sorted list without changing how anything is scored. |
+
+A note on "fewer games": the only length control is `max_games` (or a
+tighter preset). There is intentionally no "hide games below score N"
+floor. Low-scored games filling otherwise-empty slots on a quiet week is
+the design, not a bug: this is the one place games show up.
+
+### What the presets actually set
+
+If you want to start from a preset and then hand-tune, these are the
+exact bundles each preset applies (so you know your baseline before
+switching to `manual`):
+
+| Preset | rank | close | favorite | rivalry | tournament | importance | max_games |
+|---|---|---|---|---|---|---|---|
+| `high_curation` | 1.5 | 2.0 | 4.0 | 1.5 | 2.0 | 4.0 | 10 |
+| `balanced` (default) | 1.0 | 3.0 | 6.0 | 2.0 | 1.5 | 3.0 | 25 |
+| `high_coverage` | 0.7 | 4.0 | 8.0 | 2.5 | 1.0 | 2.5 | 50 |
+
+`narrative` is 0.0 (off) in every preset; the LLM narrative signal is
+opt-in regardless of preset. `high_curation` tilts toward stakes
+(importance 4.0) and away from breadth (favorite 4.0, max 10);
+`high_coverage` does the reverse (importance 2.5, favorite 8.0, max 50).
+
+### Knob reference
+
+The recipes above cover the common goals. For reference, each individual
+weight on `manual`:
+
+- **`weight_rank`** (default 1.0): multiplier on the rank-pair signal.
+  Bump to 2.0 and top-25 matchups score ~2x.
+- **`weight_spread`** (default 3.0): multiplier on closeness `[0, 1]`. A
+  true pick'em adds `weight_spread` raw points.
+- **`weight_favorite`** (default 6.0): flat points added per favorite
+  game. Each +6 is roughly +1 to +2 ★ after compression.
+- **`weight_tournament`** (default 1.5): multiplier on the per-stage
+  scalar (Final 5.0, SF 3.5, QF 2.5, R16 1.5, ...).
+- **`weight_rivalry`** (default 2.0): flat bonus on rivalry games.
+- **`weight_importance`** (default 3.0): multiplier on the Monte Carlo
+  leverage. Set to 0 to disable stakes scoring entirely.
+- **`weight_narrative`** (default 0.0, off): multiplier on the LLM
+  narrative score. Needs an Anthropic key; set > 0 to enable.
 
 The weights compose multiplicatively with the per-signal magnitudes,
-so a `weight_rank = 2.0, weight_importance = 0` config aggressively
-elevates rank-pair games while ignoring stakes leverage entirely —
+so a `weight_rank = 3.0, weight_importance = 0` config aggressively
+elevates rank-pair games while ignoring stakes leverage entirely:
 useful for purely "marquee matchup" guides without season-context
 sensitivity.
+
+### Seeing the effect of a change
+
+Every game's pre-compression breakdown is stored per-refresh in
+`cache.json` (`score_breakdown`, `score_raw`, `score`, and the
+per-signal `score_notes`). After you change a weight and re-apply, open
+`cache.json` (or read a curated channel's EPG description, which prints
+the same breakdown) and the per-signal contributions will reflect the
+new weights. That is the fastest way to confirm a knob did what you
+expected before judging the whole guide.
 
 
 ## Limitations and known gaps

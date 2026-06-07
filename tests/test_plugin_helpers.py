@@ -1401,6 +1401,105 @@ class TestCurationPresets:
         assert plugin._resolve_max_games({}) == 25
 
 
+class TestScoringDocMatchesCode:
+    """SCORING.md restates code constants (preset bundles, default signal
+    weights) for the human reader. Those tables are a documentation source
+    of truth that drifts the instant a number changes in code and nobody
+    edits the doc, which is exactly the failure mode plugin.py's
+    _CURATION_PRESETS comment ("DRY check pinned by tests") warns about.
+    These tests parse the doc and pin it to the code, so a weight or preset
+    change that forgets the doc fails CI instead of silently lying to users
+    who are following the tuning recipes.
+    """
+
+    def _scoring_md_rows(self, plugin):
+        import os
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(plugin.__file__)), "SCORING.md"
+        )
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("|"):
+                    # Split markdown row into trimmed cells, dropping the
+                    # empty leading/trailing cells the outer pipes produce.
+                    yield [c.strip() for c in line.strip("|").split("|")]
+
+    def _first_float(self, cell):
+        import re
+        m = re.search(r"-?\d+(?:\.\d+)?", cell)
+        return float(m.group()) if m else None
+
+    def test_preset_table_matches_curation_presets(self, plugin):
+        # The "What the presets actually set" table. Columns:
+        # name | rank | close | favorite | rivalry | tournament | importance | max_games
+        # Doc column "close" maps to the preset key "spread".
+        doc_cols = ["rank", "spread", "favorite", "rivalry",
+                    "tournament", "importance", "max_games"]
+        presets = plugin._CURATION_PRESETS
+        seen = set()
+        for cells in self._scoring_md_rows(plugin):
+            if len(cells) < 8:
+                continue
+            name_cell = cells[0]
+            for key in presets:
+                if key in name_cell and key not in seen:
+                    nums = [self._first_float(c) for c in cells[1:8]]
+                    if any(n is None for n in nums):
+                        continue
+                    documented = dict(zip(doc_cols, nums))
+                    expected = presets[key]
+                    for col in doc_cols:
+                        assert documented[col] == float(expected[col]), (
+                            f"SCORING.md preset table '{key}' {col}="
+                            f"{documented[col]} but _CURATION_PRESETS has "
+                            f"{expected[col]}. Update SCORING.md."
+                        )
+                    seen.add(key)
+        assert seen == set(presets), (
+            f"SCORING.md preset table is missing rows for "
+            f"{set(presets) - seen}. Every preset must be documented."
+        )
+
+    def test_signal_default_weight_table_matches_dataclass(self, plugin):
+        # The Stage 2 "per-signal scoring" table lists a "Default weight"
+        # per signal. Those must equal scoring.Weights() defaults.
+        from dispatcharr_ranked_matchups.scoring import Weights
+        d = Weights()
+        # doc signal token (in backticks) → Weights attribute
+        signal_to_attr = {
+            "rank_pair": "rank",
+            "close_game": "spread",
+            "favorite": "favorite",
+            "tournament_stage": "tournament",
+            "rivalry": "rivalry",
+            "importance": "importance",
+            "narrative": "narrative",
+        }
+        seen = set()
+        for cells in self._scoring_md_rows(plugin):
+            # Stage 2 table rows are: signal | default | range  → 3 cells.
+            if len(cells) != 3:
+                continue
+            token = cells[0].strip("`").split()[0].strip("`")
+            attr = signal_to_attr.get(token)
+            if attr is None or token in seen:
+                continue
+            documented = self._first_float(cells[1])
+            assert documented is not None, (
+                f"SCORING.md signal table '{token}' has no numeric default."
+            )
+            assert documented == float(getattr(d, attr)), (
+                f"SCORING.md signal table '{token}' default={documented} but "
+                f"Weights().{attr}={getattr(d, attr)}. Update SCORING.md."
+            )
+            seen.add(token)
+        assert seen == set(signal_to_attr), (
+            f"SCORING.md signal table is missing rows for "
+            f"{set(signal_to_attr) - seen}."
+        )
+
+
 class TestIsCatchupMatchday:
     def _table(self, max_played):
         # Synthetic table where most teams played `max_played` and a couple

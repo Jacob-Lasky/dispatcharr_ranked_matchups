@@ -402,7 +402,7 @@
       "id": "_section_scoring",
       "type": "info",
       "label": "Interestingness Weights",
-      "description": "Each signal contributes to a 0-10 score. Tweak if a signal feels under/over-weighted. Score breakdown is stored per-game in cache.json so you can inspect."
+      "description": "Each signal contributes to a 0-10 score. Tweak if a signal feels under/over-weighted. Score breakdown is stored per-game in cache.json so you can inspect. Don't want to do the math? Use the 'Curation preset' dropdown above. For worked examples of 'I want X, so I change Y', see the Tuning recipes: https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/blob/main/SCORING.md#tuning"
     },
     {
       "id": "weight_rank",
