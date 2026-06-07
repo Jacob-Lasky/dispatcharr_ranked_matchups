@@ -33,6 +33,12 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   "Elite Eight", and so on, with the incorrect "race" suffix dropped for
   bracket and championship-event bands. Season-long standings bands keep their
   "race" framing (title race, relegation race).
+- **Logo fallback now prefers a league/tournament badge** over the provider
+  channel logo (#102). When no team-vs-team matchup thumbnail exists, the
+  channel gets the league's badge from TheSportsDB (tournament badge first when
+  a competition id is mapped, then the sport/league badge), keyed by
+  `sport_prefix` and cached once per league. The source-channel logo is now the
+  last resort. Unmapped sports still fall back to the channel logo.
 
 ## [1.0.0] — 2026-05-26
 

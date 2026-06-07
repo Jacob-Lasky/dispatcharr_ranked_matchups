@@ -1933,6 +1933,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     sportsdb_api_key = SPORTSDB_DEFAULT_KEY
     thumb_cache: Optional[matchup_logos.ThumbCache] = None
     matchup_logos_used = 0
+    matchup_logos_badge = 0
     matchup_logos_fallback = 0
     if matchup_logos_enabled and not dry_run:
         sportsdb_api_key = (
@@ -1941,26 +1942,69 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         )
         thumb_cache = matchup_logos.ThumbCache(SPORTSDB_THUMB_CACHE_PATH)
 
+    def _resolve_league_badge_id(game: Dict[str, Any]) -> Optional[int]:
+        """Resolve a cached league/tournament badge Logo id for this game, or
+        None when the sport_prefix is unmapped or the badge can't be fetched.
+
+        Badges are shared per league: one file per league id, reused across all
+        that league's games, and skipped by the per-game sweep. The local file
+        IS the cache (no badge re-fetch once downloaded). Only reached on the
+        matchup-thumb miss path, which already requires logos-enabled + not
+        dry_run, so the HTTP here is appropriately gated.
+        """
+        league_id = matchup_logos.league_id_for(
+            game.get("sport_prefix"), game.get("tournament_stage"),
+        )
+        if league_id is None:
+            return None
+        badge_path = os.path.join(
+            matchup_logos.LOGO_DIR, matchup_logos.badge_filename(league_id),
+        )
+        if not os.path.exists(badge_path):
+            badge_url = matchup_logos.resolve_league_badge_url(league_id, sportsdb_api_key)
+            if not badge_url:
+                return None
+            try:
+                os.makedirs(matchup_logos.LOGO_DIR, exist_ok=True)
+            except OSError as e:
+                logger.warning("[ranked_matchups] cannot mkdir %s: %s", matchup_logos.LOGO_DIR, e)
+                return None
+            if not matchup_logos.download_thumb(badge_url, badge_path):
+                return None
+        from apps.channels.models import Logo
+        logo_obj, _ = Logo.objects.get_or_create(
+            url=badge_path,
+            defaults={"name": f"League badge: {game.get('sport_prefix','?')}"},
+        )
+        return logo_obj.id
+
     def _resolve_matchup_logo_id(
         game: Dict[str, Any], marker: str, source,
-    ) -> Tuple[Optional[int], bool]:
-        """Returns (logo_id, hit_via_sportsdb).
+    ) -> Tuple[Optional[int], str]:
+        """Returns (logo_id, outcome) where outcome is one of "matchup", "badge",
+        or "channel" so the caller can tally each per apply.
 
-        Tries SportsDB lookup → local download → Logo.get_or_create. Falls back
-        to source.logo_id (current v0 behavior) on any miss; the bool tells the
-        caller which path was taken so it can update the per-apply counters
-        without recomputing the fallback id. Dry_run and feature-disabled
-        paths short-circuit to the fallback before any HTTP.
+        Resolution order (issue #102): team-vs-team matchup thumbnail → league /
+        tournament badge → source-channel logo. The provider channel logo is the
+        last resort, not the first fallback. Dry_run and feature-disabled paths
+        short-circuit to the channel logo before any HTTP.
         """
-        fallback_id = source.logo_id if source else None
+        channel_logo = source.logo_id if source else None
         if not matchup_logos_enabled or dry_run or thumb_cache is None:
-            return fallback_id, False
+            return channel_logo, "channel"
+
+        def _badge_or_channel() -> Tuple[Optional[int], str]:
+            badge_id = _resolve_league_badge_id(game)
+            if badge_id is not None:
+                return badge_id, "badge"
+            return channel_logo, "channel"
+
         fresh, cached_url = thumb_cache.get(marker)
         thumb_url = cached_url
         if not fresh:
             start_dt = parse_iso_utc(game.get("start_time_utc"))
             if start_dt is None:
-                return fallback_id, False
+                return _badge_or_channel()
             thumb_url = matchup_logos.resolve_thumb_url(
                 home=game.get("home", ""),
                 away=game.get("away", ""),
@@ -1970,26 +2014,26 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             )
             thumb_cache.put(marker, thumb_url)
         if not thumb_url:
-            return fallback_id, False
+            return _badge_or_channel()
         # Ensure /data/logos/ exists (Dispatcharr creates it lazily on first
         # upload via the UI; we might race a fresh install).
         try:
             os.makedirs(matchup_logos.LOGO_DIR, exist_ok=True)
         except OSError as e:
             logger.warning("[ranked_matchups] cannot mkdir %s: %s", matchup_logos.LOGO_DIR, e)
-            return fallback_id, False
+            return _badge_or_channel()
         local_path = os.path.join(
             matchup_logos.LOGO_DIR, matchup_logos.marker_to_filename(marker),
         )
         if not os.path.exists(local_path):
             if not matchup_logos.download_thumb(thumb_url, local_path):
-                return fallback_id, False
+                return _badge_or_channel()
         from apps.channels.models import Logo
         logo_obj, _ = Logo.objects.get_or_create(
             url=local_path,
             defaults={"name": f"Top Matchup: {game.get('home','?')} vs {game.get('away','?')}"},
         )
-        return logo_obj.id, True
+        return logo_obj.id, "matchup"
 
     with transaction.atomic():
         # Phase 0: park existing virtual channels in a high temporary number
@@ -2123,10 +2167,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             source_streams = [sid for _, _, sid in stream_pool]
             existing = existing_virtuals.get(marker)
 
-            resolved_logo_id, used_sportsdb = _resolve_matchup_logo_id(g, marker, source)
+            resolved_logo_id, logo_outcome = _resolve_matchup_logo_id(g, marker, source)
             if matchup_logos_enabled and not dry_run:
-                if used_sportsdb:
+                if logo_outcome == "matchup":
                     matchup_logos_used += 1
+                elif logo_outcome == "badge":
+                    matchup_logos_badge += 1
                 else:
                     matchup_logos_fallback += 1
 
@@ -2330,7 +2376,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     logo_msg = ""
     if matchup_logos_enabled and not dry_run:
         logo_msg = (
-            f" Matchup logos: {matchup_logos_used} resolved via SportsDB, "
+            f" Matchup logos: {matchup_logos_used} matchup thumbnails, "
+            f"{matchup_logos_badge} league/tournament badges, "
             f"{matchup_logos_fallback} fell back to source-channel logo, "
             f"{stale_logo_files_swept} stale file(s) swept."
         )
