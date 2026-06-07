@@ -310,9 +310,18 @@
       "label": "Claude model",
       "default": "claude-haiku-4-5",
       "options": [
-        {"value": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (cheap, fast)"},
-        {"value": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
-        {"value": "claude-opus-4-7", "label": "Claude Opus 4.7"}
+        {
+          "value": "claude-haiku-4-5",
+          "label": "Claude Haiku 4.5 (cheap, fast)"
+        },
+        {
+          "value": "claude-sonnet-4-6",
+          "label": "Claude Sonnet 4.6"
+        },
+        {
+          "value": "claude-opus-4-7",
+          "label": "Claude Opus 4.7"
+        }
       ],
       "help_text": "Model used for ambiguous EPG matching and (if enabled) narrative scoring."
     },
@@ -335,10 +344,22 @@
       "label": "Curation preset",
       "default": "manual",
       "options": [
-        {"value": "manual", "label": "Manual (use individual weights + max_games below)"},
-        {"value": "high_curation", "label": "High curation (~10 games, only the best)"},
-        {"value": "balanced", "label": "Balanced (~25 games, default v0 behavior)"},
-        {"value": "high_coverage", "label": "High coverage (~50 games, include smaller stakes)"}
+        {
+          "value": "manual",
+          "label": "Manual (use individual weights + max_games below)"
+        },
+        {
+          "value": "high_curation",
+          "label": "High curation (~10 games, only the best)"
+        },
+        {
+          "value": "balanced",
+          "label": "Balanced (~25 games, default v0 behavior)"
+        },
+        {
+          "value": "high_coverage",
+          "label": "High coverage (~50 games, include smaller stakes)"
+        }
       ],
       "help_text": "Bundles weight + max_games tuning into one knob so you don't have to tune 9 sliders. Picking anything other than 'manual' overrides the individual weight_* settings and max_games below with the preset's values. Stick with 'manual' if you've hand-tuned weights."
     },
@@ -440,6 +461,18 @@
       "help_text": "Number of season simulations per match for the importance signal. 500 ≈ 0.5s per match on the test EPL season; total refresh cost stays under 30s for a typical 25-match curated list. 1000 doubles compute time but tightens tau-c convergence (Lahvička 2012 used 10000 for academic-grade stability). Drop to 200 if scheduler runs feel sluggish."
     },
     {
+      "id": "_section_naming",
+      "type": "info",
+      "label": "Channel Naming"
+    },
+    {
+      "id": "name_template",
+      "type": "string",
+      "label": "Channel name template",
+      "default": "{league_short} {favorite_star}★{score} · {away_team}{ (rank_away)} at {home_team}{ (rank_home)}{ · tagline}",
+      "help_text": "Sonarr/Radarr-style template for the channel name. Plain text is literal; a {group} holds one variable plus any literal characters glued to it, and the whole group disappears when the variable is blank (so an unranked team or a game with no tagline leaves no stray parens or separators). Variables: {league_short} {league_full} {away_team} {home_team} {rank_away} {rank_home} {rank_pair} {score} {favorite_star} {tagline} {tournament} {venue} {game_date} {start_time} {kickoff} {rivalry}. Use the 'Test naming convention' button to preview before applying. Leave blank for the default shown above."
+    },
+    {
       "id": "_section_apply",
       "type": "info",
       "label": "Apply Behavior",
@@ -527,6 +560,11 @@
       "id": "show_status",
       "label": "Show current state",
       "description": "Print recent cache contents with score breakdown per game. No writes, no API calls."
+    },
+    {
+      "id": "preview_names",
+      "label": "Test naming convention",
+      "description": "Render the channel name template against sample games (no DB writes, no cache needed) so you can check the layout before applying. Reports any template errors and lists every available variable."
     }
   ]
 }

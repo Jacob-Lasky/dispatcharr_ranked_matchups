@@ -1729,6 +1729,23 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     group_name = settings.get("channel_profile_name", "Top Matchups")
     dry_run = bool(settings.get("dry_run", True))
 
+    # Channel-name template (issue #100). Empty/unset -> the built-in default.
+    # A malformed custom template must never crash an apply or poison live
+    # channel names: validate, and on any problem fall back to the default and
+    # log loudly (the "test naming convention" action is where users catch this
+    # before it ships).
+    from . import naming
+    name_template = str(settings.get("name_template") or "").strip() or None
+    if name_template is not None:
+        tmpl_errors = naming.validate_template(name_template)
+        if tmpl_errors:
+            logger.warning(
+                "[ranked_matchups] invalid name_template (%s); using default",
+                "; ".join(tmpl_errors),
+            )
+            name_template = None
+    apply_tz = _resolve_tz(settings.get("local_timezone", "UTC"))
+
     # 1. Ensure target ChannelGroup. Also detect any old groups/sources we own
     # (from a previous target_group_name) and clean them up: fixes the case
     # where the user renames "Top Matchups" → "!Top Matchups" between runs.
@@ -2040,14 +2057,21 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 rank_b=g.get("rank_away"),
                 rank_source=rank_source,
             )
-            new_name = format_channel_name(
-                g["sport_prefix"], signals, score, g["home"], g["away"], tagline=tagline,
-            )
-
             start_dt = parse_iso_utc(g.get("start_time_utc"))
             if start_dt is None:
                 logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)
                 continue
+
+            new_name = format_channel_name(
+                g["sport_prefix"], signals, score, g["home"], g["away"],
+                tagline=tagline,
+                template=name_template,
+                rank_source=rank_source,
+                sport_label=g.get("sport_label", ""),
+                venue=g.get("venue"),
+                start_dt=start_dt,
+                tz=apply_tz,
+            )
             prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
             prog_end = start_dt + timedelta(hours=EPG_POST_HOURS)
 
@@ -2387,6 +2411,49 @@ def _action_refresh_async(settings: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ---------- preview / test naming convention ----------
+
+def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Render the current name_template against canned sample games so a user
+    can eyeball the layout before applying it to live channels (issue #100).
+
+    On an empty or invalid template it previews the DEFAULT (clearly labeled)
+    and lists the validation problems, so a broken template is caught here and
+    never reaches the channel list.
+    """
+    from . import naming
+
+    raw = str(settings.get("name_template") or "").strip()
+    tz = _resolve_tz(settings.get("local_timezone", "UTC"))
+
+    using_default = not raw
+    template = raw or naming.DEFAULT_NAME_TEMPLATE
+    errors = naming.validate_template(template)
+    if errors and not using_default:
+        template = naming.DEFAULT_NAME_TEMPLATE
+        using_default = True
+
+    _, rendered = naming.preview_lines(template, tz=tz)
+
+    lines: List[str] = []
+    if errors:
+        lines.append("Template problems (the DEFAULT is previewed below):")
+        lines += [f"  - {e}" for e in errors]
+        lines.append("")
+    lines.append(f"Previewing {'DEFAULT template' if using_default else 'your template'}:")
+    lines.append(f"  {template}")
+    lines.append("")
+    for label, name in rendered:
+        lines.append(f"  {name}")
+        lines.append(f"      ({label})")
+    lines.append("")
+    lines.append("Variables (wrap optional ones in { } so the group vanishes when blank):")
+    for token, desc in naming.TOKENS.items():
+        lines.append(f"  {{{token}}}: {desc}")
+
+    return {"status": "error" if errors else "ok", "message": "\n".join(lines)}
+
+
 # ---------- show status ----------
 
 def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -2645,6 +2712,8 @@ class Plugin:
                 return _action_auto_pipeline_async(settings)
             if action == "show_status":
                 return _action_show_status(settings)
+            if action == "preview_names":
+                return _action_preview_names(settings)
             return {"status": "error", "message": f"Unknown action: {action!r}"}
         except Exception as e:
             logger.exception("[ranked_matchups] action %r failed", action)
