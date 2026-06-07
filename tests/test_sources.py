@@ -9836,3 +9836,80 @@ class TestInternationalFriendliesSource:
         # No poll for national-team friendlies, no league context.
         assert row.rank_home is None and row.rank_away is None
         assert row.extra["espn_league_slug"] == "fifa.friendly"
+
+    @staticmethod
+    def _scheduled_event(eid, home, away):
+        return {
+            "id": eid,
+            "date": "2026-06-09T19:30Z",
+            "competitions": [{
+                "status": {"type": {"completed": False, "state": "pre"}},
+                "competitors": [
+                    {"homeAway": "home", "score": None,
+                     "team": {"location": home}},
+                    {"homeAway": "away", "score": None,
+                     "team": {"location": away}},
+                ],
+            }],
+        }
+
+    def _patch_events(self, monkeypatch, events):
+        from dispatcharr_ranked_matchups.sources import friendlies as friendlies_mod
+
+        class FakeResp:
+            status_code = 200
+            def json(self): return {"events": events}
+
+        monkeypatch.setattr(friendlies_mod.requests, "get",
+                            lambda *a, **kw: FakeResp())
+
+    def test_favorites_only_keeps_favorite_drops_rest(self, monkeypatch):
+        # The favorites gate: only games involving a configured favorite
+        # national team survive. The country name must match ESPN's `location`
+        # spelling ("United States"), which is what match_favorites sees.
+        self._patch_events(monkeypatch, [
+            self._scheduled_event("1", "United States", "Senegal"),
+            self._scheduled_event("2", "Kenya", "Lesotho"),       # dropped
+            self._scheduled_event("3", "Cambodia", "Hong Kong"),  # dropped
+        ])
+        rows = InternationalFriendliesSource(
+            gender="m",
+            favorites=["United States", "Tottenham"],
+            favorites_only=True,
+        ).fetch_upcoming(days_ahead=0)
+        assert len(rows) == 1
+        assert (rows[0].home, rows[0].away) == ("United States", "Senegal")
+
+    def test_favorites_only_off_keeps_all(self, monkeypatch):
+        # Opt-out path: a user who wants every friendly disables the gate.
+        self._patch_events(monkeypatch, [
+            self._scheduled_event("1", "United States", "Senegal"),
+            self._scheduled_event("2", "Kenya", "Lesotho"),
+        ])
+        rows = InternationalFriendliesSource(
+            gender="m",
+            favorites=["United States"],
+            favorites_only=False,
+        ).fetch_upcoming(days_ahead=0)
+        assert len(rows) == 2
+
+    def test_favorites_only_default_off_keeps_all(self, monkeypatch):
+        # The SOURCE defaults favorites_only False (the plugin layer is what
+        # defaults it on). A bare source must not silently filter.
+        self._patch_events(monkeypatch, [
+            self._scheduled_event("1", "Kenya", "Lesotho"),
+        ])
+        rows = InternationalFriendliesSource(gender="m").fetch_upcoming(
+            days_ahead=0)
+        assert len(rows) == 1
+
+    def test_favorites_only_no_favorites_drops_all(self, monkeypatch):
+        # Gate on but no favorites configured: nothing can match, so the
+        # section is empty (and a warning is logged, not an exception).
+        self._patch_events(monkeypatch, [
+            self._scheduled_event("1", "United States", "Senegal"),
+        ])
+        rows = InternationalFriendliesSource(
+            gender="m", favorites=[], favorites_only=True,
+        ).fetch_upcoming(days_ahead=0)
+        assert rows == []
