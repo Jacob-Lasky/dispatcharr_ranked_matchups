@@ -409,3 +409,75 @@ class TestDownloadThumb:
 
     def test_empty_url_returns_false(self, tmp_path):
         assert logos.download_thumb("", str(tmp_path / "out.jpg")) is False
+
+
+# ---------- league/tournament badge fallback (issue #102) ----------
+
+class TestLeagueIdFor:
+    def test_sport_league_id(self):
+        assert logos.league_id_for("EPL") == 4328
+        assert logos.league_id_for("CFB") == 4479      # NCAA football, NOT basketball
+        assert logos.league_id_for("CBB") == 4607      # NCAA men's basketball
+
+    def test_unmapped_prefix_is_none(self):
+        # Niche NCAA sub-sports are intentionally unmapped -> channel-logo fallback.
+        assert logos.league_id_for("NCAAWS") is None
+        assert logos.league_id_for("MADEUP") is None
+        assert logos.league_id_for(None) is None
+
+    def test_tournament_override_when_stage_set(self, monkeypatch):
+        monkeypatch.setitem(logos.SPORTSDB_TOURNAMENT_LEAGUE_IDS, "CBB", 9999)
+        # tournament_stage set + prefix in override -> tournament id wins
+        assert logos.league_id_for("CBB", "FINAL") == 9999
+        # no tournament_stage -> falls back to the sport league id
+        assert logos.league_id_for("CBB", None) == 4607
+
+    def test_every_mapped_id_is_int_and_known_prefix(self):
+        for prefix, lid in logos.SPORTSDB_LEAGUE_IDS.items():
+            assert isinstance(lid, int)
+            # every badge-mapped prefix is a real sport hint prefix
+            assert prefix in logos._SPORT_HINT
+
+
+class TestBadgeFilename:
+    def test_format_and_prefix(self):
+        fn = logos.badge_filename(4328)
+        assert fn == "ranked_matchups_badge_4328.png"
+        assert fn.startswith(logos.BADGE_FILENAME_PREFIX)
+
+    def test_distinct_from_per_game_filename(self):
+        # A badge file must never collide with a per-game marker file.
+        assert logos.badge_filename(4328) != logos.marker_to_filename("ranked_matchups:EPL:x")
+
+
+class TestResolveLeagueBadgeUrl:
+    def test_returns_badge_url(self, monkeypatch):
+        payload = {"leagues": [{"strLeague": "English Premier League",
+                                "strBadge": "https://example.test/epl.png"}]}
+        monkeypatch.setattr(logos.urllib.request, "urlopen", _fake_urlopen(payload))
+        assert logos.resolve_league_badge_url(4328, "3") == "https://example.test/epl.png"
+
+    def test_no_leagues_returns_none(self, monkeypatch):
+        monkeypatch.setattr(logos.urllib.request, "urlopen", _fake_urlopen({"leagues": None}))
+        assert logos.resolve_league_badge_url(4328, "3") is None
+
+    def test_missing_badge_field_returns_none(self, monkeypatch):
+        monkeypatch.setattr(logos.urllib.request, "urlopen",
+                            _fake_urlopen({"leagues": [{"strLeague": "X"}]}))
+        assert logos.resolve_league_badge_url(4328, "3") is None
+
+
+class TestSweepKeepsBadges:
+    def test_badge_file_survives_marker_sweep(self, tmp_path):
+        live_marker = "ranked_matchups:EPL:live"
+        # one live per-game file, one stale per-game file, one badge file
+        live_file = tmp_path / logos.marker_to_filename(live_marker)
+        stale_file = tmp_path / logos.marker_to_filename("ranked_matchups:EPL:stale")
+        badge_file = tmp_path / logos.badge_filename(4328)
+        for f in (live_file, stale_file, badge_file):
+            f.write_bytes(b"x")
+        removed = logos.sweep_stale_logo_files({live_marker}, logo_dir=str(tmp_path))
+        assert removed == 1               # only the stale per-game file
+        assert live_file.exists()
+        assert badge_file.exists()        # badge is never swept
+        assert not stale_file.exists()

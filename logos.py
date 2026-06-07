@@ -94,6 +94,43 @@ _SPORT_HINT: dict[str, str] = {
     "BSA": "Brazilian",
 }
 
+# Plugin sport_prefix -> TheSportsDB league id, used to fetch a league/sport
+# BADGE as the per-game logo fallback when no team-vs-team matchup thumbnail
+# exists (issue #102). A provider channel's own logo ("ESPN") is the least
+# useful image for a curated matchup, so we prefer the league badge first.
+#
+# Every id below was verified against lookupleague.php at build time (the
+# endpoint returns strBadge). Cup prefixes (UCL/WC/EURO) map to the competition
+# itself, so their badge IS the tournament badge. Prefixes deliberately left
+# unmapped (e.g. niche NCAA sub-sports whose SportsDB league could not be
+# confirmed) fall through to the source-channel logo rather than risk showing
+# a wrong-sport badge.
+SPORTSDB_LEAGUE_IDS: dict[str, int] = {
+    "CFB": 4479,            # NCAA Division 1 (American Football)
+    "CBB": 4607,            # NCAA Division I Basketball Mens
+    "NFL": 4391, "NHL": 4380, "MLB": 4424, "NBA": 4387, "WNBA": 4516,
+    "MLS": 4346, "NWSL": 4521, "LigaMX": 4350,
+    "EPL": 4328, "EFL": 4329, "UCL": 4480, "BL1": 4331,
+    "LaLiga": 4335, "SerieA": 4332, "Ligue1": 4334,
+    "WC": 4429, "EURO": 4502,
+    "Eredivisie": 4337, "PrimeiraLiga": 4344, "BSA": 4351,
+}
+
+# Optional tournament-specific override, consulted FIRST when a game carries a
+# `tournament_stage`, so a league source's postseason can show the competition
+# badge rather than the regular-season league badge (the "tournament -> sport
+# -> channel" order chosen for #102). Empty by default: cup SOURCES already map
+# their tournament badge directly via SPORTSDB_LEAGUE_IDS, so this only matters
+# for a league source that also runs a distinct postseason with its own
+# SportsDB league id. Add entries as those ids are confirmed.
+SPORTSDB_TOURNAMENT_LEAGUE_IDS: dict[str, int] = {}
+
+_LEAGUE_URL = "https://www.thesportsdb.com/api/v1/json/{key}/lookupleague.php?id={id}"
+
+# League badges are shared across all of a league's games (a small, finite set),
+# so they use a distinct filename prefix that the per-game marker sweep skips.
+BADGE_FILENAME_PREFIX = LOGO_FILENAME_PREFIX + "badge_"
+
 
 def _strip_trailing_qualifier(name: str) -> str:
     """Strip trailing FC/AFC/CF/SC/FK/AC qualifiers iteratively.
@@ -124,6 +161,45 @@ def marker_to_filename(marker: str) -> str:
     """
     digest = hashlib.sha1(marker.encode("utf-8")).hexdigest()[:16]
     return f"{LOGO_FILENAME_PREFIX}{digest}.jpg"
+
+
+def badge_filename(league_id: int) -> str:
+    """Stable filename for a cached league badge. Uses BADGE_FILENAME_PREFIX so
+    the per-game marker sweep leaves it alone (badges are shared, not per-game)."""
+    return f"{BADGE_FILENAME_PREFIX}{int(league_id)}.png"
+
+
+def league_id_for(
+    sport_prefix: Optional[str], tournament_stage: Optional[str] = None,
+) -> Optional[int]:
+    """Pick the SportsDB league id for a game's fallback badge.
+
+    Tournament override first (when the game is in a tournament AND a distinct
+    competition id is mapped), then the sport's league id, else None (the caller
+    falls back to the source-channel logo). Implements the #102 order
+    tournament -> sport -> channel.
+    """
+    if not sport_prefix:
+        return None
+    if tournament_stage and sport_prefix in SPORTSDB_TOURNAMENT_LEAGUE_IDS:
+        return SPORTSDB_TOURNAMENT_LEAGUE_IDS[sport_prefix]
+    return SPORTSDB_LEAGUE_IDS.get(sport_prefix)
+
+
+def resolve_league_badge_url(league_id: int, api_key: str = "3") -> Optional[str]:
+    """Return a league's badge image URL via SportsDB lookupleague.php, or None.
+
+    `api_key`: "3" is SportsDB's free test tier (same as resolve_thumb_url)."""
+    url = _LEAGUE_URL.format(
+        key=urllib.parse.quote(api_key or "3"), id=int(league_id),
+    )
+    payload = _http_get_json(url)
+    if not payload:
+        return None
+    leagues = payload.get("leagues") or []
+    if not leagues:
+        return None
+    return leagues[0].get("strBadge") or None
 
 
 def _date_in_tolerance(event_date_str: str, expected_dt: datetime) -> bool:
@@ -329,6 +405,10 @@ def sweep_stale_logo_files(live_markers: set[str], logo_dir: str = LOGO_DIR) -> 
         return 0
     for name in entries:
         if not name.startswith(LOGO_FILENAME_PREFIX):
+            continue
+        # League badges (BADGE_FILENAME_PREFIX) are shared across games, not
+        # keyed by a live marker; never sweep them here.
+        if name.startswith(BADGE_FILENAME_PREFIX):
             continue
         if name in live_filenames:
             continue
