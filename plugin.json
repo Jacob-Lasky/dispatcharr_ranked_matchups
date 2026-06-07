@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them on interestingness, matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -95,14 +95,21 @@
       "type": "boolean",
       "label": "International Friendlies (Men's)",
       "default": false,
-      "help_text": "Senior men's national-team friendlies and FIFA-window warm-ups (e.g. a USMNT tune-up the week before the World Cup) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. Add a national team to Favorites to see its friendlies. Offseason → no rows. No API key required."
+      "help_text": "Senior men's national-team friendlies and FIFA-window warm-ups (e.g. a USMNT tune-up the week before the World Cup) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite national team are shown (see 'Friendlies: favorite national teams only' below); add the team to Favorites using the country name as ESPN spells it (e.g. \"United States\", not \"USA\"). Offseason → no rows. No API key required."
     },
     {
       "id": "enable_intl_friendlies_women",
       "type": "boolean",
       "label": "International Friendlies (Women's)",
       "default": false,
-      "help_text": "Senior women's national-team friendlies and FIFA-window warm-ups (e.g. a USWNT tune-up) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. Add a national team to Favorites to see its friendlies. Offseason → no rows. No API key required."
+      "help_text": "Senior women's national-team friendlies and FIFA-window warm-ups (e.g. a USWNT tune-up) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite national team are shown (see 'Friendlies: favorite national teams only' below); add the team to Favorites using the country name as ESPN spells it (e.g. \"United States\", not \"USA\"). Offseason → no rows. No API key required."
+    },
+    {
+      "id": "friendlies_favorites_only",
+      "type": "boolean",
+      "label": "Friendlies: favorite national teams only",
+      "default": true,
+      "help_text": "When on (default), International Friendlies (men's and women's) show ONLY games involving a national team in your Favorites. A friendly is an exhibition with no standings or rank, so a game between two teams you don't follow has nothing to earn a guide slot, and a FIFA window produces dozens of them (Kenya vs Lesotho, Cambodia vs Hong Kong, ...). Match by the country name as ESPN spells it (\"United States\", not \"USA\"). Turn this OFF to see every international friendly in the lookahead window. No effect unless a Friendlies toggle above is on."
     },
     {
       "id": "enable_eredivisie",

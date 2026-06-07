@@ -162,6 +162,55 @@ class TestParseFavorites:
         assert plugin._parse_favorites("") == []
 
 
+class TestBuildSourcesFriendliesGate:
+    """_build_sources is where the friendlies favorites-gate is wired: it
+    reads friendlies_favorites_only (defaulting ON) and the user's Favorites
+    and hands both to InternationalFriendliesSource. Enable ONLY friendlies so
+    no API keys are needed and the returned list is just the friendlies
+    source(s)."""
+
+    def _friendlies(self, plugin, settings):
+        from dispatcharr_ranked_matchups.sources.friendlies import (
+            InternationalFriendliesSource,
+        )
+        return [
+            s for s in plugin._build_sources(settings)
+            if isinstance(s, InternationalFriendliesSource)
+        ]
+
+    def test_default_gates_on_and_passes_favorites(self, plugin):
+        # friendlies_favorites_only OMITTED must default to True (the manifest
+        # default), and the user's Favorites must reach the source.
+        srcs = self._friendlies(plugin, {
+            "favorites": "United States, Tottenham",
+            "enable_intl_friendlies": True,
+        })
+        assert len(srcs) == 1
+        assert srcs[0].gender == "m"
+        assert srcs[0].favorites_only is True
+        assert srcs[0].favorites == ["United States", "Tottenham"]
+
+    def test_explicit_opt_out(self, plugin):
+        srcs = self._friendlies(plugin, {
+            "favorites": "United States",
+            "enable_intl_friendlies": True,
+            "friendlies_favorites_only": False,
+        })
+        assert len(srcs) == 1
+        assert srcs[0].favorites_only is False
+
+    def test_women_source_also_gated(self, plugin):
+        # The gate applies to both genders from the single toggle.
+        srcs = self._friendlies(plugin, {
+            "favorites": "United States",
+            "enable_intl_friendlies_women": True,
+        })
+        assert len(srcs) == 1
+        assert srcs[0].gender == "w"
+        assert srcs[0].favorites_only is True
+        assert srcs[0].favorites == ["United States"]
+
+
 class TestBuildMarkerKey:
     """The fallback path MUST be process-stable (issue: Python's hash() is
     salted by PYTHONHASHSEED, causing every soccer game to look like a new

@@ -615,10 +615,25 @@ def _build_sources(settings: Dict[str, Any]):
     # is the only path for a pre-tournament national-team warm-up (e.g. a
     # USMNT friendly the week before the World Cup) to reach the guide: the
     # world_cup source carries only FD.org tournament fixtures, not friendlies.
+    # friendlies_favorites_only (default on) gates these to favorite national
+    # teams only: a FIFA window yields dozens of exhibitions between teams the
+    # user doesn't follow, and a friendly has no standings/rank to earn a slot
+    # on its own. The source does the matching (reusing scoring.match_favorites)
+    # so we just hand it the user's favorites and the toggle.
+    intl_favorites = _parse_favorites(settings.get("favorites", ""))
+    intl_favorites_only = bool(settings.get("friendlies_favorites_only", True))
     if settings.get("enable_intl_friendlies", False):
-        sources.append(InternationalFriendliesSource(gender="m"))
+        sources.append(InternationalFriendliesSource(
+            gender="m",
+            favorites=intl_favorites,
+            favorites_only=intl_favorites_only,
+        ))
     if settings.get("enable_intl_friendlies_women", False):
-        sources.append(InternationalFriendliesSource(gender="w"))
+        sources.append(InternationalFriendliesSource(
+            gender="w",
+            favorites=intl_favorites,
+            favorites_only=intl_favorites_only,
+        ))
 
     # Additional FD.org free-tier leagues. Same _make_soccer
     # router; LEAGUE_CONTEXTS uses format="league" so dispatch goes
@@ -2684,7 +2699,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.0.0"
+    version = "1.1.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
