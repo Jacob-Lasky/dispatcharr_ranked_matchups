@@ -2410,25 +2410,26 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 # ---------- auto pipeline ----------
 
 def _action_auto_pipeline_sync(settings: Dict[str, Any]) -> Dict[str, Any]:
-    """Synchronous in-process auto_pipeline (refresh then apply).
+    """Synchronous auto_pipeline body (refresh then apply).
 
-    DO NOT call this from the HTTP `Plugin.run("auto_pipeline", ...)`
-    dispatch -- the action runs ~40s end-to-end on a populated install
-    and the browser / axios client drops the response well before that,
-    producing a false "failed to run plugin action" toast (#84). The HTTP
-    dispatch goes through `_action_auto_pipeline_async` which queues a
-    Celery task that calls this function inside a Celery worker.
+    DO NOT call this inline in a uwsgi worker (neither from the HTTP
+    `Plugin.run` dispatch NOR from the scheduler loop). The refresh step
+    runs a pure-Python Monte Carlo that holds the GIL, and uwsgi runs
+    under gevent on 0.26.0, so running it in-worker freezes the hub and
+    hangs login + live streams (prod outage 2026-06-10). It is meant to
+    execute inside `_pipeline_runner.py` (a subprocess with no gevent
+    patch). Both entry points reach it the same way -- via
+    `tasks.run_pipeline_subprocess("auto_pipeline", settings)`:
+      - HTTP `Plugin.run("auto_pipeline")` -> `_action_auto_pipeline_async`
+        -> daemon thread -> run_pipeline_subprocess (returns a queued
+        envelope immediately so the browser doesn't time out, #84).
+      - `_scheduler_loop` -> run_pipeline_subprocess.
 
-    The scheduler (`_scheduler_loop`) DOES call this directly: scheduler
-    runs already happen out-of-request, the Redis lock prevents racing
-    a thread-driven HTTP run, and keeping the sync path means crash
-    semantics stay simple (a hung action is visible in the worker
-    process, not orphaned in a thread).
-
-    The caller is responsible for setting and clearing the inflight Redis
-    key (Celery task and scheduler do this around the call). This helper
-    only transitions the phase between refresh and apply so both entry
-    points get the same fine-grained progress in show_status."""
+    The CALLER (the daemon thread / scheduler, in the worker process) owns
+    the inflight Redis key and the scheduler lock around the subprocess.
+    This body only transitions the inflight phase between refresh and
+    apply so both entry points get the same fine-grained show_status
+    progress -- the child writes that phase update to the same Redis key."""
     r1 = _action_refresh(settings)
     if r1.get("status") != "ok":
         return r1
@@ -2644,27 +2645,14 @@ def _scheduler_loop(plugin_ref):
             )
             if _scheduler_stop.wait(timeout=sleep_s):
                 return
-            if not _try_acquire_scheduler_lock():
-                logger.info("[ranked_matchups] another worker holds the lock; skipping")
-                continue
-            try:
-                logger.info("[ranked_matchups] scheduler firing auto_pipeline")
-                # Publish inflight to the same Redis key the Celery tasks use
-                # so the UI's show_status surfaces scheduled runs identically
-                # to HTTP-queued runs. The task_id slot gets "scheduler-<pid>"
-                # so it's distinguishable from a Celery UUID.
-                tasks._set_inflight(
-                    "scheduled_auto_pipeline",
-                    f"scheduler-{os.getpid()}",
-                    "refresh",
-                )
-                try:
-                    result = _action_auto_pipeline_sync(settings)
-                    logger.info("[ranked_matchups] auto_pipeline: %s", result.get("message"))
-                finally:
-                    tasks._clear_inflight()
-            finally:
-                _release_scheduler_lock()
+            logger.info("[ranked_matchups] scheduler firing auto_pipeline")
+            # Delegates to the shared lock/inflight/subprocess path so the
+            # scheduler runs the work OUT OF PROCESS (the Monte Carlo scoring
+            # holds the GIL and would freeze this gevent worker's hub if run
+            # inline) and can't drift out of sync with the HTTP launchers.
+            # run_scheduled_pipeline acquires the cross-worker lock itself and
+            # no-ops if another worker holds it. See tasks.py header.
+            tasks.run_scheduled_pipeline(settings)
         except Exception:
             logger.exception("[ranked_matchups] scheduler loop crashed; sleeping 10m")
             _scheduler_stop.wait(timeout=600)
@@ -2699,7 +2687,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.1.0"
+    version = "1.2.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
