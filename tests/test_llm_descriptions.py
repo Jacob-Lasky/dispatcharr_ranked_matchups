@@ -150,6 +150,51 @@ class TestBuildLlmContext:
         assert "facing elimination" in llm.SYSTEM_PROMPT
         assert "win or go home" in llm.SYSTEM_PROMPT
 
+    def test_system_prompt_grounds_all_facts(self):
+        # The general grounding rule is what kills the WC "shock opening loss"
+        # fabrication: every record / result / standing must come from the
+        # provided lines, not just series facts.
+        assert "GROUND EVERY FACT" in llm.SYSTEM_PROMPT
+        assert "lost their opener" in llm.SYSTEM_PROMPT
+
+    def test_group_stage_surfaced(self):
+        # WC / EURO group grounding: without these lines the model invents a
+        # group narrative ("shock opening loss") from team names alone.
+        g = _sample_game()
+        g["home"] = "Argentina"
+        g["away"] = "Mexico"
+        g["extra"]["group_stage"] = {
+            "tournament": "FIFA World Cup",
+            "group": "C",
+            "matchday": 2,
+            "matchdays_total": 3,
+            "standings": [
+                {"position": 1, "name": "Argentina", "played": 1, "points": 3,
+                 "goal_difference": 1},
+                {"position": 2, "name": "Mexico", "played": 1, "points": 1,
+                 "goal_difference": 0},
+            ],
+            "results": [
+                {"home": "Argentina", "away": "Saudi Arabia",
+                 "home_goals": 2, "away_goals": 1},
+            ],
+            "advance": "The top 2 teams in each group advance, plus the 8 "
+                       "best third-placed teams across all groups.",
+        }
+        ctx = llm.build_llm_context(g, tagline="")
+        assert "Tournament round: FIFA World Cup Group C, Matchday 2 of 3" in ctx
+        assert "Current group standings:" in ctx
+        assert "#1 Argentina - 3 pts, 1 played, +1 GD" in ctx
+        assert "Group results so far:" in ctx
+        assert "Argentina 2-1 Saudi Arabia" in ctx
+        assert "Advancement: The top 2 teams in each group advance" in ctx
+
+    def test_no_group_stage_emits_no_group_lines(self):
+        ctx = llm.build_llm_context(_sample_game(), tagline="")
+        assert "Tournament round:" not in ctx
+        assert "Current group standings:" not in ctx
+        assert "Group results so far:" not in ctx
+
     def test_importance_thresholds_surfaced(self):
         # Phase C.4 renamed the prompt label "Stakes thresholds" →
         # "Outcome bands" to match the importance-signal vocabulary.

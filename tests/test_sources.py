@@ -8065,6 +8065,106 @@ class TestGroupStageSoccerSource:
         assert new_state["_teams"]["Mexico"]["gf"] == 3
         assert 1 in new_state["_applied"]
 
+    # ---------- group_stage LLM/description context (the "shock opening
+    # loss" fabrication fix: arm the description writer with real facts) ----
+
+    def test_display_group_letter_strips_prefix(self):
+        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
+        assert GroupStageSoccerSource._display_group_letter("GROUP_C") == "C"
+        assert GroupStageSoccerSource._display_group_letter("A") == "A"
+
+    def test_advance_rule_text_world_cup(self):
+        # WC_GS context: top 2 + best 8 thirds, 3 matchdays.
+        src = self._make_source([])
+        rule, total = src._advance_rule_text()
+        assert "top 2 teams in each group advance" in rule
+        assert "8 best third-placed teams" in rule
+        assert total == 3
+
+    def test_build_group_contexts_has_standings_results_and_advance(self):
+        matches = [
+            self._match(1, "GROUP_C", "Argentina", "Saudi Arabia",
+                        hg=2, ag=1, status="FINISHED",
+                        date="2026-06-11T19:00:00Z"),
+            self._match(2, "GROUP_C", "Mexico", "Poland",
+                        hg=1, ag=1, status="FINISHED",
+                        date="2026-06-11T22:00:00Z"),
+            # An upcoming MD2 fixture in the same group (no result yet).
+            self._match(3, "GROUP_C", "Argentina", "Mexico",
+                        date="2026-06-16T19:00:00Z"),
+        ]
+        src = self._make_source(matches)
+        ctx = src._build_group_contexts()
+        assert "GROUP_C" in ctx
+        gc = ctx["GROUP_C"]
+        assert gc["tournament"] == "FIFA World Cup"
+        assert gc["group"] == "C"        # display letter, prefix stripped
+        assert gc["matchdays_total"] == 3
+        # Standings reflect the two FINISHED results: Argentina top (3 pts),
+        # Saudi Arabia bottom (0). Sorted by the FIFA tiebreaker.
+        table = {row["name"]: row for row in gc["standings"]}
+        assert table["Argentina"]["points"] == 3
+        assert table["Argentina"]["goal_difference"] == 1
+        assert table["Saudi Arabia"]["points"] == 0
+        assert gc["standings"][0]["name"] == "Argentina"  # position 1
+        assert gc["standings"][0]["position"] == 1
+        # Results, oldest first, scoreline shape.
+        assert "Argentina 2-1 Saudi Arabia" in [
+            f'{r["home"]} {r["home_goals"]}-{r["away_goals"]} {r["away"]}'
+            for r in gc["results"]
+        ]
+        assert "third-placed" in gc["advance"]
+
+    def test_build_group_contexts_empty_before_any_result(self):
+        # Pre-tournament: all-zero rows, no results. Still emits a usable
+        # context (group letter + advance rule) so the LLM knows it's the
+        # opening group game and won't invent a prior loss.
+        matches = [
+            self._match(1, "GROUP_C", "Argentina", "Saudi Arabia",
+                        date="2026-06-11T19:00:00Z"),
+            self._match(2, "GROUP_C", "Mexico", "Poland",
+                        date="2026-06-11T22:00:00Z"),
+        ]
+        src = self._make_source(matches)
+        gc = src._build_group_contexts()["GROUP_C"]
+        assert gc["results"] == []
+        assert all(row["played"] == 0 and row["points"] == 0
+                   for row in gc["standings"])
+        assert len(gc["standings"]) == 4
+
+    def test_fetch_upcoming_stamps_group_stage(self, monkeypatch):
+        # End-to-end: a stamped extra["group_stage"] rides every emitted
+        # group-stage row, carrying that fixture's own matchday.
+        matches = [
+            self._match(1, "GROUP_C", "Argentina", "Saudi Arabia",
+                        hg=2, ag=1, status="FINISHED",
+                        date="2026-06-11T19:00:00Z"),
+            self._match(2, "GROUP_C", "Mexico", "Poland",
+                        date="2026-06-16T22:00:00Z"),
+        ]
+        src = self._make_source(matches)
+        # WC uses no flat standings table; stub fixtures + odds so super()'s
+        # fetch_upcoming builds a GameRow without touching the network.
+        monkeypatch.setattr(src, "_fetch_fixtures", lambda days_ahead: [{
+            "id": 2,
+            "homeTeam": {"name": "Argentina"},
+            "awayTeam": {"name": "Mexico"},
+            "utcDate": "2026-06-16T19:00:00Z",
+            "matchday": 2,
+            "stage": "GROUP_STAGE",
+            "status": "SCHEDULED",
+        }])
+        monkeypatch.setattr(src, "_fetch_closeness", lambda: {})
+        rows = src.fetch_upcoming(days_ahead=7)
+        assert len(rows) == 1
+        gs = rows[0].extra["group_stage"]
+        assert gs["group"] == "C"
+        assert gs["matchday"] == 2                  # this fixture's MD
+        assert gs["tournament"] == "FIFA World Cup"
+        assert any(r["home"] == "Argentina" for r in gs["results"])
+        # The group-stage competition code remap still happens.
+        assert rows[0].extra["fd_competition_code"] == "WC_GS"
+
 
 class TestKnockoutSoccerSourceSkipsGroupStage:
     """Once GroupStageSoccerSource owns group-stage fixtures, the sibling

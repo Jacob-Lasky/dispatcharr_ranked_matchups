@@ -190,3 +190,110 @@ def series_result_lines(series: Optional[Dict[str, Any]]) -> List[str]:
         tag = " (OT)" if r.get("ot") else ""
         out.append(f"Game {gn}: {home} {hg}, {away} {ag}{tag}")
     return out
+
+
+# ---------- group-stage rendering ----------
+#
+# The soccer analog of the series schema above, for international-tournament
+# group stages (World Cup, EUROs). A group is a 4-team mini-league where the
+# concrete facts -- who has played whom, the current points table, what it
+# takes to advance -- are exactly what the LLM needs to stop inventing
+# narratives ("shock opening loss", "needs a win to survive"). Populated by
+# `sources/soccer.py:GroupStageSoccerSource.fetch_upcoming`; rendered by BOTH
+# `plugin._build_description` and `llm_descriptions.build_llm_context`, so the
+# deterministic prose and the model's grounding stay in lockstep (same
+# contract the series helpers above hold).
+#
+#   {
+#     "tournament":      str,   # "FIFA World Cup" (competition label)
+#     "group":           str,   # "C" (group letter)
+#     "matchday":        int,   # this game's matchday within the group (1-3)
+#     "matchdays_total": int,   # group length (3: each team plays 3)
+#     "standings": [            # current table, FINISHED matches only, in
+#                               # finishing order (0 = top of group)
+#       {position, name, played, points, goal_difference}, ...
+#     ],
+#     "results": [              # FINISHED group matches, oldest first
+#       {home, away, home_goals, away_goals}, ...
+#     ],
+#     "advance":         str,   # "Top 2 of 4 advance, plus the best ..." (rule)
+#   }
+#
+# These are the ONLY place group state becomes prose. As with the series
+# helpers: do not author a parallel group-phrasing path in the description or
+# context builders.
+
+
+def group_phase_text(group_stage: Optional[Dict[str, Any]]) -> str:
+    """Headline phrase for a group-stage game: "FIFA World Cup Group C,
+    Matchday 2 of 3". Falls back gracefully when pieces are missing
+    ("Group C" alone, or "" when there's no group letter)."""
+    if not isinstance(group_stage, dict):
+        return ""
+    group = (group_stage.get("group") or "").strip()
+    if not group:
+        return ""
+    tournament = (group_stage.get("tournament") or "").strip()
+    head = f"{tournament} Group {group}" if tournament else f"Group {group}"
+    md = group_stage.get("matchday")
+    total = group_stage.get("matchdays_total")
+    if isinstance(md, int) and isinstance(total, int) and total > 0:
+        return f"{head}, Matchday {md} of {total}"
+    return head
+
+
+def group_standings_lines(group_stage: Optional[Dict[str, Any]]) -> List[str]:
+    """Per-team table lines, top of group first, e.g.
+    ["#1 Argentina - 6 pts, 2 played, +3 GD", ...]. Returns [] when no
+    standings are recorded. Skips malformed rows rather than raising."""
+    out: List[str] = []
+    if not isinstance(group_stage, dict):
+        return out
+    for i, row in enumerate(group_stage.get("standings") or []):
+        if not isinstance(row, dict):
+            continue
+        name = row.get("name")
+        if not name:
+            continue
+        pos = row.get("position")
+        pos = pos if isinstance(pos, int) else i + 1
+        pts = row.get("points")
+        played = row.get("played")
+        parts: List[str] = []
+        if isinstance(pts, int):
+            parts.append(f"{pts} pts")
+        if isinstance(played, int):
+            parts.append(f"{played} played")
+        gd = row.get("goal_difference")
+        if isinstance(gd, int):
+            parts.append(f"{gd:+d} GD")
+        suffix = " - " + ", ".join(parts) if parts else ""
+        out.append(f"#{pos} {name}{suffix}")
+    return out
+
+
+def group_results_lines(group_stage: Optional[Dict[str, Any]]) -> List[str]:
+    """Per-completed-match recap lines for the group, oldest first, e.g.
+    ["Argentina 2-1 Saudi Arabia", ...]. Returns [] when no results are
+    recorded. Skips malformed rows rather than raising."""
+    out: List[str] = []
+    if not isinstance(group_stage, dict):
+        return out
+    for r in group_stage.get("results") or []:
+        if not isinstance(r, dict):
+            continue
+        home = r.get("home")
+        away = r.get("away")
+        hg = r.get("home_goals")
+        ag = r.get("away_goals")
+        if None in (home, away, hg, ag):
+            continue
+        out.append(f"{home} {hg}-{ag} {away}")
+    return out
+
+
+def group_advance_text(group_stage: Optional[Dict[str, Any]]) -> str:
+    """The group's advancement rule sentence, or "" when not set."""
+    if not isinstance(group_stage, dict):
+        return ""
+    return (group_stage.get("advance") or "").strip()

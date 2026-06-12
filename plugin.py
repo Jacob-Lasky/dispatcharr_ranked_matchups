@@ -43,6 +43,10 @@ except ImportError:  # py < 3.9 fallback (won't hit on Dispatcharr's Python 3.13
     ZoneInfo = None  # type: ignore
 
 from ._util import (
+    group_advance_text,
+    group_phase_text,
+    group_results_lines,
+    group_standings_lines,
     parse_iso_utc,
     series_phase_text,
     series_record_text,
@@ -1737,6 +1741,9 @@ def _build_description(
       2. Headline: tagline + spread descriptor ("A title race: toss-up.")
       2b. Series state (playoff best-of-N games only): phase + record, then
           a completed-game recap line. Renders nothing for league fixtures.
+      2c. Group-stage state (WC / EURO group games only): round + group
+          standings + finished results + advancement rule. Renders nothing
+          for non-group fixtures.
       3. Matchday + league boundary summary (where applicable)
       4. Standings posture line (league fixtures only: see #10)
       5. Favorite-impact narratives (rooting framing, both deltas)
@@ -1796,6 +1803,25 @@ def _build_description(
         if recap:
             sections.append(" · ".join(recap))
 
+    # 2c. Group-stage state for WC / EURO group games. `extra["group_stage"]`
+    # is the schema GroupStageSoccerSource populates (group letter, current
+    # table, finished results, advance rule). Same grounding the LLM context
+    # uses: it's what stops a group game's prose inventing a "shock opening
+    # loss" when the standings actually show the team top of the group.
+    group_stage = extra.get("group_stage")
+    group_phase = group_phase_text(group_stage)
+    if group_phase:
+        sections.append(group_phase + ".")
+        standings_lines = group_standings_lines(group_stage)
+        if standings_lines:
+            sections.append(" · ".join(standings_lines))
+        result_lines = group_results_lines(group_stage)
+        if result_lines:
+            sections.append(" · ".join(result_lines))
+        advance = group_advance_text(group_stage)
+        if advance:
+            sections.append(advance)
+
     # 3. Matchday line + league boundary reminder. Both are league-based
     # ("why is this a race"). Matchday tells you where in the season we
     # are; boundary_summary explains what positions get what.
@@ -1805,7 +1831,9 @@ def _build_description(
         league_ctx.matchdays_total if league_ctx else None
     )
     matchday_line_parts: List[str] = []
-    if matchday and matchdays_total:
+    # Group-stage games already carry "Group C, Matchday 2 of 3" in section 2c;
+    # don't repeat the matchday here.
+    if matchday and matchdays_total and not group_phase:
         # "Catch-up matchday X of Y" when fixture is meaningfully behind
         # the league's current pacing: see _is_catchup_matchday and #3.
         # Without the label, an end-of-season "Matchday 40 of 46" reads as
