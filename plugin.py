@@ -2259,6 +2259,20 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # the front of the cache, so they get the lowest numbers (TiviMate
             # and other IPTV clients sort by channel number → today's games
             # appear first in the user's Top Matchups group).
+            #
+            # DO NOT make the EPG↔channel binding depend on this number, and DO
+            # NOT try to stabilize it per game to "fix" a guide mismatch. This
+            # number is INTENTIONALLY volatile: it re-ranks by ★ score every
+            # refresh, so a given number maps to a different game across applies.
+            # The stable per-game identity is `marker`, written to BOTH
+            # Channel.tvg_id and ProgramData.tvg_id below. Clients MUST generate
+            # their M3U and EPG URLs with tvg_id_source=tvg_id so the guide binds
+            # by that stable marker. Dispatcharr's default tvg_id_source=
+            # channel_number binds by THIS number instead, and because it caches
+            # the EPG XML separately from the M3U, a post-refresh renumber pairs
+            # the new channel's name with the prior cycle's guide entry for that
+            # number (e.g. "Ole Miss at North Carolina" name over an "Iran vs
+            # New Zealand" program). Root-caused 2026-06-12.
             target_chnum = float(virtual_base + cache_idx)
 
             marker = _build_marker_key(g)
