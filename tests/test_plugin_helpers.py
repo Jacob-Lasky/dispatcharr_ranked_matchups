@@ -2089,3 +2089,81 @@ class TestActionPreviewNames:
         assert "bogus" in r["message"]
         # the DEFAULT is still previewed so the user sees working output
         assert "Alabama (15) at St. John's" in r["message"]
+
+
+class TestStreamLanguageRank:
+    """#111: language-preference bucket for widen-pool ordering. Cases are
+    drawn from real `!Top Matchups` stream names observed on the live box."""
+
+    def test_both_english_team_names_is_english(self, plugin):
+        n = "FIFA World Cup 2026 02: [4K] Mexico 20:00 South Africa"
+        assert plugin._stream_language_rank(n, "Mexico", "South Africa") == plugin._LANG_RANK_ENGLISH
+
+    def test_accented_spelling_is_non_english(self, plugin):
+        # "Turquía" carries an accent and the English "Turkey" is absent.
+        n = "US (Peacock 038) |  Australia v. Turquía (2026-06-13 23:00:00)"
+        assert plugin._stream_language_rank(n, "Australia", "Turkey") == plugin._LANG_RANK_NON_ENGLISH
+
+    def test_spanish_country_without_accent_is_non_english(self, plugin):
+        # No accent, but "Estados Unidos" is a curated Spanish-country hint.
+        n = "US (Peacock 022) |  Estados Unidos v. Paraguay (2026-06-12 20:30:00)"
+        assert plugin._stream_language_rank(n, "United States", "Paraguay") == plugin._LANG_RANK_NON_ENGLISH
+
+    def test_accent_wins_over_partial_english_token(self, plugin):
+        # Regression (caught in live verification): "Arabia Saudí v. Uruguay"
+        # matches the single-word English tokens "Arabia" and "Uruguay", but the
+        # "í" in "Saudí" is the reliable Spanish tell. The foreign-marker check
+        # must run before the both-team-name check so this stays non-English.
+        n = "US (Peacock 061) |  Arabia Saudí v. Uruguay (2026-06-15 17:00:00)"
+        assert plugin._stream_language_rank(n, "Saudi Arabia", "Uruguay") == plugin._LANG_RANK_NON_ENGLISH
+
+    def test_english_provider_with_single_team_is_english(self, plugin):
+        # Only one team named, but "BBC" is an English provider marker.
+        n = "WC2026: BBC Scotland"
+        assert plugin._stream_language_rank(n, "Scotland", "Haiti") == plugin._LANG_RANK_ENGLISH
+
+    def test_no_signal_is_unknown(self, plugin):
+        assert plugin._stream_language_rank("Generic Sports Channel 12", "Foo", "Bar") == plugin._LANG_RANK_UNKNOWN
+
+    def test_empty_name_is_unknown(self, plugin):
+        assert plugin._stream_language_rank("", "Mexico", "South Africa") == plugin._LANG_RANK_UNKNOWN
+
+    def test_peacock_alone_is_not_english(self, plugin):
+        # Guard the DO-NOT: "Peacock" must not be treated as an English marker
+        # (it carries Telemundo Spanish too). With no team-name match and no
+        # other signal it stays unknown, never English.
+        assert plugin._stream_language_rank("US (Peacock 099) | Highlights", "Foo", "Bar") != plugin._LANG_RANK_ENGLISH
+
+
+class TestStreamSortKeyEnglishFirst:
+    """#111: english_first prepends the language rank so all English variants
+    sort ahead of all non-English ones, quality preserved within each tier."""
+
+    def test_quality_only_when_flag_off(self, plugin):
+        # Default behavior unchanged: UHD non-English sorts before SD English.
+        eng_sd = plugin._stream_sort_key(None, "Mexico vs South Africa SD", home="Mexico", away="South Africa")
+        non_uhd = plugin._stream_sort_key(None, "Sudáfrica vs México UHD", home="Mexico", away="South Africa")
+        assert non_uhd < eng_sd  # quality wins when english_first defaults off
+
+    def test_english_low_quality_beats_non_english_high_quality(self, plugin):
+        eng_sd = plugin._stream_sort_key(
+            None, "Mexico vs South Africa SD", english_first=True, home="Mexico", away="South Africa")
+        non_uhd = plugin._stream_sort_key(
+            None, "Sudáfrica vs México UHD", english_first=True, home="Mexico", away="South Africa")
+        assert eng_sd < non_uhd  # language is primary
+
+    def test_quality_preserved_within_english_tier(self, plugin):
+        eng_uhd = plugin._stream_sort_key(
+            None, "Mexico vs South Africa UHD", english_first=True, home="Mexico", away="South Africa")
+        eng_sd = plugin._stream_sort_key(
+            None, "Mexico vs South Africa SD", english_first=True, home="Mexico", away="South Africa")
+        assert eng_uhd < eng_sd  # within English, UHD before SD
+
+    def test_unknown_sorts_between_english_and_non_english(self, plugin):
+        eng = plugin._stream_sort_key(
+            None, "Mexico vs South Africa HD", english_first=True, home="Mexico", away="South Africa")
+        unknown = plugin._stream_sort_key(
+            None, "Generic Channel HD", english_first=True, home="Mexico", away="South Africa")
+        non_eng = plugin._stream_sort_key(
+            None, "Sudáfrica vs México HD", english_first=True, home="Mexico", away="South Africa")
+        assert eng < unknown < non_eng

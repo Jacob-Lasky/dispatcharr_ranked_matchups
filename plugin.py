@@ -71,6 +71,11 @@ PLUGIN_KEY = os.path.basename(PLUGIN_DIR).replace(" ", "_").lower()
 
 logger = logging.getLogger(f"plugins.{PLUGIN_KEY}")
 
+# Settings key read in two phases: refresh (matcher-side stacking, #108) and
+# apply (English-first stream ordering, #111). A shared constant so the two
+# reads and plugin.json can't drift apart. Other one-off settings stay inline.
+_WIDEN_STREAM_POOL_SETTING = "widen_stream_pool"
+
 CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
 # Sidecar cache for LLM-rewritten descriptions. Separate from cache.json so the
 # main cache file stays purely deterministic (score, breakdown, score_notes
@@ -212,8 +217,95 @@ def _stream_quality_rank(name: str) -> int:
     return _QUALITY_RANK_UNKNOWN
 
 
-def _stream_sort_key(stream_stats, name):
-    """Composite sort key for a stream. Lower tuple = sorted earlier.
+# Language preference tiers for the widen pool (#111). English first, then
+# unknown, then non-English. Within each tier the quality ordering still
+# applies, so the full order is: English-4K, English-1080, ..., English-SD,
+# unknown..., non-English-4K, ..., non-English-SD.
+_LANG_RANK_ENGLISH = 0
+_LANG_RANK_UNKNOWN = 1
+_LANG_RANK_NON_ENGLISH = 2
+
+# Accented Latin letters that mark a Spanish / Portuguese / French feed. ASCII
+# punctuation is deliberately excluded so an em dash or "(TM)" doesn't read as
+# foreign.
+_FOREIGN_ACCENT_CHARS = frozenset("áéíóúñüàèìòùâêîôûäëïöãõçÁÉÍÓÚÑÜÀÈÌÒÙÂÊÎÔÛÄËÏÖÃÕÇ")
+
+# Whitespace-padded tokens that reliably mark an ENGLISH feed. DO NOT add
+# "Peacock" or bare "ESPN": Peacock carries both English and Telemundo Spanish,
+# and "ESPN Deportes" is Spanish, so both would mislabel non-English feeds.
+_ENGLISH_PROVIDER_TOKENS = (
+    " BBC ", " ITV ", " TNT ", " TSN ", " SPORTSNET ", " SKY SPORTS ",
+    "(UK)", " UK ", " USA ", " ENGLISH ", " ENG ", " EN ",
+)
+
+# Non-English broadcaster tokens plus Spanish country spellings common in the
+# WC Telemundo/Peacock-Spanish feeds whose names carry no accent (e.g. "Estados
+# Unidos", "Argelia"). Accented spellings are caught by _FOREIGN_ACCENT_CHARS.
+_FOREIGN_PROVIDER_TOKENS = (
+    " TELEMUNDO ", " UNIVERSO ", " TUDN ", " DEPORTES ", " MOVISTAR ",
+    " CANAL+ ", " SPORTTV ", " SPORT TV ", " GLOBO ", " RAI ", " ZDF ",
+    " ARD ", "ESPN DEPORTES", " DAZN ES ", " DAZN DE ", " DAZN IT ",
+    " BEIN AR ", " BEIN MENA ",
+)
+_SPANISH_COUNTRY_HINTS = (
+    " ESTADOS UNIDOS ", " ALEMANIA ", " INGLATERRA ", " CROACIA ", " SUIZA ",
+    " COSTA DE MARFIL ", " ARGELIA ", " EGIPTO ", " MARRUECOS ", " JORDANIA ",
+    " NORUEGA ", " SUECIA ", " DINAMARCA ", " POLONIA ", " GRECIA ", " RUSIA ",
+    " UCRANIA ", " ESCOCIA ", " GALES ", " IRLANDA ", " CHEQUIA ",
+)
+
+
+def _has_foreign_language_marker(name: str) -> bool:
+    """True when a stream name carries a reliable non-English signal: an
+    accented Latin letter, a foreign-language broadcaster, or a Spanish country
+    spelling. Best-effort (#111); stays silent on ambiguous names so they land
+    in the unknown middle tier rather than being mislabeled."""
+    if any(c in _FOREIGN_ACCENT_CHARS for c in name):
+        return True
+    padded = f" {name.upper()} "
+    if any(tok in padded for tok in _FOREIGN_PROVIDER_TOKENS):
+        return True
+    if any(tok in padded for tok in _SPANISH_COUNTRY_HINTS):
+        return True
+    return False
+
+
+def _stream_language_rank(name: str, home: str = "", away: str = "") -> int:
+    """Language-preference bucket for a stream name (#111): English (0),
+    unknown (1), non-English (2). Lower sorts earlier.
+
+    Primary signal: both teams' English-name keywords present in the name. The
+    WC Spanish feeds spell teams differently ("Turquía" not "Turkey", "Estados
+    Unidos" not "United States"), so a name carrying BOTH English spellings is
+    an English-language feed. A foreign-marker check (accent / foreign
+    broadcaster / Spanish country spelling) runs FIRST and wins, since a loose
+    single-word English token would otherwise mislabel a Spanish name. Then the
+    both-team-name check, then explicit English provider tokens (for feeds that
+    name only one team, e.g. "WC2026: BBC Scotland"). Anything matching nothing
+    stays unknown rather than being guessed.
+    """
+    if not name:
+        return _LANG_RANK_UNKNOWN
+    # Foreign markers are checked FIRST and win: a single-word English token can
+    # otherwise short-circuit to English on a clearly-Spanish name. Real case:
+    # "Arabia Saudí v. Uruguay" (game Saudi Arabia vs Uruguay) matches "Arabia"
+    # and "Uruguay", yet the "í" in "Saudí" is the reliable Spanish tell.
+    if _has_foreign_language_marker(name):
+        return _LANG_RANK_NON_ENGLISH
+    upper = name.upper()
+    if home and away:
+        from .matcher import _team_keywords
+        home_hit = any(k.upper() in upper for k in _team_keywords(home))
+        away_hit = any(k.upper() in upper for k in _team_keywords(away))
+        if home_hit and away_hit:
+            return _LANG_RANK_ENGLISH
+    if any(tok in f" {upper} " for tok in _ENGLISH_PROVIDER_TOKENS):
+        return _LANG_RANK_ENGLISH
+    return _LANG_RANK_UNKNOWN
+
+
+def _stream_quality_sort_key(stream_stats, name):
+    """Composite quality sort key for a stream. Lower tuple = sorted earlier.
 
     Tiers (most authoritative first):
       0. Valid ffprobe data: real height ≥ 240 and width ≥ 320.
@@ -247,6 +339,21 @@ def _stream_sort_key(stream_stats, name):
         if height == 0 or width == 0 or resolution == "0x0":
             return (_PROBE_TIER_FAILED, 0, 0)
     return (_PROBE_TIER_NO_PROBE, _stream_quality_rank(name), 0)
+
+
+def _stream_sort_key(stream_stats, name, english_first=False, home="", away=""):
+    """Stream ordering key. Quality-only by default (historical behavior).
+
+    When english_first is True (#111, set when widen_stream_pool is on), the
+    language rank is prepended so ALL English variants sort ahead of ALL
+    non-English ones, with the quality ordering preserved within each language
+    tier. home/away are the game's English team names, used by
+    _stream_language_rank to detect English-language feeds.
+    """
+    quality = _stream_quality_sort_key(stream_stats, name)
+    if english_first:
+        return (_stream_language_rank(name, home, away),) + quality
+    return quality
 
 
 # ---------- timezone helpers ----------
@@ -1119,7 +1226,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # #108: off-by-default. When on, the matcher stacks same-fixture provider
     # variants as fallback streams so a single upstream 503 doesn't dark out
     # the matchup channel.
-    widen = bool(settings.get("widen_stream_pool", False))
+    widen = bool(settings.get(_WIDEN_STREAM_POOL_SETTING, False))
     matches = match_games_to_channels(scored, epg_lookup, api_key, model, widen=widen)
 
     # 5. Build cache payload (transparent: every signal + breakdown stored)
@@ -1747,6 +1854,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     group_name = settings.get("channel_profile_name", "Top Matchups")
     dry_run = bool(settings.get("dry_run", True))
+    # #111: when the widen pool is on, order each channel's pooled streams
+    # English+quality first, then non-English. Same toggle as the matcher-side
+    # widening (widen_stream_pool); language only matters once a channel has
+    # more than one stream, which is what widening produces.
+    english_first = bool(settings.get(_WIDEN_STREAM_POOL_SETTING, False))
 
     # Channel-name template (issue #100). Empty/unset -> the built-in default.
     # A malformed custom template must never crash an apply or poison live
@@ -2168,19 +2280,23 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     llm_used += 1
 
             # Gather streams from EVERY matched source channel and rank by
-            # composite quality key: valid ffprobe data (height/bitrate)
-            # ranks first, then name-keyword fallback, then probe-failed
-            # streams last. Stable secondary sort by source-channel order
-            # so equal-quality streams preserve the matcher's primary-first
-            # ordering.
-            stream_pool = []  # list of (quality_key, src_order, stream_id)
+            # composite key: valid ffprobe data (height/bitrate) ranks first,
+            # then name-keyword fallback, then probe-failed streams last. When
+            # english_first is on (#111) the language rank is prepended so all
+            # English variants sort ahead of all non-English ones, quality
+            # preserved within each. Stable secondary sort by source-channel
+            # order keeps equal-key streams in the matcher's primary-first order.
+            stream_pool = []  # list of (sort_key, src_order, stream_id)
             seen_stream_ids = set()
             for src_order, src in enumerate(sources):
                 for s in src.streams.all().only("id", "name", "stream_stats"):
                     if s.id in seen_stream_ids:
                         continue
                     seen_stream_ids.add(s.id)
-                    key = _stream_sort_key(s.stream_stats, s.name or src.name or "")
+                    key = _stream_sort_key(
+                        s.stream_stats, s.name or src.name or "",
+                        english_first=english_first, home=g["home"], away=g["away"],
+                    )
                     stream_pool.append((key, src_order, s.id))
             stream_pool.sort()
             source_streams = [sid for _, _, sid in stream_pool]
