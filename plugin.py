@@ -254,15 +254,36 @@ _SPANISH_COUNTRY_HINTS = (
     " UCRANIA ", " ESCOCIA ", " GALES ", " IRLANDA ", " CHEQUIA ",
 )
 
+# A foreign-language audio label (e.g. "Czech Feed", "Korean Commentary"): the
+# team names are spelled in English but the COMMENTARY is foreign, so the
+# English-team-name check would wrongly rank it English. #113: surfaced live on
+# a WC channel where "TSN+ Czech Feed" / "Korean Feed" sorted ahead of the
+# plain English FIFA feed. "English" is intentionally absent from the language
+# list. Matched as "<lang> <feed-noun>" so a team like "Czechia" (no feed noun)
+# never trips it.
+_FOREIGN_FEED_LANGUAGES = (
+    "SPANISH", "FRENCH", "GERMAN", "ITALIAN", "PORTUGUESE", "CZECH", "KOREAN",
+    "JAPANESE", "ARABIC", "DUTCH", "POLISH", "RUSSIAN", "TURKISH", "GREEK",
+    "DANISH", "SWEDISH", "NORWEGIAN", "CROATIAN", "SERBIAN", "CHINESE",
+)
+_FOREIGN_FEED_NOUNS = ("FEED", "COMMENTARY", "AUDIO", "COMMS")
+_FOREIGN_FEED_MARKERS = tuple(
+    f"{lang} {noun}" for lang in _FOREIGN_FEED_LANGUAGES for noun in _FOREIGN_FEED_NOUNS
+)
+
 
 def _has_foreign_language_marker(name: str) -> bool:
     """True when a stream name carries a reliable non-English signal: an
-    accented Latin letter, a foreign-language broadcaster, or a Spanish country
-    spelling. Best-effort (#111); stays silent on ambiguous names so they land
-    in the unknown middle tier rather than being mislabeled."""
+    accented Latin letter, a foreign-language broadcaster, a Spanish country
+    spelling, or a foreign-language audio-feed label ("Czech Feed"). Best-effort
+    (#111/#113); stays silent on ambiguous names so they land in the unknown
+    middle tier rather than being mislabeled."""
     if any(c in _FOREIGN_ACCENT_CHARS for c in name):
         return True
-    padded = f" {name.upper()} "
+    upper = name.upper()
+    if any(marker in upper for marker in _FOREIGN_FEED_MARKERS):
+        return True
+    padded = f" {upper} "
     if any(tok in padded for tok in _FOREIGN_PROVIDER_TOKENS):
         return True
     if any(tok in padded for tok in _SPANISH_COUNTRY_HINTS):

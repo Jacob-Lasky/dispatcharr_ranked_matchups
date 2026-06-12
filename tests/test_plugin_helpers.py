@@ -2117,6 +2117,29 @@ class TestStreamLanguageRank:
         n = "US (Peacock 061) |  Arabia Saudí v. Uruguay (2026-06-15 17:00:00)"
         assert plugin._stream_language_rank(n, "Saudi Arabia", "Uruguay") == plugin._LANG_RANK_NON_ENGLISH
 
+    def test_foreign_audio_feed_label_is_non_english(self, plugin):
+        # Regression (#113, caught live): the audio is Czech/Korean even though
+        # the team names are spelled in English, so the "<lang> Feed" label must
+        # demote it below the plain English feed.
+        czech = "TSN+ 11 : Czech Feed: FIFA World Cup 2026: Korea Republic vs. Czechia"
+        korean = "TSN+ 12 : Korean Feed: FIFA World Cup 2026: Korea Republic vs. Czechia"
+        assert plugin._stream_language_rank(czech, "South Korea", "Czechia") == plugin._LANG_RANK_NON_ENGLISH
+        assert plugin._stream_language_rank(korean, "South Korea", "Czechia") == plugin._LANG_RANK_NON_ENGLISH
+
+    def test_plain_english_feed_outranks_foreign_audio_feed(self, plugin):
+        # The plain English FIFA feed (no "<lang> Feed" label) must sort ahead.
+        czech = plugin._stream_language_rank(
+            "TSN+ 11 : Czech Feed: ... Korea Republic vs. Czechia", "South Korea", "Czechia")
+        english = plugin._stream_language_rank(
+            "FIFA World Cup 2026 05: Korea Republic 03:00 Czechia", "South Korea", "Czechia")
+        assert english < czech  # English (0) before non-English (2)
+
+    def test_team_name_alone_does_not_trip_feed_marker(self, plugin):
+        # "Czechia" contains "CZECH" but no feed noun follows, so a plain feed
+        # naming the team must NOT be mislabeled foreign.
+        n = "FIFA World Cup 2026 05: Korea Republic 03:00 Czechia"
+        assert plugin._stream_language_rank(n, "South Korea", "Czechia") == plugin._LANG_RANK_ENGLISH
+
     def test_english_provider_with_single_team_is_english(self, plugin):
         # Only one team named, but "BBC" is an English provider marker.
         n = "WC2026: BBC Scotland"
