@@ -1,12 +1,18 @@
 {
   "name": "Ranked Matchups (Top Games)",
   "version": "1.2.0",
-  "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them on interestingness, matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching.",
+  "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them on interestingness, matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching. IMPORTANT: generate your M3U and EPG URLs with TVG-ID Source = TVG-ID (not the default Channel Number) on both, or your client will pair a channel's name with another game's guide.",
   "author": "Jake (with Claude)",
   "license": "MIT",
   "repo_url": "https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups",
   "help_url": "https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups#readme",
   "fields": [
+    {
+      "id": "_section_client_setup",
+      "type": "info",
+      "label": "⚠ Client setup: set TVG-ID Source = TVG-ID",
+      "description": "When you generate your M3U and EPG URLs (Channels page → M3U / EPG buttons), set TVG-ID Source to 'TVG-ID' on BOTH (not the default 'Channel Number'). These channels re-rank by score every refresh, so their numbers change; binding the guide by channel number makes your client show one game's name over another game's program (e.g. an 'Ole Miss' channel showing the 'Iran vs New Zealand' guide). TVG-ID binds by a stable per-game id and is shuffle-proof."
+    },
     {
       "id": "_section_sources",
       "type": "info",
