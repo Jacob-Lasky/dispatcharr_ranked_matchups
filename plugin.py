@@ -1116,7 +1116,11 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     epg_lookup = _build_epg_lookup()
     api_key = _resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH)
     model = settings.get("model", "claude-haiku-4-5")
-    matches = match_games_to_channels(scored, epg_lookup, api_key, model)
+    # #108: off-by-default. When on, the matcher stacks same-fixture provider
+    # variants as fallback streams so a single upstream 503 doesn't dark out
+    # the matchup channel.
+    widen = bool(settings.get("widen_stream_pool", False))
+    matches = match_games_to_channels(scored, epg_lookup, api_key, model, widen=widen)
 
     # 5. Build cache payload (transparent: every signal + breakdown stored)
     games_payload = []

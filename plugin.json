@@ -521,6 +521,13 @@
       "help_text": "Replace each virtual channel's logo with TheSportsDB's pre-rendered 960x540 matchup graphic (both team crests + league wordmark + region backdrop). Resolved by team-name pair + date; cached per fixture for 14 days. Falls back to the matched source channel's logo when SportsDB has no thumbnail (offseason, untracked sport, field events like F1/golf/UFC/tennis). Configure key under 'API Keys'."
     },
     {
+      "id": "widen_stream_pool",
+      "type": "boolean",
+      "label": "Widen stream pool (extra fallback streams)",
+      "default": false,
+      "help_text": "When a game airs on several provider channels that all name both teams, the matcher normally keeps just the one it judges best and discards the rest. Turn this on to also stack those other same-fixture channels as lower-priority fallback streams, so if the primary upstream goes down (e.g. a provider 503) the channel fails over instead of going dark. Only channels naming BOTH teams are stacked, never single-team-keyword guesses. Off by default: it trades tighter curation for resilience, and cannot help games your providers do not carry at all."
+    },
+    {
       "id": "_section_schedule",
       "type": "info",
       "label": "Auto-Refresh",
