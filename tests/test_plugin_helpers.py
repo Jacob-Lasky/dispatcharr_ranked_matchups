@@ -1876,11 +1876,14 @@ class TestPluginStopTeardown:
         assert _isolate_registry.thread is not None
         assert _isolate_registry.stop_event is not None
 
-    def test_reload_init_reclaims_and_stops_orphan(self, plugin, monkeypatch, _isolate_registry):
+    def test_reload_init_reclaims_orphan_without_blocking(self, plugin, monkeypatch, _isolate_registry):
         # THE #110 fix: the loader reloads WITHOUT calling stop(), so a thread
         # from the prior module incarnation is still running, reachable only via
         # the reload-stable registry. A fresh Plugin() (the reload's new
-        # instance) must stop that orphan before starting its own thread.
+        # instance) must SIGNAL that orphan to exit and repoint the registry at
+        # its own thread. The reload path must NOT block-join (it runs in a
+        # gevent request greenlet during discovery); the orphan self-exits on
+        # the signal, so join is not called here.
         import threading
         reg = _isolate_registry
         orphan_event = threading.Event()
@@ -1894,14 +1897,26 @@ class TestPluginStopTeardown:
         monkeypatch.setattr(plugin.threading, "Thread", TrackingThread)
         plugin.Plugin()  # the reloaded incarnation
 
-        # Orphan was signaled, joined, and exited; registry now holds a NEW
-        # thread + event, not the orphan.
+        # Orphan was signaled (it will exit on its next wake), NOT join-blocked,
+        # and the registry now holds a NEW thread + event, not the orphan.
         assert orphan_event.is_set()
-        assert orphan.join_calls >= 1
-        assert not orphan.is_alive()
+        assert orphan.join_calls == 0  # reload path must not block on join
         assert reg.thread is not orphan
         assert isinstance(reg.thread, TrackingThread)
         assert reg.stop_event is not orphan_event
+
+    def test_stop_still_joins_on_teardown(self, plugin, _isolate_registry):
+        # The disable/delete path (stop()) is not latency-sensitive and SHOULD
+        # block-join to confirm the thread exited.
+        import threading
+        reg = _isolate_registry
+        ev = threading.Event()
+        stub = _StubThread(ev)
+        reg.thread, reg.stop_event = stub, ev
+        plugin.Plugin.__new__(plugin.Plugin).stop()
+        assert ev.is_set()
+        assert stub.join_calls == 1
+        assert not stub.is_alive()
 
 
 class TestDedupSeriesGames:

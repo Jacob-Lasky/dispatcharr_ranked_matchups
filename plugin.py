@@ -2746,14 +2746,23 @@ def _scheduler_registry():
     return reg
 
 
-def _stop_scheduler(thread, stop_event, reason: str) -> None:
-    """Signal a scheduler thread to exit and join it briefly. The loop polls
-    its own stop_event between work units, so setting it drops the loop out at
-    its next wake-up. Join with a short timeout because the loader's reload path
-    blocks on this and we don't want a thread stuck mid-pipeline to wedge it."""
+def _stop_scheduler(thread, stop_event, reason: str, *, join: bool = True) -> None:
+    """Signal a scheduler thread to exit. The loop polls its own stop_event
+    between work units, so setting it drops the loop out at its next wake-up
+    (immediate: set() wakes a thread waiting on the Event).
+
+    join controls whether we then block to confirm exit:
+      - join=True (disable/delete via stop()): block briefly; teardown is not
+        on a latency-sensitive path and confirming exit is tidy.
+      - join=False (reload via __init__): DO NOT block. __init__ runs inside a
+        gevent request greenlet during discovery; a blocking join there stalls
+        the worker's whole hub (every greenlet shares one OS thread). The orphan
+        exits on its own once signaled, and __init__ repoints the registry at
+        the replacement immediately after, so the signaled orphan is unreachable
+        and harmless while it unwinds. Keeps the hot reload path non-blocking."""
     if stop_event is not None:
         stop_event.set()
-    if thread is not None and thread.is_alive():
+    if join and thread is not None and thread.is_alive():
         thread.join(timeout=5.0)
         if thread.is_alive():
             logger.warning(
@@ -2884,7 +2893,7 @@ class Plugin:
         # starting our own, otherwise every reload leaks a thread + DB connection
         # (the #82 leak, through the reload path #82's stop() never covered).
         if reg.thread is not None and reg.thread.is_alive():
-            _stop_scheduler(reg.thread, reg.stop_event, "reload")
+            _stop_scheduler(reg.thread, reg.stop_event, "reload", join=False)
         stop_event = threading.Event()
         t = threading.Thread(target=_scheduler_loop, args=(self, stop_event), daemon=True,
                              name="ranked_matchups-scheduler")
