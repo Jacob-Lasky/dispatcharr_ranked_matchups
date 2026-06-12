@@ -30,7 +30,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
+import types
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -2719,8 +2721,45 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- scheduler ----------
 
-_scheduler_thread: Optional[threading.Thread] = None
-_scheduler_stop = threading.Event()
+# Scheduler state (the running thread + its stop Event) lives in a registry
+# stashed in sys.modules under a synthetic key, NOT in module globals, so it
+# SURVIVES a plugin reload. #110: the loader's force_reload path (reload
+# endpoint / .reload_token / settings-save) unloads this module by file path and
+# re-imports it WITHOUT calling stop() — it only calls stop() on disable/delete.
+# Module globals reset on reload, so the new incarnation could never see the
+# thread the old one started, orphaning it (and its DB connection) every reload.
+# That re-leaks the exact thread #82's stop() was meant to reclaim. Keeping the
+# state in a reload-stable registry lets the new incarnation's __init__ find and
+# tear down the prior thread before starting its own. The synthetic module has
+# no __file__/__path__ under the plugin dir, so the loader's _unload_path_modules
+# leaves it in place across reloads.
+_SCHEDULER_REGISTRY_KEY = "_dispatcharr_ranked_matchups_scheduler_state"
+
+
+def _scheduler_registry():
+    reg = sys.modules.get(_SCHEDULER_REGISTRY_KEY)
+    if reg is None:
+        reg = types.ModuleType(_SCHEDULER_REGISTRY_KEY)
+        reg.thread = None
+        reg.stop_event = None
+        sys.modules[_SCHEDULER_REGISTRY_KEY] = reg
+    return reg
+
+
+def _stop_scheduler(thread, stop_event, reason: str) -> None:
+    """Signal a scheduler thread to exit and join it briefly. The loop polls
+    its own stop_event between work units, so setting it drops the loop out at
+    its next wake-up. Join with a short timeout because the loader's reload path
+    blocks on this and we don't want a thread stuck mid-pipeline to wedge it."""
+    if stop_event is not None:
+        stop_event.set()
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=5.0)
+        if thread.is_alive():
+            logger.warning(
+                "[ranked_matchups] scheduler thread did not exit within 5s of "
+                "%s; it will linger until process exit", reason,
+            )
 
 
 def _parse_scheduled_times(raw: str) -> List[Tuple[int, int]]:
@@ -2761,30 +2800,35 @@ def _next_fire_time(times: List[Tuple[int, int]], tz, now: Optional[datetime] = 
     return min(future) if future else None
 
 
-def _scheduler_loop(plugin_ref):
-    """Auto-refresh + apply at every time listed in scheduled_times."""
-    while not _scheduler_stop.is_set():
+def _scheduler_loop(plugin_ref, stop_event):
+    """Auto-refresh + apply at every time listed in scheduled_times.
+
+    stop_event is THIS thread's own Event, held in the reload-stable registry
+    (#110), not a module global: a later reload can stop this exact thread even
+    after the module that started it has been unloaded and its globals reset.
+    """
+    while not stop_event.is_set():
         try:
             settings = plugin_ref.get_current_settings()
             if not settings.get("auto_refresh_enabled", False):
-                _scheduler_stop.wait(timeout=300)
+                stop_event.wait(timeout=300)
                 continue
             tz = _resolve_tz(settings.get("local_timezone", "UTC"))
             times = _parse_scheduled_times(settings.get("scheduled_times", "0400"))
             if not times:
                 logger.warning("[ranked_matchups] no valid scheduled_times; idling 5m")
-                _scheduler_stop.wait(timeout=300)
+                stop_event.wait(timeout=300)
                 continue
             target = _next_fire_time(times, tz)
             if target is None:
-                _scheduler_stop.wait(timeout=300)
+                stop_event.wait(timeout=300)
                 continue
             sleep_s = (target - datetime.now(tz)).total_seconds()
             logger.info(
                 "[ranked_matchups] scheduler sleeping %.0fs until %s (next of %s)",
                 sleep_s, target.isoformat(), times,
             )
-            if _scheduler_stop.wait(timeout=sleep_s):
+            if stop_event.wait(timeout=sleep_s):
                 return
             logger.info("[ranked_matchups] scheduler firing auto_pipeline")
             # Delegates to the shared lock/inflight/subprocess path so the
@@ -2796,7 +2840,7 @@ def _scheduler_loop(plugin_ref):
             tasks.run_scheduled_pipeline(settings)
         except Exception:
             logger.exception("[ranked_matchups] scheduler loop crashed; sleeping 10m")
-            _scheduler_stop.wait(timeout=600)
+            stop_event.wait(timeout=600)
 
 
 _SCHEDULER_LOCK_KEY = f"plugins:{PLUGIN_KEY}:scheduler:lock"
@@ -2833,14 +2877,21 @@ class Plugin:
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
         # relying on stale init-time settings.
-        global _scheduler_thread
-        if _scheduler_thread is None or not _scheduler_thread.is_alive():
-            _scheduler_stop.clear()
-            t = threading.Thread(target=_scheduler_loop, args=(self,), daemon=True,
-                                 name="ranked_matchups-scheduler")
-            t.start()
-            _scheduler_thread = t
-            logger.info("[ranked_matchups] scheduler thread started (pid=%s)", os.getpid())
+        reg = _scheduler_registry()
+        # #110: the loader reloads us without calling stop(), so a thread started
+        # by a PRIOR module incarnation is still running and is only reachable
+        # via the reload-stable registry. Reclaim and stop it here before
+        # starting our own, otherwise every reload leaks a thread + DB connection
+        # (the #82 leak, through the reload path #82's stop() never covered).
+        if reg.thread is not None and reg.thread.is_alive():
+            _stop_scheduler(reg.thread, reg.stop_event, "reload")
+        stop_event = threading.Event()
+        t = threading.Thread(target=_scheduler_loop, args=(self, stop_event), daemon=True,
+                             name="ranked_matchups-scheduler")
+        t.start()
+        reg.thread = t
+        reg.stop_event = stop_event
+        logger.info("[ranked_matchups] scheduler thread started (pid=%s)", os.getpid())
 
     def get_current_settings(self) -> Dict[str, Any]:
         try:
@@ -2853,35 +2904,22 @@ class Plugin:
         return {}
 
     def stop(self, context: Optional[Dict[str, Any]] = None) -> None:
-        """Tear down the scheduler thread when the loader disables /
-        reloads / deletes the plugin. The Dispatcharr plugin loader
-        contract calls this on every lifecycle change (Plugins.md). The
-        thread keeps polling settings from Postgres on a 5-min loop;
-        without this teardown each reload leaks one thread per uwsgi
-        worker, each holding a DB connection, until Postgres's
-        max_connections cap is hit and every API request 500s with
-        "FATAL: sorry, too many clients already" (#82).
+        """Tear down the scheduler thread when the loader disables / deletes the
+        plugin. The loader calls stop() on disable/delete (NOT on reload, see
+        #110), so the reload-orphan reclaim lives in __init__; this path handles
+        the explicit-teardown case. Without it the thread keeps polling Postgres
+        on a 5-min loop, leaking a DB connection per worker until max_connections
+        is hit and every API request 500s with "too many clients" (#82).
 
-        Signal-then-join: the scheduler loop polls
-        `_scheduler_stop.wait(timeout=...)` between work units, so
-        setting the event drops the loop out at its next wake-up.
-        Join with a short timeout because the loader's reload path
-        blocks on stop() and we don't want a stuck thread to wedge
-        the whole reload.
+        State is read from the reload-stable registry (#110), not module globals,
+        so stop() reclaims the live thread even if it was started by a different
+        module incarnation than the one this instance belongs to.
         """
         del context  # unused; conform to loader's stop(context) shape
-        _scheduler_stop.set()
-        global _scheduler_thread
-        t = _scheduler_thread
-        if t is not None and t.is_alive():
-            t.join(timeout=5.0)
-            if t.is_alive():
-                logger.warning(
-                    "[ranked_matchups] scheduler thread did not exit "
-                    "within 5s of stop signal; loader will proceed but "
-                    "the daemon thread will linger until process exit"
-                )
-        _scheduler_thread = None
+        reg = _scheduler_registry()
+        _stop_scheduler(reg.thread, reg.stop_event, "stop signal")
+        reg.thread = None
+        reg.stop_event = None
 
     def run(self, action: Optional[str] = None,
             params: Optional[Dict[str, Any]] = None,
