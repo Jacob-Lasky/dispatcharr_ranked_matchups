@@ -303,20 +303,50 @@ MATCHER_SYSTEM_PROMPT = (
 )
 
 
+def _stack_fallback_ids(
+    primary_id: int, cands: List[ChannelCandidate]
+) -> List[int]:
+    """Primary id first, then every other candidate id, deduped in order.
+
+    Used by the #108 widen path to stack same-fixture provider variants as
+    fallback streams behind the chosen primary. A single channel can appear in
+    `cands` more than once (multiple ProgramData rows), so dedupe.
+    """
+    out = [primary_id]
+    seen = {primary_id}
+    for c in cands:
+        if c.channel_id not in seen:
+            out.append(c.channel_id)
+            seen.add(c.channel_id)
+    return out
+
+
 def match_games_to_channels(
     scored_games: List[Tuple[Any, Any, Any]],  # (GameRow, GameSignals, GameScore)
     epg_lookup,  # callable: GameRow -> List[ChannelCandidate]
     api_key: str,
     model: str,
+    widen: bool = False,
 ) -> List[MatchResult]:
     """Resolve each game to a Dispatcharr channel.
 
     epg_lookup: callable that, given a GameRow, returns candidate channels
     broadcasting around that time. Caller (plugin.py) provides this with a
     closure over Dispatcharr's ORM.
+
+    widen (#108): when True, the LLM-disambiguated tier stacks the non-chosen
+    candidates as fallback streams behind the primary, INSTEAD of discarding
+    them. Off by default. Only the both-team candidate set (the `filtered`
+    tier-2 matches the LLM picks among) is stacked: a candidate that names just
+    one team is a different-game risk, so the zero-both-team `wider` path is
+    never widened even when `widen` is True. The tier-1 regex_strict path
+    already stacks every channel-name variant and is unaffected by this flag.
     """
     results: List[MatchResult] = [MatchResult(game_index=i) for i in range(len(scored_games))]
-    ambiguous: List[Tuple[int, Any, List[ChannelCandidate]]] = []
+    # Each entry: (game_index, game, candidates, both_team). `both_team` is True
+    # only when every candidate named BOTH teams (tier-2 multi-match), which is
+    # the precondition for #108 widening.
+    ambiguous: List[Tuple[int, Any, List[ChannelCandidate], bool]] = []
 
     for i, (game, _signals, _score) in enumerate(scored_games):
         candidates = epg_lookup(game)
@@ -333,13 +363,12 @@ def match_games_to_channels(
             results[i].channel_id = primary.channel_id
             results[i].channel_name = primary.channel_name
             results[i].program_title = primary.program_title
-            # De-dupe channel_ids while preserving order (a single channel
-            # can have multiple ProgramData rows that pass the filter).
-            seen_ids = set()
-            for c in strict:
-                if c.channel_id not in seen_ids:
-                    results[i].channel_ids.append(c.channel_id)
-                    seen_ids.add(c.channel_id)
+            # De-dupe channel_ids while preserving order (a single channel can
+            # have multiple ProgramData rows that pass the filter). Tier-1
+            # always stacks every channel-name variant: this is the original
+            # multi-stream path the #108 widen flag generalizes to lower tiers,
+            # so it shares the same stacking helper.
+            results[i].channel_ids = _stack_fallback_ids(primary.channel_id, strict)
             results[i].method = "regex_strict"
             continue
 
@@ -363,15 +392,19 @@ def match_games_to_channels(
             # mentions a team keyword, so the count is naturally small.
             wider = _strip_preview_titles(candidates)
             if wider:
-                ambiguous.append((i, game, wider))
+                # both_team=False: these matched only a team keyword, not both
+                # teams, so they are NOT eligible for #108 fallback stacking.
+                ambiguous.append((i, game, wider, False))
         else:
             # Multiple regex matches survived preview stripping: Claude resolves.
-            ambiguous.append((i, game, filtered))
+            # both_team=True: every candidate named both teams, so the
+            # non-chosen ones are same-fixture variants safe to stack (#108).
+            ambiguous.append((i, game, filtered, True))
 
     if ambiguous and api_key:
         # One batch Claude call.
         payload = []
-        for idx, game, cands in ambiguous:
+        for idx, game, cands, _both in ambiguous:
             payload.append({
                 "game_id": str(idx),
                 "sport": game.sport_label,
@@ -389,7 +422,7 @@ def match_games_to_channels(
             })
         user = "Match each game to its broadcasting channel from the candidates. JSON only.\n\n" + json.dumps(payload, ensure_ascii=False)
         parsed = _post_claude(api_key, model, MATCHER_SYSTEM_PROMPT, user) or {}
-        for idx, game, cands in ambiguous:
+        for idx, game, cands, both_team in ambiguous:
             picked = parsed.get(str(idx))
             if picked is None:
                 results[idx].note = f"LLM no match among {len(cands)} candidates"
@@ -406,17 +439,28 @@ def match_games_to_channels(
             results[idx].channel_id = chosen.channel_id
             results[idx].channel_name = chosen.channel_name
             results[idx].program_title = chosen.program_title
-            results[idx].channel_ids = [chosen.channel_id]
+            # #108: stack the other both-team variants as fallback streams when
+            # widen is on; otherwise keep the historical single-channel result.
+            if widen and both_team:
+                results[idx].channel_ids = _stack_fallback_ids(chosen.channel_id, cands)
+            else:
+                results[idx].channel_ids = [chosen.channel_id]
             results[idx].method = "llm"
     elif ambiguous:
         # No API key: best-effort: pick first candidate to surface SOMETHING.
-        for idx, _game, cands in ambiguous:
+        for idx, _game, cands, both_team in ambiguous:
             if cands:
                 c = cands[0]
                 results[idx].channel_id = c.channel_id
                 results[idx].channel_name = c.channel_name
                 results[idx].program_title = c.program_title
-                results[idx].channel_ids = [c.channel_id]
+                # #108: same widen rule as the LLM path. Without an API key we
+                # cannot disambiguate, so the first candidate is primary and the
+                # rest stack only when they all name both teams.
+                if widen and both_team:
+                    results[idx].channel_ids = _stack_fallback_ids(c.channel_id, cands)
+                else:
+                    results[idx].channel_ids = [c.channel_id]
                 results[idx].method = "fallback_first"
                 results[idx].note = "no api key; first candidate"
 

@@ -12,6 +12,7 @@ from dispatcharr_ranked_matchups.matcher import (
     _regex_filter_channel_name,
     _strip_preview_titles,
     _team_keywords,
+    match_games_to_channels,
 )
 
 
@@ -333,3 +334,142 @@ class TestMatcherPromptIncludesForeignLanguageHints:
     def test_prompt_mentions_french_journee(self):
         from dispatcharr_ranked_matchups.matcher import MATCHER_SYSTEM_PROMPT
         assert "journee" in MATCHER_SYSTEM_PROMPT
+
+
+class _Game:
+    """Minimal stand-in for a GameRow: only the attrs the matcher reads."""
+
+    def __init__(self, home, away, sport_label="NCAAF"):
+        self.home = home
+        self.away = away
+        self.sport_label = sport_label
+        self.start_time = datetime(2026, 4, 27, tzinfo=timezone.utc)
+
+
+def _cand(channel_id, channel_name, program_title):
+    return ChannelCandidate(
+        channel_id=channel_id,
+        channel_name=channel_name,
+        program_title=program_title,
+        program_start=datetime(2026, 4, 27, tzinfo=timezone.utc),
+        program_end=datetime(2026, 4, 27, 4, tzinfo=timezone.utc),
+    )
+
+
+class TestWidenStreamPool:
+    """#108: an off-by-default `widen` flag stacks the non-chosen same-fixture
+    candidates as fallback streams instead of discarding them.
+
+    Scoping rule: only candidates that name BOTH teams (the `filtered` set the
+    LLM disambiguates) get stacked. Single-team-keyword candidates (the
+    zero-both-team `wider` path) are NOT stacked, because failing over to a
+    stream that only mentions one team risks landing on a different game.
+    """
+
+    def _multi_both_team_setup(self, monkeypatch):
+        # Both candidates name BOTH teams in the TITLE but neither in the
+        # CHANNEL NAME, so tier-1 (regex_strict on channel name) misses and the
+        # game falls to the LLM disambiguation path with filtered len == 2.
+        cands = [
+            _cand(100, "ESPN", "Penn State at Ohio State"),
+            _cand(101, "FOX", "Penn State vs Ohio State"),
+        ]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        # LLM picks channel 100 as the primary broadcast.
+        monkeypatch.setattr(
+            "dispatcharr_ranked_matchups.matcher._post_claude",
+            lambda *a, **k: {"0": 100},
+        )
+        return games, lambda g: cands
+
+    def test_llm_single_id_when_widen_off(self, monkeypatch):
+        games, lookup = self._multi_both_team_setup(monkeypatch)
+        results = match_games_to_channels(games, lookup, api_key="x", model="m")
+        assert results[0].method == "llm"
+        assert results[0].channel_id == 100
+        assert results[0].channel_ids == [100]
+
+    def test_llm_stacks_both_team_candidates_when_widen_on(self, monkeypatch):
+        games, lookup = self._multi_both_team_setup(monkeypatch)
+        results = match_games_to_channels(
+            games, lookup, api_key="x", model="m", widen=True
+        )
+        assert results[0].method == "llm"
+        # Primary stays the LLM's pick; the other both-team variant is stacked
+        # after it as a fallback stream source.
+        assert results[0].channel_id == 100
+        assert results[0].channel_ids == [100, 101]
+
+    def test_widen_does_not_stack_single_team_candidates(self, monkeypatch):
+        # No candidate names BOTH teams (filtered == 0). The LLM still picks one
+        # from the wider single-team-keyword pool, but widening must NOT stack
+        # the others: they could be a different game featuring one of the teams.
+        cands = [
+            _cand(200, "ESPN", "Penn State football tonight"),
+            _cand(201, "BTN", "Ohio State pregame coverage"),
+        ]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        monkeypatch.setattr(
+            "dispatcharr_ranked_matchups.matcher._post_claude",
+            lambda *a, **k: {"0": 200},
+        )
+        results = match_games_to_channels(
+            games, lambda g: cands, api_key="x", model="m", widen=True
+        )
+        assert results[0].channel_id == 200
+        assert results[0].channel_ids == [200]
+
+    def test_regex_strict_stacks_regardless_of_widen(self, monkeypatch):
+        # Tier-1 channel-name both-team matches already stack all variants; the
+        # widen flag must not change that established behavior (widen off here).
+        cands = [
+            _cand(300, "EPL01: Penn State 20:00 Ohio State", "Live"),
+            _cand(301, "AU: Penn State v Ohio State", "Live"),
+        ]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        results = match_games_to_channels(
+            games, lambda g: cands, api_key="x", model="m"
+        )
+        assert results[0].method == "regex_strict"
+        assert results[0].channel_ids == [300, 301]
+
+    def test_regex_strict_dedupes_repeated_channel(self):
+        # A single channel with two ProgramData rows both passing the filter
+        # must appear once. Exercises the shared stacking helper's dedupe.
+        cands = [
+            _cand(300, "EPL01: Penn State v Ohio State", "First half"),
+            _cand(300, "EPL01: Penn State v Ohio State", "Second half"),
+            _cand(301, "AU: Penn State v Ohio State", "Live"),
+        ]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        results = match_games_to_channels(
+            games, lambda g: cands, api_key="x", model="m"
+        )
+        assert results[0].channel_ids == [300, 301]
+
+    def test_fallback_first_stacks_both_team_when_widen_on(self):
+        # No API key -> fallback_first. With widen on and every candidate
+        # naming both teams, stack the rest behind the first as fallbacks.
+        cands = [
+            _cand(400, "ESPN", "Penn State at Ohio State"),
+            _cand(401, "FOX", "Penn State vs Ohio State"),
+        ]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        results = match_games_to_channels(
+            games, lambda g: cands, api_key="", model="m", widen=True
+        )
+        assert results[0].method == "fallback_first"
+        assert results[0].channel_id == 400
+        assert results[0].channel_ids == [400, 401]
+
+    def test_fallback_first_single_id_when_widen_off(self):
+        cands = [
+            _cand(400, "ESPN", "Penn State at Ohio State"),
+            _cand(401, "FOX", "Penn State vs Ohio State"),
+        ]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        results = match_games_to_channels(
+            games, lambda g: cands, api_key="", model="m"
+        )
+        assert results[0].method == "fallback_first"
+        assert results[0].channel_ids == [400]
