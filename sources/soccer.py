@@ -2063,16 +2063,126 @@ class GroupStageSoccerSource(SoccerSource):
         (which routes to LEAGUE_CONTEXTS' knockout entries) to
         "WC_GS" / "EC_GS" (the group-stage contexts whose `advance`
         threshold this source's terminal_outcomes resolves against).
+
+        Also stamps `extra["group_stage"]` (the group letter, current
+        standings, finished results, and advancement rule) onto every row.
+        Without it the LLM description writer gets the base `standings_table`
+        -- which is EMPTY for tournament competitions, FD.org publishes no
+        flat table for them -- and fabricates group narratives ("shock
+        opening loss"). See `_util.group_phase_text` for the schema.
         """
         rows = super().fetch_upcoming(days_ahead)
         gs_code = self._group_stage_context_code()
+        group_ctx = self._build_group_contexts()
+        team_group = self._team_group_map()
         out: List[GameRow] = []
         for r in rows:
             if (r.extra or {}).get("stage") != "GROUP_STAGE":
                 continue
             if isinstance(r.extra, dict):
                 r.extra["fd_competition_code"] = gs_code
+                group_key = team_group.get(r.home) or team_group.get(r.away)
+                ctx = group_ctx.get(group_key) if group_key else None
+                if ctx is not None:
+                    # Stamp this fixture's own matchday onto a shallow copy:
+                    # the shared per-group context carries the table + results
+                    # (group-wide), but matchday is per-fixture (MD1/2/3).
+                    gs = dict(ctx)
+                    md = r.extra.get("matchday")
+                    if isinstance(md, int):
+                        gs["matchday"] = md
+                    r.extra["group_stage"] = gs
             out.append(r)
+        return out
+
+    @staticmethod
+    def _display_group_letter(group_key: str) -> str:
+        """FD.org's group field is "GROUP_A"; the human-facing letter is "A".
+        Last underscore-delimited token, so a bare "A" passes through."""
+        return group_key.rsplit("_", 1)[-1]
+
+    def _advance_rule_text(self) -> Tuple[str, int]:
+        """Return (advancement-rule sentence, matchdays_total) for this
+        tournament's group stage, read from the registered group-stage
+        LEAGUE_CONTEXTS entry so it tracks the same source of truth as the
+        advance/eliminated classification."""
+        from ..scoring import LEAGUE_CONTEXTS
+
+        ctx = LEAGUE_CONTEXTS.get(self._group_stage_context_code())
+        n_third = ctx.best_third_place_count if ctx else 0
+        total = ctx.matchdays_total if ctx else 0
+        rule = f"The top {_GROUP_ADVANCE_TOP_N} teams in each group advance"
+        if n_third > 0:
+            rule += (
+                f", plus the {n_third} best third-placed teams across all groups."
+            )
+        else:
+            rule += "."
+        return rule, total
+
+    def _finished_results_by_group(self) -> Dict[str, List[Dict[str, Any]]]:
+        """{group_key: [{home, away, home_goals, away_goals}, ...]} for every
+        FINISHED group-stage match, oldest first. Keyed by FD.org's raw group
+        value ("GROUP_A") so it joins cleanly to `_compute_group_standings`'
+        by_group keys (same source). Best-effort: a fetch failure yields {}."""
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        try:
+            matches = self._fetch_all_season_matches()
+        except Exception as e:  # noqa: BLE001 - enrichment must never drop rows
+            logger.warning("[soccer:%s] group-results fetch failed: %s",
+                           self.config.fd_code, e)
+            return out
+        for m in sorted(matches, key=lambda x: x.get("utcDate") or ""):
+            parsed = self._parse_finished_group_match(m)
+            if parsed is None:
+                continue
+            home, away, hg, ag, _fd_id, group_key = parsed
+            if not group_key:
+                continue
+            out.setdefault(group_key, []).append({
+                "home": home,
+                "away": away,
+                "home_goals": hg,
+                "away_goals": ag,
+            })
+        return out
+
+    def _build_group_contexts(self) -> Dict[str, Dict[str, Any]]:
+        """Per-group description/LLM context keyed by FD.org's raw group value
+        ("GROUP_A"): current standings (FINISHED matches only), finished
+        results, and the advancement rule. Built once per refresh from the
+        cached simulator state + season fixtures so `fetch_upcoming` stamps it
+        cheaply. Best-effort: any failure yields {} and rows ship without
+        group context (a thinner, but never wrong, description)."""
+        try:
+            state = self.initial_state()
+            standings = self._compute_group_standings(state)
+        except Exception as e:  # noqa: BLE001 - enrichment must never drop rows
+            logger.warning("[soccer:%s] group-context build failed: %s",
+                           self.config.fd_code, e)
+            return {}
+
+        advance, total = self._advance_rule_text()
+        results_by_group = self._finished_results_by_group()
+        out: Dict[str, Dict[str, Any]] = {}
+        for group_key, ranked in standings.by_group.items():
+            table: List[Dict[str, Any]] = []
+            for pos, (team, row) in enumerate(ranked, start=1):
+                table.append({
+                    "position": pos,
+                    "name": team,
+                    "played": row["played"],
+                    "points": row["points"],
+                    "goal_difference": row["gf"] - row["ga"],
+                })
+            out[group_key] = {
+                "tournament": self.config.sport_label,
+                "group": self._display_group_letter(group_key),
+                "matchdays_total": total or None,
+                "standings": table,
+                "results": results_by_group.get(group_key, []),
+                "advance": advance,
+            }
         return out
 
     def _group_stage_context_code(self) -> str:
@@ -2111,6 +2221,30 @@ class GroupStageSoccerSource(SoccerSource):
     def outcome_labels(self) -> List[str]:
         return ["advance", "eliminated"]
 
+    @staticmethod
+    def _parse_finished_group_match(
+        m: Dict[str, Any],
+    ) -> Optional[Tuple[str, str, int, int, Any, Optional[str]]]:
+        """Extract (home, away, home_goals, away_goals, fd_id, group) from a
+        FINISHED group-stage match dict, or None if it isn't a usable finished
+        group match. Single source of truth for the finished-group-match
+        guard, shared by `initial_state` (simulator seeding) and
+        `_finished_results_by_group` (description grounding): the two must
+        agree on what counts, or the standings the LLM sees diverge from the
+        standings the advance/eliminate classifier computed."""
+        if m.get("stage") != "GROUP_STAGE" or m.get("status") != "FINISHED":
+            return None
+        ft = (m.get("score") or {}).get("fullTime") or {}
+        hg = ft.get("home")
+        ag = ft.get("away")
+        if hg is None or ag is None:
+            return None
+        home = (m.get("homeTeam") or {}).get("name")
+        away = (m.get("awayTeam") or {}).get("name")
+        if not home or not away:
+            return None
+        return home, away, int(hg), int(ag), m.get("id"), m.get("group")
+
     def initial_state(self) -> Dict[str, Any]:
         """Group-stage-only standings snapshot. Same shape as
         SoccerSource.initial_state plus a "_team_group" lookup so
@@ -2134,24 +2268,16 @@ class GroupStageSoccerSource(SoccerSource):
         applied: List[Any] = []
         # Apply FINISHED group-stage matches.
         for m in matches:
-            if m.get("stage") != "GROUP_STAGE":
+            parsed = self._parse_finished_group_match(m)
+            if parsed is None:
                 continue
-            if m.get("status") != "FINISHED":
-                continue
-            ft = (m.get("score") or {}).get("fullTime") or {}
-            hg = ft.get("home")
-            ag = ft.get("away")
-            if hg is None or ag is None:
-                continue
-            home = (m.get("homeTeam") or {}).get("name")
-            away = (m.get("awayTeam") or {}).get("name")
-            fd_id = m.get("id")
-            if not home or not away or fd_id is None:
+            home, away, hg, ag, fd_id, _group = parsed
+            if fd_id is None:
                 continue
             if home not in state["_teams"] or away not in state["_teams"]:
                 continue  # defensive: team_group_map should have covered them
             applied.append(fd_id)
-            self._mutate_apply(state, home, away, int(hg), int(ag))
+            self._mutate_apply(state, home, away, hg, ag)
         state["_applied"] = frozenset(applied)
         self._initial_state_cache = state
         return state

@@ -25,7 +25,15 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
-from ._util import series_phase_text, series_record_text, series_result_lines
+from ._util import (
+    group_advance_text,
+    group_phase_text,
+    group_results_lines,
+    group_standings_lines,
+    series_phase_text,
+    series_record_text,
+    series_result_lines,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +59,12 @@ Hard rules:
 - If a favorite team for this user is playing, that's a "personal interest":
   ground the preview in their angle.
 - Plain text only. No markdown, no asterisks, no bullet points.
+- GROUND EVERY FACT in the lines above. A team's record, points, group/league
+  position, who they have already played, and any prior result must come from
+  the standings, results, group, or series lines provided. If a fact is not
+  listed, you do not know it: never invent a scoreline, a win or loss, a points
+  total, or a standing. Do not say a team "lost their opener", "needs a win to
+  survive", or "has yet to score" unless the given lines make it literally true.
 - Do NOT fabricate playoff series facts. The only series facts you may use are
   the "Series", "Series record", and "Results so far" lines above. Never invent
   a series score, a game number, or a best-of-N length.
@@ -59,6 +73,12 @@ Hard rules:
   (a team one loss from elimination in a best-of-N). If no series lines are
   given the match may still be a one-off knockout, so general "win or go home"
   framing is fine, but never assert a series standing or game number.
+- For group-stage matches, the "Current group standings", "Group results so
+  far", and "Advancement" lines are the actual current state. Reason about
+  advancement only from them (e.g. a team already on 6 points after 2 games is
+  through; a team that has played both games and sits last is in trouble).
+  Before any game has been played in the group, there are no results: do not
+  imply otherwise.
 """
 
 # How many standings rows above/below each team to include in the context.
@@ -148,6 +168,31 @@ def build_llm_context(g: Dict[str, Any], tagline: str, boundary_summary: str = "
         lines.append("Results so far:")
         for recap_line in series_recap:
             lines.append(f"  - {recap_line}")
+
+    # Group-stage grounding (WC / EURO group games populate
+    # extra["group_stage"]). The soccer analog of the series block above and
+    # the load-bearing fix for the false-"shock opening loss" bug: a group
+    # game has no flat standings table (FD.org publishes none for
+    # tournaments), so without these lines the model had nothing but team
+    # names and invented the table. The SYSTEM_PROMPT grounding rule forbids
+    # asserting any record / result not listed here.
+    group_stage = extra.get("group_stage")
+    group_phase = group_phase_text(group_stage)
+    if group_phase:
+        lines.append(f"Tournament round: {group_phase}")
+    group_standings = group_standings_lines(group_stage)
+    if group_standings:
+        lines.append("Current group standings:")
+        for standing_line in group_standings:
+            lines.append(f"  - {standing_line}")
+    group_results = group_results_lines(group_stage)
+    if group_results:
+        lines.append("Group results so far:")
+        for result_line in group_results:
+            lines.append(f"  - {result_line}")
+    group_advance = group_advance_text(group_stage)
+    if group_advance:
+        lines.append(f"Advancement: {group_advance}")
 
     matchday = extra.get("matchday")
     matchdays_total = extra.get("matchdays_total")

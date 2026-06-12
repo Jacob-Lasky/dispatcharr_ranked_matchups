@@ -5,6 +5,10 @@ from datetime import datetime, timezone
 
 from dispatcharr_ranked_matchups._util import (
     extract_game_number_after_marker,
+    group_advance_text,
+    group_phase_text,
+    group_results_lines,
+    group_standings_lines,
     parse_iso_utc,
     series_phase_text,
     series_record_text,
@@ -191,3 +195,109 @@ class TestSeriesResultLines:
 
     def test_none_returns_empty(self):
         assert series_result_lines(None) == []
+
+
+# ---------- group-stage rendering ----------
+
+def _group_stage(**overrides):
+    base = {
+        "tournament": "FIFA World Cup",
+        "group": "C",
+        "matchday": 2,
+        "matchdays_total": 3,
+        "standings": [
+            {"position": 1, "name": "Argentina", "played": 1, "points": 3,
+             "goal_difference": 1},
+            {"position": 2, "name": "Mexico", "played": 1, "points": 1,
+             "goal_difference": 0},
+            {"position": 3, "name": "Poland", "played": 1, "points": 1,
+             "goal_difference": 0},
+            {"position": 4, "name": "Saudi Arabia", "played": 1, "points": 0,
+             "goal_difference": -1},
+        ],
+        "results": [
+            {"home": "Argentina", "away": "Saudi Arabia",
+             "home_goals": 2, "away_goals": 1},
+            {"home": "Mexico", "away": "Poland",
+             "home_goals": 1, "away_goals": 1},
+        ],
+        "advance": "The top 2 teams in each group advance, plus the 8 best "
+                   "third-placed teams across all groups.",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestGroupPhaseText:
+    def test_full_phrase(self):
+        assert group_phase_text(_group_stage()) == (
+            "FIFA World Cup Group C, Matchday 2 of 3"
+        )
+
+    def test_no_tournament_drops_to_group_only(self):
+        assert group_phase_text(_group_stage(tournament="")) == (
+            "Group C, Matchday 2 of 3"
+        )
+
+    def test_missing_matchday_drops_to_head(self):
+        assert group_phase_text(_group_stage(matchday=None)) == "FIFA World Cup Group C"
+
+    def test_no_group_returns_empty(self):
+        assert group_phase_text(_group_stage(group="")) == ""
+
+    def test_none_returns_empty(self):
+        assert group_phase_text(None) == ""
+        assert group_phase_text("nope") == ""
+
+
+class TestGroupStandingsLines:
+    def test_lines_in_order_with_gd_sign(self):
+        lines = group_standings_lines(_group_stage())
+        assert lines[0] == "#1 Argentina - 3 pts, 1 played, +1 GD"
+        assert lines[3] == "#4 Saudi Arabia - 0 pts, 1 played, -1 GD"
+
+    def test_position_falls_back_to_index(self):
+        gs = _group_stage(standings=[{"name": "A", "points": 0, "played": 0,
+                                       "goal_difference": 0}])
+        assert group_standings_lines(gs) == ["#1 A - 0 pts, 0 played, +0 GD"]
+
+    def test_malformed_row_skipped(self):
+        gs = _group_stage(standings=[
+            {"position": 1, "name": "A", "points": 3, "played": 1, "goal_difference": 1},
+            {"position": 2},  # no name
+            "garbage",
+        ])
+        assert group_standings_lines(gs) == ["#1 A - 3 pts, 1 played, +1 GD"]
+
+    def test_none_returns_empty(self):
+        assert group_standings_lines(None) == []
+
+
+class TestGroupResultsLines:
+    def test_scorelines(self):
+        assert group_results_lines(_group_stage()) == [
+            "Argentina 2-1 Saudi Arabia",
+            "Mexico 1-1 Poland",
+        ]
+
+    def test_malformed_row_skipped(self):
+        gs = _group_stage(results=[
+            {"home": "A", "away": "B", "home_goals": 1, "away_goals": 0},
+            {"home": "A", "away": "B"},  # missing scores
+        ])
+        assert group_results_lines(gs) == ["A 1-0 B"]
+
+    def test_empty_before_kickoff(self):
+        assert group_results_lines(_group_stage(results=[])) == []
+
+    def test_none_returns_empty(self):
+        assert group_results_lines(None) == []
+
+
+class TestGroupAdvanceText:
+    def test_returns_rule(self):
+        assert "third-placed" in group_advance_text(_group_stage())
+
+    def test_missing_returns_empty(self):
+        assert group_advance_text(_group_stage(advance="")) == ""
+        assert group_advance_text(None) == ""

@@ -1022,6 +1022,58 @@ class TestBuildDescription:
         assert "of 7." not in out
         assert "Series" not in out
 
+    # ---------- block 2c: group-stage state ----------
+
+    @staticmethod
+    def _group_stage_extra():
+        return {
+            "fd_competition_code": "WC_GS",
+            "matchday": 2,
+            "group_stage": {
+                "tournament": "FIFA World Cup",
+                "group": "C",
+                "matchday": 2,
+                "matchdays_total": 3,
+                "standings": [
+                    {"position": 1, "name": "Argentina", "played": 1,
+                     "points": 3, "goal_difference": 1},
+                    {"position": 2, "name": "Mexico", "played": 1,
+                     "points": 1, "goal_difference": 0},
+                ],
+                "results": [
+                    {"home": "Argentina", "away": "Saudi Arabia",
+                     "home_goals": 2, "away_goals": 1},
+                ],
+                "advance": "The top 2 teams in each group advance, plus the "
+                           "8 best third-placed teams across all groups.",
+            },
+        }
+
+    def test_group_stage_round_standings_results_advance_render(self, plugin):
+        # The "shock opening loss" fix: a group game's description must carry
+        # the real round, table, results, and advance rule, NEVER invent them.
+        g = self._g(home="Argentina", away="Mexico",
+                    extra=self._group_stage_extra())
+        out = plugin._build_description(g, "", False)
+        assert "FIFA World Cup Group C, Matchday 2 of 3." in out
+        assert "#1 Argentina - 3 pts, 1 played, +1 GD" in out
+        assert "Argentina 2-1 Saudi Arabia" in out
+        assert "The top 2 teams in each group advance" in out
+
+    def test_group_stage_does_not_double_render_matchday(self, plugin):
+        # group_phase owns the matchday line; block 3's generic matchday
+        # (WC_GS league ctx supplies matchdays_total=3) must not repeat it.
+        g = self._g(home="Argentina", away="Mexico",
+                    extra=self._group_stage_extra())
+        out = plugin._build_description(g, "", False)
+        assert out.count("Matchday 2 of 3") == 1
+
+    def test_no_group_stage_key_renders_no_group_block(self, plugin):
+        out = plugin._build_description(
+            self._g(extra={"matchday": 7, "matchdays_total": 38}), "", False)
+        assert "Group" not in out
+        assert "advance" not in out.lower()
+
     # ---------- block 3: matchday + league boundary ----------
 
     def test_matchday_line_uses_explicit_totals(self, plugin):
