@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
 import sys
 import threading
@@ -44,7 +43,6 @@ except ImportError:  # py < 3.9 fallback (won't hit on Dispatcharr's Python 3.13
     ZoneInfo = None  # type: ignore
 
 from ._util import (
-    CHANNEL_NUMBER_DECIMALS,
     group_advance_text,
     group_phase_text,
     group_results_lines,
@@ -1474,37 +1472,39 @@ def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) 
     return candidate if candidate > 1 else _AUTO_BASE_FALLBACK
 
 
-def _resolve_park_base(max_target_number: float) -> int:
+def _resolve_park_base(max_target_number: int) -> int:
     """Pick a parking range that's guaranteed past every target number we'll
     write. Parking + writing happens in one transaction within our own group,
     so we only need to clear our own target range; +1000 slack keeps the
     parking range comfortably out of the highest target we're about to assign.
 
     `max_target_number` is the largest channel number this apply will write
-    (the channel numbers are now day-offset based, so the ceiling is driven by
-    how far ahead the slate reaches, NOT by the game count). Callers pass the
-    target base itself when the slate is empty so the result stays sane."""
-    return int(math.floor(max_target_number)) + 1000
+    (channel numbers are kickoff-time based, so the ceiling is driven by how far
+    ahead the slate reaches, NOT by the game count). Callers pass the target
+    base itself when the slate is empty so the result stays sane."""
+    return int(max_target_number) + 1000
 
 
 def _assign_channel_numbers(
     games: List[Dict[str, Any]], virtual_base: int, tz
-) -> Dict[str, float]:
+) -> Dict[str, int]:
     """Map each game's marker to its stable channel number for this apply.
 
-    Numbers come from `stable_channel_number` (a pure function of kickoff +
-    marker), so a given game keeps the same number across applies regardless of
-    how the slate is ranked. That stability is what lets Dispatcharr's default
-    ``tvg_id_source=channel_number`` bind the EPG correctly (#119).
+    Numbers come from `stable_channel_number` (a pure function of kickoff time +
+    marker), so a given game keeps the same integer for its whole life
+    regardless of how the slate is ranked or which other games are present. That
+    stability is what lets both the default M3U/XMLTV output and the Xtream Codes
+    API bind the EPG correctly with no client setting (#121), while the numbers
+    still increase with kickoff time so the list sorts soonest-first.
 
-    Two DIFFERENT games can only land on the same rounded number if they share
-    a local day AND a hash bucket (~1e-5 odds on a realistic slate). That would
-    violate the unique ``(channel_group, channel_number)`` constraint, so we
-    resolve it deterministically: walk the games in (number, marker) order and
-    nudge any exact duplicate up by a hair. This perturbs ONLY the colliding
-    game, never the rest, so every other game keeps its pure stable number and
-    the resolution is reproducible across applies."""
-    pairs: List[Tuple[str, float]] = []
+    Two DIFFERENT games can only land on the same number if they share a kickoff
+    minute AND a hash slot (uncommon; see CHANNEL_NUMBER_TIEBREAK_SLOTS). That
+    would violate the unique ``(channel_group, channel_number)`` constraint, so
+    we resolve it deterministically: walk the games in (number, marker) order and
+    bump any exact duplicate to the next free integer. This perturbs ONLY a
+    colliding same-minute game, never games at other minutes, and is reproducible
+    across applies."""
+    pairs: List[Tuple[str, int]] = []
     for g in games:
         start_dt = parse_iso_utc(g.get("start_time_utc"))
         if start_dt is None:
@@ -1513,23 +1513,19 @@ def _assign_channel_numbers(
         pairs.append((marker, stable_channel_number(virtual_base, start_dt, marker, tz)))
 
     pairs.sort(key=lambda mn: (mn[1], mn[0]))
-    assigned: Dict[str, float] = {}
+    assigned: Dict[str, int] = {}
     used: set = set()
     collisions = 0
-    # Smallest increment that survives the shared rounding grid: one step nudges
-    # an exact duplicate onto the next free slot without crossing into the next
-    # day band (which is 1.0 away).
-    nudge = 10 ** -CHANNEL_NUMBER_DECIMALS
     for marker, number in pairs:
         while number in used:
-            number = round(number + nudge, CHANNEL_NUMBER_DECIMALS)
+            number += 1
             collisions += 1
         used.add(number)
         assigned[marker] = number
     if collisions:
         logger.warning(
-            "[ranked_matchups] resolved %d channel-number collision(s) by nudging; "
-            "widen _CHANNEL_NUMBER_FRAC_BUCKETS in _util.py if this recurs",
+            "[ranked_matchups] resolved %d channel-number collision(s) by +1 nudge; "
+            "raise CHANNEL_NUMBER_TIEBREAK_SLOTS in _util.py if this recurs",
             collisions,
         )
     return assigned
@@ -2121,13 +2117,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     virtual_base = _resolve_virtual_base(settings, highest_other)
     # Stable per-game channel numbers (marker -> number). Computed once up front
     # so collision resolution sees the whole slate and so park_base can be set
-    # above the true ceiling (day-offset based, not game-count based).
+    # above the true ceiling (kickoff-time based, so driven by how far ahead the
+    # slate reaches, not by the game count).
     chnum_by_marker = _assign_channel_numbers(games, virtual_base, apply_tz)
-    max_target = max(chnum_by_marker.values(), default=float(virtual_base))
+    max_target = max(chnum_by_marker.values(), default=virtual_base)
     park_base = _resolve_park_base(max_target)
     logger.info(
         "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r), "
-        "max_target=%.3f, park_base=%d",
+        "max_target=%d, park_base=%d",
         virtual_base, highest_other,
         settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE),
         max_target, park_base,
@@ -2344,13 +2341,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)
                 continue
 
-            # Stable, day-chronological channel number for this game. Keyed by
-            # marker (not slate position) so it never moves across applies, which
-            # is what makes Dispatcharr's DEFAULT tvg_id_source=channel_number
-            # bind the EPG correctly with no client setup (#119). Earlier-day
-            # kickoffs still sort first. _assign_channel_numbers computed the
-            # whole map up front; marker is guaranteed present here because that
-            # map skips exactly the same bad-start_time rows we just skipped.
+            # Stable, kickoff-time-based channel number for this game. Keyed by
+            # marker (not slate position) so it never moves across applies, yet
+            # it increases with start time so the list still sorts soonest-first.
+            # Being a stable integer is what makes BOTH the default M3U/XMLTV
+            # output and the Xtream Codes API bind the EPG correctly with no
+            # client setup (#121). _assign_channel_numbers computed the whole map
+            # up front; marker is guaranteed present here because that map skips
+            # exactly the same bad-start_time rows we just skipped.
             target_chnum = chnum_by_marker[marker]
 
             new_name = format_channel_name(
@@ -2974,7 +2972,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.3.0"
+    version = "1.4.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

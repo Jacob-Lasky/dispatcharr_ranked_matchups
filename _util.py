@@ -36,55 +36,61 @@ def stable_hash_int(s: str) -> int:
     return int(digest[:16], 16)
 
 
-# Fixed anchor for stable_channel_number's day offset. DO NOT change this date:
-# every virtual channel's number is measured in days from this origin, so moving
-# it shifts EVERY channel number by the same delta in one apply (a one-time mass
-# renumber). It only needs to sit on or before the earliest kickoff the plugin
-# will ever schedule; the plugin fetches upcoming games, so any date safely in
-# the past works and 2024-01-01 leaves comfortable headroom.
-CHANNEL_NUMBER_ORIGIN = date(2024, 1, 1)
+# Fixed anchor for stable_channel_number. DO NOT change this date: every virtual
+# channel's number is measured in minutes from this origin, so moving it shifts
+# EVERY channel number by the same delta in one apply (a one-time mass renumber).
+# It only needs to sit on or before the earliest kickoff the plugin will ever
+# schedule; the plugin fetches upcoming games, so any date in the recent past
+# works. 2026-01-01 keeps the resulting numbers ~7 digits rather than ~8.
+CHANNEL_NUMBER_ORIGIN = date(2026, 1, 1)
 
-# Decimal places channel numbers are rounded to. Single source of truth: the
-# fraction-bucket count, the rounding below, and plugin.py's collision nudge all
-# derive from it, so the hash-fraction granularity always matches the rounding
-# grid. 9 keeps same-day collisions astronomically unlikely (birthday bound over
-# a realistic slate of <~100 games is ~1e-5) while staying within float
-# precision when added to a 4-6 digit integer base.
-CHANNEL_NUMBER_DECIMALS = 9
-
-# Stable hash buckets for the fractional part: one per rounding step, so every
-# distinct bucket survives the round() below as a distinct number.
-_CHANNEL_NUMBER_FRAC_BUCKETS = 10 ** CHANNEL_NUMBER_DECIMALS
+# Tiebreak slots reserved per kickoff minute. The channel number is
+# minutes-since-origin * this + (stable hash % this), so two games at the SAME
+# minute get distinct, stable numbers as long as their hashes differ mod this.
+# 16 keeps numbers compact while making same-minute hash collisions uncommon
+# (~6% per simultaneous pair); the rare residual is resolved by the deterministic
+# nudge in plugin._assign_channel_numbers. Because the value is < the per-minute
+# stride, it never reorders games across minute boundaries.
+CHANNEL_NUMBER_TIEBREAK_SLOTS = 16
 
 
 def stable_channel_number(
     virtual_base: int, start_utc: datetime, marker: str, tz
-) -> float:
-    """Stable, day-chronological channel number for a virtual game channel.
+) -> int:
+    """Stable, chronological channel number for a virtual game channel.
 
-    PURE FUNCTION of the game's immutable kickoff and its `marker`: the SAME
-    game always maps to the SAME number regardless of how the slate is ranked
-    or which other games are present. That stability is the whole point.
-    Dispatcharr's default output mode (``tvg_id_source=channel_number``) binds
-    the EPG to a channel BY its channel number, so a volatile number pairs the
-    wrong programme with a channel after a re-rank (see #117). A stable number
-    makes the default mode bind correctly with no client configuration.
+    PURE FUNCTION of the game's immutable kickoff time and its `marker`: the
+    SAME game always maps to the SAME integer for its whole life, regardless of
+    how the slate is ranked or which other games are present. That stability is
+    the whole point. Both Dispatcharr's default M3U/XMLTV output AND the Xtream
+    Codes API bind the EPG to a channel BY its (integer) channel number, so a
+    number that MOVES pairs the wrong programme with a channel after the slate
+    changes (see #117). A number derived from kickoff time never moves, so the
+    guide binds correctly with no client configuration, in either output mode.
 
-      integer part = virtual_base + days-from-origin (in the user's local tz)
-      fraction     = stable hash of marker in [0, 1)
+      number = virtual_base
+             + minutes-since-origin (in the user's local tz) * TIEBREAK_SLOTS
+             + (stable hash of marker) % TIEBREAK_SLOTS
 
-    The day offset makes earlier-kickoff days sort first (today's games lead the
-    list, preserving the prior behaviour's intent), while the hash fraction
-    gives each same-day game a distinct, stable slot. Within a day the order is
-    stable-but-arbitrary (by hash), not by kickoff time; see #119 for the
-    trade-off (chronological-within-day would force much larger channel
-    numbers). Earlier kickoffs in absolute time still get strictly lower
-    numbers across days.
+    The number increases monotonically with kickoff time, so the channel list
+    sorts strictly by day then start time (today's/soonest games first) — which
+    is exactly the "renumber every refresh, by start time" behaviour, achieved
+    WITHOUT any game's number ever changing: finished games drop off and new
+    games slot into their time-position on their own. The per-minute tiebreak
+    gives simultaneous kickoffs distinct, stable slots. Integer throughout, so
+    the Xtream Codes integer-channel-number requirement is satisfied natively
+    (no flooring/rounding by the XC layer, which is what scrambled the prior
+    fractional scheme).
     """
-    local_date = start_utc.astimezone(tz).date()
-    day_offset = max(0, (local_date - CHANNEL_NUMBER_ORIGIN).days)
-    frac = (stable_hash_int(marker) % _CHANNEL_NUMBER_FRAC_BUCKETS) / _CHANNEL_NUMBER_FRAC_BUCKETS
-    return round(virtual_base + day_offset + frac, CHANNEL_NUMBER_DECIMALS)
+    local = start_utc.astimezone(tz)
+    day_offset = max(0, (local.date() - CHANNEL_NUMBER_ORIGIN).days)
+    minutes_since_origin = day_offset * 1440 + local.hour * 60 + local.minute
+    slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
+    return (
+        virtual_base
+        + minutes_since_origin * slots
+        + (stable_hash_int(marker) % slots)
+    )
 
 
 def extract_game_number_after_marker(headline: str, marker: str) -> Optional[int]:

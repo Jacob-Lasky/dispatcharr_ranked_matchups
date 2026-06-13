@@ -7,16 +7,21 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ### Changed
 
-- **Stable, day-chronological channel numbers (#119).** Virtual channel numbers
-  are now a pure function of each game's kickoff day plus a per-game hash, so a
-  given game keeps the same number for its whole life instead of being renumbered
-  by ★ rank on every refresh. This makes the EPG bind correctly under
-  Dispatcharr's **default** `tvg_id_source=channel_number` with no client setup,
-  fixing the name↔guide mismatch from #117 at the source rather than via a
-  required client setting. Earlier-day games still get lower numbers, so today's
-  games sort first; within a day, order is stable-but-arbitrary (by hash) rather
-  than by ★ score. The prior "set TVG-ID Source = TVG-ID" requirement (banner +
-  README step 5) is removed; that mode still works but is no longer needed.
+- **Stable, kickoff-time channel numbers (#121, supersedes #119).** Virtual
+  channel numbers are a pure function of each game's start time:
+  `virtual_base + minutes-since-a-fixed-origin × slots + a small per-game hash
+  tiebreak`, as an **integer**. The list therefore sorts strictly by day then
+  start time (live/upcoming first, no ★-score ordering), and every game keeps
+  the same number for its whole life — finished games drop off and new games
+  slot into their time-position without any existing number moving. Because the
+  number is stable, the guide binds to the right game with no client setup in
+  **both** the default M3U/EPG output and the **Xtream Codes API** (both bind by
+  the integer channel number), fixing the #117 name↔guide mismatch at the source.
+  Replaces #119's day-offset-plus-hash-fraction scheme, whose *fractional*
+  numbers were floored and collision-bumped by the Xtream Codes layer (XC
+  requires integer channel numbers), scrambling the order. The "set TVG-ID
+  Source = TVG-ID" requirement remains removed. Numbers are large (time-encoded)
+  by design; that is the cost of stable, integer, chronological numbering.
 
 ### Added
 
