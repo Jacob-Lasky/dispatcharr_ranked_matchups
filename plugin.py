@@ -1343,8 +1343,10 @@ def _build_epg_lookup():
         window_start = game.start_time - timedelta(minutes=pre_min)
         window_end = game.start_time + timedelta(hours=post_hours)
 
-        all_kws = _team_keywords(game.home) + _team_keywords(game.away)
-        if not all_kws:
+        home_kws = _team_keywords(game.home)
+        away_kws = _team_keywords(game.away)
+        all_kws = home_kws + away_kws
+        if not (home_kws and away_kws):
             return []
 
         # Path A: programs in window whose TITLE mentions any team keyword.
@@ -1358,18 +1360,25 @@ def _build_epg_lookup():
             .only("id", "title", "start_time", "end_time", "epg_id")
         )
 
-        # Path B: channels whose NAME mentions any team keyword. Include
-        # them even without EPG entries in window: provider channels often
-        # advertise the match in the channel NAME but have no program data
-        # (e.g. 'AU (STAN 01) | Manchester United v Brentford ...'). Tier-1
-        # strict still discriminates by 'both teams in channel name', so
-        # noise channels with only one team mentioned won't pass through.
-        name_q = Q()
-        for kw in all_kws:
-            name_q |= Q(name__icontains=kw)
+        # Path B: channels whose NAME mentions BOTH teams. Include them even
+        # without EPG entries in window: provider channels often advertise the
+        # match in the channel NAME but carry no program data (e.g.
+        # 'AU (STAN 01) | Manchester United v Brentford ...', or the World Cup
+        # per-game feeds 'FIFA World Cup 2026 06: USA 02:00 Paraguay'). Requiring
+        # BOTH teams here (not just any keyword) is deliberate (#123): it is
+        # exactly what Tier-1 strict needs, it stops single-team team-branded
+        # home channels from leaking into the Tier-3 LLM candidate set, and it
+        # keeps short broadcast aliases (e.g. 'USA') from dragging in every
+        # unrelated channel that merely contains the substring.
+        home_name_q = Q()
+        for kw in home_kws:
+            home_name_q |= Q(name__icontains=kw)
+        away_name_q = Q()
+        for kw in away_kws:
+            away_name_q |= Q(name__icontains=kw)
         name_match_chans = list(
             Channel.objects
-            .filter(name_q)
+            .filter(home_name_q & away_name_q)
             .exclude(_owned_tvg_id_q())
             .only("id", "name", "epg_data_id")
         )

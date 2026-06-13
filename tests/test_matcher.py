@@ -173,6 +173,45 @@ class TestRegexFilterChannelName:
         assert {c.channel_id for c in out} == {100, 101, 102}
 
 
+class TestNationalTeamAliases:
+    """#123: national-team channels name the matchup with broadcast forms the
+    canonical name doesn't contain — FIFA-style 'USA' and Spanish exonyms
+    ('Estados Unidos', 'Brasil'). Without aliases, _team_keywords('United
+    States') = ['United States', 'States'], so the provider's
+    'FIFA World Cup 2026 06: USA 02:00 Paraguay' channel (and its Spanish
+    feeds) never match, leaving the marquee game streamless."""
+
+    def test_united_states_expands_to_usa(self):
+        kws = [k.lower() for k in _team_keywords("United States")]
+        assert "usa" in kws
+        assert "estados unidos" in kws
+
+    def test_spanish_exonym_present(self):
+        assert "brasil" in [k.lower() for k in _team_keywords("Brazil")]
+        assert "alemania" in [k.lower() for k in _team_keywords("Germany")]
+
+    def _cand(self, channel_name: str, cid: int) -> ChannelCandidate:
+        return ChannelCandidate(
+            channel_id=cid, channel_name=channel_name, program_title="",
+            program_start=datetime(2026, 6, 13, tzinfo=timezone.utc),
+            program_end=datetime(2026, 6, 13, tzinfo=timezone.utc),
+        )
+
+    def test_wc_channel_variants_all_match(self):
+        # The 7 real provider channels for USA vs Paraguay (the 4 dedicated
+        # feeds named with USA / Estados Unidos). Tier-1 must catch them all so
+        # they stack as fallback streams.
+        cands = [
+            self._cand("FIFA World Cup 2026 06: USA 02:00 Paraguay", 1),
+            self._cand("FIFA World Cup 2026 07: [4K] USA 02:00 Paraguay", 2),
+            self._cand("FIFA World Cup 2026 08: Estados Unidos 02:00 Paraguay - En Espanol", 3),
+            self._cand("TSN+ 16 : Spanish Feed: FIFA World Cup 2026: USA vs. Paraguay", 4),
+            self._cand("Fox Sports 1", 5),  # noise: neither matchup team
+        ]
+        out = _regex_filter_channel_name(cands, "United States", "Paraguay")
+        assert {c.channel_id for c in out} == {1, 2, 3, 4}
+
+
 class TestPreviewTitleDetection:
     def test_next_game_is_preview(self):
         assert _is_preview_title("Next Game: Brentford @ Manchester United")
