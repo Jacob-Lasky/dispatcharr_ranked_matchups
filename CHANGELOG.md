@@ -5,6 +5,19 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+### Changed
+
+- **Stable, day-chronological channel numbers (#119).** Virtual channel numbers
+  are now a pure function of each game's kickoff day plus a per-game hash, so a
+  given game keeps the same number for its whole life instead of being renumbered
+  by ★ rank on every refresh. This makes the EPG bind correctly under
+  Dispatcharr's **default** `tvg_id_source=channel_number` with no client setup,
+  fixing the name↔guide mismatch from #117 at the source rather than via a
+  required client setting. Earlier-day games still get lower numbers, so today's
+  games sort first; within a day, order is stable-but-arbitrary (by hash) rather
+  than by ★ score. The prior "set TVG-ID Source = TVG-ID" requirement (banner +
+  README step 5) is removed; that mode still works but is no longer needed.
+
 ### Added
 
 - **Tuning recipes in SCORING.md** plus an in-settings link to them. The

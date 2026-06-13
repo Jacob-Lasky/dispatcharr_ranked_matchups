@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -43,6 +44,7 @@ except ImportError:  # py < 3.9 fallback (won't hit on Dispatcharr's Python 3.13
     ZoneInfo = None  # type: ignore
 
 from ._util import (
+    CHANNEL_NUMBER_DECIMALS,
     group_advance_text,
     group_phase_text,
     group_results_lines,
@@ -51,6 +53,7 @@ from ._util import (
     series_phase_text,
     series_record_text,
     series_result_lines,
+    stable_channel_number,
     stable_hash_int,
 )
 
@@ -1471,12 +1474,65 @@ def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) 
     return candidate if candidate > 1 else _AUTO_BASE_FALLBACK
 
 
-def _resolve_park_base(target_base: int, num_games: int) -> int:
+def _resolve_park_base(max_target_number: float) -> int:
     """Pick a parking range that's guaranteed past every target number we'll
     write. Parking + writing happens in one transaction within our own group,
     so we only need to clear our own target range; +1000 slack keeps the
-    parking range comfortably out of any plausible target_base growth."""
-    return target_base + max(num_games, 0) + 1000
+    parking range comfortably out of the highest target we're about to assign.
+
+    `max_target_number` is the largest channel number this apply will write
+    (the channel numbers are now day-offset based, so the ceiling is driven by
+    how far ahead the slate reaches, NOT by the game count). Callers pass the
+    target base itself when the slate is empty so the result stays sane."""
+    return int(math.floor(max_target_number)) + 1000
+
+
+def _assign_channel_numbers(
+    games: List[Dict[str, Any]], virtual_base: int, tz
+) -> Dict[str, float]:
+    """Map each game's marker to its stable channel number for this apply.
+
+    Numbers come from `stable_channel_number` (a pure function of kickoff +
+    marker), so a given game keeps the same number across applies regardless of
+    how the slate is ranked. That stability is what lets Dispatcharr's default
+    ``tvg_id_source=channel_number`` bind the EPG correctly (#119).
+
+    Two DIFFERENT games can only land on the same rounded number if they share
+    a local day AND a hash bucket (~1e-5 odds on a realistic slate). That would
+    violate the unique ``(channel_group, channel_number)`` constraint, so we
+    resolve it deterministically: walk the games in (number, marker) order and
+    nudge any exact duplicate up by a hair. This perturbs ONLY the colliding
+    game, never the rest, so every other game keeps its pure stable number and
+    the resolution is reproducible across applies."""
+    pairs: List[Tuple[str, float]] = []
+    for g in games:
+        start_dt = parse_iso_utc(g.get("start_time_utc"))
+        if start_dt is None:
+            continue
+        marker = _build_marker_key(g)
+        pairs.append((marker, stable_channel_number(virtual_base, start_dt, marker, tz)))
+
+    pairs.sort(key=lambda mn: (mn[1], mn[0]))
+    assigned: Dict[str, float] = {}
+    used: set = set()
+    collisions = 0
+    # Smallest increment that survives the shared rounding grid: one step nudges
+    # an exact duplicate onto the next free slot without crossing into the next
+    # day band (which is 1.0 away).
+    nudge = 10 ** -CHANNEL_NUMBER_DECIMALS
+    for marker, number in pairs:
+        while number in used:
+            number = round(number + nudge, CHANNEL_NUMBER_DECIMALS)
+            collisions += 1
+        used.add(number)
+        assigned[marker] = number
+    if collisions:
+        logger.warning(
+            "[ranked_matchups] resolved %d channel-number collision(s) by nudging; "
+            "widen _CHANNEL_NUMBER_FRAC_BUCKETS in _util.py if this recurs",
+            collisions,
+        )
+    return assigned
 
 
 def _build_signals_score_from_payload(g: Dict[str, Any]):
@@ -2063,12 +2119,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         .aggregate(m=_Max("channel_number"))["m"] or 0
     )
     virtual_base = _resolve_virtual_base(settings, highest_other)
-    park_base = _resolve_park_base(virtual_base, len(games))
+    # Stable per-game channel numbers (marker -> number). Computed once up front
+    # so collision resolution sees the whole slate and so park_base can be set
+    # above the true ceiling (day-offset based, not game-count based).
+    chnum_by_marker = _assign_channel_numbers(games, virtual_base, apply_tz)
+    max_target = max(chnum_by_marker.values(), default=float(virtual_base))
+    park_base = _resolve_park_base(max_target)
     logger.info(
-        "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r), park_base=%d",
+        "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r), "
+        "max_target=%.3f, park_base=%d",
         virtual_base, highest_other,
         settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE),
-        park_base,
+        max_target, park_base,
     )
 
     created = 0
@@ -2228,7 +2290,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             for ch in existing_virtuals.values():
                 ch.save(update_fields=["channel_number"])
 
-        for cache_idx, g in enumerate(games):
+        for g in games:
             # channel_ids is the full list of matched provider channels (e.g.
             # multiple regional/quality variants of the same fixture). Falls
             # back to the single-channel `channel_id` key for cache entries
@@ -2254,26 +2316,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 else:
                     skipped_unmatched += 1
                     continue
-
-            # Target channel number = base + cache index. Today's games are at
-            # the front of the cache, so they get the lowest numbers (TiviMate
-            # and other IPTV clients sort by channel number → today's games
-            # appear first in the user's Top Matchups group).
-            #
-            # DO NOT make the EPG↔channel binding depend on this number, and DO
-            # NOT try to stabilize it per game to "fix" a guide mismatch. This
-            # number is INTENTIONALLY volatile: it re-ranks by ★ score every
-            # refresh, so a given number maps to a different game across applies.
-            # The stable per-game identity is `marker`, written to BOTH
-            # Channel.tvg_id and ProgramData.tvg_id below. Clients MUST generate
-            # their M3U and EPG URLs with tvg_id_source=tvg_id so the guide binds
-            # by that stable marker. Dispatcharr's default tvg_id_source=
-            # channel_number binds by THIS number instead, and because it caches
-            # the EPG XML separately from the M3U, a post-refresh renumber pairs
-            # the new channel's name with the prior cycle's guide entry for that
-            # number (e.g. "Ole Miss at North Carolina" name over an "Iran vs
-            # New Zealand" program). Root-caused 2026-06-12.
-            target_chnum = float(virtual_base + cache_idx)
 
             marker = _build_marker_key(g)
             seen_markers.add(marker)
@@ -2301,6 +2343,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             if start_dt is None:
                 logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)
                 continue
+
+            # Stable, day-chronological channel number for this game. Keyed by
+            # marker (not slate position) so it never moves across applies, which
+            # is what makes Dispatcharr's DEFAULT tvg_id_source=channel_number
+            # bind the EPG correctly with no client setup (#119). Earlier-day
+            # kickoffs still sort first. _assign_channel_numbers computed the
+            # whole map up front; marker is guaranteed present here because that
+            # map skips exactly the same bad-start_time rows we just skipped.
+            target_chnum = chnum_by_marker[marker]
 
             new_name = format_channel_name(
                 g["sport_prefix"], signals, score, g["home"], g["away"],
@@ -2923,7 +2974,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.2.0"
+    version = "1.3.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
