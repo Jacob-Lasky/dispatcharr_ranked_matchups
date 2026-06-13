@@ -6,7 +6,7 @@ from __future__ import annotations
 import hashlib
 import math
 import random
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -34,6 +34,57 @@ def stable_hash_int(s: str) -> int:
     uniqueness and is identical across processes / restarts."""
     digest = hashlib.md5(s.encode("utf-8")).hexdigest()
     return int(digest[:16], 16)
+
+
+# Fixed anchor for stable_channel_number's day offset. DO NOT change this date:
+# every virtual channel's number is measured in days from this origin, so moving
+# it shifts EVERY channel number by the same delta in one apply (a one-time mass
+# renumber). It only needs to sit on or before the earliest kickoff the plugin
+# will ever schedule; the plugin fetches upcoming games, so any date safely in
+# the past works and 2024-01-01 leaves comfortable headroom.
+CHANNEL_NUMBER_ORIGIN = date(2024, 1, 1)
+
+# Decimal places channel numbers are rounded to. Single source of truth: the
+# fraction-bucket count, the rounding below, and plugin.py's collision nudge all
+# derive from it, so the hash-fraction granularity always matches the rounding
+# grid. 9 keeps same-day collisions astronomically unlikely (birthday bound over
+# a realistic slate of <~100 games is ~1e-5) while staying within float
+# precision when added to a 4-6 digit integer base.
+CHANNEL_NUMBER_DECIMALS = 9
+
+# Stable hash buckets for the fractional part: one per rounding step, so every
+# distinct bucket survives the round() below as a distinct number.
+_CHANNEL_NUMBER_FRAC_BUCKETS = 10 ** CHANNEL_NUMBER_DECIMALS
+
+
+def stable_channel_number(
+    virtual_base: int, start_utc: datetime, marker: str, tz
+) -> float:
+    """Stable, day-chronological channel number for a virtual game channel.
+
+    PURE FUNCTION of the game's immutable kickoff and its `marker`: the SAME
+    game always maps to the SAME number regardless of how the slate is ranked
+    or which other games are present. That stability is the whole point.
+    Dispatcharr's default output mode (``tvg_id_source=channel_number``) binds
+    the EPG to a channel BY its channel number, so a volatile number pairs the
+    wrong programme with a channel after a re-rank (see #117). A stable number
+    makes the default mode bind correctly with no client configuration.
+
+      integer part = virtual_base + days-from-origin (in the user's local tz)
+      fraction     = stable hash of marker in [0, 1)
+
+    The day offset makes earlier-kickoff days sort first (today's games lead the
+    list, preserving the prior behaviour's intent), while the hash fraction
+    gives each same-day game a distinct, stable slot. Within a day the order is
+    stable-but-arbitrary (by hash), not by kickoff time; see #119 for the
+    trade-off (chronological-within-day would force much larger channel
+    numbers). Earlier kickoffs in absolute time still get strictly lower
+    numbers across days.
+    """
+    local_date = start_utc.astimezone(tz).date()
+    day_offset = max(0, (local_date - CHANNEL_NUMBER_ORIGIN).days)
+    frac = (stable_hash_int(marker) % _CHANNEL_NUMBER_FRAC_BUCKETS) / _CHANNEL_NUMBER_FRAC_BUCKETS
+    return round(virtual_base + day_offset + frac, CHANNEL_NUMBER_DECIMALS)
 
 
 def extract_game_number_after_marker(headline: str, marker: str) -> Optional[int]:

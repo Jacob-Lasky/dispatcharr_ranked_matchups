@@ -8,6 +8,7 @@ __init__.py."""
 import importlib.util
 import os
 import sys
+from datetime import timezone
 
 import pytest
 
@@ -503,26 +504,84 @@ class TestResolveVirtualBase:
 
 
 class TestResolvParkBase:
-    def test_park_above_target_range(self, plugin):
-        # park must be past base + N (the highest target we'll write).
-        base = 9000
-        n_games = 25
-        park = plugin._resolve_park_base(base, n_games)
-        assert park > base + n_games
+    def test_park_above_max_target(self, plugin):
+        # park must be past the highest target number we'll write this apply.
+        max_target = 9742.512345
+        park = plugin._resolve_park_base(max_target)
+        assert park > max_target
 
-    def test_dynamic_with_huge_n(self, plugin):
-        # Even with a giant cache, park stays past targets.
-        assert plugin._resolve_park_base(100, 5000) > 100 + 5000
+    def test_park_above_fractional_ceiling(self, plugin):
+        # The ceiling is a fractional float (day_offset + hash frac); park must
+        # clear its integer ceiling, not just its floor.
+        assert plugin._resolve_park_base(9000.999) > 9001
 
-    def test_zero_games(self, plugin):
-        # Empty cache shouldn't crash; we still want a sane park base.
-        park = plugin._resolve_park_base(9000, 0)
-        assert park > 9000
+    def test_empty_slate_uses_base(self, plugin):
+        # Empty cache passes the bare virtual_base; result stays sane and above.
+        assert plugin._resolve_park_base(9000.0) > 9000
 
-    def test_negative_games_clamped(self, plugin):
-        # Defensive: never compute a park base below the target base.
-        park = plugin._resolve_park_base(9000, -10)
-        assert park > 9000
+
+class TestAssignChannelNumbers:
+    """Stable per-game channel numbering (#119). The map must be position-
+    independent (the #117/#119 fix) and collision-free."""
+
+    @staticmethod
+    def _game(marker_id, start_iso, sport="cfb"):
+        # Minimal cache-shaped row: _assign_channel_numbers only reads
+        # start_time_utc + whatever _build_marker_key needs (sport_prefix +
+        # extra.cfbd_id here gives a deterministic marker).
+        return {
+            "sport_prefix": sport,
+            "start_time_utc": start_iso,
+            "extra": {"cfbd_id": marker_id},
+        }
+
+    def test_same_game_keeps_number_when_slate_reordered(self, plugin):
+        # THE regression: under the old `virtual_base + cache_idx` scheme a
+        # game's number changed when the slate re-ranked. Now reordering the
+        # input list must not change any game's assigned number.
+        games = [
+            self._game(1, "2026-06-13T16:00:00Z"),
+            self._game(2, "2026-06-13T20:00:00Z"),
+            self._game(3, "2026-06-14T18:00:00Z"),
+        ]
+        a = plugin._assign_channel_numbers(games, 1000, timezone.utc)
+        b = plugin._assign_channel_numbers(list(reversed(games)), 1000, timezone.utc)
+        assert a == b
+        assert len(a) == 3
+
+    def test_all_numbers_unique(self, plugin):
+        games = [
+            self._game(i, f"2026-06-{13 + (i % 5)}T{12 + (i % 8):02d}:00:00Z")
+            for i in range(60)
+        ]
+        assigned = plugin._assign_channel_numbers(games, 5000, timezone.utc)
+        assert len(assigned) == 60
+        assert len(set(assigned.values())) == 60
+
+    def test_skips_bad_start_time(self, plugin):
+        games = [
+            self._game(1, "2026-06-13T16:00:00Z"),
+            self._game(2, "not-a-date"),
+            self._game(3, None),
+        ]
+        assigned = plugin._assign_channel_numbers(games, 1000, timezone.utc)
+        markers = set(assigned.keys())
+        assert plugin._build_marker_key(games[0]) in markers
+        assert plugin._build_marker_key(games[1]) not in markers
+        assert plugin._build_marker_key(games[2]) not in markers
+
+    def test_collisions_resolved_to_unique_values(self, plugin, monkeypatch):
+        # Force every game onto the SAME raw number; the resolver must still
+        # hand back all-distinct numbers (nudge path) and stay deterministic.
+        monkeypatch.setattr(plugin, "stable_channel_number",
+                            lambda base, start, marker, tz: 1000.0)
+        games = [self._game(i, "2026-06-13T16:00:00Z") for i in range(5)]
+        assigned = plugin._assign_channel_numbers(games, 1000, timezone.utc)
+        assert len(assigned) == 5
+        assert len(set(assigned.values())) == 5
+        # Deterministic across calls.
+        again = plugin._assign_channel_numbers(games, 1000, timezone.utc)
+        assert assigned == again
 
 
 class TestBuildSourcesToggles:

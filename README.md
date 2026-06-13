@@ -163,22 +163,19 @@ form will collect everything needed to scope it.
 
 4. Run **Refresh + apply now** to populate.
 
-5. **Point your client at the right URLs (required).** On the Channels page,
-   use the **M3U** and **EPG** buttons to generate URLs, and on BOTH set
-   **TVG-ID Source = TVG-ID** (not the default *Channel Number*). Then load
-   those URLs in TiviMate / Plex / your client.
+5. **Load the M3U and EPG URLs in your client.** On the Channels page, use the
+   **M3U** and **EPG** buttons to generate URLs and load them in TiviMate /
+   Plex / your client. No special TVG-ID setting is required: the guide binds
+   correctly under Dispatcharr's default *Channel Number* source.
 
-   > **Why this matters.** These channels are renumbered by ★ score on every
-   > refresh, so a given channel *number* maps to a different game over time.
-   > With the default `tvg_id_source=channel_number`, your client binds the
-   > guide to channels by that volatile number, and because Dispatcharr caches
-   > the EPG separately from the playlist, a post-refresh renumber pairs the
-   > new channel's name with the previous cycle's program for that number
-   > (e.g. an "Ole Miss at North Carolina" channel showing the "Iran vs New
-   > Zealand" guide entry). The plugin already writes a stable per-game
-   > `tvg_id`, so `TVG-ID Source = TVG-ID` binds name and guide by that stable
-   > id and is immune to the reshuffle. Both the M3U and EPG URLs must use the
-   > same source.
+   > **Why no setup is needed.** Each game's channel *number* is now stable for
+   > the life of that game (it's derived from the kickoff date plus a per-game
+   > hash, not from its ★ rank), and earlier-day games get lower numbers so
+   > today's games still sort first. Because the number no longer moves when the
+   > slate re-ranks, binding the guide by channel number stays correct even
+   > though Dispatcharr caches the EPG separately from the playlist. (Setting
+   > **TVG-ID Source = TVG-ID** on both URLs also works and binds by the stable
+   > per-game `tvg_id` instead, but it is no longer required.)
 
 ## Pipeline
 
