@@ -163,19 +163,24 @@ form will collect everything needed to scope it.
 
 4. Run **Refresh + apply now** to populate.
 
-5. **Load the M3U and EPG URLs in your client.** On the Channels page, use the
-   **M3U** and **EPG** buttons to generate URLs and load them in TiviMate /
-   Plex / your client. No special TVG-ID setting is required: the guide binds
-   correctly under Dispatcharr's default *Channel Number* source.
+5. **Load the M3U/EPG URLs (or connect via Xtream Codes) in your client.** On
+   the Channels page, use the **M3U** and **EPG** buttons (or point your client
+   at the Xtream Codes API). No special TVG-ID setting is required, in either
+   the default M3U/EPG output or the Xtream Codes API.
 
-   > **Why no setup is needed.** Each game's channel *number* is now stable for
-   > the life of that game (it's derived from the kickoff date plus a per-game
-   > hash, not from its ★ rank), and earlier-day games get lower numbers so
-   > today's games still sort first. Because the number no longer moves when the
-   > slate re-ranks, binding the guide by channel number stays correct even
-   > though Dispatcharr caches the EPG separately from the playlist. (Setting
-   > **TVG-ID Source = TVG-ID** on both URLs also works and binds by the stable
-   > per-game `tvg_id` instead, but it is no longer required.)
+   > **Why it sorts soonest-first and the guide stays correct.** Each channel's
+   > *number* is derived from its kickoff time: `virtual_base + minutes-since-a-
+   > fixed-origin × slots + a small per-game tiebreak`. So the list sorts
+   > strictly by day then start time (live/upcoming games first), and — crucially
+   > — every game keeps the **same number for its whole life**. Finished games
+   > drop off and new games slot into their time-position on their own, which
+   > looks like "renumbering every refresh" but no existing game's number ever
+   > moves. Because the number is stable, the guide binds to the right game even
+   > though clients cache the EPG separately from the channel list, in both the
+   > default output and the Xtream Codes API (both bind by the integer channel
+   > number). The numbers are large (time-encoded) by design; that is what keeps
+   > them stable and integer-clean (Xtream Codes requires integer channel
+   > numbers and floors fractional ones, which would scramble the order).
 
 ## Pipeline
 

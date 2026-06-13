@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from dispatcharr_ranked_matchups._util import (
     CHANNEL_NUMBER_ORIGIN,
+    CHANNEL_NUMBER_TIEBREAK_SLOTS,
     extract_game_number_after_marker,
     group_advance_text,
     group_phase_text,
@@ -305,10 +306,10 @@ class TestGroupAdvanceText:
         assert group_advance_text(None) == ""
 
 
-# ---------- stable channel numbering (#119) ----------
+# ---------- stable kickoff-time channel numbering (#121) ----------
 
 # A fixed-offset tz stands in for a real zoneinfo zone: enough to exercise the
-# local-date boundary logic without depending on the tz database in CI.
+# local-date/time boundary logic without depending on the tz database in CI.
 _ET = timezone(timedelta(hours=-5))
 
 
@@ -317,71 +318,84 @@ def _utc(y, mo, d, h=18, mi=0):
 
 
 class TestStableChannelNumber:
+    def test_returns_int(self):
+        # Xtream Codes requires integer channel numbers; a float gets floored and
+        # collision-bumped by the XC layer, scrambling order. Must be int.
+        n = stable_channel_number(1000, _utc(2026, 6, 13), "m:cfb:1", _ET)
+        assert isinstance(n, int)
+
     def test_deterministic(self):
-        # Same inputs → same number, every time. This is the property the whole
-        # feature rests on: a game's number must not move across applies.
+        # Same inputs → same number, every time. The whole feature rests on this:
+        # a game's number must not move across applies.
         a = stable_channel_number(1000, _utc(2026, 6, 13), "m:cfb:1", _ET)
         b = stable_channel_number(1000, _utc(2026, 6, 13), "m:cfb:1", _ET)
         assert a == b
 
     def test_independent_of_other_games(self):
-        # The number is a pure function of THIS game; the old scheme keyed off
-        # slate position (virtual_base + cache_idx), so a re-rank moved it. The
-        # number must depend only on (base, kickoff, marker, tz).
+        # Pure function of THIS game; the old scheme keyed off slate position
+        # (virtual_base + cache_idx) so a re-rank moved it. Must depend only on
+        # (base, kickoff, marker, tz).
         n = stable_channel_number(1000, _utc(2026, 6, 13), "m:cfb:42", _ET)
-        # Computing it before/after any number of other games changes nothing.
         for other in ("m:cfb:1", "m:soc:fd_9", "m:nhl:7"):
             stable_channel_number(1000, _utc(2026, 6, 13), other, _ET)
         assert stable_channel_number(1000, _utc(2026, 6, 13), "m:cfb:42", _ET) == n
 
-    def test_earlier_day_sorts_first(self):
-        # Today's games must get lower numbers than tomorrow's, regardless of
-        # which marker hashes higher.
-        today = stable_channel_number(1000, _utc(2026, 6, 13), "zzz", _ET)
-        tomorrow = stable_channel_number(1000, _utc(2026, 6, 14), "aaa", _ET)
+    def test_earlier_kickoff_sorts_first_across_days(self):
+        # Today's games get lower numbers than tomorrow's, regardless of hash.
+        today = stable_channel_number(1000, _utc(2026, 6, 13, 23), "zzz", _ET)
+        tomorrow = stable_channel_number(1000, _utc(2026, 6, 15, 1), "aaa", _ET)
         assert today < tomorrow
 
-    def test_within_day_band(self):
-        # A same-day game lands in [base + day_offset, base + day_offset + 1):
-        # the integer part encodes the day, the fraction the per-game slot.
-        day_offset = (_utc(2026, 6, 13).astimezone(_ET).date() - CHANNEL_NUMBER_ORIGIN).days
-        n = stable_channel_number(1000, _utc(2026, 6, 13), "m:cfb:1", _ET)
-        assert 1000 + day_offset <= n < 1000 + day_offset + 1
+    def test_earlier_kickoff_sorts_first_within_day(self):
+        # The key #121 fix vs the prior hash-within-day scheme: WITHIN a day the
+        # number must increase with start time (noon < afternoon < evening),
+        # independent of marker hash.
+        noon = stable_channel_number(1000, _utc(2026, 6, 13, 16), "zzzz", _ET)   # 12:00 ET
+        eve = stable_channel_number(1000, _utc(2026, 6, 13, 23), "aaaa", _ET)    # 19:00 ET
+        assert noon < eve
 
-    def test_same_day_distinct_per_marker(self):
-        # Two different games on the same day get different numbers (distinct
-        # hash fractions) so they never collide on the unique constraint.
-        a = stable_channel_number(1000, _utc(2026, 6, 13, 12), "m:cfb:1", _ET)
-        b = stable_channel_number(1000, _utc(2026, 6, 13, 20), "m:cfb:2", _ET)
+    def test_same_minute_distinct_via_tiebreak(self):
+        # Two games at the SAME kickoff minute get distinct numbers (different
+        # hash slots) so they don't collide on the unique constraint, and both
+        # stay just above the minute's base.
+        a = stable_channel_number(1000, _utc(2026, 6, 13, 18), "m:cfb:1", _ET)
+        b = stable_channel_number(1000, _utc(2026, 6, 13, 18), "m:cfb:2", _ET)
         assert a != b
+        # Both sit within one minute-stride of each other (same minute bucket).
+        assert abs(a - b) < CHANNEL_NUMBER_TIEBREAK_SLOTS
 
-    def test_pre_origin_clamps_to_zero_offset(self):
+    def test_pre_origin_clamps_to_base_minute_zero(self):
         # A kickoff before the fixed origin must not produce a number below the
-        # base (which could collide with the user's real channels). Clamped.
-        n = stable_channel_number(1000, _utc(2020, 1, 1), "m:cfb:1", _ET)
-        assert 1000 <= n < 1001
+        # base (which could collide with the user's real channels). Clamped to
+        # day_offset 0, so number is base + minute_of_day*slots + tiebreak.
+        n = stable_channel_number(1000, _utc(2020, 1, 1, 5), "m:cfb:1", _ET)
+        # 2020-01-01 05:00 UTC = 2020-01-01 00:00 ET → minute_of_day 0.
+        assert 1000 <= n < 1000 + CHANNEL_NUMBER_TIEBREAK_SLOTS
 
-    def test_local_timezone_decides_the_day(self):
-        # A kickoff at 02:00 UTC on the 14th is still the EVENING of the 13th in
-        # ET (-5). The day offset must use the LOCAL date so "today" matches the
-        # user's calendar, not UTC's.
-        early_utc = _utc(2026, 6, 14, 2, 0)  # = 2026-06-13 21:00 ET
+    def test_local_timezone_decides_day_and_time(self):
+        # 02:00 UTC on the 14th is 21:00 ET on the 13th. The local date+time
+        # drive the number so "today" and ordering match the user's clock. Same
+        # marker → same tiebreak, so the gap is exactly the minutes difference
+        # times the tiebreak stride.
+        early_utc = _utc(2026, 6, 14, 2, 0)
+        slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
         n_et = stable_channel_number(1000, early_utc, "m:cfb:1", _ET)
         n_utc = stable_channel_number(1000, early_utc, "m:cfb:1", timezone.utc)
-        et_off = (early_utc.astimezone(_ET).date() - CHANNEL_NUMBER_ORIGIN).days
-        utc_off = (early_utc.date() - CHANNEL_NUMBER_ORIGIN).days
-        assert utc_off == et_off + 1
-        assert int(n_et) == 1000 + et_off
-        assert int(n_utc) == 1000 + utc_off
+
+        def mins(dt):
+            return (dt.date() - CHANNEL_NUMBER_ORIGIN).days * 1440 + dt.hour * 60 + dt.minute
+        et_min = mins(early_utc.astimezone(_ET))
+        utc_min = mins(early_utc.astimezone(timezone.utc))
+        assert n_utc - n_et == (utc_min - et_min) * slots
+        assert n_utc > n_et  # UTC interpretation is later in wall-clock-from-origin
 
     def test_unique_across_realistic_slate(self):
-        # 120 games spread over 10 days: every number must be distinct after
-        # rounding (the value clients bind on), so no two channels ever share a
-        # (group, channel_number).
+        # 120 games over 10 days at staggered times: every number distinct, so no
+        # two channels share a (group, channel_number).
         numbers = []
         for day in range(10):
             for i in range(12):
-                start = _utc(2026, 6, 1 + day, 12 + (i % 8))
+                start = _utc(2026, 6, 1 + day, 12 + (i % 8), (i * 7) % 60)
                 numbers.append(
                     stable_channel_number(5000, start, f"m:cfb:{day}_{i}", _ET)
                 )

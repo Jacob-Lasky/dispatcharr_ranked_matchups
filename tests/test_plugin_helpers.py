@@ -506,23 +506,18 @@ class TestResolveVirtualBase:
 class TestResolvParkBase:
     def test_park_above_max_target(self, plugin):
         # park must be past the highest target number we'll write this apply.
-        max_target = 9742.512345
+        max_target = 3767040
         park = plugin._resolve_park_base(max_target)
         assert park > max_target
 
-    def test_park_above_fractional_ceiling(self, plugin):
-        # The ceiling is a fractional float (day_offset + hash frac); park must
-        # clear its integer ceiling, not just its floor.
-        assert plugin._resolve_park_base(9000.999) > 9001
-
     def test_empty_slate_uses_base(self, plugin):
         # Empty cache passes the bare virtual_base; result stays sane and above.
-        assert plugin._resolve_park_base(9000.0) > 9000
+        assert plugin._resolve_park_base(9000) > 9000
 
 
 class TestAssignChannelNumbers:
-    """Stable per-game channel numbering (#119). The map must be position-
-    independent (the #117/#119 fix) and collision-free."""
+    """Stable kickoff-time channel numbering (#121). The map must be position-
+    independent (the #117 fix) and collision-free."""
 
     @staticmethod
     def _game(marker_id, start_iso, sport="cfb"):
@@ -574,11 +569,13 @@ class TestAssignChannelNumbers:
         # Force every game onto the SAME raw number; the resolver must still
         # hand back all-distinct numbers (nudge path) and stay deterministic.
         monkeypatch.setattr(plugin, "stable_channel_number",
-                            lambda base, start, marker, tz: 1000.0)
+                            lambda base, start, marker, tz: 1000)
         games = [self._game(i, "2026-06-13T16:00:00Z") for i in range(5)]
         assigned = plugin._assign_channel_numbers(games, 1000, timezone.utc)
         assert len(assigned) == 5
         assert len(set(assigned.values())) == 5
+        # Integer +1 nudge produces a contiguous block from the collided value.
+        assert sorted(assigned.values()) == [1000, 1001, 1002, 1003, 1004]
         # Deterministic across calls.
         again = plugin._assign_channel_numbers(games, 1000, timezone.utc)
         assert assigned == again
