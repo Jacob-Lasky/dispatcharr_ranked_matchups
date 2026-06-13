@@ -5,6 +5,8 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-06-13
+
 ### Changed
 
 - **Stable, kickoff-time channel numbers (#121, supersedes #119).** Virtual
