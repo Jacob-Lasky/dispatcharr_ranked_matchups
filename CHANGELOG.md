@@ -5,6 +5,23 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-06-13
+
+### Added
+
+- **"Diagnose matching" now logs a verbose report.** Alongside the short toast,
+  the action writes the full detail (every matchup listing in the game's window,
+  all unmatched games, and the matched set) to the container logs, so a user can
+  paste the toast AND hand over the logs (`docker logs Dispatcharr`, grep
+  "diagnose (verbose)") for deeper troubleshooting.
+
+### Changed
+
+- **"Diagnose matching" output trimmed to fit the result toast.** The UI shows
+  an action result as a single bottom-anchored notification that clips long
+  messages, so the toast is now at most 3 short lines (game, one naming listing
+  if any, a one-line verdict). The full detail moved to the verbose log above.
+
 ## [1.5.0] - 2026-06-13
 
 ### Added

@@ -157,6 +157,36 @@ class TestDeepDive:
         msg = _run(plugin, games, window_rows=[])
         assert "UFC Freedom 250" not in msg
 
+    def test_verbose_report_logged_alongside_toast(self, plugin, monkeypatch):
+        # The full detail the toast omits goes to the logs, so a user can paste
+        # the toast AND provide logs.
+        captured = []
+
+        class _FakeLogger:
+            def info(self, *a, **k):
+                captured.append(" ".join(str(x) for x in a))
+            def warning(self, *a, **k):
+                pass
+            def exception(self, *a, **k):
+                pass
+            def error(self, *a, **k):
+                pass
+
+        monkeypatch.setattr(plugin, "logger", _FakeLogger())
+        rows = [("beIN 1", "Japan vs Netherlands", " [BOTH TEAMS]"),
+                ("Some Other Ch", "Unrelated vs Game", "")]
+        games = [_game("Japan", "Netherlands", score=9.0),
+                 _game("Egypt", "Belgium", score=3.0, start="2099-09-09T20:00:00Z")]
+        toast = _run(plugin, games, window_rows=rows)
+
+        v = "\n".join(captured)
+        assert "diagnose (verbose)" in v          # the marker
+        assert "all unmatched" in v
+        assert "Egypt" in v                        # non-target game IS in the log
+        assert "Egypt" not in toast                # ...but NOT in the toast
+        assert "Unrelated vs Game" in v            # full window listings in the log
+        assert "Unrelated vs Game" not in toast    # ...not in the toast (names neither)
+
 
 class TestActionContract:
     """The dispatch table and the manifest must declare the SAME action ids."""
