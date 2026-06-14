@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them on interestingness, matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching. Channels are numbered by kickoff time, so the list sorts soonest-first and the guide binds correctly in both the default M3U/EPG output and the Xtream Codes API with no special settings.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -585,6 +585,11 @@
       "id": "preview_names",
       "label": "Test naming convention",
       "description": "Render the channel name template against sample games (no DB writes, no cache needed) so you can check the layout before applying. Reports any template errors and lists every available variable."
+    },
+    {
+      "id": "diagnose",
+      "label": "Diagnose matching",
+      "description": "Explain, in one copy-pasteable block, why each curated game did or did not match a channel: which of your channels named one team, both, or none, and why a near-miss was skipped. Read-only, no DB writes. Run this and paste the result when streams are not attaching."
     }
   ]
 }

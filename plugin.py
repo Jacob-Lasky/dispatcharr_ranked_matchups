@@ -2819,6 +2819,184 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "ok", "message": "\n".join(lines)}
 
 
+# ---------- diagnose matching ----------
+
+# Cap near-miss channels listed per game so the paste stays manageable on a
+# busy slate. Any extras beyond the cap are COUNTED in the output, never
+# silently dropped (a hidden truncation would read as "covered everything").
+_DIAGNOSE_MAX_CANDIDATES = 8
+
+
+def _named_sides(text: str, home_kws: List[str], away_kws: List[str]) -> Tuple[bool, bool]:
+    """Whether `text` (a channel name or program title) names the home / away
+    side. Delegates to matcher._kw_hit, the SAME test the matcher tiers use, so
+    the diagnostic reports exactly what the matcher saw, not a parallel
+    heuristic that could drift."""
+    from .matcher import _kw_hit
+    return _kw_hit(text, home_kws), _kw_hit(text, away_kws)
+
+
+def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Explain, in one copy-pasteable block, why each curated game did or did
+    not match a channel.
+
+    Built for users who cannot read container logs (the common case for an
+    installed plugin): it re-runs the EXACT candidate lookup the matcher uses
+    (`_build_epg_lookup`) against the cached slate, then reports per game which
+    of the user's channels named one team, both teams, or none, and why a
+    near-miss was skipped (preview card, only one team). See #128.
+
+    Read-only: no DB writes, no apply, safe to run anytime. Reflects the EPG as
+    it stands now, which can differ slightly from refresh time if the guide has
+    since updated.
+    """
+    del settings  # interface-required (Plugin.run dispatch), not read here
+    from types import SimpleNamespace
+    from .matcher import (
+        _team_keywords,
+        _regex_filter_channel_name,
+        _is_preview_title,
+    )
+
+    cache = _read_cache()
+    games = cache.get("games", [])
+    if not games:
+        return {"status": "ok", "message": "Cache empty. Run refresh first, then re-run this."}
+
+    epg_lookup = _build_epg_lookup()
+    matched = [g for g in games if g.get("channel_name_current")]
+    unmatched = [g for g in games if not g.get("channel_name_current")]
+
+    lines: List[str] = [
+        "Ranked Matchups - Match Diagnostics  (copy this whole block)",
+        f"plugin v{Plugin.version}  -  {len(games)} games  -  "
+        f"{len(matched)} matched  -  {len(unmatched)} unmatched",
+        "",
+    ]
+
+    if not unmatched:
+        lines.append("Every curated game matched a channel. Nothing to diagnose.")
+    else:
+        lines.append("UNMATCHED - why each found no streams:")
+        lines.append("")
+
+    for g in unmatched:
+        home = g.get("home", "")
+        away = g.get("away", "")
+        sport = g.get("sport_prefix", "?")
+        kickoff = g.get("kickoff_local", "")
+        lines.append(f"* {sport} - {away} at {home}  ({kickoff})")
+
+        # Field-event sports (#127): away is the "Field" sentinel, which the
+        # matcher's both-teams gate can never satisfy. Say so plainly rather
+        # than reporting a misleading "0 candidates".
+        if away == "Field":
+            lines.append("   -> known limitation: field-event sports (UFC, F1, golf, "
+                         "etc.) can't match yet (issue #127). Nothing you can "
+                         "configure fixes this; a plugin fix is needed.")
+            lines.append("")
+            continue
+
+        home_kws = _team_keywords(home)
+        away_kws = _team_keywords(away)
+        lines.append(f"   searched for: {' / '.join(repr(k) for k in home_kws)}"
+                     f"  AND  {' / '.join(repr(k) for k in away_kws)}")
+
+        start_dt = parse_iso_utc(g.get("start_time_utc"))
+        if start_dt is None:
+            lines.append("   -> cannot diagnose: missing/invalid start time in cache.")
+            lines.append("")
+            continue
+
+        shim = SimpleNamespace(sport_prefix=sport, start_time=start_dt,
+                               home=home, away=away)
+        try:
+            candidates = epg_lookup(shim)
+        except Exception as e:  # diagnostic must never raise; report and move on
+            lines.append(f"   -> diagnostic lookup failed: {type(e).__name__}: {e}")
+            lines.append("")
+            continue
+
+        if not candidates:
+            lines.append("   channels naming either team in this window: 0")
+            lines.append("   -> the game's feed likely is not in your lineup, OR your "
+                         "channels have no per-game guide naming the teams. This plugin "
+                         "can only attach a channel it can identify as carrying this "
+                         "exact game.")
+            lines.append("")
+            continue
+
+        lines.append(f"   channels naming either team in this window: {len(candidates)}")
+        shown = 0
+        both_count = 0       # candidates naming BOTH teams (any tier)
+        both_live = 0        # ...of those, the ones that are NOT preview cards
+        for c in candidates:
+            nh, na = _named_sides(c.channel_name, home_kws, away_kws)
+            th, ta = _named_sides(c.program_title, home_kws, away_kws)
+            named_both = (nh and na) or (th and ta)
+            if named_both:
+                both_count += 1
+                if not _is_preview_title(c.program_title):
+                    both_live += 1
+            if shown >= _DIAGNOSE_MAX_CANDIDATES:
+                continue
+            shown += 1
+            sides = []
+            if nh or th:
+                sides.append("home")
+            if na or ta:
+                sides.append("away")
+            named = "+".join(sides) if sides else "neither"
+            guide = c.program_title or "(no guide entry; channel-name match)"
+            note = "  [PREVIEW card - skipped on purpose]" if (
+                named_both and _is_preview_title(c.program_title)) else ""
+            lines.append(f"     - \"{c.channel_name}\"  guide: \"{guide}\"  "
+                         f"-> named: {named}{note}")
+        extra = len(candidates) - shown
+        if extra > 0:
+            lines.append(f"     ... and {extra} more (omitted to keep this short)")
+
+        # Conclusion: classify the failure so the user knows the next move.
+        strict = _regex_filter_channel_name(candidates, home, away)
+        if strict:
+            lines.append("   -> a channel NAME contains both teams but it did not "
+                         "stick; this is unexpected, please send this block to us.")
+        elif both_count == 0:
+            lines.append("   -> no channel named BOTH teams. Likely a name-spelling "
+                         "gap: if a channel above is the right game under a different "
+                         "spelling, tell us the exact title and we can add an alias.")
+        elif both_live == 0:
+            # strict empty + both_count>0 means the both-team hits were titles,
+            # and none survived the preview filter, so they were all preview cards.
+            lines.append("   -> the only channels naming both teams were preview / "
+                         "pre-game cards, not the live broadcast. The live feed either "
+                         "is not in your lineup or its guide does not name the teams.")
+        else:
+            # Live-looking both-team candidates exist but none was auto-selected:
+            # the match was ambiguous and the LLM tie-break did not resolve it.
+            lines.append(f"   -> {both_live} channel(s) named both teams but the match "
+                         "was ambiguous and not auto-resolved (the Claude API key may be "
+                         "unset, or it abstained). Set the key, or tell us which feed is "
+                         "correct.")
+        lines.append("")
+
+    if matched:
+        lines.append("MATCHED (for contrast - this is what success looks like):")
+        for g in matched[:_DIAGNOSE_MAX_CANDIDATES]:
+            lines.append(f"  * {g.get('sport_prefix','?')} - {g.get('away','')} at "
+                         f"{g.get('home','')}  -> \"{g.get('channel_name_current')}\"")
+        if len(matched) > _DIAGNOSE_MAX_CANDIDATES:
+            lines.append(f"  ... and {len(matched) - _DIAGNOSE_MAX_CANDIDATES} more matched.")
+        lines.append("")
+
+    lines.append("How matching works: this plugin attaches streams from channels you "
+                 "ALREADY have, by finding one whose GUIDE names both teams, or whose "
+                 "channel NAME contains both. Generic-named channels with no per-game "
+                 "guide cannot be matched.")
+
+    return {"status": "ok", "message": "\n".join(lines)}
+
+
 # ---------- scheduler ----------
 
 # Scheduler state (the running thread + its stop Event) lives in a registry
@@ -2976,12 +3154,29 @@ def _release_scheduler_lock() -> None:
 
 # ---------- Plugin entry ----------
 
+# Single source of truth mapping every action id to its handler. run() dispatches
+# through this, and plugin.json's "actions" must declare exactly these ids: the
+# contract test (tests/test_diagnose.py) asserts the two sets match, so a manifest
+# button with no handler (or a handler with no button) fails CI instead of
+# silently returning "Unknown action" at runtime. Every handler has the uniform
+# (settings) -> dict shape. refresh/auto_pipeline map to their ASYNC entrypoints
+# (the HTTP-facing wrappers); see #84 and the run() docstring.
+_ACTION_HANDLERS = {
+    "refresh": _action_refresh_async,
+    "apply": _action_apply,
+    "auto_pipeline": _action_auto_pipeline_async,
+    "show_status": _action_show_status,
+    "preview_names": _action_preview_names,
+    "diagnose": _action_diagnose,
+}
+
+
 class Plugin:
     name = "Ranked Matchups (Top Games)"
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.4.0"
+    version = "1.5.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
@@ -3038,21 +3233,15 @@ class Plugin:
         if params:
             settings.update(params)
         try:
-            # refresh + auto_pipeline run too long for browsers / axios
-            # default fetch timeouts (~30s). Dispatch via Celery and return
-            # immediately with a task id; UI polls show_status for progress.
-            # See #84 and tasks.py. apply stays synchronous (~17s, fits).
-            if action == "refresh":
-                return _action_refresh_async(settings)
-            if action == "apply":
-                return _action_apply(settings)
-            if action == "auto_pipeline":
-                return _action_auto_pipeline_async(settings)
-            if action == "show_status":
-                return _action_show_status(settings)
-            if action == "preview_names":
-                return _action_preview_names(settings)
-            return {"status": "error", "message": f"Unknown action: {action!r}"}
+            # _ACTION_HANDLERS is the single dispatch table. refresh + auto_pipeline
+            # map to ASYNC entrypoints because they run too long for browser / axios
+            # default fetch timeouts (~30s): they queue and return a task id, and the
+            # UI polls show_status for progress. See #84 and tasks.py. apply stays
+            # synchronous (~17s, fits).
+            handler = _ACTION_HANDLERS.get(action)
+            if handler is None:
+                return {"status": "error", "message": f"Unknown action: {action!r}"}
+            return handler(settings)
         except Exception as e:
             logger.exception("[ranked_matchups] action %r failed", action)
             return {"status": "error", "message": f"{type(e).__name__}: {e}"}
