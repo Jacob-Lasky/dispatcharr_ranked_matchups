@@ -2925,22 +2925,23 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
 
 
 def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
-    """Diagnose ONE unmatched game in depth, so a non-technical user can paste a
-    short, decisive block instead of a wall of repeated text.
+    """Diagnose why games aren't matching, in two views (#128).
 
-    Picks the highest-scored unmatched game (the one most worth fixing), shows
-    the team spellings the matcher searched for, then dumps the SPORTS
-    programming actually airing in that game's window. That dump is the point:
-    if the game is in the user's guide under a spelling we do not search, it
-    shows up there (-> alias fix); if nothing in the window is the game, the
-    provider is not carrying it. The remaining unmatched games are listed one
-    line each for scope. See #128.
+    Picks the SOONEST unmatched game (the one with EPG to examine and the one a
+    user is likely asking about) and checks the matchup listings airing in its
+    window for the teams.
+
+    Returns a SHORT toast (<=3 lines: the game, one naming listing if any, a
+    verdict) because the UI shows the result as a single bottom-anchored toast
+    that clips long messages. ALSO logs a VERBOSE block (full window listings +
+    every unmatched game + the matched set) to docker logs, so a user can paste
+    the toast and hand over the logs for deeper help.
 
     Read-only: no DB writes, no apply; reflects the EPG as it stands now.
     """
     del settings  # interface-required (Plugin.run dispatch), not read here
     from types import SimpleNamespace
-    from .matcher import _team_keywords, _regex_filter_channel_name, _is_preview_title
+    from .matcher import _team_keywords, _regex_filter_channel_name
 
     cache = _read_cache()
     games = cache.get("games", [])
@@ -2985,66 +2986,99 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     else:
         target = None
 
-    # Build the body, then assemble with the verdict LAST (toast visibility).
-    # Kept to ~3 short lines (toast limit): the game, at most ONE piece of
-    # evidence (a listing that actually names a team), and the verdict.
-    lines: List[str] = []
-
-    if target is None:
-        non_field = [g for g in unmatched if g.get("away") != "Field"]
-        lines.append(
-            "All unmatched games are field-event sports (UFC/F1/golf), not matchable "
-            "yet (#127)." if not non_field else
-            "Could not pick a game to diagnose (no kickoff time in cache); send us this.")
-        return {"status": "ok", "message": "\n".join(lines)}
-
-    home, away = target.get("home", ""), target.get("away", "")
-    home_kws, away_kws = _team_keywords(home), _team_keywords(away)
-    start_dt = parse_iso_utc(target.get("start_time_utc"))
-    lines.append(f"Closest of {len(unmatched)} unmatched: {_label(target)}")
-
-    if start_dt is None:
-        lines.append("=> Can't diagnose this one: bad start time in cache.")
-        return {"status": "ok", "message": "\n".join(lines)}
-
-    try:
-        rows = _diagnose_window_sample(
-            start_dt, target.get("sport_prefix"), home, away, home_kws, away_kws)
-    except Exception as e:  # diagnostic must never raise
-        rows = []
-        lines.append(f"(window scan failed: {type(e).__name__})")
-
+    # Gather the facts once, then emit TWO views: a SHORT toast (the return
+    # value, shown as one bottom-anchored notification) and a VERBOSE block to
+    # the logs (docker logs Dispatcharr), so a user can paste the toast AND hand
+    # over the full detail. See #128 and the toast-length note in the skill.
     def _trunc(s, n):
         s = s or ""
         return s if len(s) <= n else s[:n - 1] + "…"
 
-    # Surface only the single most relevant listing that names a team (both > one);
-    # an unrelated head-to-head airing at the same time is not evidence.
-    both = next((r for r in rows if r[2] == " [BOTH TEAMS]"), None)
-    one = next((r for r in rows if r[2] and r[2] != " [BOTH TEAMS]"), None)
-    if both or one:
-        name, title, ann = both or one
-        lines.append(f"Saw {_trunc(name, 22)}: \"{_trunc(title, 48)}\"{ann}")
+    home = away = ""
+    home_kws = away_kws = []
+    rows: List[Any] = []
+    verdict = ""
+    toast: List[str] = []
 
-    shim = SimpleNamespace(sport_prefix=target.get("sport_prefix"),
-                           start_time=start_dt, home=home, away=away)
-    try:
-        cands = _build_epg_lookup()(shim)
-    except Exception:
-        cands = []
-    if cands and _regex_filter_channel_name(cands, home, away):
-        lines.append("=> A channel name has both teams but it didn't match - "
-                     "unexpected; please send us this.")
-    elif both:
-        lines.append("=> A listing names BOTH teams but wasn't auto-picked - reply "
-                     "and we'll fix it.")
-    elif one:
-        lines.append("=> Likely a name/spelling gap: if 'Saw' above is this game, "
-                     "reply with that exact title.")
+    if target is None:
+        non_field = [g for g in unmatched if g.get("away") != "Field"]
+        verdict = ("All unmatched games are field-event sports (UFC/F1/golf), not "
+                   "matchable yet (#127)." if not non_field else
+                   "Could not pick a game to diagnose (no kickoff time in cache); send us this.")
+        toast = [verdict]
     else:
-        lines.append("=> Nothing in your guide names either team - likely not carried "
-                     "(often a future game), or named differently; reply if you spot it.")
-    return {"status": "ok", "message": "\n".join(lines)}
+        home, away = target.get("home", ""), target.get("away", "")
+        home_kws, away_kws = _team_keywords(home), _team_keywords(away)
+        start_dt = parse_iso_utc(target.get("start_time_utc"))
+        head = f"Closest of {len(unmatched)} unmatched: {_label(target)}"
+        if start_dt is None:
+            verdict = "Can't diagnose this one: bad start time in cache."
+            toast = [head, f"=> {verdict}"]
+        else:
+            try:
+                rows = _diagnose_window_sample(
+                    start_dt, target.get("sport_prefix"), home, away, home_kws, away_kws)
+            except Exception:  # diagnostic must never raise
+                rows = []
+            # Single most relevant listing that names a team (both > one); an
+            # unrelated head-to-head airing at the same time is not evidence.
+            both = next((r for r in rows if r[2] == " [BOTH TEAMS]"), None)
+            one = next((r for r in rows if r[2] and r[2] != " [BOTH TEAMS]"), None)
+            shim = SimpleNamespace(sport_prefix=target.get("sport_prefix"),
+                                   start_time=start_dt, home=home, away=away)
+            try:
+                cands = _build_epg_lookup()(shim)
+            except Exception:
+                cands = []
+            if cands and _regex_filter_channel_name(cands, home, away):
+                verdict = ("A channel name has both teams but it didn't match - "
+                           "unexpected; please send us this.")
+            elif both:
+                verdict = ("A listing names BOTH teams but wasn't auto-picked - reply "
+                           "and we'll fix it.")
+            elif one:
+                verdict = ("Likely a name/spelling gap: if 'Saw' above is this game, "
+                           "reply with that exact title.")
+            else:
+                verdict = ("Nothing in your guide names either team - likely not carried "
+                           "(often a future game), or named differently; reply if you spot it.")
+            toast = [head]
+            if both or one:
+                name, title, ann = both or one
+                toast.append(f"Saw {_trunc(name, 22)}: \"{_trunc(title, 48)}\"{ann}")
+            toast.append(f"=> {verdict}")
+
+    # Verbose companion -> logs: full window listings, every unmatched game, and
+    # the matched set, none of which fits the toast. Grep "diagnose (verbose)".
+    vlog = [
+        "===== Ranked Matchups diagnose (verbose) =====",
+        f"{len(games)} games | {len(matched)} matched | {len(unmatched)} unmatched",
+    ]
+    if target is not None:
+        vlog.append(f"deep dive (soonest unmatched): {_label(target)}")
+        vlog.append(f"  searched - {away}: {', '.join(away_kws)} | "
+                    f"{home}: {', '.join(home_kws)}")
+        if rows:
+            vlog.append(f"  head-to-head listings in its window ({len(rows)}):")
+            for name, title, ann in rows[:40]:
+                vlog.append(f"    {name}: \"{title}\"{ann}")
+            if len(rows) > 40:
+                vlog.append(f"    +{len(rows) - 40} more")
+        else:
+            vlog.append("  head-to-head listings in its window: none")
+    vlog.append(f"  verdict: {verdict}")
+    vlog.append(f"all unmatched ({len(unmatched)}):")
+    for g in unmatched:
+        tag = " (field event #127)" if g.get("away") == "Field" else ""
+        vlog.append(f"  {_label(g)}{tag}")
+    if matched:
+        vlog.append(f"matched ({len(matched)}):")
+        for g in matched:
+            vlog.append(f"  {_label(g)} -> {g.get('channel_name_current')}")
+    vlog.append("===== end diagnose =====")
+    logger.info("[ranked_matchups] diagnose (verbose)\n%s", "\n".join(vlog))
+
+    return {"status": "ok", "message": "\n".join(toast)}
 
 
 # ---------- scheduler ----------
@@ -3226,7 +3260,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.5.0"
+    version = "1.6.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
