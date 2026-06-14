@@ -27,6 +27,8 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+from ._util import is_field_event
+
 logger = logging.getLogger(__name__)
 
 _SEARCH_URL = "https://www.thesportsdb.com/api/v1/json/{key}/searchevents.php?e={q}"
@@ -55,10 +57,6 @@ _TRAILING_CLUB_QUALIFIERS = ("FC", "AFC", "CF", "SC", "FK", "AC")
 _TRAILING_QUALIFIER_RE = re.compile(
     r"\s+(" + "|".join(_TRAILING_CLUB_QUALIFIERS) + r")$", re.IGNORECASE
 )
-
-# Sentinel `away` value used by field-event sources (F1, golf, UFC, tennis,
-# NASCAR). These have no home/away matchup so SportsDB lookup is skipped.
-_FIELD_AWAY_SENTINEL = "Field"
 
 # Plugin sport_prefix -> substring that must appear in SportsDB's strLeague or
 # strSport for the result to be accepted. Disambiguates same-name cross-sport
@@ -256,7 +254,7 @@ def resolve_thumb_url(
     """Search SportsDB for a matchup event and return its strThumb URL.
 
     Returns None when:
-      - away == "Field" (field-event sentinel: no h2h matchup)
+      - the game is a field event (is_field_event: no h2h matchup)
       - the search returns no events
       - no event matches both the date tolerance AND the sport hint
       - the matched event has no strThumb
@@ -266,7 +264,7 @@ def resolve_thumb_url(
     """
     if not home or not away:
         return None
-    if away == _FIELD_AWAY_SENTINEL:
+    if is_field_event(away):
         return None
 
     q = _build_search_query(home, away)

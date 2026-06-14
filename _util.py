@@ -168,6 +168,31 @@ GENERIC_TEAM_SECOND_WORDS = (
 )
 
 
+# Sentinel `away` value emitted by field-event sources (F1, NASCAR, golf, UFC,
+# ATP, WTA): a single event with a whole field of competitors and no
+# head-to-head opponent. This module is the SINGLE SOURCE OF TRUTH for the
+# value. DO NOT re-declare a local `_FIELD_AWAY_SENTINEL = "Field"` or compare
+# against the bare string "Field" anywhere else: every layer that special-cases
+# field events (sources/field_event.py emits it, matcher drops its both-teams
+# gate on it, logos skips the head-to-head thumb lookup, the diagnose action
+# labels it) MUST import this constant or call is_field_event(), or they drift.
+# See sources/field_event.py and #127.
+FIELD_AWAY_SENTINEL = "Field"
+
+
+def is_field_event(away: Optional[str], extra: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether a game is a single-event sport with no head-to-head opponent.
+
+    Primary signal is the source-set `extra["is_field_event"]` flag; falls back
+    to the `away` sentinel so callers that only carry a cached game dict (which
+    may predate the flag, or strip `extra`) still classify correctly. Either
+    signal alone is sufficient; both are set by current field-event sources.
+    """
+    if extra and extra.get("is_field_event"):
+        return True
+    return away == FIELD_AWAY_SENTINEL
+
+
 # ---------- playoff-series rendering ----------
 #
 # The sport-agnostic `extra["series"]` schema that best-of-N sources populate

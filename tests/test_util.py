@@ -6,11 +6,13 @@ from datetime import datetime, timedelta, timezone
 from dispatcharr_ranked_matchups._util import (
     CHANNEL_NUMBER_ORIGIN,
     CHANNEL_NUMBER_TIEBREAK_SLOTS,
+    FIELD_AWAY_SENTINEL,
     extract_game_number_after_marker,
     group_advance_text,
     group_phase_text,
     group_results_lines,
     group_standings_lines,
+    is_field_event,
     parse_iso_utc,
     series_phase_text,
     series_record_text,
@@ -18,6 +20,29 @@ from dispatcharr_ranked_matchups._util import (
     stable_channel_number,
     stable_hash_int,
 )
+
+
+class TestIsFieldEvent:
+    """#127: single source of truth for the field-event shape (no opponent)."""
+
+    def test_sentinel_away_is_field_event(self):
+        assert is_field_event(FIELD_AWAY_SENTINEL) is True
+        assert is_field_event("Field") is True
+
+    def test_real_opponent_is_not_field_event(self):
+        assert is_field_event("Ohio State") is False
+        assert is_field_event("") is False
+        assert is_field_event(None) is False
+
+    def test_extra_flag_wins_even_without_sentinel(self):
+        # A source could set the flag without using the literal sentinel; the
+        # flag is the primary signal.
+        assert is_field_event("Some Opponent", {"is_field_event": True}) is True
+
+    def test_falsy_extra_falls_back_to_sentinel(self):
+        assert is_field_event("Field", {}) is True
+        assert is_field_event("Field", {"is_field_event": False}) is True
+        assert is_field_event("Arsenal", {"is_field_event": False}) is False
 
 
 class TestParseIsoUtc:

@@ -36,12 +36,9 @@ from typing import Any, List, Optional, Pattern
 import requests
 
 from .base import GameRow, SportSource
-from .._util import parse_iso_utc
+from .._util import FIELD_AWAY_SENTINEL, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.field_event")
-
-
-_FIELD_AWAY_SENTINEL = "Field"
 
 
 class FieldEventSource(SportSource):
@@ -118,7 +115,7 @@ class FieldEventSource(SportSource):
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
                 home=display_name,
-                away=_FIELD_AWAY_SENTINEL,
+                away=FIELD_AWAY_SENTINEL,
                 rank_home=None,
                 rank_away=None,
                 start_time=start,

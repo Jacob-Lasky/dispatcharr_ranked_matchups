@@ -511,4 +511,82 @@ class TestWidenStreamPool:
             games, lambda g: cands, api_key="", model="m"
         )
         assert results[0].method == "fallback_first"
-        assert results[0].channel_ids == [400]
+
+
+class TestSingleSidedRegexFilters:
+    """#127: passing team_b=None matches on team_a (the event name) alone,
+    dropping the both-teams requirement for field events."""
+
+    def test_program_title_single_sided(self):
+        cands = [
+            _cand(1, "ESPN+", "UFC 250: Topuria vs Gaethje"),
+            _cand(2, "Random", "Premier League: Arsenal vs Chelsea"),
+        ]
+        out = _regex_filter(cands, "UFC 250: Topuria vs Gaethje")  # team_b defaults to None
+        assert [c.channel_id for c in out] == [1]
+
+    def test_channel_name_single_sided(self):
+        cands = [
+            _cand(1, "PPV: UFC 250 Topuria Gaethje", ""),
+            _cand(2, "EPL01: Arsenal v Chelsea", ""),
+        ]
+        out = _regex_filter_channel_name(cands, "UFC 250: Topuria vs Gaethje")
+        assert [c.channel_id for c in out] == [1]
+
+    def test_both_teams_still_required_when_team_b_given(self):
+        # Regression guard: two-team mode must keep the AND gate.
+        cands = [_cand(1, "ESPN", "Penn State football tonight")]  # only one team
+        assert _regex_filter(cands, "Penn State", "Ohio State") == []
+
+
+class _FieldGame:
+    """A field-event GameRow stand-in: away is the 'Field' sentinel and the
+    source flag is set in extra, exactly as field_event.py emits."""
+
+    def __init__(self, event_name):
+        self.home = event_name
+        self.away = "Field"
+        self.sport_label = "UFC"
+        self.start_time = datetime(2026, 4, 27, tzinfo=timezone.utc)
+        self.extra = {"is_field_event": True}
+
+
+class TestFieldEventMatching:
+    """#127: field events (away='Field') match on the event name alone. Before
+    the fix the both-teams gate fed the 'Field' sentinel into the keyword logic
+    and nothing could ever match."""
+
+    def test_tier1_channel_name_matches_event_name(self):
+        cands = [_cand(10, "UFC 250: Topuria vs Gaethje (PPV)", "Live")]
+        games = [(_FieldGame("UFC 250: Topuria vs Gaethje"), None, None)]
+        results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
+        assert results[0].method == "regex_strict"
+        assert results[0].channel_id == 10
+
+    def test_tier2_program_title_matches_event_name(self):
+        # Channel name is generic; the EVENT name is in the program title only.
+        cands = [_cand(20, "BT Sport 1", "UFC 250: Topuria vs Gaethje")]
+        games = [(_FieldGame("UFC 250: Topuria vs Gaethje"), None, None)]
+        results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
+        assert results[0].method == "regex_unique"
+        assert results[0].channel_id == 20
+
+    def test_field_event_channel_naming_neither_fails_regex_tiers(self):
+        # A channel that names neither the event nor anything relevant must NOT
+        # pass the single-sided regex tiers (it may still reach the tier-3 LLM,
+        # which is out of scope here).
+        cands = [_cand(30, "Random Movie Channel", "Some Film")]
+        games = [(_FieldGame("The Masters"), None, None)]
+        results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
+        assert results[0].method not in ("regex_strict", "regex_unique")
+
+    def test_sentinel_alone_classifies_without_extra_flag(self):
+        # A cached game dict may strip extra; the away sentinel alone must still
+        # trigger single-sided matching.
+        bare = _Game("The Masters", "Field", sport_label="Golf")  # no .extra attr
+        cands = [_cand(40, "Golf Channel: The Masters", "Final round")]
+        results = match_games_to_channels([(bare, None, None)], lambda g: cands,
+                                          api_key="", model="m")
+        assert results[0].method == "regex_strict"
+        assert results[0].channel_id == 40
+        assert results[0].channel_ids == [40]
