@@ -2821,10 +2821,8 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- diagnose matching ----------
 
-# How many of the user's in-window channels to print in the deep dive, and how
-# many ProgramData rows to scan to find them. Caps keep the paste short and the
-# query bounded; any overflow is COUNTED in the output, never silently dropped.
-_DIAGNOSE_WINDOW_SHOW = 25
+# How many ProgramData rows to scan when looking for the game in its window.
+# Bounds the query; the deep dive then surfaces at most one naming listing.
 _DIAGNOSE_WINDOW_FETCH = 300
 
 # A program is a "matchup listing" if its title contains a head-to-head
@@ -2858,9 +2856,9 @@ def _named_sides(text: str, home_kws: List[str], away_kws: List[str]) -> Tuple[b
 
 
 def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_kws):
-    """Return (rows, scan_capped) for MATCHUP-shaped programming airing in the
-    chosen game's window, so a human can spot the game sitting under a spelling
-    our keywords miss.
+    """Return rows of MATCHUP-shaped programming airing in the chosen game's
+    window, so a human can spot the game sitting under a spelling our keywords
+    miss.
 
     Only programs whose title looks like a head-to-head ("A vs B", "A @ B") are
     returned (see _MATCHUP_MARKERS): that is what a game listing is in any
@@ -2869,8 +2867,7 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
 
     rows: list of (channel_name, program_title, annotation), one per channel,
     ordered with team-naming channels first. annotation flags whether the row
-    names BOTH teams, one team, or neither. scan_capped is True if the fetch hit
-    its row cap (so more matchup listings exist than we examined).
+    names BOTH teams, one team, or neither.
     """
     from apps.epg.models import ProgramData
     from apps.channels.models import Channel
@@ -2891,7 +2888,6 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
         .only("id", "title", "epg_id", "start_time")
         .order_by("start_time")[:_DIAGNOSE_WINDOW_FETCH]
     )
-    scan_capped = len(progs) >= _DIAGNOSE_WINDOW_FETCH
 
     epg_ids = {p.epg_id for p in progs if p.epg_id}
     chan_by_epg: Dict[Any, list] = {}
@@ -2925,7 +2921,7 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
     # Team-naming channels first (the actionable ones), then the rest in the
     # order found (already chronological from the query).
     rows.sort(key=lambda r: r[0])
-    return [(name, title, ann) for _, name, title, ann in rows], scan_capped
+    return [(name, title, ann) for _, name, title, ann in rows]
 
 
 def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -2958,15 +2954,13 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
         return (f"{g.get('sport_prefix', '?')} {g.get('away', '')} at "
                 f"{g.get('home', '')} ({g.get('kickoff_local', '')})")
 
-    lines: List[str] = [
-        f"Ranked Matchups diagnostics - v{Plugin.version}",
-        f"{len(games)} games - {len(matched)} matched - {len(unmatched)} unmatched",
-    ]
-
+    # The result renders as a Mantine toast (Plugins.md), NOT a scrollable modal:
+    # it anchors bottom-right and grows UPWARD, so a tall message overflows off
+    # the top of the screen with no way to scroll up. Keep the message SHORT and
+    # put the verdict LAST, where the bottom-anchored toast stays visible.
     if not unmatched:
-        lines.append("")
-        lines.append("Every curated game matched a channel. Nothing to diagnose.")
-        return {"status": "ok", "message": "\n".join(lines)}
+        return {"status": "ok",
+                "message": f"Ranked Matchups: {len(games)} games, all matched. Nothing to diagnose."}
 
     # Deep-dive the SOONEST-starting unmatched game that CAN match (skip the
     # "Field" field-event sentinel, #127). Soonest, not highest-scored: a game
@@ -2991,91 +2985,65 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     else:
         target = None
 
+    # Build the body, then assemble with the verdict LAST (toast visibility).
+    # Kept to ~3 short lines (toast limit): the game, at most ONE piece of
+    # evidence (a listing that actually names a team), and the verdict.
+    lines: List[str] = []
+
     if target is None:
         non_field = [g for g in unmatched if g.get("away") != "Field"]
-        lines.append("")
-        if not non_field:
-            lines.append("All unmatched games are field-event sports (UFC/F1/golf/etc.), "
-                         "which can't match yet (issue #127). Nothing to diagnose here.")
-        else:
-            lines.append("Could not pick a game to deep-dive (no valid kickoff time in "
-                         "cache). Please send this block to us.")
+        lines.append(
+            "All unmatched games are field-event sports (UFC/F1/golf), not matchable "
+            "yet (#127)." if not non_field else
+            "Could not pick a game to diagnose (no kickoff time in cache); send us this.")
+        return {"status": "ok", "message": "\n".join(lines)}
+
+    home, away = target.get("home", ""), target.get("away", "")
+    home_kws, away_kws = _team_keywords(home), _team_keywords(away)
+    start_dt = parse_iso_utc(target.get("start_time_utc"))
+    lines.append(f"Closest of {len(unmatched)} unmatched: {_label(target)}")
+
+    if start_dt is None:
+        lines.append("=> Can't diagnose this one: bad start time in cache.")
+        return {"status": "ok", "message": "\n".join(lines)}
+
+    try:
+        rows = _diagnose_window_sample(
+            start_dt, target.get("sport_prefix"), home, away, home_kws, away_kws)
+    except Exception as e:  # diagnostic must never raise
+        rows = []
+        lines.append(f"(window scan failed: {type(e).__name__})")
+
+    def _trunc(s, n):
+        s = s or ""
+        return s if len(s) <= n else s[:n - 1] + "…"
+
+    # Surface only the single most relevant listing that names a team (both > one);
+    # an unrelated head-to-head airing at the same time is not evidence.
+    both = next((r for r in rows if r[2] == " [BOTH TEAMS]"), None)
+    one = next((r for r in rows if r[2] and r[2] != " [BOTH TEAMS]"), None)
+    if both or one:
+        name, title, ann = both or one
+        lines.append(f"Saw {_trunc(name, 22)}: \"{_trunc(title, 48)}\"{ann}")
+
+    shim = SimpleNamespace(sport_prefix=target.get("sport_prefix"),
+                           start_time=start_dt, home=home, away=away)
+    try:
+        cands = _build_epg_lookup()(shim)
+    except Exception:
+        cands = []
+    if cands and _regex_filter_channel_name(cands, home, away):
+        lines.append("=> A channel name has both teams but it didn't match - "
+                     "unexpected; please send us this.")
+    elif both:
+        lines.append("=> A listing names BOTH teams but wasn't auto-picked - reply "
+                     "and we'll fix it.")
+    elif one:
+        lines.append("=> Likely a name/spelling gap: if 'Saw' above is this game, "
+                     "reply with that exact title.")
     else:
-        home, away = target.get("home", ""), target.get("away", "")
-        home_kws, away_kws = _team_keywords(home), _team_keywords(away)
-        start_dt = parse_iso_utc(target.get("start_time_utc"))
-        pre_min, post_hours = _epg_match_window(target.get("sport_prefix"))
-
-        lines.append("")
-        lines.append(f"DEEP DIVE (soonest unmatched): {_label(target)}")
-        lines.append(f"  We need a channel whose NAME or guide TITLE has BOTH teams, "
-                     f"from {pre_min} min before to {post_hours:g}h after kickoff.")
-        lines.append(f"  Spellings searched - {away}: {', '.join(away_kws)}")
-        lines.append(f"                       {home}: {', '.join(home_kws)}")
-
-        if start_dt is None:
-            lines.append("  (cannot dig further: bad start time in cache)")
-        else:
-            try:
-                rows, scan_capped = _diagnose_window_sample(
-                    start_dt, target.get("sport_prefix"), home, away, home_kws, away_kws)
-            except Exception as e:  # diagnostic must never raise
-                rows, scan_capped = [], False
-                lines.append(f"  (window scan failed: {type(e).__name__})")
-
-            named_both = any(a == " [BOTH TEAMS]" for _, _, a in rows)
-            lines.append("")
-            if not rows:
-                lines.append("  Matchup listings (A vs B) in your guide for that window: NONE.")
-                lines.append("  => Your provider is not carrying this game (no head-to-head "
-                             "listing on at that time). Often just a future game.")
-            else:
-                shown = rows[:_DIAGNOSE_WINDOW_SHOW]
-                more = len(rows) - len(shown)
-                cap_note = " (scan limit hit, more may exist)" if scan_capped else ""
-                lines.append(f"  Matchup listings (A vs B) in your guide for that window "
-                             f"({len(rows)}{cap_note}):")
-                for name, title, ann in shown:
-                    lines.append(f"    {name}  \"{title}\"{ann}")
-                if more > 0:
-                    lines.append(f"    +{more} more")
-                lines.append("")
-                # Verdict keyed off what the matcher itself would see.
-                shim = SimpleNamespace(sport_prefix=target.get("sport_prefix"),
-                                       start_time=start_dt, home=home, away=away)
-                try:
-                    cands = _build_epg_lookup()(shim)
-                except Exception:
-                    cands = []
-                if cands and _regex_filter_channel_name(cands, home, away):
-                    lines.append("  => A channel NAME already has both teams but it did not "
-                                 "stick. Unexpected - please send us this block.")
-                elif named_both:
-                    lines.append("  => A channel above names BOTH teams but was not picked "
-                                 "(preview card, or ambiguous with the Claude key unset). "
-                                 "Reply with the [BOTH TEAMS] channel and we will dig in.")
-                else:
-                    lines.append("  => No channel named both teams. SCAN THE LIST: if one of "
-                                 "the titles above IS this game under another spelling, reply "
-                                 "with that exact title and we will add an alias. If none is "
-                                 "the game, your provider is not carrying it.")
-
-    # The rest of the unmatched slate, one compact line each (scope, no detail).
-    others = [g for g in unmatched if g is not target]
-    if others:
-        lines.append("")
-        lines.append(f"Other unmatched ({len(others)}):")
-        for g in others:
-            tag = "  (field event #127)" if g.get("away") == "Field" else ""
-            lines.append(f"  {_label(g)}{tag}")
-
-    if matched:
-        lines.append("")
-        lines.append(f"Working matches ({len(matched)}), e.g.:")
-        for g in matched[:3]:
-            lines.append(f"  {g.get('sport_prefix', '?')} {g.get('away', '')} at "
-                         f"{g.get('home', '')} -> {g.get('channel_name_current')}")
-
+        lines.append("=> Nothing in your guide names either team - likely not carried "
+                     "(often a future game), or named differently; reply if you spot it.")
     return {"status": "ok", "message": "\n".join(lines)}
 
 
