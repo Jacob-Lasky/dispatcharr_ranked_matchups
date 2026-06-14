@@ -145,6 +145,17 @@ def _team_keywords(team_name: str) -> List[str]:
     return list(dict.fromkeys(keywords))
 
 
+def _kw_hit(text: str, keywords: List[str]) -> bool:
+    """Whether any keyword (case-insensitive substring) appears in `text`.
+
+    Single source of truth for the substring-hit test every matcher tier uses
+    (and the diagnose action reuses), so the matched-vs-explained logic can
+    never drift apart. Tolerates None/empty text.
+    """
+    t = (text or "").lower()
+    return any(kw.lower() in t for kw in keywords)
+
+
 def _regex_filter(
     candidates: List[ChannelCandidate],
     team_a: str,
@@ -153,14 +164,8 @@ def _regex_filter(
     """Programs whose title contains references to BOTH teams."""
     a_kws = _team_keywords(team_a)
     b_kws = _team_keywords(team_b)
-    out = []
-    for c in candidates:
-        title = c.program_title.lower()
-        a_hit = any(kw.lower() in title for kw in a_kws)
-        b_hit = any(kw.lower() in title for kw in b_kws)
-        if a_hit and b_hit:
-            out.append(c)
-    return out
+    return [c for c in candidates
+            if _kw_hit(c.program_title, a_kws) and _kw_hit(c.program_title, b_kws)]
 
 
 def _regex_filter_channel_name(
@@ -183,14 +188,8 @@ def _regex_filter_channel_name(
     """
     a_kws = _team_keywords(team_a)
     b_kws = _team_keywords(team_b)
-    out = []
-    for c in candidates:
-        name = (c.channel_name or "").lower()
-        a_hit = any(kw.lower() in name for kw in a_kws)
-        b_hit = any(kw.lower() in name for kw in b_kws)
-        if a_hit and b_hit:
-            out.append(c)
-    return out
+    return [c for c in candidates
+            if _kw_hit(c.channel_name, a_kws) and _kw_hit(c.channel_name, b_kws)]
 
 
 # Keywords that mark a program as a preview/highlight wrapper rather than the
