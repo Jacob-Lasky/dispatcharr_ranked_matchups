@@ -47,6 +47,7 @@ from ._util import (
     group_phase_text,
     group_results_lines,
     group_standings_lines,
+    is_field_event,
     parse_iso_utc,
     series_phase_text,
     series_record_text,
@@ -1343,11 +1344,21 @@ def _build_epg_lookup():
         window_start = game.start_time - timedelta(minutes=pre_min)
         window_end = game.start_time + timedelta(hours=post_hours)
 
+        # Field events (#127) have no opponent: the away side is the "Field"
+        # sentinel. Match on the event name (home) alone, both for the Path A
+        # title pre-filter and the Path B channel-name query below, mirroring
+        # the matcher's single-sided tiers. Two-team games keep both sides.
+        field = is_field_event(game.away, getattr(game, "extra", None))
         home_kws = _team_keywords(game.home)
-        away_kws = _team_keywords(game.away)
-        all_kws = home_kws + away_kws
-        if not (home_kws and away_kws):
-            return []
+        away_kws = [] if field else _team_keywords(game.away)
+        if field:
+            all_kws = home_kws
+            if not home_kws:
+                return []
+        else:
+            all_kws = home_kws + away_kws
+            if not (home_kws and away_kws):
+                return []
 
         # Path A: programs in window whose TITLE mentions any team keyword.
         title_q = Q()
@@ -1373,12 +1384,19 @@ def _build_epg_lookup():
         home_name_q = Q()
         for kw in home_kws:
             home_name_q |= Q(name__icontains=kw)
-        away_name_q = Q()
-        for kw in away_kws:
-            away_name_q |= Q(name__icontains=kw)
+        if field:
+            # Single-sided: a channel naming the event is the broadcast. ANDing
+            # the "Field" sentinel here (as the two-team path does) would match
+            # nothing, which is the #127 bug.
+            name_q = home_name_q
+        else:
+            away_name_q = Q()
+            for kw in away_kws:
+                away_name_q |= Q(name__icontains=kw)
+            name_q = home_name_q & away_name_q
         name_match_chans = list(
             Channel.objects
-            .filter(home_name_q & away_name_q)
+            .filter(name_q)
             .exclude(_owned_tvg_id_q())
             .only("id", "name", "epg_data_id")
         )
@@ -2855,19 +2873,24 @@ def _named_sides(text: str, home_kws: List[str], away_kws: List[str]) -> Tuple[b
     return _kw_hit(text, home_kws), _kw_hit(text, away_kws)
 
 
-def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_kws):
-    """Return rows of MATCHUP-shaped programming airing in the chosen game's
-    window, so a human can spot the game sitting under a spelling our keywords
-    miss.
+def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_kws,
+                            field=False):
+    """Return rows of candidate programming airing in the chosen game's window,
+    so a human can spot the game sitting under a spelling our keywords miss.
 
-    Only programs whose title looks like a head-to-head ("A vs B", "A @ B") are
-    returned (see _MATCHUP_MARKERS): that is what a game listing is in any
-    language, and it keeps the list to actual fixtures instead of every sports
-    channel in the window.
+    Two-team games: only programs whose title looks like a head-to-head
+    ("A vs B", "A @ B") are returned (see _MATCHUP_MARKERS): that is what a game
+    listing is in any language, and it keeps the list to actual fixtures instead
+    of every sports channel in the window. annotation flags whether the row
+    names BOTH teams, one team, or neither.
+
+    Field events (#127): there is no opponent, so the head-to-head separators
+    don't apply (golf/F1/NASCAR titles have none). Instead we surface programs
+    whose title names the event itself (home keywords), and annotate " [event]"
+    when the channel/title names it. `away_kws` is empty in this mode.
 
     rows: list of (channel_name, program_title, annotation), one per channel,
-    ordered with team-naming channels first. annotation flags whether the row
-    names BOTH teams, one team, or neither.
+    ordered with naming channels first.
     """
     from apps.epg.models import ProgramData
     from apps.channels.models import Channel
@@ -2878,8 +2901,13 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
     win_end = start_dt + timedelta(hours=post_hours)
 
     title_q = Q()
-    for t in _MATCHUP_MARKERS:
-        title_q |= Q(title__icontains=t)
+    if field:
+        # Find programs that name the event; there is no h2h separator to key on.
+        for kw in home_kws:
+            title_q |= Q(title__icontains=kw)
+    else:
+        for t in _MATCHUP_MARKERS:
+            title_q |= Q(title__icontains=t)
 
     progs = list(
         ProgramData.objects
@@ -2909,7 +2937,10 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
             nh, na = _named_sides(c.name, home_kws, away_kws)
             th, ta = _named_sides(title, home_kws, away_kws)
             h, a = (nh or th), (na or ta)
-            if h and a:
+            if field:
+                # Single-sided: there is only the event name to find.
+                ann, rank = (" [event]", 1) if h else ("", 2)
+            elif h and a:
                 ann, rank = " [BOTH TEAMS]", 0
             elif h:
                 ann, rank = f" [{home}]", 1
@@ -2952,6 +2983,10 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     unmatched = [g for g in games if not g.get("channel_name_current")]
 
     def _label(g: Dict[str, Any]) -> str:
+        # Field events have no opponent, so render the event name alone instead
+        # of the misleading "Field at <event>".
+        if is_field_event(g.get("away"), g.get("extra")):
+            return f"{g.get('sport_prefix', '?')} {g.get('home', '')} ({g.get('kickoff_local', '')})"
         return (f"{g.get('sport_prefix', '?')} {g.get('away', '')} at "
                 f"{g.get('home', '')} ({g.get('kickoff_local', '')})")
 
@@ -2963,17 +2998,16 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "ok",
                 "message": f"Ranked Matchups: {len(games)} games, all matched. Nothing to diagnose."}
 
-    # Deep-dive the SOONEST-starting unmatched game that CAN match (skip the
-    # "Field" field-event sentinel, #127). Soonest, not highest-scored: a game
-    # is only diagnosable once its guide exists, so a far-future game would
-    # trivially show an empty window. Soonest is also the game a user is most
-    # likely asking about, regardless of its interestingness score.
+    # Deep-dive the SOONEST-starting unmatched game. Soonest, not
+    # highest-scored: a game is only diagnosable once its guide exists, so a
+    # far-future game would trivially show an empty window. Soonest is also the
+    # game a user is most likely asking about, regardless of its
+    # interestingness score. Field events (#127) are matched single-sided and
+    # are ordinary diagnosable targets, not skipped.
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
     diggable = []
     for g in unmatched:
-        if g.get("away") == "Field":
-            continue
         dt = parse_iso_utc(g.get("start_time_utc"))
         if dt is not None:
             diggable.append((dt, g))
@@ -2999,16 +3033,19 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     rows: List[Any] = []
     verdict = ""
     toast: List[str] = []
+    field = False
 
     if target is None:
-        non_field = [g for g in unmatched if g.get("away") != "Field"]
-        verdict = ("All unmatched games are field-event sports (UFC/F1/golf), not "
-                   "matchable yet (#127)." if not non_field else
-                   "Could not pick a game to diagnose (no kickoff time in cache); send us this.")
+        verdict = "Could not pick a game to diagnose (no kickoff time in cache); send us this."
         toast = [verdict]
     else:
         home, away = target.get("home", ""), target.get("away", "")
-        home_kws, away_kws = _team_keywords(home), _team_keywords(away)
+        # Field events (#127) match single-sided on the event name; there is no
+        # away side to search for, so away_kws is empty and the both-teams
+        # bookkeeping below collapses to a single "names the event" signal.
+        field = is_field_event(away, target.get("extra"))
+        home_kws = _team_keywords(home)
+        away_kws = [] if field else _team_keywords(away)
         start_dt = parse_iso_utc(target.get("start_time_utc"))
         head = f"Closest of {len(unmatched)} unmatched: {_label(target)}"
         if start_dt is None:
@@ -3017,7 +3054,8 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
         else:
             try:
                 rows = _diagnose_window_sample(
-                    start_dt, target.get("sport_prefix"), home, away, home_kws, away_kws)
+                    start_dt, target.get("sport_prefix"), home, away,
+                    home_kws, away_kws, field=field)
             except Exception:  # diagnostic must never raise
                 rows = []
             # Single most relevant listing that names a team (both > one); an
@@ -3025,20 +3063,29 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
             both = next((r for r in rows if r[2] == " [BOTH TEAMS]"), None)
             one = next((r for r in rows if r[2] and r[2] != " [BOTH TEAMS]"), None)
             shim = SimpleNamespace(sport_prefix=target.get("sport_prefix"),
-                                   start_time=start_dt, home=home, away=away)
+                                   start_time=start_dt, home=home, away=away,
+                                   extra=target.get("extra") or {})
             try:
                 cands = _build_epg_lookup()(shim)
             except Exception:
                 cands = []
-            if cands and _regex_filter_channel_name(cands, home, away):
-                verdict = ("A channel name has both teams but it didn't match - "
-                           "unexpected; please send us this.")
+            # Single-sided channel-name check for field events (team_b=None).
+            name_match = _regex_filter_channel_name(
+                cands, home, None if field else away) if cands else []
+            if name_match:
+                verdict = (("A channel name has the event but it didn't match - "
+                            if field else
+                            "A channel name has both teams but it didn't match - ")
+                           + "unexpected; please send us this.")
             elif both:
                 verdict = ("A listing names BOTH teams but wasn't auto-picked - reply "
                            "and we'll fix it.")
             elif one:
                 verdict = ("Likely a name/spelling gap: if 'Saw' above is this game, "
                            "reply with that exact title.")
+            elif field:
+                verdict = ("Nothing in your guide names this event - likely not carried "
+                           "(often a future event), or named differently; reply if you spot it.")
             else:
                 verdict = ("Nothing in your guide names either team - likely not carried "
                            "(often a future game), or named differently; reply if you spot it.")
@@ -3056,8 +3103,12 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     ]
     if target is not None:
         vlog.append(f"deep dive (soonest unmatched): {_label(target)}")
-        vlog.append(f"  searched - {away}: {', '.join(away_kws)} | "
-                    f"{home}: {', '.join(home_kws)}")
+        if field:
+            vlog.append(f"  searched - event {home}: {', '.join(home_kws)} "
+                        "(field event, no opponent)")
+        else:
+            vlog.append(f"  searched - {away}: {', '.join(away_kws)} | "
+                        f"{home}: {', '.join(home_kws)}")
         if rows:
             vlog.append(f"  head-to-head listings in its window ({len(rows)}):")
             for name, title, ann in rows[:40]:
@@ -3069,7 +3120,7 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     vlog.append(f"  verdict: {verdict}")
     vlog.append(f"all unmatched ({len(unmatched)}):")
     for g in unmatched:
-        tag = " (field event #127)" if g.get("away") == "Field" else ""
+        tag = " (field event)" if is_field_event(g.get("away"), g.get("extra")) else ""
         vlog.append(f"  {_label(g)}{tag}")
     if matched:
         vlog.append(f"matched ({len(matched)}):")
@@ -3260,7 +3311,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.6.0"
+    version = "1.7.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

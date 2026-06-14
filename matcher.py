@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS
+from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS, is_field_event
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.matcher")
 
@@ -159,10 +159,17 @@ def _kw_hit(text: str, keywords: List[str]) -> bool:
 def _regex_filter(
     candidates: List[ChannelCandidate],
     team_a: str,
-    team_b: str,
+    team_b: Optional[str] = None,
 ) -> List[ChannelCandidate]:
-    """Programs whose title contains references to BOTH teams."""
+    """Programs whose title references both teams.
+
+    `team_b=None` is the single-sided mode for field events (#127): one event,
+    no opponent, so we match on the event name (`team_a`) alone. The both-teams
+    gate would otherwise be unsatisfiable against the "Field" away sentinel.
+    """
     a_kws = _team_keywords(team_a)
+    if team_b is None:
+        return [c for c in candidates if _kw_hit(c.program_title, a_kws)]
     b_kws = _team_keywords(team_b)
     return [c for c in candidates
             if _kw_hit(c.program_title, a_kws) and _kw_hit(c.program_title, b_kws)]
@@ -171,7 +178,7 @@ def _regex_filter(
 def _regex_filter_channel_name(
     candidates: List[ChannelCandidate],
     team_a: str,
-    team_b: str,
+    team_b: Optional[str] = None,
 ) -> List[ChannelCandidate]:
     """Stricter filter: channels whose CHANNEL NAME contains both teams.
 
@@ -185,8 +192,13 @@ def _regex_filter_channel_name(
     channels (US/AU/EU regional variants, different bitrates), all of which
     name both teams in the channel name. Returning the full set lets the
     caller stack them as fallback streams on the virtual channel.
+
+    `team_b=None` is the single-sided mode for field events (#127): the event
+    name (`team_a`) alone identifies the broadcast, since there is no opponent.
     """
     a_kws = _team_keywords(team_a)
+    if team_b is None:
+        return [c for c in candidates if _kw_hit(c.channel_name, a_kws)]
     b_kws = _team_keywords(team_b)
     return [c for c in candidates
             if _kw_hit(c.channel_name, a_kws) and _kw_hit(c.channel_name, b_kws)]
@@ -353,10 +365,18 @@ def match_games_to_channels(
             results[i].note = "no EPG candidates in time window"
             continue
 
-        # Tier 1 (strongest signal): channels whose NAME contains both teams.
-        # These are dedicated match channels: typically multiple regional /
-        # quality variants of the same fixture. Stack all of them.
-        strict = _regex_filter_channel_name(candidates, game.home, game.away)
+        # Field events (UFC/F1/golf/NASCAR/ATP/WTA, #127) have no opponent: the
+        # away side is the "Field" sentinel, which no channel or title ever
+        # names. Drop the both-teams gate and match on the event name (home)
+        # alone, exactly as field_event.py's design contract assumes. Two-team
+        # games keep `match_away = game.away` and the full both-teams gate.
+        match_away = None if is_field_event(game.away, getattr(game, "extra", None)) else game.away
+
+        # Tier 1 (strongest signal): channels whose NAME contains both teams
+        # (or, for field events, the event name). These are dedicated match
+        # channels: typically multiple regional / quality variants of the same
+        # fixture. Stack all of them.
+        strict = _regex_filter_channel_name(candidates, game.home, match_away)
         if strict:
             primary = strict[0]
             results[i].channel_id = primary.channel_id
@@ -375,7 +395,7 @@ def match_games_to_channels(
         # 'Pre-game ...') stripped: those mark team-branded home channels
         # that surface upcoming-game EPG cards but don't broadcast the match.
         filtered = _strip_preview_titles(
-            _regex_filter(candidates, game.home, game.away)
+            _regex_filter(candidates, game.home, match_away)
         )
         if len(filtered) == 1:
             c = filtered[0]

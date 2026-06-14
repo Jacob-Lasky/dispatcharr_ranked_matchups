@@ -5,6 +5,33 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-06-13
+
+### Fixed
+
+- **Field-event sports (UFC, F1, golf, NASCAR, ATP/WTA) now match channels
+  (#127).** These single-event sports have no opponent, so their source emits an
+  away-side `"Field"` sentinel. The matcher's both-teams gate fed that sentinel
+  into its keyword logic, and since no channel or EPG title ever contains the
+  word "Field" the gate could never be satisfied: every field-event game fell
+  through to a placeholder with no streams. The matcher and the EPG candidate
+  lookup now detect the single-event shape and match on the event name alone,
+  dropping the away-side requirement. Two-team sports are unchanged.
+
+### Changed
+
+- **"Diagnose matching" now diagnoses field events too.** Previously it skipped
+  them as unmatchable (#127); now that they match, an unmatched field event is an
+  ordinary diagnosable target, with the window scan keyed on the event name
+  instead of a head-to-head separator.
+
+### Internal
+
+- The `"Field"` away sentinel and field-event detection are consolidated into a
+  single `_util.is_field_event()` / `FIELD_AWAY_SENTINEL`, replacing three
+  independent copies (`sources/field_event.py`, `logos.py`, an inline literal in
+  `plugin.py`).
+
 ## [1.6.0] - 2026-06-13
 
 ### Added
