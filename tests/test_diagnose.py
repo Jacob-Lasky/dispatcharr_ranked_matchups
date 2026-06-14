@@ -58,10 +58,10 @@ def _game(away, home, *, prefix="WC", score=5.0, matched=None,
     }
 
 
-def _run(plugin, games, *, window_rows=None, window_capped=False, lookup_cands=None):
+def _run(plugin, games, *, window_rows=None, lookup_cands=None):
     """Drive _action_diagnose with the two DB helpers stubbed."""
     plugin._read_cache = lambda: {"games": games}
-    plugin._diagnose_window_sample = lambda *a, **k: (list(window_rows or []), window_capped)
+    plugin._diagnose_window_sample = lambda *a, **k: list(window_rows or [])
     plugin._build_epg_lookup = lambda: (lambda shim: list(lookup_cands or []))
     out = plugin._action_diagnose({})
     assert out["status"] == "ok"
@@ -83,7 +83,7 @@ class TestDeepDive:
     def test_all_matched_nothing_to_diagnose(self, plugin):
         games = [_game("Scotland", "Haiti", matched="Peacock 12")]
         msg = _run(plugin, games)
-        assert "Every curated game matched" in msg
+        assert "all matched" in msg
 
     def test_picks_soonest_unmatched_not_highest_scored(self, plugin):
         # Far-future distinct starts so "upcoming" holds regardless of wall clock.
@@ -92,39 +92,40 @@ class TestDeepDive:
         games = [_game("Egypt", "Belgium", score=9.9, start="2099-01-02T20:00:00Z"),
                  _game("Japan", "Netherlands", score=0.1, start="2099-01-01T20:00:00Z")]
         msg = _run(plugin, games, window_rows=[])
-        assert "DEEP DIVE" in msg
-        deep = msg.split("Other unmatched")[0]
-        assert "Japan at Netherlands" in deep          # soonest, despite low score
-        assert "Egypt at Belgium" not in deep
+        assert "Closest of 2 unmatched: WC Japan at Netherlands" in msg  # soonest, low score
+        assert "Egypt" not in msg                                        # non-target not shown
 
-    def test_searched_spellings_shown(self, plugin):
-        # _team_keywords expands aliases, so the searched line proves what we look for.
-        games = [_game("Japan", "Netherlands", score=9.0)]
-        msg = _run(plugin, games, window_rows=[])
-        assert "Spellings searched" in msg
-        assert "Japan" in msg and "Netherlands" in msg
-
-    def test_no_sports_programming_means_not_carried(self, plugin):
-        games = [_game("Japan", "Netherlands", score=9.0)]
-        msg = _run(plugin, games, window_rows=[])
-        assert "NONE" in msg
-        assert "not carrying this game" in msg
-
-    def test_both_teams_row_yields_not_picked_verdict(self, plugin):
-        rows = [("beIN SPORTS 1", "FIFA World Cup: Japan vs Netherlands", " [BOTH TEAMS]")]
-        games = [_game("Japan", "Netherlands", score=9.0)]
-        msg = _run(plugin, games, window_rows=rows)   # lookup returns no strict match
-        assert "[BOTH TEAMS]" in msg
-        assert "names BOTH teams but was not picked" in msg
-
-    def test_one_team_row_yields_alias_scan_verdict(self, plugin):
-        # The classic alias gap: the game is there under a Spanish spelling our
-        # keywords miss, so it reads as only one team (or neither).
+    def test_output_is_short(self, plugin):
+        # Toast constraint: keep it to a few short lines. No game with evidence
+        # should exceed 3 lines (game + Saw + verdict).
         rows = [("beIN SPORTS 1", "Copa Mundial: Japon vs Paises Bajos", " [Japan]")]
         games = [_game("Japan", "Netherlands", score=9.0)]
         msg = _run(plugin, games, window_rows=rows)
-        assert "SCAN THE LIST" in msg
-        assert "alias" in msg
+        assert len(msg.splitlines()) <= 3
+
+    def test_no_naming_listing_means_not_carried(self, plugin):
+        # An unrelated head-to-head airing then names neither team: not evidence.
+        rows = [("ACC Network", "CFP: Miami vs. Ohio State", "")]
+        games = [_game("Japan", "Netherlands", score=9.0)]
+        msg = _run(plugin, games, window_rows=rows)
+        assert "Saw " not in msg                       # the unrelated game is NOT surfaced
+        assert "not carried" in msg
+
+    def test_both_teams_listing_yields_not_picked_verdict(self, plugin):
+        rows = [("beIN SPORTS 1", "FIFA World Cup: Japan vs Netherlands", " [BOTH TEAMS]")]
+        games = [_game("Japan", "Netherlands", score=9.0)]
+        msg = _run(plugin, games, window_rows=rows)   # lookup returns no strict match
+        assert "Saw beIN SPORTS 1" in msg
+        assert "BOTH teams but wasn't auto-picked" in msg
+
+    def test_one_team_listing_yields_alias_verdict(self, plugin):
+        # The classic alias gap: the game is there under a Spanish spelling our
+        # keywords miss, so it reads as only one team.
+        rows = [("beIN SPORTS 1", "Copa Mundial: Japon vs Paises Bajos", " [Japan]")]
+        games = [_game("Japan", "Netherlands", score=9.0)]
+        msg = _run(plugin, games, window_rows=rows)
+        assert "Saw " in msg
+        assert "spelling gap" in msg
 
     def test_unexpected_when_channel_name_has_both(self, plugin, ChannelCandidate):
         # A candidate whose NAME has both teams should have matched; flag it.
@@ -132,36 +133,29 @@ class TestDeepDive:
         rows = [("Knicks vs Spurs HD", "", " [BOTH TEAMS]")]
         games = [_game("New York Knicks", "San Antonio Spurs", prefix="NBA", score=8.0)]
         msg = _run(plugin, games, window_rows=rows, lookup_cands=cands)
-        assert "Unexpected" in msg
+        assert "unexpected" in msg
 
-    def test_window_sample_capped_with_remainder(self, plugin):
-        cap = plugin._DIAGNOSE_WINDOW_SHOW
-        rows = [(f"Ch {i}", "Soccer", "") for i in range(cap + 4)]
+    def test_long_title_is_truncated(self, plugin):
+        long_title = "FIFA World Cup Quarterfinal Extravaganza Presented by Sponsor: Japan vs"
+        rows = [("Some Very Long Channel Name Here FHD", long_title, " [Japan]")]
         games = [_game("Japan", "Netherlands", score=9.0)]
-        msg = _run(plugin, games, window_rows=rows, window_capped=True)
-        assert f"+4 more" in msg
-        assert "scan limit hit" in msg
-        assert msg.count('Ch ') >= cap
+        msg = _run(plugin, games, window_rows=rows)
+        assert "…" in msg                              # title/name got truncated
+        saw_line = next(l for l in msg.splitlines() if l.startswith("Saw "))
+        assert len(saw_line) < 90
 
     def test_all_field_events_short_circuits(self, plugin):
         games = [_game("Field", "UFC Freedom 250: Topuria vs Gaethje", prefix="UFC", score=2.0)]
         msg = _run(plugin, games)
         assert "field-event" in msg and "#127" in msg
-        assert "DEEP DIVE" not in msg
+        assert "Closest of" not in msg
 
-    def test_other_unmatched_lists_field_events_tagged(self, plugin):
+    def test_non_target_games_not_listed(self, plugin):
+        # The full unmatched slate is NOT dumped (toast length): only the target.
         games = [_game("Japan", "Netherlands", score=9.0),
                  _game("Field", "UFC Freedom 250", prefix="UFC", score=2.0)]
         msg = _run(plugin, games, window_rows=[])
-        other = msg.split("Other unmatched")[1]
-        assert "field event #127" in other
-
-    def test_matched_shown_as_working_examples(self, plugin):
-        games = [_game("Japan", "Netherlands", score=9.0),
-                 _game("Scotland", "Haiti", matched="Peacock 12")]
-        msg = _run(plugin, games, window_rows=[])
-        assert "Working matches (1)" in msg
-        assert "Peacock 12" in msg
+        assert "UFC Freedom 250" not in msg
 
 
 class TestActionContract:
