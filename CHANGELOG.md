@@ -5,6 +5,26 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-06-13
+
+### Added
+
+- **"Diagnose matching" action (#128).** A copy-pasteable troubleshooting
+  report explaining, per curated game, why it did or did not match a channel:
+  the exact team keywords searched, which of your channels named one team /
+  both / neither in the time window, and why a near-miss was skipped (preview
+  card, only one team, or an ambiguous match the LLM tie-break did not
+  resolve). Field-event sports get a plain known-limitation note (#127). Built
+  for users who cannot read container logs; read-only, no DB writes.
+
+### Changed
+
+- Internal: extracted `matcher._kw_hit` as the single substring-hit test
+  shared by every matcher tier and the diagnostic (removes 4x duplication).
+- Internal: `run()` dispatches through a single `_ACTION_HANDLERS` table; a
+  contract test asserts the manifest's action ids match the table exactly, so
+  a button with no handler (or a handler with no button) fails CI.
+
 ## [1.4.0] - 2026-06-13
 
 ### Changed
