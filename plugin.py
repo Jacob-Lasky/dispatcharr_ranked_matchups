@@ -2303,154 +2303,174 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         )
         return logo_obj.id, "matchup"
 
+    # Resolve ALL network-backed values BEFORE opening the transaction (#136).
+    # The apply transaction below must hold only fast DB writes. LLM-description
+    # and SportsDB-logo calls are network I/O; making them INSIDE
+    # transaction.atomic() holds the transaction (and its DB connection) open
+    # across every slow call, which starves the login/token worker on large
+    # instances and on the scheduled refresh (observed: a 14s login timeout +
+    # a 13.9s Postgres checkpoint right after an apply on a ~6.3k-channel box).
+    # Both calls are cache-backed, so this pass moves them earlier, it does not
+    # add work. Each surviving game's precomputed plan is stored by marker; the
+    # transaction then does nothing but writes. This pre-pass mirrors the skip /
+    # placeholder / bad-start-time semantics of the write loop exactly (same
+    # marker key, same seen_markers set, same counters) so the two stay in lockstep.
+    from types import SimpleNamespace
+    from .scoring import pick_tagline
+    prep_by_marker: Dict[str, Any] = {}
+    for g in games:
+        source_ids = list(g.get("channel_ids") or [])
+        if not source_ids:
+            primary_id = g.get("channel_id")
+            if primary_id:
+                source_ids = [primary_id]
+        sources = list(Channel.objects.filter(id__in=source_ids))
+        sources_by_id = {c.id: c for c in sources}
+        sources = [sources_by_id[sid] for sid in source_ids if sid in sources_by_id]
+        source = sources[0] if sources else None
+
+        placeholder = False
+        if not source:
+            score_val = float(g.get("score", 0.0))
+            if score_val >= placeholder_threshold:
+                placeholder = True
+                placeholder_channels_created += 1
+            else:
+                skipped_unmatched += 1
+                continue
+
+        marker = _build_marker_key(g)
+        seen_markers.add(marker)
+
+        signals, score = _build_signals_score_from_payload(g)
+        extra = g.get("extra") or {}
+        rank_source = extra.get("rank_source", "poll")
+        tagline = pick_tagline(
+            score_breakdown=g.get("score_breakdown", {}),
+            favorites_matched=g.get("favorites_matched", []),
+            spread=g.get("spread"),
+            closeness=g.get("closeness"),
+            importance_thresholds=(
+                g.get("importance_thresholds_hit")
+                or g.get("stakes_thresholds_hit")  # pre-C.4 cache fallback
+                or []
+            ),
+            tournament_stage=g.get("tournament_stage"),
+            rank_a=g.get("rank_home"),
+            rank_b=g.get("rank_away"),
+            rank_source=rank_source,
+        )
+        start_dt = parse_iso_utc(g.get("start_time_utc"))
+        if start_dt is None:
+            logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)
+            continue
+
+        new_name = format_channel_name(
+            g["sport_prefix"], signals, score, g["home"], g["away"],
+            tagline=tagline,
+            template=name_template,
+            rank_source=rank_source,
+            sport_label=g.get("sport_label", ""),
+            venue=g.get("venue"),
+            start_dt=start_dt,
+            tz=apply_tz,
+        )
+
+        description = _build_description(g=g, tagline=tagline, placeholder=placeholder)
+        # Optional Claude-rewritten prose (network, cached). Placeholders keep the
+        # deterministic "match pending" note. Failures fall back to `description`.
+        if llm_enabled and not placeholder:
+            _ctx = _league_context_for(g)
+            _boundary = _ctx.boundary_summary if _ctx else ""
+            before = description
+            description = llm_descriptions.llm_describe_or_fallback(
+                g=g,
+                tagline=tagline,
+                fallback_description=description,
+                api_key=llm_api_key,
+                model=llm_model,
+                cache=llm_cache,
+                boundary_summary=_boundary,
+                marker=marker,
+            )
+            if description is before:
+                llm_failed += 1
+            else:
+                llm_used += 1
+
+        # Rank the streams from every matched source channel (DB reads only).
+        stream_pool = []  # list of (sort_key, src_order, stream_id)
+        seen_stream_ids = set()
+        for src_order, src in enumerate(sources):
+            for s in src.streams.all().only("id", "name", "stream_stats"):
+                if s.id in seen_stream_ids:
+                    continue
+                seen_stream_ids.add(s.id)
+                key = _stream_sort_key(
+                    s.stream_stats, s.name or src.name or "",
+                    english_first=english_first, home=g["home"], away=g["away"],
+                )
+                stream_pool.append((key, src_order, s.id))
+        stream_pool.sort()
+        source_streams = [sid for _, _, sid in stream_pool]
+
+        resolved_logo_id, logo_outcome = _resolve_matchup_logo_id(g, marker, source)
+        if matchup_logos_enabled and not dry_run:
+            if logo_outcome == "matchup":
+                matchup_logos_used += 1
+            elif logo_outcome == "badge":
+                matchup_logos_badge += 1
+            else:
+                matchup_logos_fallback += 1
+
+        prep_by_marker[marker] = SimpleNamespace(
+            new_name=new_name,
+            description=description,
+            tagline=tagline,
+            logo_id=resolved_logo_id,
+            source_streams=source_streams,
+            start_dt=start_dt,
+        )
+
     with transaction.atomic():
         # Phase 0: park existing virtual channels in a high temporary number
         # range so we can renumber based on cache order without colliding with
         # the unique (channel_group, channel_number) constraint. park_base is
         # guaranteed to be past every target number we're about to write.
         if not dry_run and existing_virtuals:
-            for i, ch in enumerate(existing_virtuals.values()):
+            parked = list(existing_virtuals.values())
+            for i, ch in enumerate(parked):
                 ch.channel_number = float(park_base + i)
-            for ch in existing_virtuals.values():
-                ch.save(update_fields=["channel_number"])
+            # One UPDATE rather than N per-row saves (#136): on a large slate of
+            # existing virtuals the park step shouldn't issue a query per channel.
+            Channel.objects.bulk_update(parked, ["channel_number"])
 
         for g in games:
-            # channel_ids is the full list of matched provider channels (e.g.
-            # multiple regional/quality variants of the same fixture). Falls
-            # back to the single-channel `channel_id` key for cache entries
-            # written by an older plugin version. Primary (first) drives
-            # the channel logo and EPG context.
-            source_ids = list(g.get("channel_ids") or [])
-            if not source_ids:
-                primary_id = g.get("channel_id")
-                if primary_id:
-                    source_ids = [primary_id]
-            sources = list(Channel.objects.filter(id__in=source_ids))
-            # Preserve the matcher-given order (channel_ids is primary-first).
-            sources_by_id = {c.id: c for c in sources}
-            sources = [sources_by_id[sid] for sid in source_ids if sid in sources_by_id]
-            source = sources[0] if sources else None
-
-            placeholder = False
-            if not source:
-                score_val = float(g.get("score", 0.0))
-                if score_val >= placeholder_threshold:
-                    placeholder = True
-                    placeholder_channels_created += 1
-                else:
-                    skipped_unmatched += 1
-                    continue
-
+            # Per-game writes consume the plan resolved in the pre-pass above
+            # (#136); the transaction holds no network I/O. `prep` is None for
+            # games the pre-pass skipped (unmatched below the placeholder
+            # threshold, or a bad start_time): keying off the same marker and
+            # skipping here keeps the two passes in lockstep without re-running
+            # resolution or double-counting. _build_marker_key is pure, so the
+            # marker computed here equals the one the pre-pass stored under.
             marker = _build_marker_key(g)
-            seen_markers.add(marker)
-
-            from .scoring import pick_tagline
-            signals, score = _build_signals_score_from_payload(g)
-            extra = g.get("extra") or {}
-            rank_source = extra.get("rank_source", "poll")
-            tagline = pick_tagline(
-                score_breakdown=g.get("score_breakdown", {}),
-                favorites_matched=g.get("favorites_matched", []),
-                spread=g.get("spread"),
-                closeness=g.get("closeness"),
-                importance_thresholds=(
-                    g.get("importance_thresholds_hit")
-                    or g.get("stakes_thresholds_hit")  # pre-C.4 cache fallback
-                    or []
-                ),
-                tournament_stage=g.get("tournament_stage"),
-                rank_a=g.get("rank_home"),
-                rank_b=g.get("rank_away"),
-                rank_source=rank_source,
-            )
-            start_dt = parse_iso_utc(g.get("start_time_utc"))
-            if start_dt is None:
-                logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)
+            prep = prep_by_marker.get(marker)
+            if prep is None:
                 continue
-
-            # Stable, kickoff-time-based channel number for this game. Keyed by
-            # marker (not slate position) so it never moves across applies, yet
-            # it increases with start time so the list still sorts soonest-first.
-            # Being a stable integer is what makes BOTH the default M3U/XMLTV
-            # output and the Xtream Codes API bind the EPG correctly with no
-            # client setup (#121). _assign_channel_numbers computed the whole map
-            # up front; marker is guaranteed present here because that map skips
-            # exactly the same bad-start_time rows we just skipped.
+            new_name = prep.new_name
+            description = prep.description
+            tagline = prep.tagline
+            resolved_logo_id = prep.logo_id
+            source_streams = prep.source_streams
+            start_dt = prep.start_dt
+            # Stable, kickoff-time-based channel number (keyed by marker, see
+            # _assign_channel_numbers / #121). Guaranteed present: both this map
+            # and the pre-pass skip exactly the same bad-start_time rows, so any
+            # marker with a plan also has a number here.
             target_chnum = chnum_by_marker[marker]
-
-            new_name = format_channel_name(
-                g["sport_prefix"], signals, score, g["home"], g["away"],
-                tagline=tagline,
-                template=name_template,
-                rank_source=rank_source,
-                sport_label=g.get("sport_label", ""),
-                venue=g.get("venue"),
-                start_dt=start_dt,
-                tz=apply_tz,
-            )
             prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
             prog_end = start_dt + timedelta(hours=EPG_POST_HOURS)
-
-            description = _build_description(
-                g=g,
-                tagline=tagline,
-                placeholder=placeholder,
-            )
-
-            # If LLM-rewritten descriptions are enabled and this isn't a
-            # placeholder (placeholders have no EPG match yet, so the "channel
-            # match pending" note matters more than prose), try the call and
-            # fall back to `description` on any failure.
-            if llm_enabled and not placeholder:
-                _ctx = _league_context_for(g)
-                _boundary = _ctx.boundary_summary if _ctx else ""
-                before = description
-                description = llm_descriptions.llm_describe_or_fallback(
-                    g=g,
-                    tagline=tagline,
-                    fallback_description=description,
-                    api_key=llm_api_key,
-                    model=llm_model,
-                    cache=llm_cache,
-                    boundary_summary=_boundary,
-                    marker=marker,
-                )
-                if description is before:
-                    llm_failed += 1
-                else:
-                    llm_used += 1
-
-            # Gather streams from EVERY matched source channel and rank by
-            # composite key: valid ffprobe data (height/bitrate) ranks first,
-            # then name-keyword fallback, then probe-failed streams last. When
-            # english_first is on (#111) the language rank is prepended so all
-            # English variants sort ahead of all non-English ones, quality
-            # preserved within each. Stable secondary sort by source-channel
-            # order keeps equal-key streams in the matcher's primary-first order.
-            stream_pool = []  # list of (sort_key, src_order, stream_id)
-            seen_stream_ids = set()
-            for src_order, src in enumerate(sources):
-                for s in src.streams.all().only("id", "name", "stream_stats"):
-                    if s.id in seen_stream_ids:
-                        continue
-                    seen_stream_ids.add(s.id)
-                    key = _stream_sort_key(
-                        s.stream_stats, s.name or src.name or "",
-                        english_first=english_first, home=g["home"], away=g["away"],
-                    )
-                    stream_pool.append((key, src_order, s.id))
-            stream_pool.sort()
-            source_streams = [sid for _, _, sid in stream_pool]
             existing = existing_virtuals.get(marker)
-
-            resolved_logo_id, logo_outcome = _resolve_matchup_logo_id(g, marker, source)
-            if matchup_logos_enabled and not dry_run:
-                if logo_outcome == "matchup":
-                    matchup_logos_used += 1
-                elif logo_outcome == "badge":
-                    matchup_logos_badge += 1
-                else:
-                    matchup_logos_fallback += 1
 
             if existing:
                 changed = False
@@ -3311,7 +3331,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.7.0"
+    version = "1.7.1"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
