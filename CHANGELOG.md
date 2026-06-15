@@ -5,6 +5,22 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-06-14
+
+### Fixed
+
+- **Apply no longer holds a DB transaction open across network I/O (#136).** The
+  apply step wrapped its per-game writes in a single `transaction.atomic()` block
+  and, inside it, made a Claude LLM-description call and a SportsDB logo lookup
+  per game. On a large channel lineup (or whenever new, uncached games appear,
+  e.g. right after enabling a sport) that held one Postgres transaction open
+  across dozens of sequential network calls, then committed all at once, which
+  starved the login/token worker and could make the server's login time out. All
+  network-backed values are now resolved in a pre-pass BEFORE the transaction;
+  the transaction does only fast in-memory to DB writes. The park step also uses
+  a single `bulk_update` instead of one save per existing virtual channel. No
+  change to apply output (channel names, EPG, logos are identical).
+
 ## [1.7.0] - 2026-06-13
 
 ### Fixed
