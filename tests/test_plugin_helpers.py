@@ -1910,16 +1910,17 @@ class _StubThread:
 
 
 class TestPluginStopTeardown:
-    """The Plugin class spawns a daemon scheduler thread in __init__. Without
-    teardown, every reload leaks one thread per uwsgi worker, each holding a
-    Postgres connection via its 5-min settings-poll loop, until max_connections
-    is hit and the API 500s with "too many clients" (#82).
+    """The Plugin class spawns a daemon scheduler thread in __init__. The thread
+    reads settings from Postgres each tick, so a leaked or churned thread leaks a
+    Postgres connection until max_connections is hit and the API 500s with "too
+    many clients" (#82).
 
-    #110: the loader unloads + re-imports this module on reload WITHOUT calling
-    stop() (it only calls stop() on disable/delete). So the scheduler (thread +
-    its stop Event) lives in a reload-stable registry, and __init__ reclaims and
-    stops a prior incarnation's thread before starting its own. These tests
-    drive that registry-based lifecycle.
+    The scheduler (thread + its stop Event) lives in a reload-stable registry
+    (#110) so a later disable can reach it even after the module that started it
+    is unloaded. __init__ is IDEMPOTENT (#82/#136): the loader re-instantiates
+    Plugin on EVERY discovery, so if a healthy thread is already in the registry
+    it is LEFT running (no restart, no churn, no per-discovery connection leak);
+    only stop() (disable/delete) tears it down. These tests drive that lifecycle.
     """
 
     @pytest.fixture(autouse=True)
@@ -1984,34 +1985,60 @@ class TestPluginStopTeardown:
         assert _isolate_registry.thread is not None
         assert _isolate_registry.stop_event is not None
 
-    def test_reload_init_reclaims_orphan_without_blocking(self, plugin, monkeypatch, _isolate_registry):
-        # THE #110 fix: the loader reloads WITHOUT calling stop(), so a thread
-        # from the prior module incarnation is still running, reachable only via
-        # the reload-stable registry. A fresh Plugin() (the reload's new
-        # instance) must SIGNAL that orphan to exit and repoint the registry at
-        # its own thread. The reload path must NOT block-join (it runs in a
-        # gevent request greenlet during discovery); the orphan self-exits on
-        # the signal, so join is not called here.
+    def test_reload_init_keeps_live_thread_idempotent(self, plugin, monkeypatch, _isolate_registry):
+        # #82/#136: the loader re-instantiates Plugin on EVERY discovery
+        # (plugins-list view, run, settings-save, reload). A healthy scheduler
+        # from a prior incarnation is reachable via the reload-stable registry
+        # and reads settings live from the DB, so __init__ must LEAVE it running:
+        # no signal, no replacement, no new spawn. Restarting per discovery is
+        # what churned a thread and leaked a DB connection each time (the #82
+        # lock-up).
         import threading
         reg = _isolate_registry
-        orphan_event = threading.Event()
-        orphan = _StubThread(orphan_event)
-        reg.thread, reg.stop_event = orphan, orphan_event
+        live_event = threading.Event()
+        live = _StubThread(live_event)  # is_alive() -> True
+        reg.thread, reg.stop_event = live, live_event
+
+        spawned = []
+
+        class TrackingThread(threading.Thread):
+            def __init__(self, *a, **kw):
+                spawned.append(kw.get("name"))
+                super().__init__(*a, **kw)
+            def start(self):  # don't run a live thread in tests
+                pass
+
+        monkeypatch.setattr(plugin.threading, "Thread", TrackingThread)
+        plugin.Plugin()  # a later discovery's incarnation
+
+        # The live thread is untouched: not signaled, not joined, not replaced,
+        # and no new thread spawned.
+        assert not live_event.is_set()
+        assert live.join_calls == 0
+        assert reg.thread is live
+        assert reg.stop_event is live_event
+        assert spawned == []
+
+    def test_reload_init_replaces_dead_thread(self, plugin, monkeypatch, _isolate_registry):
+        # If the registry's thread has died, __init__ starts a fresh one (the
+        # idempotency check is is_alive(), not mere presence).
+        import threading
+        reg = _isolate_registry
+        dead_event = threading.Event()
+        dead = _StubThread(dead_event)
+        dead._alive = False  # a thread that has exited
+        reg.thread, reg.stop_event = dead, dead_event
 
         class TrackingThread(threading.Thread):
             def start(self):  # don't run a live thread in tests
                 pass
 
         monkeypatch.setattr(plugin.threading, "Thread", TrackingThread)
-        plugin.Plugin()  # the reloaded incarnation
+        plugin.Plugin()
 
-        # Orphan was signaled (it will exit on its next wake), NOT join-blocked,
-        # and the registry now holds a NEW thread + event, not the orphan.
-        assert orphan_event.is_set()
-        assert orphan.join_calls == 0  # reload path must not block on join
-        assert reg.thread is not orphan
+        assert reg.thread is not dead
         assert isinstance(reg.thread, TrackingThread)
-        assert reg.stop_event is not orphan_event
+        assert reg.stop_event is not dead_event
 
     def test_stop_still_joins_on_teardown(self, plugin, _isolate_registry):
         # The disable/delete path (stop()) is not latency-sensitive and SHOULD

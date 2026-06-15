@@ -5,6 +5,24 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-06-14
+
+### Fixed
+
+- **Scheduler no longer leaks a Postgres connection, which could lock up the
+  whole container (#82 / #136).** The background scheduler thread reads settings
+  from the DB each tick but never closed its connection, so a parked scheduler
+  pinned one Postgres backend open; and because Dispatcharr re-instantiates the
+  plugin on every discovery (opening the Plugins page, running an action, saving
+  settings, reloading), each re-instantiation churned a new scheduler thread and
+  orphaned the previous one's connection. Connections accumulated until Postgres
+  `max_connections` was hit and every request (including login) blocked, which
+  presented as the server locking up. This was independent of channel count, so
+  it hit small installs too. The scheduler now closes its DB connection before
+  every sleep and on exit, and `Plugin.__init__` is idempotent: a healthy
+  scheduler thread is left running instead of being restarted on every
+  discovery.
+
 ## [1.7.1] - 2026-06-14
 
 ### Fixed
