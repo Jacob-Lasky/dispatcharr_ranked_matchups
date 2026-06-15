@@ -3179,23 +3179,20 @@ def _scheduler_registry():
     return reg
 
 
-def _stop_scheduler(thread, stop_event, reason: str, *, join: bool = True) -> None:
-    """Signal a scheduler thread to exit. The loop polls its own stop_event
-    between work units, so setting it drops the loop out at its next wake-up
-    (immediate: set() wakes a thread waiting on the Event).
+def _stop_scheduler(thread, stop_event, reason: str) -> None:
+    """Signal a scheduler thread to exit and briefly block to confirm it did.
 
-    join controls whether we then block to confirm exit:
-      - join=True (disable/delete via stop()): block briefly; teardown is not
-        on a latency-sensitive path and confirming exit is tidy.
-      - join=False (reload via __init__): DO NOT block. __init__ runs inside a
-        gevent request greenlet during discovery; a blocking join there stalls
-        the worker's whole hub (every greenlet shares one OS thread). The orphan
-        exits on its own once signaled, and __init__ repoints the registry at
-        the replacement immediately after, so the signaled orphan is unreachable
-        and harmless while it unwinds. Keeps the hot reload path non-blocking."""
+    The loop polls its own stop_event between work units (and on every park via
+    _scheduler_sleep), so setting it drops the loop out at its next wake-up
+    (immediate: set() wakes a thread waiting on the Event); the loop's finally
+    then closes its DB connection. Only stop() (disable/delete) calls this now:
+    __init__ is idempotent and leaves a healthy thread running rather than
+    restarting it (#82/#136), so there is no longer a reload path that needed the
+    old non-blocking (join=False) variant.
+    """
     if stop_event is not None:
         stop_event.set()
-    if join and thread is not None and thread.is_alive():
+    if thread is not None and thread.is_alive():
         thread.join(timeout=5.0)
         if thread.is_alive():
             logger.warning(
@@ -3242,47 +3239,85 @@ def _next_fire_time(times: List[Tuple[int, int]], tz, now: Optional[datetime] = 
     return min(future) if future else None
 
 
+def _scheduler_close_db():
+    """Release this scheduler greenlet's Django DB connection.
+
+    Django opens a connection lazily on first query and, in a NON-request thread,
+    NEVER closes it automatically (the request/response cycle is what normally
+    closes connections). The scheduler reads settings from the DB each tick, so
+    without this it pins one Postgres backend open the entire time it sleeps; and
+    because the loader spawns a fresh scheduler per discovery, orphaned ones
+    accumulate one leaked connection apiece until `max_connections` is hit and
+    every request blocks on connection acquisition. That is the #82 lock-up,
+    rediscovered in #136. Closing before every park keeps a sleeping scheduler at
+    ZERO held connections; the next tick reopens transparently. DO NOT swap the
+    _scheduler_sleep calls below for a bare `stop_event.wait`: that reintroduces
+    the leak.
+    """
+    try:
+        from django.db import connection
+        connection.close()
+    except Exception:
+        pass
+
+
+def _scheduler_sleep(stop_event, timeout):
+    """Close the DB connection (see _scheduler_close_db), THEN park on the stop
+    event. Every scheduler sleep MUST go through here so a parked scheduler holds
+    no connection. Returns True if the stop event fired (caller should exit)."""
+    _scheduler_close_db()
+    return stop_event.wait(timeout=timeout)
+
+
 def _scheduler_loop(plugin_ref, stop_event):
     """Auto-refresh + apply at every time listed in scheduled_times.
 
     stop_event is THIS thread's own Event, held in the reload-stable registry
     (#110), not a module global: a later reload can stop this exact thread even
     after the module that started it has been unloaded and its globals reset.
+
+    Holds NO DB connection while parked: every sleep goes through
+    _scheduler_sleep (which closes first), and the finally closes on exit so a
+    reclaimed (reload-orphaned or stopped) greenlet releases its backend instead
+    of leaking it (#82/#136).
     """
-    while not stop_event.is_set():
-        try:
-            settings = plugin_ref.get_current_settings()
-            if not settings.get("auto_refresh_enabled", False):
-                stop_event.wait(timeout=300)
-                continue
-            tz = _resolve_tz(settings.get("local_timezone", "UTC"))
-            times = _parse_scheduled_times(settings.get("scheduled_times", "0400"))
-            if not times:
-                logger.warning("[ranked_matchups] no valid scheduled_times; idling 5m")
-                stop_event.wait(timeout=300)
-                continue
-            target = _next_fire_time(times, tz)
-            if target is None:
-                stop_event.wait(timeout=300)
-                continue
-            sleep_s = (target - datetime.now(tz)).total_seconds()
-            logger.info(
-                "[ranked_matchups] scheduler sleeping %.0fs until %s (next of %s)",
-                sleep_s, target.isoformat(), times,
-            )
-            if stop_event.wait(timeout=sleep_s):
-                return
-            logger.info("[ranked_matchups] scheduler firing auto_pipeline")
-            # Delegates to the shared lock/inflight/subprocess path so the
-            # scheduler runs the work OUT OF PROCESS (the Monte Carlo scoring
-            # holds the GIL and would freeze this gevent worker's hub if run
-            # inline) and can't drift out of sync with the HTTP launchers.
-            # run_scheduled_pipeline acquires the cross-worker lock itself and
-            # no-ops if another worker holds it. See tasks.py header.
-            tasks.run_scheduled_pipeline(settings)
-        except Exception:
-            logger.exception("[ranked_matchups] scheduler loop crashed; sleeping 10m")
-            stop_event.wait(timeout=600)
+    try:
+        while not stop_event.is_set():
+            try:
+                settings = plugin_ref.get_current_settings()
+                if not settings.get("auto_refresh_enabled", False):
+                    _scheduler_sleep(stop_event, 300)
+                    continue
+                tz = _resolve_tz(settings.get("local_timezone", "UTC"))
+                times = _parse_scheduled_times(settings.get("scheduled_times", "0400"))
+                if not times:
+                    logger.warning("[ranked_matchups] no valid scheduled_times; idling 5m")
+                    _scheduler_sleep(stop_event, 300)
+                    continue
+                target = _next_fire_time(times, tz)
+                if target is None:
+                    _scheduler_sleep(stop_event, 300)
+                    continue
+                sleep_s = (target - datetime.now(tz)).total_seconds()
+                logger.info(
+                    "[ranked_matchups] scheduler sleeping %.0fs until %s (next of %s)",
+                    sleep_s, target.isoformat(), times,
+                )
+                if _scheduler_sleep(stop_event, sleep_s):
+                    return
+                logger.info("[ranked_matchups] scheduler firing auto_pipeline")
+                # Delegates to the shared lock/inflight/subprocess path so the
+                # scheduler runs the work OUT OF PROCESS (the Monte Carlo scoring
+                # holds the GIL and would freeze this gevent worker's hub if run
+                # inline) and can't drift out of sync with the HTTP launchers.
+                # run_scheduled_pipeline acquires the cross-worker lock itself and
+                # no-ops if another worker holds it. See tasks.py header.
+                tasks.run_scheduled_pipeline(settings)
+            except Exception:
+                logger.exception("[ranked_matchups] scheduler loop crashed; sleeping 10m")
+                _scheduler_sleep(stop_event, 600)
+    finally:
+        _scheduler_close_db()
 
 
 _SCHEDULER_LOCK_KEY = f"plugins:{PLUGIN_KEY}:scheduler:lock"
@@ -3331,19 +3366,30 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.7.1"
+    version = "1.7.2"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
         # relying on stale init-time settings.
         reg = _scheduler_registry()
-        # #110: the loader reloads us without calling stop(), so a thread started
-        # by a PRIOR module incarnation is still running and is only reachable
-        # via the reload-stable registry. Reclaim and stop it here before
-        # starting our own, otherwise every reload leaks a thread + DB connection
-        # (the #82 leak, through the reload path #82's stop() never covered).
+        # IDEMPOTENT across the loader's per-discovery re-instantiation (#82/#136).
+        # The loader re-execs plugin.py and rebuilds this Plugin on EVERY discovery
+        # (discover_plugins defaults to use_cache=False). Two paths, both verified
+        # live (2026-06-15):
+        #   - Routine discovery (plugins-list view / run): does NOT call stop(),
+        #     so the prior incarnation's scheduler is still in the reload-stable
+        #     registry (#110) with is_alive()==True. We MUST leave it running:
+        #     stopping+starting on every UI poll churned a thread and (pre-fix)
+        #     leaked a DB connection per poll until max_connections was hit (the
+        #     #82 lock-up). This early return is what prevents that churn.
+        #   - The reload endpoint: the loader calls stop() FIRST (loader.py), which
+        #     clears reg.thread, so we fall through and start a fresh one; the old
+        #     thread was already signaled and releases its DB connection in
+        #     _scheduler_loop's finally, and the new one parks holding none.
+        # Either way no connection leaks. Code updates ship via container restart
+        # (fresh process -> fresh thread), so a kept thread never runs stale code.
         if reg.thread is not None and reg.thread.is_alive():
-            _stop_scheduler(reg.thread, reg.stop_event, "reload", join=False)
+            return
         stop_event = threading.Event()
         t = threading.Thread(target=_scheduler_loop, args=(self, stop_event), daemon=True,
                              name="ranked_matchups-scheduler")
