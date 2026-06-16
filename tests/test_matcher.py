@@ -513,6 +513,98 @@ class TestWidenStreamPool:
         assert results[0].method == "fallback_first"
 
 
+def _scand(stream_id, name):
+    """A Path C stream-name candidate: channel_name == program_title == the
+    stream name, channel_id a negative sentinel, stream_id set."""
+    return ChannelCandidate(
+        channel_id=-stream_id,
+        channel_name=name,
+        program_title=name,
+        program_start=datetime(2026, 4, 27, tzinfo=timezone.utc),
+        program_end=datetime(2026, 4, 27, 4, tzinfo=timezone.utc),
+        stream_id=stream_id,
+    )
+
+
+class TestTier1Merge:
+    """Tier-1 (channel-name both-team) must MERGE the program-title both-team
+    matches behind it as fallback streams, not short-circuit and drop them.
+
+    Regression: once one dedicated-feed channel (channel name has both teams)
+    existed, the matcher returned ONLY that channel and silently dropped every
+    EPG-confirmed broadcaster (FOX/TSN/BBC whose programme title names the game)
+    whose stream pool used to back the matchup channel."""
+
+    def test_strict_merges_program_title_broadcasters(self):
+        cands = [
+            # dedicated feed: both teams in the CHANNEL NAME (Tier-1 strict)
+            _cand(10, "FIFA World Cup 2026 18: Penn State 02:00 Ohio State", "Live"),
+            # broadcaster: both teams only in the PROGRAMME TITLE (Tier-2)
+            _cand(20, "FOX Sports 1", "Penn State at Ohio State"),
+            _cand(21, "TSN 1", "Penn State vs Ohio State"),
+        ]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
+        assert results[0].method == "regex_strict"
+        # Dedicated feed primary, broadcasters stacked behind it (no LLM).
+        assert results[0].channel_ids == [10, 20, 21]
+        assert results[0].stream_ids == []
+
+    def test_strict_alone_unchanged_when_no_program_title_matches(self):
+        # No broadcaster programme names both teams: behaviour is exactly the
+        # pre-merge shape (strict variants only).
+        cands = [
+            _cand(10, "EPL01: Penn State 20:00 Ohio State", "Live"),
+            _cand(11, "AU: Penn State v Ohio State", "Live"),
+        ]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
+        assert results[0].channel_ids == [10, 11]
+        assert results[0].stream_ids == []
+
+
+class TestStreamGranularRouting:
+    """Path C stream candidates (stream_id set) route to stream_ids, never to
+    channel_ids, so the apply attaches the specific stream and not the parent
+    channel's unrelated streams."""
+
+    def test_pure_stream_match_via_tier1(self):
+        # A stream naming both teams is a Tier-1 match (its channel_name IS the
+        # stream name); it must land in stream_ids with empty channel_ids.
+        cands = [_scand(500, "USA Soccer10: Penn State vs Ohio State 9pm")]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
+        assert results[0].method == "regex_strict"
+        assert results[0].channel_ids == []
+        assert results[0].stream_ids == [500]
+
+    def test_channel_and_stream_match_split_correctly(self):
+        cands = [
+            _cand(10, "EPL01: Penn State v Ohio State", "Live"),       # whole channel
+            _scand(500, "USA Soccer10: Penn State vs Ohio State 9pm"),  # one stream
+        ]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
+        assert results[0].channel_ids == [10]
+        assert results[0].stream_ids == [500]
+
+    def test_stream_match_via_llm_routes_to_stream_ids(self, monkeypatch):
+        # Channel name lacks both teams, programme title (= stream name) has them;
+        # two such streams → LLM disambiguation. The LLM picks one by its
+        # (negative-sentinel) channel_id, and it lands in stream_ids.
+        cands = [
+            _scand(500, "USA Soccer10: Penn State vs Ohio State"),
+            _scand(501, "USA Soccer11: Penn State vs Ohio State"),
+        ]
+        games = [(_Game("Penn State", "Ohio State"), None, None)]
+        # NOTE: these are Tier-1 strict (channel_name = stream name has both
+        # teams), so they merge deterministically without the LLM. Assert that.
+        results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
+        assert results[0].method == "regex_strict"
+        assert results[0].channel_ids == []
+        assert sorted(results[0].stream_ids) == [500, 501]
+
+
 class TestSingleSidedRegexFilters:
     """#127: passing team_b=None matches on team_a (the event name) alone,
     dropping the both-teams requirement for field events."""

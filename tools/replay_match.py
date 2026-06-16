@@ -151,12 +151,17 @@ def load_snapshot(path):
     progs = [_Row(id=p["id"], title=p["title"] or "", epg_id=p["epg_id"],
                   start_time=_dt(p["start_time"]), end_time=_dt(p["end_time"]))
              for p in data["programs"]]
-    return chans, progs
+    # Streams power Path C (stream-name matching). Older snapshots predate the
+    # key; default to empty so they still replay (Path C just finds nothing).
+    streams = [_Row(id=s["id"], name=s["name"] or "")
+               for s in data.get("streams", [])]
+    return chans, progs, streams
 
 
-def install_orm(chans, progs):
+def install_orm(chans, progs, streams):
     chan_mod = types.ModuleType("apps.channels.models")
     chan_mod.Channel = SimpleNamespace(objects=FakeManager(chans))
+    chan_mod.Stream = SimpleNamespace(objects=FakeManager(streams))
     epg_mod = types.ModuleType("apps.epg.models")
     epg_mod.ProgramData = SimpleNamespace(objects=FakeManager(progs))
     dj = types.ModuleType("django.db.models")
@@ -215,10 +220,11 @@ def main():
     ap.add_argument("--start", default="2026-06-15T00:00:00Z")
     args = ap.parse_args()
 
-    chans, progs = load_snapshot(args.snapshot)
-    install_orm(chans, progs)
+    chans, progs, streams = load_snapshot(args.snapshot)
+    install_orm(chans, progs, streams)
     matcher, plugin = load_pkg()
-    print(f"snapshot: {len(chans)} channels, {len(progs)} programs\n")
+    print(f"snapshot: {len(chans)} channels, {len(progs)} programs, "
+          f"{len(streams)} streams\n")
 
     if args.cache:
         cache = json.load(open(args.cache))
@@ -230,7 +236,8 @@ def main():
         for g, r, was in zip(games, results, cached_match):
             tag = "OK " if bool(r.channel_id) == bool(was) else "DIFF"
             print(f"[{tag}] {g.sport_prefix} {g.home[:40]!r}")
-            print(f"       replay: {r.method} -> {r.channel_name!r} ({len(r.channel_ids)} streams)")
+            print(f"       replay: {r.method} -> {r.channel_name!r} "
+                  f"({len(r.channel_ids)} chans, {len(r.stream_ids)} streams)")
             print(f"       cache : {was!r}")
         return
 
@@ -250,7 +257,8 @@ def main():
         print(f"   [{c.channel_id}] {c.channel_name!r}")
     res = matcher.match_games_to_channels([(game, None, None)], plugin._build_epg_lookup(),
                                           api_key="", model="m")[0]
-    print(f"\nVERDICT: method={res.method} primary={res.channel_name!r} stacked={len(res.channel_ids)}")
+    print(f"\nVERDICT: method={res.method} primary={res.channel_name!r} "
+          f"channels={res.channel_ids} streams={res.stream_ids}")
 
 
 if __name__ == "__main__":

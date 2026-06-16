@@ -1285,7 +1285,8 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "importance_notes": signals.importance_notes,
             "importance_thresholds_hit": signals.importance_thresholds_hit,
             "channel_id": match.channel_id,           # primary, kept for backward-compat
-            "channel_ids": list(match.channel_ids),   # all matched, primary first
+            "channel_ids": list(match.channel_ids),   # whole-channel matches, primary first
+            "stream_ids": list(match.stream_ids),     # stream-granular (Path C stream-name matches)
             "channel_name_current": match.channel_name,
             "program_title": match.program_title,
             "match_method": match.method,
@@ -1306,7 +1307,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "status": "ok",
         "message": (
-            f"Refreshed: {len(games_payload)} games scored, {matched} matched to channels. "
+            f"Refreshed: {len(games_payload)} games scored, {matched} matched to a broadcast. "
             + " | ".join(src_summary)
         ),
     }
@@ -1331,8 +1332,8 @@ def _build_epg_lookup():
     against the old uncapped path was ch_id=111919 'EPL 07ⓧ: ... vs Brentford
     FC' getting omitted from the candidate list for the live game window).
     """
-    from .matcher import ChannelCandidate, _team_keywords
-    from apps.channels.models import Channel
+    from .matcher import ChannelCandidate, _team_keywords, both_teams_in_one_segment
+    from apps.channels.models import Channel, Stream
     from apps.epg.models import ProgramData
     from django.db.models import Q
 
@@ -1360,10 +1361,25 @@ def _build_epg_lookup():
             if not (home_kws and away_kws):
                 return []
 
+        def _or_icontains(dbfield, kws):
+            """OR of `<dbfield>__icontains=kw` over kws. One source of truth for
+            the three keyword-substring queries below (programme title, channel
+            name, stream name).
+
+            Empty kws returns a match-NOTHING Q, NOT a bare `Q()`: an empty
+            Django Q matches EVERY row, so a future caller passing no keywords
+            would silently select the whole table. All current call sites guard
+            against empty kws, but the safe contract is enforced here too.
+            """
+            if not kws:
+                return Q(pk__in=[])
+            q = Q()
+            for kw in kws:
+                q |= Q(**{f"{dbfield}__icontains": kw})
+            return q
+
         # Path A: programs in window whose TITLE mentions any team keyword.
-        title_q = Q()
-        for kw in all_kws:
-            title_q |= Q(title__icontains=kw)
+        title_q = _or_icontains("title", all_kws)
         title_progs = list(
             ProgramData.objects
             .filter(start_time__lt=window_end, end_time__gt=window_start)
@@ -1381,19 +1397,13 @@ def _build_epg_lookup():
         # home channels from leaking into the Tier-3 LLM candidate set, and it
         # keeps short broadcast aliases (e.g. 'USA') from dragging in every
         # unrelated channel that merely contains the substring.
-        home_name_q = Q()
-        for kw in home_kws:
-            home_name_q |= Q(name__icontains=kw)
         if field:
             # Single-sided: a channel naming the event is the broadcast. ANDing
             # the "Field" sentinel here (as the two-team path does) would match
             # nothing, which is the #127 bug.
-            name_q = home_name_q
+            name_q = _or_icontains("name", home_kws)
         else:
-            away_name_q = Q()
-            for kw in away_kws:
-                away_name_q |= Q(name__icontains=kw)
-            name_q = home_name_q & away_name_q
+            name_q = _or_icontains("name", home_kws) & _or_icontains("name", away_kws)
         name_match_chans = list(
             Channel.objects
             .filter(name_q)
@@ -1441,6 +1451,42 @@ def _build_epg_lookup():
                 program_title="",  # no real program; tier-1 matches via channel name
                 program_start=game.start_time,
                 program_end=window_end,
+            ))
+
+        # Path C: STREAMS whose NAME names both teams (or, for field events, the
+        # event name). Providers spin up dedicated per-match feeds whose matchup
+        # lives in the STREAM name ('USA Soccer10: ... Iran vs New Zealand')
+        # while the parent channel is generically named and carries no EPG, so
+        # Path A (EPG title) and Path B (channel name) both miss them. We match
+        # the stream by name and attach ONLY that stream (stream-granular):
+        # channel_id is a negative sentinel (never a real PK), and channel_name
+        # is the stream name so the matcher's Tier-1 treats a stream naming both
+        # teams with the same confidence as a channel naming both teams. Streams
+        # carry no schedule, so there is no time-window filter; the specific
+        # team-pair gate is what keeps it tight. Re-selecting a stream already
+        # attached to our own virtual channel is harmless: the apply de-dupes
+        # and the end state converges. The DB predicate is identical to Path B's
+        # `name_q` (both query a `name` field with the same both-teams gate), so
+        # it is reused rather than rebuilt; the per-segment refinement below is
+        # what makes the stream-name case safe against feed-prefix collisions.
+        for s in Stream.objects.filter(name_q).only("id", "name"):
+            # Guard the feed-prefix false positive (e.g. 'USA Soccer09: Australia
+            # vs Turkey' matching United States vs Australia: 'USA' is the feed
+            # label, not the team). Two-team games require both sides to co-occur
+            # in ONE ':'/'|'-delimited segment of the name. Field events are
+            # single-sided (just the event name), so the segment gate does not
+            # apply.
+            if not field and not both_teams_in_one_segment(
+                s.name or "", home_kws, away_kws
+            ):
+                continue
+            out.append(ChannelCandidate(
+                channel_id=-s.id,            # sentinel: not a real channel PK
+                channel_name=s.name or "",   # stream name → Tier-1 sees both teams
+                program_title=s.name or "",
+                program_start=game.start_time,
+                program_end=window_end,
+                stream_id=s.id,
             ))
         return out
 
@@ -1971,7 +2017,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     Source channels are never touched. Stale virtual channels (game no longer
     in cache) are deleted along with their EPG entries.
     """
-    from apps.channels.models import Channel, ChannelGroup, ChannelStream
+    from apps.channels.models import Channel, ChannelGroup, ChannelStream, Stream
     from apps.epg.models import EPGSource, EPGData, ProgramData
     from django.db import transaction
 
@@ -2320,9 +2366,16 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     prep_by_marker: Dict[str, Any] = {}
     for g in games:
         source_ids = list(g.get("channel_ids") or [])
-        if not source_ids:
+        # Path C stream-granular matches: specific streams to attach without
+        # pulling in their parent channel's other streams. Older caches lack
+        # this key (→ []), so behaviour is unchanged for them.
+        explicit_stream_ids = list(g.get("stream_ids") or [])
+        if not source_ids and not explicit_stream_ids:
             primary_id = g.get("channel_id")
-            if primary_id:
+            # A positive primary is a real channel; a negative one is a Path C
+            # stream sentinel with no whole-channel to expand, so ignore it here
+            # (its stream rides in explicit_stream_ids).
+            if primary_id and primary_id > 0:
                 source_ids = [primary_id]
         sources = list(Channel.objects.filter(id__in=source_ids))
         sources_by_id = {c.id: c for c in sources}
@@ -2330,7 +2383,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         source = sources[0] if sources else None
 
         placeholder = False
-        if not source:
+        # A stream-only match (no whole-channel source, but explicit streams) is
+        # a real match, NOT a placeholder.
+        if not source and not explicit_stream_ids:
             score_val = float(g.get("score", 0.0))
             if score_val >= placeholder_threshold:
                 placeholder = True
@@ -2411,6 +2466,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     english_first=english_first, home=g["home"], away=g["away"],
                 )
                 stream_pool.append((key, src_order, s.id))
+        # Path C: attach the specific stream-name-matched streams, NOT their
+        # parent channels' other (unrelated) streams. Ordered after the channel
+        # sources; the quality sort below re-ranks the whole pool anyway, so the
+        # base offset is only a stable tiebreak. De-duped against channel
+        # streams already pooled.
+        if explicit_stream_ids:
+            base = len(sources)
+            by_id = {
+                s.id: s for s in Stream.objects.filter(id__in=explicit_stream_ids)
+                .only("id", "name", "stream_stats")
+            }
+            for j, sid in enumerate(explicit_stream_ids):
+                s = by_id.get(sid)
+                if s is None or s.id in seen_stream_ids:
+                    continue
+                seen_stream_ids.add(s.id)
+                key = _stream_sort_key(
+                    s.stream_stats, s.name or "",
+                    english_first=english_first, home=g["home"], away=g["away"],
+                )
+                stream_pool.append((key, base + j, s.id))
         stream_pool.sort()
         source_streams = [sid for _, _, sid in stream_pool]
 
@@ -3051,6 +3127,7 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     home = away = ""
     home_kws = away_kws = []
     rows: List[Any] = []
+    stream_hits: List[str] = []  # Path C: stream NAMES that name the team(s)
     verdict = ""
     toast: List[str] = []
     field = False
@@ -3089,13 +3166,24 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
                 cands = _build_epg_lookup()(shim)
             except Exception:
                 cands = []
+            # Path C: stream NAMES (not channel names) that name the team(s).
+            # These carry stream_id; surface them so a user can see the dedicated
+            # per-match feeds the matcher now keys on.
+            stream_hits = [c.program_title for c in cands if c.stream_id is not None]
             # Single-sided channel-name check for field events (team_b=None).
             name_match = _regex_filter_channel_name(
                 cands, home, None if field else away) if cands else []
-            if name_match:
+            chan_name_match = [c for c in name_match if c.stream_id is None]
+            stream_name_match = [c for c in name_match if c.stream_id is not None]
+            if chan_name_match:
                 verdict = (("A channel name has the event but it didn't match - "
                             if field else
                             "A channel name has both teams but it didn't match - ")
+                           + "unexpected; please send us this.")
+            elif stream_name_match:
+                verdict = (("A stream name has the event but it didn't match - "
+                            if field else
+                            "A stream name has both teams but it didn't match - ")
                            + "unexpected; please send us this.")
             elif both:
                 verdict = ("A listing names BOTH teams but wasn't auto-picked - reply "
@@ -3137,6 +3225,17 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
                 vlog.append(f"    +{len(rows) - 40} more")
         else:
             vlog.append("  head-to-head listings in its window: none")
+        # Path C: streams whose NAME names the team(s). A non-empty list here on
+        # an UNMATCHED game indicates a bug (these should match via Path C), so
+        # it is the actionable signal to send us.
+        if stream_hits:
+            vlog.append(f"  streams naming the team(s) ({len(stream_hits)}):")
+            for nm in stream_hits[:40]:
+                vlog.append(f"    \"{nm}\"")
+            if len(stream_hits) > 40:
+                vlog.append(f"    +{len(stream_hits) - 40} more")
+        else:
+            vlog.append("  streams naming the team(s): none")
     vlog.append(f"  verdict: {verdict}")
     vlog.append(f"all unmatched ({len(unmatched)}):")
     for g in unmatched:
@@ -3366,7 +3465,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.7.2"
+    version = "1.8.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
