@@ -61,7 +61,12 @@ def ChannelCandidate():
 
 
 def _game(away, home, *, prefix="WC", score=5.0, matched=None,
-          start="2026-06-15T20:00:00Z", label="FIFA World Cup"):
+          start="2099-06-15T20:00:00Z", label="FIFA World Cup"):
+    # Default start is FAR-FUTURE so the diagnose "soonest upcoming" selection
+    # holds regardless of the wall clock. A real near-past date (e.g. today's
+    # fixture) rots the moment the test runs the next day: it drops out of the
+    # "upcoming" window and target selection flips to whatever future game
+    # remains. Tests that care about ordering pass explicit distinct futures.
     return {
         "sport_prefix": prefix, "sport_label": label,
         "away": away, "home": home,
@@ -148,6 +153,19 @@ class TestDeepDive:
         msg = _run(plugin, games, window_rows=rows, lookup_cands=cands)
         assert "unexpected" in msg
 
+    def test_unexpected_when_stream_name_has_both(self, plugin, ChannelCandidate):
+        # Path C: a STREAM (stream_id set) names both teams but the game is
+        # unmatched -> the verdict must say "stream name" (not "channel name").
+        from datetime import datetime, timezone
+        now = datetime(2026, 6, 15, 20, 0, tzinfo=timezone.utc)
+        stream_cand = ChannelCandidate(
+            channel_id=-77, channel_name="USA Soccer10: Knicks vs Spurs",
+            program_title="USA Soccer10: Knicks vs Spurs",
+            program_start=now, program_end=now, stream_id=77)
+        games = [_game("New York Knicks", "San Antonio Spurs", prefix="NBA", score=8.0)]
+        msg = _run(plugin, games, window_rows=[], lookup_cands=[stream_cand])
+        assert "stream name has both teams but it didn't match" in msg
+
     def test_long_title_is_truncated(self, plugin):
         long_title = "FIFA World Cup Quarterfinal Extravaganza Presented by Sponsor: Japan vs"
         rows = [("Some Very Long Channel Name Here FHD", long_title, " [Japan]")]
@@ -209,7 +227,9 @@ class TestDeepDive:
         monkeypatch.setattr(plugin, "logger", _FakeLogger())
         rows = [("beIN 1", "Japan vs Netherlands", " [BOTH TEAMS]"),
                 ("Some Other Ch", "Unrelated vs Game", "")]
-        games = [_game("Japan", "Netherlands", score=9.0),
+        # Both far-future (clock-independent); Japan SOONER so it is the target,
+        # Egypt later so it is the non-target shown only in the verbose log.
+        games = [_game("Japan", "Netherlands", score=9.0, start="2099-01-01T20:00:00Z"),
                  _game("Egypt", "Belgium", score=3.0, start="2099-09-09T20:00:00Z")]
         toast = _run(plugin, games, window_rows=rows)
 

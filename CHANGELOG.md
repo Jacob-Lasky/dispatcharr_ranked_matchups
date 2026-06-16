@@ -5,6 +5,35 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-06-16
+
+### Added
+
+- **Stream-name matching (Path C).** The matcher now also keys on the names of
+  individual STREAMS, not just channel names and EPG programme titles. Providers
+  spin up dedicated per-match feeds whose matchup lives in the stream name
+  ("USA Soccer10: ... Iran vs New Zealand") on a generically-named channel with
+  no EPG; Path A (EPG title) and Path B (channel name) both miss those. A stream
+  whose name names both teams (or, for field events, the event) is now attached
+  **stream-granular**: only that one stream lands on the matchup channel, not its
+  parent channel's unrelated streams. Match results carry a new `stream_ids`
+  alongside `channel_ids`, threaded through the cache and apply.
+- A **feed-prefix guard** for stream-name matching: both teams must co-occur in a
+  single `:`/`|`-delimited segment of the name. Without it the network label
+  "USA Soccer09" supplied a bogus "USA" hit for United States while the real
+  opponent appeared in a different matchup ("Australia vs Turkey"),
+  cross-matching games. Kickoff times ("Iran 02:00 New Zealand") are not treated
+  as segment boundaries.
+
+### Fixed
+
+- **Tier-1 no longer drops EPG-confirmed broadcasters when a dedicated feed
+  exists.** When a channel name named both teams (Tier-1), the matcher used to
+  return only those channels and discard every broadcaster whose EPG programme
+  title named the game (FOX/TSN/BBC). It now MERGES the program-title both-team
+  matches behind the channel-name matches as fallback streams. Both sets are
+  gated on both teams, so the merge is high-precision and needs no LLM call.
+
 ## [1.7.2] - 2026-06-14
 
 ### Fixed

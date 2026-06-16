@@ -25,7 +25,7 @@ def main():
     import django
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "dispatcharr.settings")
     django.setup()
-    from apps.channels.models import Channel
+    from apps.channels.models import Channel, Stream
     from apps.epg.models import ProgramData
 
     chans = [
@@ -40,8 +40,15 @@ def main():
          "epg_id": p.epg_id}
         for p in ProgramData.objects.all().only("id", "title", "start_time", "end_time", "epg_id")
     ]
-    json.dump({"channels": chans, "programs": progs}, open(out, "w"))
-    print(f"exported {len(chans)} channels, {len(progs)} programs -> {out}")
+    # Streams power Path C (stream-name matching). Only id + name are needed by
+    # the lookup; SELECT just those columns.
+    streams = [
+        {"id": s.id, "name": s.name}
+        for s in Stream.objects.all().only("id", "name")
+    ]
+    json.dump({"channels": chans, "programs": progs, "streams": streams}, open(out, "w"))
+    print(f"exported {len(chans)} channels, {len(progs)} programs, "
+          f"{len(streams)} streams -> {out}")
 
 
 if __name__ == "__main__":

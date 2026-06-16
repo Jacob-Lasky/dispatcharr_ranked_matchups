@@ -1,15 +1,26 @@
-"""Match scored games to Dispatcharr channels via EPG ProgramData.
+"""Match scored games to Dispatcharr channels / streams.
 
-Flow per game:
-  1) Query ProgramData for programs airing during [game.start_time-30m, game.start_time+4h]
-     across all sports-flagged channels.
-  2) Regex pre-filter: programs whose title contains BOTH team identifiers (full
-     name or last word as fallback).
-  3) If exactly 1 candidate → match.
-  4) If multiple → Claude picks the right one given the game context.
-  5) If zero candidates → log and skip (provider may not carry this game).
+`_build_epg_lookup` (in plugin.py) supplies candidates from three sources:
+  Path A - EPG ProgramData whose programme TITLE names a team, in the game's
+           broadcast window (whole-channel: all the channel's streams attach).
+  Path B - channels whose NAME names both teams (whole-channel).
+  Path C - STREAMS whose name names both teams (stream-granular: only that one
+           stream attaches, not the parent channel's others). Candidates carry
+           a stream_id and a negative sentinel channel_id.
 
-Batch optimization: one Claude call resolves all ambiguous-match games together.
+Tiers per game (match_games_to_channels):
+  Tier 1 (regex_strict): a CHANNEL NAME (Path B) or STREAM NAME (Path C) names
+     both teams. Highest confidence. MERGES the Tier-2 program-title both-team
+     matches behind it (the live broadcasters) as fallback streams instead of
+     discarding them.
+  Tier 2 (regex_unique): exactly one non-preview programme title names both
+     teams → match it.
+  Tier 3 (llm / fallback_first): multiple or zero strict/title matches → Claude
+     disambiguates (one batched call for all ambiguous games); with no API key,
+     the first candidate is used.
+
+The result splits matched targets into channel_ids (whole-channel) and
+stream_ids (stream-granular Path C) via _partition_attach_targets.
 """
 
 from __future__ import annotations
@@ -77,6 +88,14 @@ class ChannelCandidate:
     program_title: str
     program_start: datetime
     program_end: datetime
+    # Path C (stream-name match): when set, this candidate is a SPECIFIC stream
+    # whose NAME named the game, NOT a whole channel. The apply attaches only
+    # this stream, not the parent channel's other (unrelated) streams. None =
+    # whole-channel candidate (Path A EPG title / Path B channel name): every
+    # stream on the channel attaches. For stream candidates channel_id is a
+    # negative sentinel (-stream_id), never a real PK, so the partition below
+    # never expands a parent channel for them.
+    stream_id: Optional[int] = None
 
 
 @dataclass
@@ -89,9 +108,14 @@ class MatchResult:
     # to stack multiple provider variants (different qualities/regions) onto
     # the virtual channel as fallback streams. Empty list means no match.
     channel_ids: List[int] = None  # type: ignore[assignment]
-    # 'regex_strict' (channel name had both teams), 'regex_unique' (program
-    # title regex matched exactly one non-preview), 'llm' (Claude picked from
-    # multiple), 'fallback_first' (no API key, used first candidate),
+    # Explicit stream IDs to attach (stream-granular: Path C stream-name
+    # matches), separate from channel_ids (whole-channel matches whose every
+    # stream attaches). The apply stacks BOTH, deduped by stream id. Empty
+    # unless a stream-name candidate won a tier.
+    stream_ids: List[int] = None  # type: ignore[assignment]
+    # 'regex_strict' (channel name OR stream name had both teams), 'regex_unique'
+    # (program title regex matched exactly one non-preview), 'llm' (Claude picked
+    # from multiple), 'fallback_first' (no API key, used first candidate),
     # 'unmatched'.
     method: str = "unmatched"
     note: str = ""
@@ -99,6 +123,8 @@ class MatchResult:
     def __post_init__(self):
         if self.channel_ids is None:
             self.channel_ids = []
+        if self.stream_ids is None:
+            self.stream_ids = []
 
 
 def _team_keywords(team_name: str) -> List[str]:
@@ -154,6 +180,35 @@ def _kw_hit(text: str, keywords: List[str]) -> bool:
     """
     t = (text or "").lower()
     return any(kw.lower() in t for kw in keywords)
+
+
+def both_teams_in_one_segment(
+    text: str, home_kws: List[str], away_kws: List[str]
+) -> bool:
+    """True if SOME ':'/'|'-delimited segment of `text` names BOTH sides.
+
+    Providers prefix a feed/network label onto stream names:
+    'USA Soccer09: Australia vs Turkey', 'US (Peacock 064) | Suiza v. Bosnia'.
+    The matchup lives in ONE segment; a team alias appearing only in the LABEL
+    (e.g. 'USA' in the feed-prefix 'USA Soccer09', which is NOT the United
+    States team) must not pair with an opponent token in the matchup body to
+    fake a match. Confirmed false positive: the United States vs Australia game
+    matched 'USA Soccer09: Australia vs Turkey' (USA from the prefix, Australia
+    from the body) before this gate. Requiring co-occurrence in a single segment
+    kills that class while keeping every real feed (whose matchup names both
+    teams together). Used to gate Path C stream-name candidates, where these
+    feed prefixes are common.
+
+    Splits on the label separators ':' and '|', but NOT on a ':' that is part of
+    a clock time ('Iran 02:00 New Zealand'): a colon immediately followed by a
+    digit is a time, not a feed-label boundary. Without that guard the kickoff
+    time inside 'FIFA World Cup 2026 18: Iran 02:00 New Zealand' would split the
+    matchup across segments and reject a legitimate feed.
+    """
+    for seg in re.split(r":(?!\d)|\|", text or ""):
+        if _kw_hit(seg, home_kws) and _kw_hit(seg, away_kws):
+            return True
+    return False
 
 
 def _regex_filter(
@@ -314,22 +369,39 @@ MATCHER_SYSTEM_PROMPT = (
 )
 
 
-def _stack_fallback_ids(
-    primary_id: int, cands: List[ChannelCandidate]
-) -> List[int]:
-    """Primary id first, then every other candidate id, deduped in order.
+def _partition_attach_targets(
+    primary: ChannelCandidate, cands: List[ChannelCandidate]
+) -> Tuple[List[int], List[int]]:
+    """Split an ordered candidate set into (channel_ids, stream_ids).
 
-    Used by the #108 widen path to stack same-fixture provider variants as
-    fallback streams behind the chosen primary. A single channel can appear in
-    `cands` more than once (multiple ProgramData rows), so dedupe.
+    `primary` leads (its target sits first in whichever list it belongs to),
+    then the rest of `cands` in order. Whole-channel candidates (stream_id is
+    None: Path A EPG title / Path B channel name) contribute their channel_id,
+    so the apply stacks ALL of that channel's streams. Stream-name candidates
+    (stream_id set: Path C) contribute ONLY their stream_id, so the apply
+    attaches that one stream and NOT the parent channel's unrelated streams.
+    Both lists are deduped in encounter order.
+
+    With an all-whole-channel set (the pre-stream-name shape) this returns
+    (deduped channel_ids, []), identical to the old _stack_fallback_ids it
+    replaced. Used by the #108 widen path and the Tier-1 merge to stack
+    same-fixture variants as fallback streams behind the chosen primary; a
+    single channel can appear more than once (multiple ProgramData rows), hence
+    the dedupe.
     """
-    out = [primary_id]
-    seen = {primary_id}
-    for c in cands:
-        if c.channel_id not in seen:
-            out.append(c.channel_id)
-            seen.add(c.channel_id)
-    return out
+    channel_ids: List[int] = []
+    stream_ids: List[int] = []
+    seen_ch: set = set()
+    seen_st: set = set()
+    for c in [primary, *cands]:
+        if c.stream_id is not None:
+            if c.stream_id not in seen_st:
+                seen_st.add(c.stream_id)
+                stream_ids.append(c.stream_id)
+        elif c.channel_id not in seen_ch:
+            seen_ch.add(c.channel_id)
+            channel_ids.append(c.channel_id)
+    return channel_ids, stream_ids
 
 
 def match_games_to_channels(
@@ -375,34 +447,47 @@ def match_games_to_channels(
         # Tier 1 (strongest signal): channels whose NAME contains both teams
         # (or, for field events, the event name). These are dedicated match
         # channels: typically multiple regional / quality variants of the same
-        # fixture. Stack all of them.
+        # fixture. Stack all of them. Note Path C stream-name candidates also
+        # land here when their name names both teams (their channel_name IS the
+        # stream name), so a stream-name match is treated with the same
+        # confidence as a channel-name match.
         strict = _regex_filter_channel_name(candidates, game.home, match_away)
+        # Tier 2: program-title regex, with previews ('Next Game:', 'Preview:',
+        # 'Pre-game ...') stripped: those mark team-branded home channels
+        # that surface upcoming-game EPG cards but don't broadcast the match.
+        # Computed up front so Tier-1 can MERGE it in (below).
+        filtered = _strip_preview_titles(
+            _regex_filter(candidates, game.home, match_away)
+        )
         if strict:
             primary = strict[0]
             results[i].channel_id = primary.channel_id
             results[i].channel_name = primary.channel_name
             results[i].program_title = primary.program_title
-            # De-dupe channel_ids while preserving order (a single channel can
-            # have multiple ProgramData rows that pass the filter). Tier-1
-            # always stacks every channel-name variant: this is the original
-            # multi-stream path the #108 widen flag generalizes to lower tiers,
-            # so it shares the same stacking helper.
-            results[i].channel_ids = _stack_fallback_ids(primary.channel_id, strict)
+            # MERGE: a channel-name match confirms the fixture is genuinely on
+            # air, so also stack the program-title both-team matches (the live
+            # broadcasters: FOX/TSN/BBC whose EPG names the game) behind the
+            # dedicated feeds, instead of discarding them. Before this, Tier-1
+            # short-circuited on `strict` alone and silently dropped every
+            # EPG-confirmed broadcaster the moment one dedicated-feed channel
+            # existed. Both sets are gated on BOTH teams, so the merge is
+            # high-precision and needs no LLM call. The partition routes any
+            # Path C stream-name candidates in either set to stream_ids and
+            # de-dupes (a channel can recur across multiple ProgramData rows).
+            ch_ids, st_ids = _partition_attach_targets(primary, [*strict, *filtered])
+            results[i].channel_ids = ch_ids
+            results[i].stream_ids = st_ids
             results[i].method = "regex_strict"
             continue
 
-        # Tier 2: program-title regex, with previews ('Next Game:', 'Preview:',
-        # 'Pre-game ...') stripped: those mark team-branded home channels
-        # that surface upcoming-game EPG cards but don't broadcast the match.
-        filtered = _strip_preview_titles(
-            _regex_filter(candidates, game.home, match_away)
-        )
         if len(filtered) == 1:
             c = filtered[0]
             results[i].channel_id = c.channel_id
             results[i].channel_name = c.channel_name
             results[i].program_title = c.program_title
-            results[i].channel_ids = [c.channel_id]
+            results[i].channel_ids, results[i].stream_ids = (
+                _partition_attach_targets(c, [])
+            )
             results[i].method = "regex_unique"
         elif len(filtered) == 0:
             # Tier 3: LLM with a wider net (all non-preview candidates in
@@ -460,10 +545,10 @@ def match_games_to_channels(
             results[idx].program_title = chosen.program_title
             # #108: stack the other both-team variants as fallback streams when
             # widen is on; otherwise keep the historical single-channel result.
-            if widen and both_team:
-                results[idx].channel_ids = _stack_fallback_ids(chosen.channel_id, cands)
-            else:
-                results[idx].channel_ids = [chosen.channel_id]
+            extra = cands if (widen and both_team) else []
+            results[idx].channel_ids, results[idx].stream_ids = (
+                _partition_attach_targets(chosen, extra)
+            )
             results[idx].method = "llm"
     elif ambiguous:
         # No API key: best-effort: pick first candidate to surface SOMETHING.
@@ -476,10 +561,10 @@ def match_games_to_channels(
                 # #108: same widen rule as the LLM path. Without an API key we
                 # cannot disambiguate, so the first candidate is primary and the
                 # rest stack only when they all name both teams.
-                if widen and both_team:
-                    results[idx].channel_ids = _stack_fallback_ids(c.channel_id, cands)
-                else:
-                    results[idx].channel_ids = [c.channel_id]
+                extra = cands if (widen and both_team) else []
+                results[idx].channel_ids, results[idx].stream_ids = (
+                    _partition_attach_targets(c, extra)
+                )
                 results[idx].method = "fallback_first"
                 results[idx].note = "no api key; first candidate"
 

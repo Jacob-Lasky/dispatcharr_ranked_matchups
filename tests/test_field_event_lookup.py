@@ -120,10 +120,11 @@ class _Row:
         self.__dict__.update(kw)
 
 
-def _install_fake_orm(monkeypatch, channels, programs):
+def _install_fake_orm(monkeypatch, channels, programs, streams=None):
     """Register fake apps.channels.models / apps.epg.models / django.db.models."""
     chan_mod = types.ModuleType("apps.channels.models")
     chan_mod.Channel = types.SimpleNamespace(objects=FakeManager(channels))
+    chan_mod.Stream = types.SimpleNamespace(objects=FakeManager(streams or []))
     epg_mod = types.ModuleType("apps.epg.models")
     epg_mod.ProgramData = types.SimpleNamespace(objects=FakeManager(programs))
     dj_mod = types.ModuleType("django.db.models")
@@ -203,3 +204,76 @@ class TestFieldEventLookup:
         game = _game("Arsenal", "Chelsea", prefix="EPL")
         out = plugin._build_epg_lookup()(game)
         assert [c.channel_id for c in out] == [4]
+
+
+class TestStreamNameLookup:
+    """Path C: streams whose NAME names both teams become stream-granular
+    candidates even when no channel (name or EPG) names the game. This is the
+    'matchup lives only in the stream name' failure mode."""
+
+    def test_stream_named_both_teams_becomes_candidate(self, plugin, monkeypatch):
+        # Generic channel, no EPG, but a stream names both teams.
+        chans = [_Row(id=9, name="USA Sports 24/7", epg_data_id=None)]
+        streams = [
+            _Row(id=500, name="USA Soccer10: FIFA World Cup : Iran vs New Zealand @ 9pm"),
+            _Row(id=501, name="Random Movie Stream"),  # noise
+        ]
+        _install_fake_orm(monkeypatch, chans, programs=[], streams=streams)
+        game = _game("Iran", "New Zealand", prefix="WC")
+        out = plugin._build_epg_lookup()(game)
+        # Only the both-team stream becomes a candidate, carrying its stream_id
+        # and a negative sentinel channel_id (never a real PK).
+        sc = [c for c in out if c.stream_id is not None]
+        assert [c.stream_id for c in sc] == [500]
+        assert sc[0].channel_id == -500
+        assert "Iran" in sc[0].channel_name and "New Zealand" in sc[0].channel_name
+
+    def test_stream_naming_one_team_does_not_match(self, plugin, monkeypatch):
+        streams = [_Row(id=600, name="Iran National Team 24/7")]  # only home
+        _install_fake_orm(monkeypatch, [], programs=[], streams=streams)
+        game = _game("Iran", "New Zealand", prefix="WC")
+        out = plugin._build_epg_lookup()(game)
+        assert [c for c in out if c.stream_id is not None] == []
+
+    def test_feed_prefix_does_not_fake_a_match(self, plugin, monkeypatch):
+        # Confirmed false positive: the feed label 'USA Soccer09' supplies a
+        # bogus 'USA' home hit for United States, while the away token (Australia,
+        # the real opponent) appears in a DIFFERENT matchup. The two tokens are
+        # in different ':'-segments, so the stream must NOT become a candidate.
+        streams = [_Row(id=800, name="USA Soccer09: Australia vs Turkey ( TSN5 ) @ 12am")]
+        _install_fake_orm(monkeypatch, [], programs=[], streams=streams)
+        game = _game("United States", "Australia", prefix="WC")
+        out = plugin._build_epg_lookup()(game)
+        assert [c for c in out if c.stream_id is not None] == []
+
+    def test_feed_prefix_with_real_matchup_still_matches(self, plugin, monkeypatch):
+        # The same feed-label shape is legitimate when the matchup names BOTH the
+        # game's teams in one segment: 'USA Soccer10: ... Iran vs New Zealand'.
+        streams = [_Row(id=801, name="USA Soccer10: FIFA World Cup : Iran vs New Zealand @ 9pm")]
+        _install_fake_orm(monkeypatch, [], programs=[], streams=streams)
+        game = _game("Iran", "New Zealand", prefix="WC")
+        out = plugin._build_epg_lookup()(game)
+        assert [c.stream_id for c in out if c.stream_id is not None] == [801]
+
+    def test_kickoff_time_colon_does_not_split_matchup(self, plugin, monkeypatch):
+        # 'FIFA World Cup 2026 18: Iran 02:00 New Zealand': the kickoff time
+        # '02:00' contains a colon, but it must NOT split the matchup segment
+        # (else both teams land in different segments and the feed is wrongly
+        # rejected). The label colon after '18' is the only real boundary.
+        streams = [_Row(id=802, name="FIFA World Cup 2026 18: Iran 02:00 New Zealand")]
+        _install_fake_orm(monkeypatch, [], programs=[], streams=streams)
+        game = _game("Iran", "New Zealand", prefix="WC")
+        out = plugin._build_epg_lookup()(game)
+        assert [c.stream_id for c in out if c.stream_id is not None] == [802]
+
+    def test_field_event_stream_single_sided(self, plugin, monkeypatch):
+        streams = [
+            _Row(id=700, name="PPV: UFC 250 Topuria vs Gaethje 4K"),
+            _Row(id=701, name="Premier League Arsenal v Chelsea"),  # noise
+        ]
+        _install_fake_orm(monkeypatch, [], programs=[], streams=streams)
+        game = _game("UFC 250: Topuria vs Gaethje", "Field",
+                     extra={"is_field_event": True})
+        out = plugin._build_epg_lookup()(game)
+        sc = [c for c in out if c.stream_id is not None]
+        assert [c.stream_id for c in sc] == [700]
