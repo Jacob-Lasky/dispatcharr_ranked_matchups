@@ -2376,21 +2376,37 @@ class TestUsBroadcastPreference:
         assert us == non_us
 
     def test_acceptance_4k_fox_usa_v_aus_is_top(self, plugin):
-        # The probed-4K Fox feed tops the stack under us_preferred: it ties the
-        # 4K non-US feed on quality and wins the tie on US; both beat the 1080p.
+        # Real config: widen_stream_pool ON (english_first=True) AND us_preferred,
+        # with realistic live feed names (no team names): "FOX 4K" is a US token
+        # but NOT an English token; "TSN 1" IS an English token. Under us_preferred
+        # quality leads, so the probed-4K Fox tops the 1080p TSN. The bug this
+        # guards: english_first alone sank FOX below TSN (TSN-first symptom).
+        kw = dict(english_first=True, prefer_us=True, home="United States", away="Australia")
         fox_4k = plugin._stream_sort_key(
-            {"width": 3840, "height": 2160, "ffmpeg_output_bitrate": 25000.0},
-            "FOX 4K: USA vs Australia", prefer_us=True)
-        espn_1080 = plugin._stream_sort_key(
-            {"width": 1920, "height": 1080, "ffmpeg_output_bitrate": 8000.0},
-            "ESPN: USA vs Australia", prefer_us=True)
-        tsn_4k = plugin._stream_sort_key(
-            {"width": 3840, "height": 2160, "ffmpeg_output_bitrate": 25000.0},
-            "TSN: USA vs Australia", prefer_us=True)
+            {"width": 3840, "height": 2160, "ffmpeg_output_bitrate": 12876.0}, "FOX 4K", **kw)
+        tsn_1080 = plugin._stream_sort_key(
+            {"width": 1920, "height": 1080, "ffmpeg_output_bitrate": 5803.0}, "TSN 1", **kw)
+        bein_es_1080 = plugin._stream_sort_key(
+            {"width": 1920, "height": 1080, "ffmpeg_output_bitrate": 2748.0},
+            "Bein Sports en Espanol", **kw)
         ranked = sorted(
-            [("fox_4k", fox_4k), ("espn_1080", espn_1080), ("tsn_4k", tsn_4k)],
+            [("fox_4k", fox_4k), ("tsn_1080", tsn_1080), ("bein_es_1080", bein_es_1080)],
             key=lambda t: t[1])
         assert ranked[0][0] == "fox_4k", f"expected fox_4k first, got {[r[0] for r in ranked]}"
+
+    def test_us_preferred_overrides_english_first_language_ordering(self, plugin):
+        # Regression for the live bug: with english_first ON, a 4K feed whose name
+        # is NOT an English token must still beat a 1080p English-token feed under
+        # us_preferred (quality leads; language is only a final tiebreak). Without
+        # prefer_us, english_first sinks the 4K feed below the 1080p one.
+        fox_4k, tsn_1080 = {"width": 3840, "height": 2160}, {"width": 1920, "height": 1080}
+        hw = dict(home="United States", away="Australia")
+        # us_preferred: 4K FOX wins (quality leads)
+        assert plugin._stream_sort_key(fox_4k, "FOX 4K", english_first=True, prefer_us=True, **hw) < \
+               plugin._stream_sort_key(tsn_1080, "TSN 1", english_first=True, prefer_us=True, **hw)
+        # english_first only (the #111 behavior that produced TSN-first): TSN wins
+        assert plugin._stream_sort_key(tsn_1080, "TSN 1", english_first=True, **hw) < \
+               plugin._stream_sort_key(fox_4k, "FOX 4K", english_first=True, **hw)
 
     def test_manifest_stream_priority_matches_code(self, plugin):
         # plugin.json's stream_priority option values + default MUST match the

@@ -425,19 +425,24 @@ def _stream_sort_key(stream_stats, name, english_first=False, prefer_us=False, h
     tier. home/away are the game's English team names, used by
     _stream_language_rank to detect English-language feeds.
 
-    When prefer_us is True (stream_priority="us_preferred"), a US-broadcast rank
-    is APPENDED after the quality key, so quality still decides first and US only
-    breaks ties among equal-quality streams (a 1080p TSN feed still beats a 720p
-    ESPN feed). It sits below the language rank too, so among equal-quality
-    English feeds the US one wins.
+    When prefer_us is True (stream_priority="us_preferred"), QUALITY decides
+    first and a US-broadcast rank breaks quality ties (a 1080p TSN feed still
+    beats a 720p ESPN feed). This DELIBERATELY overrides english_first's
+    language-first ordering (#111): with widen_stream_pool on, a high-quality
+    feed whose name is not an English token (e.g. "FOX 4K") would otherwise sink
+    below a 1080p "TSN" (TSN IS an English token, FOX is not), which is the
+    opposite of the quality-first intent. Language is kept only as a final
+    sub-tiebreak below quality and US.
     """
     quality = _stream_quality_sort_key(stream_stats, name)
-    key = quality
-    if english_first:
-        key = (_stream_language_rank(name, home, away),) + key
     if prefer_us:
-        key = key + (_us_broadcast_rank(name),)
-    return key
+        key = quality + (_us_broadcast_rank(name),)
+        if english_first:
+            key = key + (_stream_language_rank(name, home, away),)
+        return key
+    if english_first:
+        return (_stream_language_rank(name, home, away),) + quality
+    return quality
 
 
 # ---------- timezone helpers ----------
