@@ -84,6 +84,15 @@ logger = logging.getLogger(f"plugins.{PLUGIN_KEY}")
 # reads and plugin.json can't drift apart. Other one-off settings stay inline.
 _WIDEN_STREAM_POOL_SETTING = "widen_stream_pool"
 
+# Stream ordering preference. "quality" (default) keeps the historical
+# quality-only ordering; "us_preferred" keeps quality primary but breaks ties
+# toward US English broadcasts. The value strings are constants (not inline
+# literals) so the runtime check and plugin.json can't drift apart silently;
+# test_manifest_stream_priority_matches_code pins plugin.json to these.
+_STREAM_PRIORITY_SETTING = "stream_priority"
+_STREAM_PRIORITY_QUALITY = "quality"       # default: quality-only ordering
+_STREAM_PRIORITY_US = "us_preferred"       # quality first, US breaks ties
+
 CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
 # Sidecar cache for LLM-rewritten descriptions. Separate from cache.json so the
 # main cache file stays purely deterministic (score, breakdown, score_notes
@@ -246,6 +255,24 @@ _ENGLISH_PROVIDER_TOKENS = (
     "(UK)", " UK ", " USA ", " ENGLISH ", " ENG ", " EN ",
 )
 
+# US-broadcast preference (stream_priority="us_preferred"): rank US English feeds
+# ahead of equal-quality non-US ones. US networks ONLY — deliberately excludes
+# Canadian (TSN/Sportsnet) and UK (BBC/ITV/Sky) feeds. "TNT" is omitted because
+# "TNT Sports" is now UK; "FOX"/"FOX SPORTS" are kept as US (Jake's call). DO NOT
+# add bare " US " / " USA ": a USMNT fixture name ("USA vs Mexico") carries those
+# as a TEAM and would mislabel a foreign feed as US. A foreign-language marker
+# disqualifies a name even with a US token (see _us_broadcast_rank), so ESPN
+# Deportes / Telemundo are never treated as the preferred US feed.
+_US_PROVIDER_TOKENS = (
+    " ESPN ", " ESPN2 ", " ESPNU ", " FS1 ", " FS2 ", " FOX SPORTS ", " FOX ",
+    " NBC ", " NBCSN ", " PEACOCK ", " ABC ", " CBS ", " PARAMOUNT ", " TBS ",
+    " TRUTV ", " USA NETWORK ", " NFL NETWORK ", " MLB NETWORK ", " NBA TV ",
+    " NHL NETWORK ", " BTN ", " BIG TEN NETWORK ", " SEC NETWORK ",
+    " ACC NETWORK ", " GOLF CHANNEL ", " TENNIS CHANNEL ", "(US)",
+)
+_US_RANK_US = 0
+_US_RANK_NON_US = 1
+
 # Non-English broadcaster tokens plus Spanish country spellings common in the
 # WC Telemundo/Peacock-Spanish feeds whose names carry no accent (e.g. "Estados
 # Unidos", "Argelia"). Accented spellings are caught by _FOREIGN_ACCENT_CHARS.
@@ -333,6 +360,25 @@ def _stream_language_rank(name: str, home: str = "", away: str = "") -> int:
     return _LANG_RANK_UNKNOWN
 
 
+def _us_broadcast_rank(name: str) -> int:
+    """US-broadcast preference bucket: US English feed (0) vs everything else (1).
+    Lower sorts earlier. Used ONLY as a tiebreak BELOW the quality key when
+    stream_priority is "us_preferred", so it never promotes a lower-quality US
+    feed over a higher-quality non-US one.
+
+    A foreign-language marker disqualifies a name even if it carries a US network
+    token, so "ESPN Deportes" / Telemundo Spanish feeds are NOT ranked as the
+    preferred US broadcast (the intent is the American ENGLISH feed). DO NOT add
+    bare " US " / " USA " tokens to _US_PROVIDER_TOKENS: a USMNT fixture name
+    ("USA vs Mexico") carries them as a TEAM and would mislabel a foreign feed.
+    """
+    if not name or _has_foreign_language_marker(name):
+        return _US_RANK_NON_US
+    if any(tok in f" {name.upper()} " for tok in _US_PROVIDER_TOKENS):
+        return _US_RANK_US
+    return _US_RANK_NON_US
+
+
 def _stream_quality_sort_key(stream_stats, name):
     """Composite quality sort key for a stream. Lower tuple = sorted earlier.
 
@@ -370,7 +416,7 @@ def _stream_quality_sort_key(stream_stats, name):
     return (_PROBE_TIER_NO_PROBE, _stream_quality_rank(name), 0)
 
 
-def _stream_sort_key(stream_stats, name, english_first=False, home="", away=""):
+def _stream_sort_key(stream_stats, name, english_first=False, prefer_us=False, home="", away=""):
     """Stream ordering key. Quality-only by default (historical behavior).
 
     When english_first is True (#111, set when widen_stream_pool is on), the
@@ -378,11 +424,20 @@ def _stream_sort_key(stream_stats, name, english_first=False, home="", away=""):
     non-English ones, with the quality ordering preserved within each language
     tier. home/away are the game's English team names, used by
     _stream_language_rank to detect English-language feeds.
+
+    When prefer_us is True (stream_priority="us_preferred"), a US-broadcast rank
+    is APPENDED after the quality key, so quality still decides first and US only
+    breaks ties among equal-quality streams (a 1080p TSN feed still beats a 720p
+    ESPN feed). It sits below the language rank too, so among equal-quality
+    English feeds the US one wins.
     """
     quality = _stream_quality_sort_key(stream_stats, name)
+    key = quality
     if english_first:
-        return (_stream_language_rank(name, home, away),) + quality
-    return quality
+        key = (_stream_language_rank(name, home, away),) + key
+    if prefer_us:
+        key = key + (_us_broadcast_rank(name),)
+    return key
 
 
 # ---------- timezone helpers ----------
@@ -2035,6 +2090,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # widening (widen_stream_pool); language only matters once a channel has
     # more than one stream, which is what widening produces.
     english_first = bool(settings.get(_WIDEN_STREAM_POOL_SETTING, False))
+    # Stream ordering: quality decides first always; "us_preferred" additionally
+    # breaks quality ties toward US English broadcasts (see _stream_sort_key).
+    prefer_us = settings.get(_STREAM_PRIORITY_SETTING, _STREAM_PRIORITY_QUALITY) == _STREAM_PRIORITY_US
 
     # Channel-name template (issue #100). Empty/unset -> the built-in default.
     # A malformed custom template must never crash an apply or poison live
@@ -2463,7 +2521,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 seen_stream_ids.add(s.id)
                 key = _stream_sort_key(
                     s.stream_stats, s.name or src.name or "",
-                    english_first=english_first, home=g["home"], away=g["away"],
+                    english_first=english_first, prefer_us=prefer_us,
+                    home=g["home"], away=g["away"],
                 )
                 stream_pool.append((key, src_order, s.id))
         # Path C: attach the specific stream-name-matched streams, NOT their
@@ -2484,7 +2543,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 seen_stream_ids.add(s.id)
                 key = _stream_sort_key(
                     s.stream_stats, s.name or "",
-                    english_first=english_first, home=g["home"], away=g["away"],
+                    english_first=english_first, prefer_us=prefer_us,
+                    home=g["home"], away=g["away"],
                 )
                 stream_pool.append((key, base + j, s.id))
         stream_pool.sort()

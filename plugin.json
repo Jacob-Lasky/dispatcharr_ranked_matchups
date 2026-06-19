@@ -534,6 +534,17 @@
       "help_text": "When a game airs on several provider channels that all name both teams, the matcher normally keeps just the one it judges best and discards the rest. Turn this on to also stack those other same-fixture channels as lower-priority fallback streams, so if the primary upstream goes down (e.g. a provider 503) the channel fails over instead of going dark. Only channels naming BOTH teams are stacked, never single-team-keyword guesses. Off by default: it trades tighter curation for resilience, and cannot help games your providers do not carry at all."
     },
     {
+      "id": "stream_priority",
+      "type": "select",
+      "label": "Stream ordering",
+      "default": "quality",
+      "options": [
+        { "value": "quality", "label": "Quality (highest resolution/bitrate first)" },
+        { "value": "us_preferred", "label": "Prefer US broadcasts (quality first, US breaks ties)" }
+      ],
+      "help_text": "How a virtual channel's stacked fallback streams are ordered. 'Quality' sorts by ffprobe resolution then bitrate, falling back to HD/FHD/UHD hints in the stream name when a stream was never probed (the historical behavior). 'Prefer US broadcasts' keeps that quality ordering but, among streams of EQUAL quality, puts the US English feed (ESPN/FOX/NBC/ABC/CBS/etc.) ahead of Canadian (TSN/Sportsnet) and overseas feeds. It never promotes a lower-quality US feed over a higher-quality non-US one. US is detected from the stream name; Spanish-language US feeds (ESPN Deportes, Telemundo) are not treated as the preferred US feed."
+    },
+    {
       "id": "_section_schedule",
       "type": "info",
       "label": "Auto-Refresh",

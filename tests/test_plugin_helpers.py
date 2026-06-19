@@ -2331,3 +2331,76 @@ class TestStreamSortKeyEnglishFirst:
         non_eng = plugin._stream_sort_key(
             None, "Sudáfrica vs México HD", english_first=True, home="Mexico", away="South Africa")
         assert eng < unknown < non_eng
+
+
+class TestUsBroadcastPreference:
+    """stream_priority='us_preferred' breaks quality TIES toward US English
+    feeds, but never overrides quality. Acceptance (Jake): the 4K Fox feed of
+    USA vs Australia must be the top stream."""
+
+    def test_us_rank_identifies_us_networks(self, plugin):
+        assert plugin._us_broadcast_rank("FOX Sports 1") == plugin._US_RANK_US
+        assert plugin._us_broadcast_rank("ESPN") == plugin._US_RANK_US
+        assert plugin._us_broadcast_rank("FS1 4K") == plugin._US_RANK_US
+
+    def test_us_rank_excludes_canada_and_uk(self, plugin):
+        assert plugin._us_broadcast_rank("TSN 4") == plugin._US_RANK_NON_US
+        assert plugin._us_broadcast_rank("Sportsnet") == plugin._US_RANK_NON_US
+        assert plugin._us_broadcast_rank("BBC One") == plugin._US_RANK_NON_US
+
+    def test_us_rank_foreign_language_us_feed_not_preferred(self, plugin):
+        # ESPN Deportes is US-based but Spanish — not the preferred English feed.
+        assert plugin._us_broadcast_rank("ESPN Deportes") == plugin._US_RANK_NON_US
+
+    def test_us_rank_team_name_usa_not_false_positive(self, plugin):
+        # A USMNT fixture on a Canadian feed must NOT read as US: 'USA'/'US' are
+        # team names here, not broadcaster tokens (why they're excluded).
+        assert plugin._us_broadcast_rank("TSN: USA vs Australia") == plugin._US_RANK_NON_US
+
+    def test_us_breaks_tie_among_equal_quality(self, plugin):
+        us = plugin._stream_sort_key({"width": 1920, "height": 1080}, "FOX Sports 1", prefer_us=True)
+        non_us = plugin._stream_sort_key({"width": 1920, "height": 1080}, "TSN 4", prefer_us=True)
+        assert us < non_us
+
+    def test_quality_still_dominates_us(self, plugin):
+        # A 1080p US feed must NOT beat a 2160p non-US feed: quality is primary.
+        us_1080 = plugin._stream_sort_key({"width": 1920, "height": 1080}, "FOX Sports 1", prefer_us=True)
+        non_us_2160 = plugin._stream_sort_key({"width": 3840, "height": 2160}, "TSN 4", prefer_us=True)
+        assert non_us_2160 < us_1080
+
+    def test_default_mode_has_no_us_tiebreak(self, plugin):
+        # Without prefer_us the key carries no country term: equal-quality US and
+        # non-US feeds tie (downstream src_order decides), preserving old behavior.
+        us = plugin._stream_sort_key({"width": 1920, "height": 1080}, "FOX Sports 1")
+        non_us = plugin._stream_sort_key({"width": 1920, "height": 1080}, "TSN 4")
+        assert us == non_us
+
+    def test_acceptance_4k_fox_usa_v_aus_is_top(self, plugin):
+        # The probed-4K Fox feed tops the stack under us_preferred: it ties the
+        # 4K non-US feed on quality and wins the tie on US; both beat the 1080p.
+        fox_4k = plugin._stream_sort_key(
+            {"width": 3840, "height": 2160, "ffmpeg_output_bitrate": 25000.0},
+            "FOX 4K: USA vs Australia", prefer_us=True)
+        espn_1080 = plugin._stream_sort_key(
+            {"width": 1920, "height": 1080, "ffmpeg_output_bitrate": 8000.0},
+            "ESPN: USA vs Australia", prefer_us=True)
+        tsn_4k = plugin._stream_sort_key(
+            {"width": 3840, "height": 2160, "ffmpeg_output_bitrate": 25000.0},
+            "TSN: USA vs Australia", prefer_us=True)
+        ranked = sorted(
+            [("fox_4k", fox_4k), ("espn_1080", espn_1080), ("tsn_4k", tsn_4k)],
+            key=lambda t: t[1])
+        assert ranked[0][0] == "fox_4k", f"expected fox_4k first, got {[r[0] for r in ranked]}"
+
+    def test_manifest_stream_priority_matches_code(self, plugin):
+        # plugin.json's stream_priority option values + default MUST match the
+        # code constants, or picking "Prefer US broadcasts" in the UI would
+        # silently no-op (the runtime check compares against _STREAM_PRIORITY_US).
+        import json
+        import os
+        repo = os.path.dirname(os.path.abspath(plugin.__file__))
+        manifest = json.load(open(os.path.join(repo, "plugin.json"), encoding="utf-8"))
+        field = next(f for f in manifest["fields"] if f["id"] == plugin._STREAM_PRIORITY_SETTING)
+        values = {o["value"] for o in field["options"]}
+        assert values == {plugin._STREAM_PRIORITY_QUALITY, plugin._STREAM_PRIORITY_US}
+        assert field["default"] == plugin._STREAM_PRIORITY_QUALITY
