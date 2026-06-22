@@ -8,6 +8,7 @@ __init__.py."""
 import importlib.util
 import os
 import sys
+import types
 from datetime import timezone
 
 import pytest
@@ -210,6 +211,158 @@ class TestBuildSourcesFriendliesGate:
         assert srcs[0].gender == "w"
         assert srcs[0].favorites_only is True
         assert srcs[0].favorites == ["United States"]
+
+
+class TestIsPostseasonGame:
+    """`_is_postseason_game` classifies a game from its source-set
+    `extra["stage"]`. The contract is an EXCLUSION set (non-postseason stages);
+    any other non-empty stage is postseason, so future bracket stages default
+    to postseason without code changes."""
+
+    def _game(self, stage):
+        extra = {} if stage is None else {"stage": stage}
+        return types.SimpleNamespace(home="A", away="B", extra=extra)
+
+    def test_regular_season_league_has_no_stage(self, plugin):
+        # NFL/NBA/NHL/MLB stamp a stage ONLY on playoff games; regular season
+        # has no stage key at all.
+        assert plugin._is_postseason_game(self._game(None)) is False
+        assert plugin._is_postseason_game(types.SimpleNamespace(extra=None)) is False
+
+    def test_explicit_non_postseason_stages(self, plugin):
+        for stage in ("REGULAR_SEASON", "GROUP_STAGE", "ALLSTAR", "EVENT"):
+            assert plugin._is_postseason_game(self._game(stage)) is False, stage
+
+    def test_world_cup_group_stage_is_not_postseason(self, plugin):
+        # The original complaint: WC group phase must stay favorites-gated even
+        # in postseason mode. The group LETTER lives in extra["group_stage"],
+        # so extra["stage"] is "GROUP_STAGE".
+        g = types.SimpleNamespace(
+            home="Brazil", away="Serbia",
+            extra={"stage": "GROUP_STAGE", "group_stage": "GROUP_A"},
+        )
+        assert plugin._is_postseason_game(g) is False
+
+    def test_team_sport_playoff_stages_are_postseason(self, plugin):
+        # A representative slice across every bracket source's vocabulary.
+        for stage in (
+            "WC", "DIV", "CONF", "SB",          # NFL playoffs
+            "FINALS", "CONF_FINAL", "CUP_FINAL",  # NBA / NHL
+            "LDS", "LCS",                        # MLB
+            "R64", "R32", "S16", "E8", "F4", "NCG",  # NCAA basketball
+            "LAST_32", "LAST_16", "QUARTER_FINALS", "SEMI_FINALS", "FINAL",  # soccer KO
+        ):
+            assert plugin._is_postseason_game(self._game(stage)) is True, stage
+
+    def test_ncaa_regionals_are_postseason_despite_reg_suffix(self, plugin):
+        # BSB_REG / SB_REG are NCAA Regionals (postseason), NOT regular season.
+        # A naive "_REG" suffix exclusion would wrongly drop these.
+        assert plugin._is_postseason_game(self._game("BSB_REG")) is True
+        assert plugin._is_postseason_game(self._game("SB_REG")) is True
+
+    def test_golf_major_is_postseason_event_is_not(self, plugin):
+        assert plugin._is_postseason_game(self._game("MAJOR")) is True
+        assert plugin._is_postseason_game(self._game("EVENT")) is False
+
+    def test_case_insensitive(self, plugin):
+        assert plugin._is_postseason_game(self._game("group_stage")) is False
+        assert plugin._is_postseason_game(self._game("final")) is True
+
+
+class TestFilterFavoritesOnly:
+    """`_filter_favorites_only` is the curation gate. It filters games and
+    their parallel source list in lockstep and returns a drop count."""
+
+    def _g(self, home, away, stage=None):
+        extra = {} if stage is None else {"stage": stage}
+        return types.SimpleNamespace(home=home, away=away, extra=extra)
+
+    def _run(self, plugin, games, favorites, mode):
+        # Sources are opaque to the filter; tag them so we can assert the
+        # parallel association survives.
+        sources = [f"src{i}" for i in range(len(games))]
+        kept_g, kept_s, dropped = plugin._filter_favorites_only(
+            games, sources, favorites, mode,
+        )
+        # Parallel association must hold: each kept source is the one that
+        # originally accompanied its kept game.
+        for g, s in zip(kept_g, kept_s):
+            assert s == f"src{games.index(g)}"
+        return kept_g, dropped
+
+    def test_off_is_noop(self, plugin):
+        games = [self._g("USA", "Wales"), self._g("Brazil", "Serbia")]
+        kept, dropped = self._run(plugin, games, ["United States"], "off")
+        assert dropped == 0 and kept == games
+
+    def test_unrecognized_mode_is_noop(self, plugin):
+        games = [self._g("Brazil", "Serbia")]
+        kept, dropped = self._run(plugin, games, ["United States"], "bogus")
+        assert dropped == 0 and kept == games
+
+    def test_empty_favorites_is_noop_even_when_mode_on(self, plugin):
+        # Strict with no favorites would blank the guide; the gate no-ops.
+        games = [self._g("Brazil", "Serbia")]
+        for mode in ("strict", "postseason"):
+            kept, dropped = self._run(plugin, games, [], mode)
+            assert dropped == 0 and kept == games, mode
+
+    def test_strict_keeps_only_favorite_games(self, plugin):
+        usa = self._g("United States", "Wales", stage="GROUP_STAGE")
+        bra = self._g("Brazil", "Serbia", stage="GROUP_STAGE")
+        final = self._g("France", "Argentina", stage="FINAL")  # KO, but no fav
+        kept, dropped = self._run(plugin, [usa, bra, final], ["United States"], "strict")
+        assert kept == [usa]
+        assert dropped == 2  # strict drops the non-favorite final too
+
+    def test_postseason_rescues_playoff_non_favorites(self, plugin):
+        usa_group = self._g("United States", "Wales", stage="GROUP_STAGE")
+        bra_group = self._g("Brazil", "Serbia", stage="GROUP_STAGE")   # dropped
+        wc_final = self._g("France", "Argentina", stage="FINAL")        # rescued
+        nfl_playoff = self._g("Bills", "Ravens", stage="DIV")          # rescued
+        nfl_regular = self._g("Jets", "Texans")                         # dropped
+        kept, dropped = self._run(
+            plugin,
+            [usa_group, bra_group, wc_final, nfl_playoff, nfl_regular],
+            ["United States"],
+            "postseason",
+        )
+        assert kept == [usa_group, wc_final, nfl_playoff]
+        assert dropped == 2  # bra_group (WC group) + nfl_regular
+
+
+class TestManifestFavoritesOnlyMatchesCode:
+    """plugin.json's favorites_only option values must equal the code
+    constants, mirroring test_manifest_stream_priority_matches_code."""
+
+    def test_options_match_constants(self, plugin):
+        import json
+        with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
+            manifest = json.load(f)
+        field = next(x for x in manifest["fields"] if x["id"] == "favorites_only")
+        values = [o["value"] for o in field["options"]]
+        assert values == [
+            plugin._FAVORITES_ONLY_OFF,
+            plugin._FAVORITES_ONLY_STRICT,
+            plugin._FAVORITES_ONLY_POSTSEASON,
+        ]
+        assert field["default"] == plugin._FAVORITES_ONLY_OFF
+        assert field["id"] == plugin._FAVORITES_ONLY_SETTING
+
+
+class TestEmptyRefreshResult:
+    """Shared exit for the no-games-fetched and everything-filtered-out paths.
+    Must persist an EMPTY cache (so a stale prior cache stops serving dropped
+    games) and return the action's ok-with-message payload."""
+
+    def test_returns_ok_and_persists_empty_cache(self, plugin, monkeypatch):
+        captured = {}
+        monkeypatch.setattr(plugin, "_write_cache", lambda c: captured.update(c))
+        out = plugin._empty_refresh_result("nothing here", ["NFL: 0 games"])
+        assert out == {"status": "ok", "message": "nothing here"}
+        assert captured["games"] == []
+        assert captured["summary"] == ["NFL: 0 games"]
+        assert "refreshed_at" in captured
 
 
 class TestBuildMarkerKey:

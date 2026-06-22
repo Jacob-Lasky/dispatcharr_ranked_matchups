@@ -93,6 +93,28 @@ _STREAM_PRIORITY_SETTING = "stream_priority"
 _STREAM_PRIORITY_QUALITY = "quality"       # default: quality-only ordering
 _STREAM_PRIORITY_US = "us_preferred"       # quality first, US breaks ties
 
+# Favorites-only curation (Discord req: justinglock40 wanted USMNT-only World
+# Cup, not all 48 countries, while keeping the full NFL/NCAA list incl.
+# playoffs). A select, not two booleans, so the modes can't contradict each
+# other ("both on" is meaningless). The value strings are constants (not inline
+# literals) so the runtime read and plugin.json can't drift silently;
+# test_manifest_favorites_only_matches_code pins plugin.json to these.
+#   - off:        curate every enabled sport normally (historical behavior).
+#   - strict:     keep ONLY games involving a Favorites team, across all sports.
+#   - postseason: keep Favorites games AND any postseason/playoff game
+#                 regardless of favorite (NFL playoffs, NCAA tournament, soccer
+#                 knockout). Regular-season league play and WC/EURO GROUP_STAGE
+#                 are still favorites-gated, so the all-countries WC group
+#                 flood stays suppressed even in this mode.
+_FAVORITES_ONLY_SETTING = "favorites_only"
+_FAVORITES_ONLY_OFF = "off"                # default: no filtering
+_FAVORITES_ONLY_STRICT = "strict"          # favorite-involved games only
+_FAVORITES_ONLY_POSTSEASON = "postseason"  # favorites + any postseason game
+# The modes that actually filter (everything except OFF / unrecognized).
+_FAVORITES_ONLY_ACTIVE_MODES = frozenset({
+    _FAVORITES_ONLY_STRICT, _FAVORITES_ONLY_POSTSEASON,
+})
+
 CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
 # Sidecar cache for LLM-rewritten descriptions. Separate from cache.json so the
 # main cache file stays purely deterministic (score, breakdown, score_notes
@@ -720,6 +742,92 @@ def _resolve_max_games(settings: Dict[str, Any]) -> int:
     return int(settings.get("max_games", 25))
 
 
+# Stage strings that are NOT postseason. A game with any OTHER non-empty
+# `extra["stage"]` is treated as a knockout/playoff round. DO NOT invert this
+# into an allowlist of postseason stages: every bracket source defines its own
+# stage vocabulary (NFL WC/DIV/CONF/SB, NHL/NBA/MLB rounds + FINALS, NCAA
+# R64..NCG, BSB_REG/SB_REG regionals, soccer LAST_32..FINAL, golf MAJOR) and new
+# ones get added, so over-including an unknown stage as postseason is the safe
+# failure direction (mirrors the source layer's "better to over-emit a new
+# knockout stage than under-emit a known one" rule in sources/soccer.py).
+# Note BSB_REG / SB_REG are postseason Regionals despite the "_REG" suffix, so
+# this set is exact strings, never a substring/suffix match. GROUP_STAGE is
+# excluded on purpose: it keeps the World Cup / EURO group phase favorites-gated
+# even in 'postseason' mode (the original all-countries complaint). The group
+# LETTER lives in extra["group_stage"]="GROUP_A", not in extra["stage"].
+_NON_POSTSEASON_STAGES = frozenset({
+    "REGULAR_SEASON",  # FD.org soccer league play
+    "GROUP_STAGE",     # WC / EURO group phase
+    "ALLSTAR",         # exhibition (most sources reject it upstream anyway)
+    "EVENT",           # field-event regular tour stop (weekly golf/F1/NASCAR)
+})
+
+
+def _empty_refresh_result(msg: str, src_summary: List[str]) -> Dict[str, Any]:
+    """Log `msg`, persist an empty cache (so a stale prior cache doesn't keep
+    serving games that no longer pass the curator), and return the action's
+    ok-with-message payload. Shared by the no-games-fetched and
+    everything-filtered-out exits so the two can't drift."""
+    logger.info("[ranked_matchups] %s", msg)
+    _write_cache({
+        "games": [],
+        "refreshed_at": datetime.now(timezone.utc).isoformat(),
+        "summary": src_summary,
+    })
+    return {"status": "ok", "message": msg}
+
+
+def _is_postseason_game(game: Any) -> bool:
+    """True when this game is a postseason/playoff round (vs regular season,
+    group stage, or a weekly field event). Reads the source-set
+    `extra["stage"]`; see `_NON_POSTSEASON_STAGES` for the taxonomy."""
+    stage = (getattr(game, "extra", None) or {}).get("stage")
+    if not stage:
+        # No stage = regular-season league play (NFL/NBA/NHL/MLB only stamp a
+        # stage on playoff games; their parsers return None otherwise).
+        return False
+    return str(stage).strip().upper() not in _NON_POSTSEASON_STAGES
+
+
+def _filter_favorites_only(games, sources, favorites, mode):
+    """Apply the favorites-only curation gate, returning (games, sources,
+    dropped_count) filtered in lockstep so the parallel game/source association
+    survives. No-op (returns inputs unchanged, dropped=0) when the mode is off,
+    unrecognized, or no favorites are configured.
+
+    Favorite matching reuses scoring.match_favorites so the gate and the
+    favorite SCORING signal agree on what "involves a favorite" means (same
+    word-boundary + soccer-qualifier rules); a divergence would drop a game the
+    score still treats as a favorite. In 'postseason' mode a non-favorite game
+    is rescued iff `_is_postseason_game` is true."""
+    if mode not in _FAVORITES_ONLY_ACTIVE_MODES:
+        return games, sources, 0
+    if not favorites:
+        # Strict mode with no favorites would blank the entire guide; even
+        # postseason mode would silently drop all regular-season output. Both
+        # are surprising, so favorites-only is a no-op until the user lists at
+        # least one favorite. The caller logs a user-facing warning.
+        return games, sources, 0
+
+    from .scoring import match_favorites
+
+    kept_games, kept_sources, dropped = [], [], 0
+    for g, src in zip(games, sources):
+        keep = bool(match_favorites(g.home, g.away, favorites))
+        if (
+            not keep
+            and mode == _FAVORITES_ONLY_POSTSEASON
+            and _is_postseason_game(g)
+        ):
+            keep = True
+        if keep:
+            kept_games.append(g)
+            kept_sources.append(src)
+        else:
+            dropped += 1
+    return kept_games, kept_sources, dropped
+
+
 def _build_sources(settings: Dict[str, Any]):
     from .sources import (
         GroupStageSoccerSource, KnockoutSoccerSource, MlbPlayoffSource, MlbRegularSource,
@@ -1130,12 +1238,10 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("[ranked_matchups] %s: pulled %d games", src.sport_label, len(games))
 
     if not all_games:
-        msg = "No games found in lookahead window. " + " | ".join(src_summary)
-        logger.info("[ranked_matchups] %s", msg)
-        cache = {"games": [], "refreshed_at": datetime.now(timezone.utc).isoformat(),
-                 "summary": src_summary}
-        _write_cache(cache)
-        return {"status": "ok", "message": msg}
+        return _empty_refresh_result(
+            "No games found in lookahead window. " + " | ".join(src_summary),
+            src_summary,
+        )
 
     # 1a. Series dedup. Best-of-N playoff sources (NHL, NBA, MLB, NCAA
     # basketball/baseball) return EVERY scheduled game in a series, so a
@@ -1156,6 +1262,41 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "series-game rows (kept earliest per team-pair)",
             deduped_count,
         )
+
+    # 1b. Favorites-only gate (Discord req). Applied BEFORE scoring so the
+    # Monte Carlo importance simulation never runs on a game we're about to
+    # drop. Independent of and composable with the per-source
+    # friendlies_favorites_only gate (a friendly already gated to favorites
+    # simply survives this too). See `_filter_favorites_only`.
+    fav_only_mode = str(settings.get(_FAVORITES_ONLY_SETTING, _FAVORITES_ONLY_OFF)
+                        or _FAVORITES_ONLY_OFF).lower()
+    if fav_only_mode in _FAVORITES_ONLY_ACTIVE_MODES and not favorites:
+        logger.warning(
+            "[ranked_matchups] favorites_only=%s but no Favorites are "
+            "configured; gate is a no-op (would otherwise blank the guide)",
+            fav_only_mode,
+        )
+        src_summary.append("favorites-only: ignored (no favorites set)")
+    else:
+        all_games, game_sources, fav_dropped = _filter_favorites_only(
+            all_games, game_sources, favorites, fav_only_mode,
+        )
+        if fav_dropped:
+            postseason_note = (
+                " (postseason games kept)"
+                if fav_only_mode == _FAVORITES_ONLY_POSTSEASON else ""
+            )
+            logger.info(
+                "[ranked_matchups] favorites_only=%s: dropped %d non-favorite "
+                "game(s)%s", fav_only_mode, fav_dropped, postseason_note,
+            )
+            src_summary.append(f"favorites-only ({fav_only_mode}): dropped {fav_dropped}")
+        if not all_games:
+            return _empty_refresh_result(
+                "Favorites-only filter dropped every game in the lookahead "
+                "window. " + " | ".join(src_summary),
+                src_summary,
+            )
 
     # 2. Score. The Lahvička Monte Carlo importance signal covers three
     # related concerns structurally:
@@ -3530,7 +3671,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.8.0"
+    version = "1.9.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

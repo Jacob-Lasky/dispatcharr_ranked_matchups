@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them on interestingness, matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching. Channels are numbered by kickoff time, so the list sorts soonest-first and the guide binds correctly in both the default M3U/EPG output and the Xtream Codes API with no special settings.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -87,14 +87,14 @@
       "type": "boolean",
       "label": "FIFA World Cup",
       "default": false,
-      "help_text": "Quadrennial international tournament. Pure knockout in V1 — group-stage importance not yet modeled (filed as follow-up). LAST_32 (new 48-team format) → R16 → QF → SF → Final → Champion. Requires Football-Data.org key."
+      "help_text": "Quadrennial international tournament. Both phases are produced: every group-stage match plus the knockout bracket (LAST_32 in the new 48-team format → R16 → QF → SF → Final). The group stage alone is dozens of matches across all participating nations; to see only your country's games, list it in Favorites and set 'Favorites only' below (knockout rounds still score on stage). Requires Football-Data.org key."
     },
     {
       "id": "enable_euros",
       "type": "boolean",
       "label": "UEFA European Championship (EURO)",
       "default": false,
-      "help_text": "UEFA's quadrennial national-team tournament. Pure knockout in V1 — group-stage importance not yet modeled. R16 → QF → SF → Final → Champion. Requires Football-Data.org key."
+      "help_text": "UEFA's quadrennial national-team tournament. Both phases are produced: every group-stage match plus the knockout bracket (R16 → QF → SF → Final). The group stage alone is dozens of matches across all participating nations; to see only your country's games, list it in Favorites and set 'Favorites only' below (knockout rounds still score on stage). Requires Football-Data.org key."
     },
     {
       "id": "enable_intl_friendlies",
@@ -352,6 +352,27 @@
       "help_text": "Substring-matched against home/away team names (with team-qualifier whitelist for soccer suffixes like 'FC', 'AFC', 'City', 'United'). Always shown regardless of rank, with a flat score boost. Teams in playoff races still get the 'impact-on-favorite' signal automatically when they sit near a favorite's position."
     },
     {
+      "id": "favorites_only",
+      "type": "select",
+      "label": "Favorites only",
+      "default": "off",
+      "options": [
+        {
+          "value": "off",
+          "label": "Off (curate all enabled sports normally)"
+        },
+        {
+          "value": "strict",
+          "label": "Favorites only (just the teams above)"
+        },
+        {
+          "value": "postseason",
+          "label": "Favorites only, but show all postseason/playoff games"
+        }
+      ],
+      "help_text": "Restricts the curated guide to games involving a team in your Favorites list above. 'Favorites only' shows ONLY your teams across every enabled sport, so an event like the World Cup shows just your country's matches instead of all 48. 'Favorites only, but show all postseason/playoff games' adds back the big championship games (NFL playoffs, NCAA tournament, NHL/NBA/MLB playoffs, soccer knockout rounds) even when no favorite is playing, while regular-season games and World Cup / EURO group-stage games stay limited to your favorites. No effect unless you've listed at least one Favorite team (otherwise it would blank your guide). Independent of the Friendlies favorites gate above."
+    },
+    {
       "id": "curation_preset",
       "type": "select",
       "label": "Curation preset",
@@ -539,8 +560,14 @@
       "label": "Stream ordering",
       "default": "quality",
       "options": [
-        { "value": "quality", "label": "Quality (highest resolution/bitrate first)" },
-        { "value": "us_preferred", "label": "Prefer US broadcasts (quality first, US breaks ties)" }
+        {
+          "value": "quality",
+          "label": "Quality (highest resolution/bitrate first)"
+        },
+        {
+          "value": "us_preferred",
+          "label": "Prefer US broadcasts (quality first, US breaks ties)"
+        }
       ],
       "help_text": "How a virtual channel's stacked fallback streams are ordered. 'Quality' sorts by ffprobe resolution then bitrate, falling back to HD/FHD/UHD hints in the stream name when a stream was never probed (the historical behavior). 'Prefer US broadcasts' keeps that quality ordering but, among streams of EQUAL quality, puts the US English feed (ESPN/FOX/NBC/ABC/CBS/etc.) ahead of Canadian (TSN/Sportsnet) and overseas feeds. It never promotes a lower-quality US feed over a higher-quality non-US one. US is detected from the stream name; Spanish-language US feeds (ESPN Deportes, Telemundo) are not treated as the preferred US feed."
     },
