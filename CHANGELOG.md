@@ -5,6 +5,41 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-06-28
+
+### Added
+
+- **DVR recording preservation (#146).** Apply no longer lets the stale-channel
+  reap take your recordings with it. `Recording.channel` is `on_delete=CASCADE`,
+  so deleting a past game's virtual channel used to CASCADE-delete any DVR
+  recording made on it (the file was orphaned on disk and vanished from the DVR
+  tab). Apply now: skips reaping a channel whose recording is still active
+  (in progress or ending in the future); re-homes completed recordings onto a
+  persistent archive channel before reaping; and keeps the channel rather than
+  destroying recordings if it can't preserve them.
+- New **Recordings group name** setting (`recordings_group_name`, default
+  `Matchups Recordings`). The archive group is created lazily only when a
+  recording needs preserving and removed again once empty, so it exists only
+  while it holds recordings. Must differ from the live target group; if they
+  match, preservation is disabled and channels with recordings are kept.
+
+## [1.9.0] - 2026-06-22
+
+### Added
+
+- **Favorites-only curation (#144).** New "Favorites only" setting with three
+  modes: **Off** (default, curate every enabled sport); **Favorites only** (keep
+  only games involving a Favorites-list team across all sports, e.g. USMNT-only
+  World Cup); and **Favorites only, postseason shown** (favorites everywhere,
+  plus any playoff/knockout game regardless of favorite, while regular-season and
+  World Cup / EURO group-stage games stay favorites-gated). No-ops with a warning
+  when no Favorites are configured.
+
+### Fixed
+
+- Corrected the World Cup / EURO source help text, which claimed "pure knockout"
+  while group-stage matches are produced.
+
 ## [1.8.0] - 2026-06-16
 
 ### Added

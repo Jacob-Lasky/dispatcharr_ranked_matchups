@@ -3885,7 +3885,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.9.0"
+    version = "1.10.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
