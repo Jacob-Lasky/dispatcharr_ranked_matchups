@@ -202,6 +202,134 @@ def _owned_tvg_id_q(field_prefix: str = ""):
         | Q(**{f"{field_prefix}tvg_id__in": _OWNED_TVG_ID_LEGACY_MARKERS})
     )
 
+
+# ---------- DVR recording preservation (#146) ----------
+#
+# A completed DVR recording is FK'd to the matchups game channel it was made on
+# (apps/channels/models.py: Recording.channel, on_delete=CASCADE). Every apply
+# reaps stale (past-game) virtual channels, so without intervention deleting the
+# game channel CASCADE-deletes the recording row, orphaning the .mkv on disk and
+# making it vanish from the DVR tab. To preserve recordings we re-home them onto
+# a persistent archive channel (in a separate, user-named group) BEFORE reaping
+# the game channel, and never reap a channel whose recording is still active.
+
+# Default name for the archive group; overridable via the recordings_group_name
+# setting. The group is created lazily (only when a recording needs preserving)
+# and removed again once it holds no recordings.
+DEFAULT_RECORDINGS_GROUP = "Matchups Recordings"
+
+# Stable tvg_id for the single archive channel. Lives under TVG_ID_PREFIX so it
+# reads as "ours" and is therefore excluded from the matcher (it must never be
+# matched to a game) and from the highest-real-channel scan. It is NOT a game
+# marker, so it is never in seen_markers and is scoped out of existing_virtuals
+# (which is filtered to the live target_group, not the recordings group).
+ARCHIVE_TVG_ID = TVG_ID_PREFIX + "recordings_archive"
+
+# The in-progress value Dispatcharr writes to Recording.custom_properties["status"]
+# while a recording is capturing (apps/channels/tasks.py sets it to "recording"
+# at start and "completed"/"stopped" at end). We only ever need to recognize the
+# in-progress state, to avoid reaping a channel mid-recording. Named here so the
+# external contract is documented in one place rather than as a bare literal.
+_DVR_STATUS_RECORDING = "recording"
+
+
+def _recording_is_active(rec, now) -> bool:
+    """True when a recording must NOT be stranded by reaping its channel: it is
+    in progress, or scheduled/running with an end_time still in the future.
+
+    Pure: `rec` only needs `.custom_properties` (dict or None) and `.end_time`
+    (aware datetime or None). Kept ORM-free so it is unit-testable without a
+    Django DB (mirrors the offline-policy pattern used elsewhere in this plugin).
+    """
+    cp = getattr(rec, "custom_properties", None) or {}
+    if cp.get("status") == _DVR_STATUS_RECORDING:
+        return True
+    end = getattr(rec, "end_time", None)
+    return end is not None and end > now
+
+
+def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled):
+    """Decide, for stale (past-game) channels, which are safe to reap and which
+    recordings to re-home first. Pure policy, no ORM.
+
+    stale: iterable of channel-likes with `.id`.
+    recs_by_channel: {channel_id: [recording-likes]} (see _recording_is_active).
+    now: aware datetime.
+    archive_enabled: whether re-homing is available (False when the archive
+        group name clashes with the live group, so recordings cannot be moved).
+
+    Returns (reapable, kept, rehome_rec_ids):
+      reapable        channels safe to delete (no recordings, or all done and
+                      re-homable).
+      kept            channels to leave in place this cycle (active recording,
+                      or recordings present but archive disabled so reaping
+                      would destroy them). Reconciles next cycle.
+      rehome_rec_ids  recording ids on reapable channels to move to the archive.
+    """
+    reapable, kept, rehome_rec_ids = [], [], []
+    for ch in stale:
+        recs = recs_by_channel.get(ch.id, [])
+        if not recs:
+            reapable.append(ch)
+            continue
+        if any(_recording_is_active(r, now) for r in recs):
+            kept.append(ch)
+            continue
+        if not archive_enabled:
+            # No place to preserve them: keep the channel rather than CASCADE
+            # the recordings away.
+            kept.append(ch)
+            continue
+        rehome_rec_ids.extend(r.id for r in recs)
+        reapable.append(ch)
+    return reapable, kept, rehome_rec_ids
+
+
+def _ensure_archive_channel(recordings_group_name):
+    """Get-or-create the persistent recordings group and its single archive
+    channel. The archive channel is stream-less (a recording container only),
+    has no channel_number (stays out of the highest-real-channel scan), and is
+    keyed by ARCHIVE_TVG_ID so it is found again on the next apply."""
+    from apps.channels.models import Channel, ChannelGroup
+    grp, _ = ChannelGroup.objects.get_or_create(name=recordings_group_name)
+    arch = Channel.objects.filter(
+        channel_group=grp, tvg_id=ARCHIVE_TVG_ID,
+    ).first()
+    if arch is None:
+        arch = Channel.objects.create(
+            name=recordings_group_name,
+            channel_group=grp,
+            tvg_id=ARCHIVE_TVG_ID,
+            channel_number=None,
+            auto_created=False,
+        )
+        logger.info(
+            "[ranked_matchups] created recordings archive channel id=%s in group %r",
+            arch.id, recordings_group_name,
+        )
+    return arch
+
+
+def _cleanup_empty_archive(recordings_group_name) -> bool:
+    """Remove the archive channel (and then the group) once no recordings remain
+    under it, so the group exists only while it holds recordings. Returns True if
+    anything was removed. Safe: the archive channel is deleted only when it has
+    zero Recording rows, so the CASCADE takes nothing with it."""
+    from apps.channels.models import Channel, ChannelGroup, Recording
+    grp = ChannelGroup.objects.filter(name=recordings_group_name).first()
+    if grp is None:
+        return False
+    removed = False
+    arch = Channel.objects.filter(channel_group=grp, tvg_id=ARCHIVE_TVG_ID).first()
+    if arch is not None and not Recording.objects.filter(channel_id=arch.id).exists():
+        arch.delete()
+        removed = True
+    if Channel.objects.filter(channel_group=grp).count() == 0:
+        grp.delete()
+        removed = True
+    return removed
+
+
 # Default starting channel number when the user hasn't configured one. Sentinel
 # 0 means "auto": pick the first channel number after the highest existing
 # non-virtual channel, so we slot in cleanly without colliding with real
@@ -2218,7 +2346,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     Source channels are never touched. Stale virtual channels (game no longer
     in cache) are deleted along with their EPG entries.
     """
-    from apps.channels.models import Channel, ChannelGroup, ChannelStream, Stream
+    from apps.channels.models import Channel, ChannelGroup, ChannelStream, Recording, Stream
     from apps.epg.models import EPGSource, EPGData, ProgramData
     from django.db import transaction
 
@@ -2230,6 +2358,23 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "ok", "message": "Cache empty; run refresh first."}
 
     group_name = settings.get("channel_profile_name", "Top Matchups")
+    # Archive group for preserved DVR recordings (#146). Blank falls back to the
+    # default. It MUST differ from the live group: if they collide the archive
+    # channel would land in the reaped group and defeat the feature, so we
+    # disable preservation (and keep recordings safe by not reaping channels
+    # that have them) until the user sets a distinct name.
+    recordings_group_name = (
+        str(settings.get("recordings_group_name", "") or "").strip()
+        or DEFAULT_RECORDINGS_GROUP
+    )
+    archive_enabled = recordings_group_name.lower() != str(group_name).strip().lower()
+    if not archive_enabled:
+        logger.warning(
+            "[ranked_matchups] recordings_group_name (%r) matches the live group; "
+            "recording preservation disabled until a distinct name is set. "
+            "Channels with recordings will be kept rather than reaped.",
+            recordings_group_name,
+        )
     dry_run = bool(settings.get("dry_run", True))
     # #111: when the widen pool is on, order each channel's pooled streams
     # English+quality first, then non-English. Same toggle as the matcher-side
@@ -2265,13 +2410,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # Find any other groups containing channels we own. Helper covers both the
     # current TVG_ID_PREFIX scheme and any legacy markers from earlier plugin
     # versions (a prefix-only check would miss leftovers on rename).
+    # Exclude the recordings archive group/source (#146) from the rename-cleanup
+    # sweep: the archive channel is intentionally "ours" (so the matcher skips
+    # it), which would otherwise make this sweep migrate it into the live group
+    # and delete the archive group out from under preserved recordings.
+    _protected_group_names = [group_name, recordings_group_name]
     foreign_owned_groups = list(
-        ChannelGroup.objects.exclude(name=group_name)
+        ChannelGroup.objects.exclude(name__in=_protected_group_names)
         .filter(_owned_tvg_id_q("channels__"))
         .distinct()
     )
     foreign_epg_sources = list(
-        EPGSource.objects.exclude(name=group_name)
+        EPGSource.objects.exclude(name__in=_protected_group_names)
         .filter(_owned_tvg_id_q("epgs__"))
         .distinct()
     )
@@ -2411,6 +2561,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     updated = 0
     deleted_stale = 0
     skipped_unmatched = 0
+    rehomed_recordings = 0      # #146: recordings moved to the archive this run
+    kept_for_recording_n = 0    # #146: stale channels kept (active recording)
     seen_markers = set()
 
     placeholder_threshold = float(settings.get("placeholder_min_score", 5.0))
@@ -2719,6 +2871,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # range so we can renumber based on cache order without colliding with
         # the unique (channel_group, channel_number) constraint. park_base is
         # guaranteed to be past every target number we're about to write.
+        # Capture pre-park numbers so a channel we end up KEEPING (active
+        # recording, #146) can be restored to its real number instead of being
+        # stranded at a ~park_base value: only "seen" games get renumbered in
+        # the loop below, so without this a kept stale channel would sit at the
+        # parking number until the next cycle reaps it.
+        prepark_numbers = {ch.id: ch.channel_number for ch in existing_virtuals.values()}
         if not dry_run and existing_virtuals:
             parked = list(existing_virtuals.values())
             for i, ch in enumerate(parked):
@@ -2889,18 +3047,62 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     tvg_id=marker,
                 )
 
-        # 5. Delete stale virtual channels (not seen this refresh)
+        # 5. Reap stale virtual channels (not seen this refresh), preserving any
+        # DVR recordings first (#146). Recording.channel is on_delete=CASCADE, so
+        # a bare Channel.delete() would take the user's recordings with it. We
+        # re-home completed recordings onto a persistent archive channel and skip
+        # reaping any channel whose recording is still active (it reconciles next
+        # cycle once the recording finishes).
         stale = [ch for marker, ch in existing_virtuals.items() if marker not in seen_markers]
-        if stale:
-            if not dry_run:
-                stale_ids = [c.id for c in stale]
-                stale_markers = [c.tvg_id for c in stale]
-                ChannelStream.objects.filter(channel_id__in=stale_ids).delete()
-                Channel.objects.filter(id__in=stale_ids).delete()
+        if stale and not dry_run:
+            now_reap = datetime.now(timezone.utc)
+            stale_ids_all = [c.id for c in stale]
+            recs_by_channel: Dict[int, list] = {}
+            for r in Recording.objects.filter(channel_id__in=stale_ids_all):
+                recs_by_channel.setdefault(r.channel_id, []).append(r)
+            reapable, kept_for_recording, rehome_rec_ids = _partition_stale_for_recordings(
+                stale, recs_by_channel, now_reap, archive_enabled,
+            )
+            if rehome_rec_ids:
+                archive_ch = _ensure_archive_channel(recordings_group_name)
+                # .update() on the Recording queryset: re-point the FK without
+                # invoking per-row save hooks. Recording carries no destructive
+                # post_save signal (unlike Channel.epg_data), so this is a plain
+                # bulk re-home.
+                rehomed_recordings = Recording.objects.filter(
+                    id__in=rehome_rec_ids,
+                ).update(channel_id=archive_ch.id)
+                logger.info(
+                    "[ranked_matchups] re-homed %d recording(s) to archive %r before reaping",
+                    rehomed_recordings, recordings_group_name,
+                )
+            reap_ids = [c.id for c in reapable]
+            reap_markers = [c.tvg_id for c in reapable]
+            if reap_ids:
+                ChannelStream.objects.filter(channel_id__in=reap_ids).delete()
+                Channel.objects.filter(id__in=reap_ids).delete()
                 if epg_source is not None:
                     EPGData.objects.filter(
-                        epg_source=epg_source, tvg_id__in=stale_markers,
+                        epg_source=epg_source, tvg_id__in=reap_markers,
                     ).delete()
+            # Restore kept channels (active recording) to their pre-park number
+            # so they don't linger at a ~park_base value. Only restore numbers
+            # not claimed by a current game this run (assigned set), so the
+            # unique (channel_group, channel_number) constraint can't be hit;
+            # any (rare) collision leaves that channel parked, still safe.
+            if kept_for_recording:
+                assigned_now = set(chnum_by_marker.values())
+                restore = []
+                for ch in kept_for_recording:
+                    orig = prepark_numbers.get(ch.id)
+                    if orig is not None and orig not in assigned_now:
+                        ch.channel_number = orig
+                        restore.append(ch)
+                if restore:
+                    Channel.objects.bulk_update(restore, ["channel_number"])
+            deleted_stale = len(reap_ids)
+            kept_for_recording_n = len(kept_for_recording)
+        elif stale and dry_run:
             deleted_stale = len(stale)
 
         # 6. Defensive: clean up orphan EPGData entries on our source whose
@@ -2917,6 +3119,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 _owned_tvg_id_q(), epg_source=epg_source,
             ).exclude(tvg_id__in=kept_markers)
             orphan_epg_deleted, _ = orphans.delete()
+
+        # 7. Archive hygiene (#146): the recordings group/channel exists only
+        # while it holds recordings. Drop the archive channel and its group once
+        # empty (e.g. after the user deletes the last preserved recording).
+        if not dry_run and archive_enabled:
+            _cleanup_empty_archive(recordings_group_name)
 
     # Persist the LLM-description cache (prune entries whose marker is no
     # longer in this refresh; keep file bounded to live games). Save outside
@@ -2959,12 +3167,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             f"{matchup_logos_fallback} fell back to source-channel logo, "
             f"{stale_logo_files_swept} stale file(s) swept."
         )
+    rec_msg = ""
+    if rehomed_recordings or kept_for_recording_n:
+        rec_msg = (
+            f" Recordings: {rehomed_recordings} re-homed to {recordings_group_name!r}, "
+            f"{kept_for_recording_n} channel(s) kept (active recording)."
+        )
     msg = (
         f"{prefix}Group {group_name!r}: created={created}, updated={updated} "
         f"(placeholders={placeholder_channels_created} included), "
         f"stale_deleted={deleted_stale}, "
         f"orphan_epg_deleted={orphan_epg_deleted if 'orphan_epg_deleted' in locals() else 0}, "
-        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{llm_msg}{logo_msg} "
+        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{rec_msg}{llm_msg}{logo_msg} "
         f"WHY descriptions written to EPG source."
     )
     return {"status": "ok", "message": msg}

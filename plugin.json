@@ -520,6 +520,13 @@
       "help_text": "Apply creates virtual channels in this ChannelGroup, cloning streams from the matched source channels (source channels untouched). A matching dummy EPGSource is created with the same name; each virtual channel gets a ProgramData entry whose description explains WHY the game made the cut. Tip: prefix with '!' (e.g. '!Top Matchups') so it sorts to the top of your group list. If you rename the group, the next apply will detect the old group/source by tvg_id markers and clean them up automatically."
     },
     {
+      "id": "recordings_group_name",
+      "type": "string",
+      "label": "Recordings group name",
+      "default": "Matchups Recordings",
+      "help_text": "Channel group that keeps your DVR recordings after a game's virtual channel is removed. When the plugin reaps a past game it would otherwise CASCADE-delete any recording made on that channel; instead the recording is re-homed into this group so it stays in the DVR tab. The group is created only when there is a recording to keep and removed again once empty. Must differ from the Target group name above (if they match, preservation is disabled and channels with recordings are kept instead of reaped)."
+    },
+    {
       "id": "virtual_channel_base",
       "type": "number",
       "label": "Starting channel number (0 = auto)",
