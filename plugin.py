@@ -225,6 +225,22 @@ DEFAULT_RECORDINGS_GROUP = "Matchups Recordings"
 # (which is filtered to the live target_group, not the recordings group).
 ARCHIVE_TVG_ID = TVG_ID_PREFIX + "recordings_archive"
 
+# Starting channel number for the single archive channel. It MUST be non-None:
+# Dispatcharr's Xtream Codes EPG/stream-list generator (apps/output/epg.py) does
+# an unconditional channel_num_map[channel.id] for XC clients, and that map only
+# contains channels whose effective_channel_number is not None. A null-numbered
+# channel therefore raises KeyError mid-stream and TRUNCATES the entire XC feed
+# (every televizo/XC client sees "no playlist"/"update failed"), not just this one
+# channel. DO NOT set the archive channel's number back to None.
+#
+# The exact value is arbitrary: _ensure_archive_channel takes the first free
+# number at/above this within the recordings group (via _first_free_number), so it
+# never trips the unique (channel_group, channel_number) constraint even if the
+# user points recordings_group_name at an already-populated group. Staying out of
+# the highest-real-channel scan is handled by the ranked_matchups: tvg_id prefix
+# via _owned_tvg_id_q (see _resolve_virtual_base), NOT by the number.
+_ARCHIVE_CHANNEL_NUMBER = 9999
+
 # The in-progress value Dispatcharr writes to Recording.custom_properties["status"]
 # while a recording is capturing (apps/channels/tasks.py sets it to "recording"
 # at start and "completed"/"stopped" at end). We only ever need to recognize the
@@ -285,27 +301,65 @@ def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled
     return reapable, kept, rehome_rec_ids
 
 
+def _first_free_number(used, start: int) -> int:
+    """Smallest integer >= ``start`` that is not in ``used`` (any collection of
+    numbers). Pure and ORM-free so it is unit-testable without a Django DB
+    (mirrors the offline-policy pattern used elsewhere in this plugin). Shared by
+    _assign_channel_numbers (resolving same-minute game collisions) and
+    _ensure_archive_channel (placing the archive channel collision-free)."""
+    num = int(start)
+    while num in used:
+        num += 1
+    return num
+
+
 def _ensure_archive_channel(recordings_group_name):
     """Get-or-create the persistent recordings group and its single archive
     channel. The archive channel is stream-less (a recording container only),
-    has no channel_number (stays out of the highest-real-channel scan), and is
-    keyed by ARCHIVE_TVG_ID so it is found again on the next apply."""
+    carries a non-null channel_number (a null number truncates the whole Xtream
+    Codes feed, see _ARCHIVE_CHANNEL_NUMBER), and is keyed by ARCHIVE_TVG_ID so it
+    is found again on the next apply. Scan-exclusion comes from the owned tvg_id,
+    not the number."""
     from apps.channels.models import Channel, ChannelGroup
     grp, _ = ChannelGroup.objects.get_or_create(name=recordings_group_name)
     arch = Channel.objects.filter(
         channel_group=grp, tvg_id=ARCHIVE_TVG_ID,
     ).first()
+    if arch is not None and arch.channel_number is not None:
+        return arch
+
+    # Either a fresh create, or a self-heal of an install whose archive channel
+    # was created before _ARCHIVE_CHANNEL_NUMBER existed (null number, silently
+    # breaking the XC feed). Take the first free number at/above the constant
+    # within the group so the unique (channel_group, channel_number) constraint
+    # can't fire even if recordings_group_name points at a populated group.
+    used = set(
+        Channel.objects.filter(channel_group=grp)
+        .exclude(tvg_id=ARCHIVE_TVG_ID)
+        .exclude(channel_number__isnull=True)
+        .values_list("channel_number", flat=True)
+    )
+    number = _first_free_number(used, _ARCHIVE_CHANNEL_NUMBER)
+
     if arch is None:
         arch = Channel.objects.create(
             name=recordings_group_name,
             channel_group=grp,
             tvg_id=ARCHIVE_TVG_ID,
-            channel_number=None,
+            channel_number=number,
             auto_created=False,
         )
         logger.info(
-            "[ranked_matchups] created recordings archive channel id=%s in group %r",
-            arch.id, recordings_group_name,
+            "[ranked_matchups] created recordings archive channel id=%s number=%s in group %r",
+            arch.id, number, recordings_group_name,
+        )
+    else:
+        # update() bypasses the post_save signal chain (the epg_data-wipe trap).
+        Channel.objects.filter(pk=arch.pk).update(channel_number=number)
+        arch.channel_number = number
+        logger.info(
+            "[ranked_matchups] backfilled archive channel id=%s number=%s (was None)",
+            arch.id, number,
         )
     return arch
 
@@ -1919,11 +1973,10 @@ def _assign_channel_numbers(
     used: set = set()
     collisions = 0
     for marker, number in pairs:
-        while number in used:
-            number += 1
-            collisions += 1
-        used.add(number)
-        assigned[marker] = number
+        free = _first_free_number(used, number)
+        collisions += free - number  # == number of +1 nudges taken
+        used.add(free)
+        assigned[marker] = free
     if collisions:
         logger.warning(
             "[ranked_matchups] resolved %d channel-number collision(s) by +1 nudge; "
