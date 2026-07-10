@@ -1491,7 +1491,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     #     outcomes out of contention.
     from .scoring import (
         match_favorites, LEAGUE_CONTEXTS, build_impact_narratives,
-        compute_match_importance,
+        compute_match_importance, wc_knockout_importance,
     )
     n_importance_sims = int(settings.get("n_importance_sims", 500))
     scored: List[Tuple[Any, GameSignals, Any]] = []
@@ -1557,6 +1557,19 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                     "[ranked_matchups] importance failed for %s vs %s: %s",
                     g.home, g.away, e,
                 )
+
+        # World Cup knockout premium. A knockout tie is win-or-go-home, but the
+        # Monte Carlo above scores it 0 (binary outcome, no standings leverage to
+        # simulate), so a marquee Round-of-32 game would otherwise rank at the
+        # bottom and fall under placeholder_min_score. Override with a round-
+        # scaled importance premium; the gate (WC competition + knockout stage)
+        # lives in the pure, unit-tested wc_knockout_importance so WC group games
+        # keep their simulated importance and no other competition is affected.
+        _ko_premium = wc_knockout_importance(comp_code, extra.get("stage"))
+        if _ko_premium is not None:
+            importance_pts = _ko_premium
+            importance_notes = ["World Cup knockout: win or go home"]
+            importance_thresholds_hit = []
 
         # Rivalry detection: source-set is_rivalry takes precedence (no adapter
         # currently does this, but the door is open); otherwise we consult the
