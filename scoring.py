@@ -267,6 +267,67 @@ _WC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
 ]
 
 
+# FIFA World Cup knockout importance premium (pre-weight importance_points),
+# keyed by the UPPER-cased tournament stage. A knockout game is win-or-go-home:
+# maximal stakes. But compute_match_importance returns 0 for it (there is no
+# standings distribution to Monte-Carlo: the outcome is binary), so without this
+# a marquee Round-of-32 tie (e.g. France vs Sweden) scored only its tournament-
+# stage band (raw 1.5 -> ~0.95/10) and ranked BELOW a random regular-season game
+# AND below placeholder_min_score, so it never even got a placeholder channel.
+#
+# DO NOT move this into the shared `stage_score` tournament ladder in score_game:
+# that ladder caps at a FINAL (5.0 x tournament weight 1.5 = 7.5 raw -> 4.37/10,
+# still under the 5.0 placeholder bar), inverting it (R32 > FINAL) would be
+# nonsensical, and its QF/SF/FINAL keys are shared with NHL/NBA so a bump there
+# would silently boost those sports too. The importance channel is the design's
+# top-priority signal (see the ScoringWeights docstring: "importance > rank >
+# favorites > tournament"), is uncapped, and is applied per-competition in
+# plugin.py's scoring loop scoped to fd_competition_code == "WC", so only the
+# World Cup is affected.
+#
+# Values chosen so that, at the default weight_importance (3.0) plus each stage's
+# tournament band, the displayed 0-10 score escalates R32~5.5 -> R16~6.5 ->
+# QF~7.6 -> SF~8.3 -> FINAL~9.2, all clearing placeholder_min_score's 5.0 default.
+# THIRD_PLACE has no tournament band, so its premium is set to still clear 5.0.
+# If weight_importance is retuned, these displayed targets shift proportionally,
+# which is the intended, coherent behavior of an importance weight.
+_WC_KNOCKOUT_IMPORTANCE: Dict[str, float] = {
+    "LAST_32":        2.8,
+    "LAST_16":        3.4,
+    "QUARTER_FINALS": 4.0,
+    "SEMI_FINALS":    4.6,
+    "FINAL":          6.0,
+    "THIRD_PLACE":    3.4,
+}
+
+# FD.org competition code for the FIFA World Cup. Matches the fd_code on the WC
+# SoccerCompetitionConfig and the LEAGUE_CONTEXTS key; named here so the scoring
+# gate below and any future WC-scoped logic compare against one symbol instead
+# of a bare "WC" literal scattered across modules.
+WC_COMPETITION_CODE = "WC"
+
+
+def wc_knockout_importance(
+    comp_code: Optional[str], stage: Optional[str]
+) -> Optional[float]:
+    """Importance-points premium for a FIFA World Cup knockout game, or None.
+
+    Pure gate for the WC knockout premium so plugin.py's `_action_refresh`
+    scoring loop stays a thin caller and this runtime string match (competition
+    code + stage label) is unit-testable in isolation — a silent drift in the
+    `fd_competition_code` value or the stage casing would otherwise regress WC
+    games back to their bare ~0.9 tournament-band score with no test to catch it.
+
+    Returns None for anything that is NOT a World Cup knockout game (a different
+    competition, or a WC group-stage game, whose importance is left to the Monte
+    Carlo simulation). See _WC_KNOCKOUT_IMPORTANCE for the why and the calibrated
+    displayed-score targets.
+    """
+    if comp_code != WC_COMPETITION_CODE:
+        return None
+    return _WC_KNOCKOUT_IMPORTANCE.get((stage or "").upper())
+
+
 LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     "PL": LeagueContext(
         code="PL", matchdays_total=38,

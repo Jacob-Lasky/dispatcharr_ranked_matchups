@@ -215,3 +215,79 @@ class TestApplyPreservationWiring:
         assert "Channel.objects.filter(id__in=stale_ids)" not in src, (
             "unguarded all-stale channel delete must not return"
         )
+
+
+class TestArchiveChannelHasNumber:
+    """The archive channel MUST carry a non-null channel_number. A null number
+    makes Dispatcharr's XC EPG/stream-list generator raise KeyError mid-stream
+    (channel_num_map[channel.id]) and truncate the entire feed, so every Xtream
+    client sees an empty/failed playlist. This guards against regressing the
+    archive channel back to channel_number=None."""
+
+    @staticmethod
+    def _archive_source():
+        tree = ast.parse(open(PLUGIN_PY, encoding="utf-8").read(), filename=PLUGIN_PY)
+        lines = open(PLUGIN_PY, encoding="utf-8").read().splitlines()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_ensure_archive_channel":
+                return "\n".join(lines[node.lineno - 1: node.end_lineno])
+        raise AssertionError("_ensure_archive_channel not found")
+
+    def test_create_assigns_a_number_not_none(self):
+        src = self._archive_source()
+        assert "channel_number=number" in src, (
+            "archive channel must be created with the resolved non-null number"
+        )
+        assert "channel_number=None" not in src, (
+            "archive channel must never be created with a null channel_number"
+        )
+        assert "_first_free_number(" in src and "_ARCHIVE_CHANNEL_NUMBER" in src, (
+            "number must come from _first_free_number seeded by _ARCHIVE_CHANNEL_NUMBER"
+        )
+
+    def test_constant_is_a_positive_int(self):
+        # Read the literal via AST without importing the Django-dependent module.
+        tree = ast.parse(open(PLUGIN_PY, encoding="utf-8").read(), filename=PLUGIN_PY)
+        value = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "_ARCHIVE_CHANNEL_NUMBER"
+                for t in node.targets
+            ):
+                value = ast.literal_eval(node.value)
+        assert isinstance(value, int) and value > 0, (
+            "_ARCHIVE_CHANNEL_NUMBER must be a positive int so the XC map is populated"
+        )
+
+    def test_self_heals_existing_null_archive(self):
+        src = self._archive_source()
+        # Existing installs already have a null-numbered archive channel; the
+        # function must repair it (via a signal-bypassing update), not only fix
+        # fresh creates.
+        assert "arch.channel_number is not None" in src, (
+            "must detect and pass through an already-numbered archive channel"
+        )
+        assert ".update(channel_number=number)" in src, (
+            "must backfill a pre-existing null-numbered archive channel via update()"
+        )
+
+
+class TestFirstFreeNumber:
+    """The shared collision-resolver used by both _assign_channel_numbers and
+    _ensure_archive_channel. Pure, so tested directly."""
+
+    def test_returns_start_when_free(self, plugin):
+        assert plugin._first_free_number(set(), 9999) == 9999
+        assert plugin._first_free_number({1, 2, 3}, 9999) == 9999
+
+    def test_bumps_past_a_run_of_taken_numbers(self, plugin):
+        assert plugin._first_free_number({9999}, 9999) == 10000
+        assert plugin._first_free_number({9999, 10000, 10001}, 9999) == 10002
+
+    def test_matches_float_used_values(self, plugin):
+        # Channel.channel_number is a float column, so the DB hands back floats;
+        # an int seed must still detect the clash (9999 == 9999.0).
+        assert plugin._first_free_number({9999.0}, 9999) == 10000
+
+    def test_returns_int(self, plugin):
+        assert isinstance(plugin._first_free_number({9999.0}, 9999), int)
