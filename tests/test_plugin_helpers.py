@@ -1558,6 +1558,35 @@ class TestComputePastSlotEnd:
         assert past_end.utcoffset().total_seconds() == 0
 
 
+class TestBuildSourcesBoxingGate:
+    """_build_sources wires the boxing source: gated on enable_boxing AND a
+    resolved Boxing Data API key (ESPN has no boxing feed, so unlike the ESPN
+    field events boxing REQUIRES a key). Enabled-without-key must be a no-op,
+    not a crash, mirroring the CFBD/FD-keyed sources."""
+
+    def _boxing(self, plugin, settings):
+        from dispatcharr_ranked_matchups.sources.boxing import BoxingSource
+        return [s for s in plugin._build_sources(settings) if isinstance(s, BoxingSource)]
+
+    def test_enabled_with_key_adds_source(self, plugin):
+        srcs = self._boxing(plugin, {
+            "enable_boxing": True,
+            "boxing_data_api_key": "test-key",
+        })
+        assert len(srcs) == 1
+        assert srcs[0].api_key == "test-key"
+
+    def test_enabled_without_key_is_noop(self, plugin):
+        # No key -> no source (and a warning), never a crash.
+        assert self._boxing(plugin, {"enable_boxing": True}) == []
+
+    def test_disabled_adds_nothing(self, plugin):
+        assert self._boxing(plugin, {
+            "enable_boxing": False,
+            "boxing_data_api_key": "test-key",
+        }) == []
+
+
 class TestEpgMatchWindow:
     """#4: per-sport match-window override. Soccer uses (5, 2.5) to avoid
     false-positives on pre-game preview programs; NCAAF / NFL keep
@@ -1585,6 +1614,15 @@ class TestEpgMatchWindow:
         pre, post = plugin._epg_match_window("CFB")
         assert pre == 30
         assert post == 4
+
+    def test_boxing_wide_window(self, plugin):
+        # Boxing (BOX) uses a WIDE window: the Boxing Data API's start times are
+        # unreliable (date-only T00:00:00 placeholders + naive datetimes), so a
+        # +/- ~1 day window absorbs the offset; the event-name keyword filter,
+        # not the clock, is the discriminator for a rare, name-unique card.
+        pre, post = plugin._epg_match_window("BOX")
+        assert pre == 12 * 60
+        assert post == 24.0
 
 
 class TestCurationPresets:

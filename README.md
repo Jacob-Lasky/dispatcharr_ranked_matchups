@@ -102,6 +102,8 @@ the **Test naming convention** action to preview a template before applying it.
 | MLS (regular + Cup playoffs) | [site.api.espn.com](https://site.api.espn.com/) for schedule + [The Odds API](https://the-odds-api.com/) (`soccer_usa_mls`) for closeness | Yes (Odds API free tier; ESPN no key) |
 | NCAA Baseball (D1 regular season) | [site.api.espn.com](https://site.api.espn.com/) (unofficial) + D1Baseball.com poll | Yes (no key required) |
 | NCAA Soccer — Men's + Women's (D1 regular season) | [site.api.espn.com](https://site.api.espn.com/) (unofficial) + United Soccer Coaches Top 25 | Yes (no key required) |
+| Field events — Formula 1 / NASCAR / PGA Golf / ATP + WTA Tennis / UFC | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
+| Boxing | [Boxing Data API](https://rapidapi.com/bengroves1993/api/boxing-data-api) (RapidAPI — ESPN has no boxing feed) | Yes (free RapidAPI tier; ~7-day lookahead) |
 | Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |
 
 Adding a sport is a new file in `sources/` implementing the `SportSource`
@@ -144,6 +146,7 @@ form will collect everything needed to scope it.
      echo "<CFBD key>"          > /data/plugins/dispatcharr_ranked_matchups/cfbd_api_key
      echo "<Football-Data key>" > /data/plugins/dispatcharr_ranked_matchups/football_data_api_key
      echo "<Odds API key>"      > /data/plugins/dispatcharr_ranked_matchups/odds_api_key
+     echo "<Boxing Data key>"   > /data/plugins/dispatcharr_ranked_matchups/boxing_data_api_key
      echo "<Anthropic key>"     > /data/plugins/dispatcharr_ranked_matchups/anthropic_api_key
      chmod 600 /data/plugins/dispatcharr_ranked_matchups/*_api_key
    '

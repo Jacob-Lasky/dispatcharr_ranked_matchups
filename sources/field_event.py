@@ -36,7 +36,7 @@ from typing import Any, List, Optional, Pattern
 import requests
 
 from .base import GameRow, SportSource
-from .._util import FIELD_AWAY_SENTINEL, parse_iso_utc
+from .._util import FIELD_AWAY_SENTINEL, field_event_extra, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.field_event")
 
@@ -119,13 +119,12 @@ class FieldEventSource(SportSource):
                 rank_home=None,
                 rank_away=None,
                 start_time=start,
-                extra={
-                    "espn_event_id": eid,
-                    "fd_competition_code": self.FD_COMPETITION_CODE,
-                    "is_field_event": True,
-                    "stage": stage,
-                    "short_name": short_name,
-                },
+                extra=field_event_extra(
+                    self.FD_COMPETITION_CODE,
+                    stage,
+                    short_name,
+                    espn_event_id=eid,
+                ),
             ))
         return out
 

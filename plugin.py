@@ -20,6 +20,7 @@ Files:
   - cfbd_api_key:         CFBD/CBB-Data bearer token (chmod 600)
   - football_data_api_key: Football-Data.org token (chmod 600)
   - odds_api_key:         The Odds API token (chmod 600)
+  - boxing_data_api_key:  Boxing Data API / RapidAPI key (chmod 600)
   - anthropic_api_key:    Claude key (chmod 600), needed for LLM EPG
                           matching, the optional narrative signal, OR the
                           optional LLM-rewritten EPG descriptions.
@@ -129,6 +130,7 @@ CFBD_KEY_PATH = os.path.join(PLUGIN_DIR, "cfbd_api_key")
 FD_KEY_PATH = os.path.join(PLUGIN_DIR, "football_data_api_key")
 ODDS_KEY_PATH = os.path.join(PLUGIN_DIR, "odds_api_key")
 ANTHROPIC_KEY_PATH = os.path.join(PLUGIN_DIR, "anthropic_api_key")
+BOXING_KEY_PATH = os.path.join(PLUGIN_DIR, "boxing_data_api_key")
 SPORTSDB_KEY_PATH = os.path.join(PLUGIN_DIR, "sportsdb_api_key")
 # Free public test tier. Patreon keys unlock higher rate limits per
 # https://www.thesportsdb.com/api.php.
@@ -161,6 +163,16 @@ _SOCCER_PREFIXES = frozenset({
 })
 _MATCH_WINDOW_OVERRIDE_PRE_MIN: Dict[str, int] = {p: 5 for p in _SOCCER_PREFIXES}
 _MATCH_WINDOW_OVERRIDE_POST_HOURS: Dict[str, float] = {p: 2.5 for p in _SOCCER_PREFIXES}
+
+# Boxing (BOX) gets a WIDE window, the opposite of soccer's tight one. The
+# Boxing Data API's start times are unreliable: some cards are date-only and
+# come back as T00:00:00, and the feed's datetimes are naive (no offset, so
+# parse_iso_utc assumes UTC), which can place a card up to a day off the actual
+# broadcast slot. A boxing card is a rare, name-unique field event, so the
+# event-name keyword filter (not the clock) is the real discriminator; a wide
+# +/- ~1 day window absorbs the time error without inviting false positives.
+_MATCH_WINDOW_OVERRIDE_PRE_MIN["BOX"] = 12 * 60   # 12h before
+_MATCH_WINDOW_OVERRIDE_POST_HOURS["BOX"] = 24.0   # 24h after
 
 
 def _epg_match_window(sport_prefix: Optional[str]) -> Tuple[int, float]:
@@ -1025,6 +1037,7 @@ def _build_sources(settings: Dict[str, Any]):
         NhlPlayoffSource, NhlRegularSource, SoccerSource,
         F1Source, NascarSource, GolfSource, UfcSource,
         AtpSource, WtaSource,
+        BoxingSource,
         InternationalFriendliesSource,
     )
     from .sources.soccer import COMPETITIONS
@@ -1256,6 +1269,17 @@ def _build_sources(settings: Dict[str, Any]):
     # (numbered UFC events) get MAJOR tier, Fight Nights get EVENT.
     if settings.get("enable_ufc", False):
         sources.append(UfcSource())
+
+    # Boxing. Same field-event shape as UFC (one row per fight card), but a
+    # DIFFERENT upstream: ESPN has no boxing feed (verified 2026-07-10), so
+    # boxing pulls from the Boxing Data API (RapidAPI) and REQUIRES a key.
+    # Enabled-but-unkeyed is a no-op with a warning, matching the CFBD/FD gate.
+    if settings.get("enable_boxing", False):
+        boxing_key = _resolve_key(settings, "boxing_data_api_key", BOXING_KEY_PATH)
+        if boxing_key:
+            sources.append(BoxingSource(api_key=boxing_key))
+        else:
+            logger.warning("[boxing] enabled but no Boxing Data API key configured")
 
     # Tennis. ESPN's tennis scoreboard returns whole
     # tournaments (one entry per active event), not individual
@@ -3951,7 +3975,7 @@ class Plugin:
     # Single source of truth for the displayed version: the loader uses this
     # class attr over plugin.json's "version". Keep all three in sync
     # (this attr, plugin.json, __init__.py __version__).
-    version = "1.10.0"
+    version = "1.11.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

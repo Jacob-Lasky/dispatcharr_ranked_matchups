@@ -5,6 +5,21 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-07-10
+
+### Added
+- **Boxing source** (`enable_boxing`). Professional boxing cards surface as
+  one field-event entry per card (same shape as UFC), sourced from the Boxing
+  Data API (RapidAPI) via a new `boxing_data_api_key` setting. ESPN has no
+  boxing feed, so boxing requires this key; enabled-but-unkeyed is a logged
+  no-op. Cards default to "Event" tier; explicit world-title cards get "Major".
+  Cancelled cards are dropped. The free tier looks ahead about 7 days, so the
+  boxing lookahead is clamped to 7. Boxing gets a widened EPG match window
+  because the feed's start times are unreliable (date-only placeholders + naive
+  datetimes); name specificity, not the clock, drives matching. Covers boxing
+  only: UFC/MMA remains the separate `enable_ufc` toggle, and kickboxing /
+  bare-knuckle have no free feed.
+
 ## [1.10.0] - 2026-06-28
 
 ### Added

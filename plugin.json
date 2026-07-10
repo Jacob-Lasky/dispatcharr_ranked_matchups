@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them on interestingness, matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching. Channels are numbered by kickoff time, so the list sorts soonest-first and the guide binds correctly in both the default M3U/EPG output and the Xtream Codes API with no special settings.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -216,6 +216,13 @@
       "help_text": "Each UFC fight card surfaces as one entry in the guide (the card title carries the headliner, e.g., 'UFC 309: Jones vs. Miocic'). Numbered PPVs get a higher tier ('Major') than Fight Nights and ESPN cards ('Event'). No API key required — ESPN unofficial."
     },
     {
+      "id": "enable_boxing",
+      "type": "boolean",
+      "label": "Boxing",
+      "default": false,
+      "help_text": "Each professional boxing card surfaces as one 'Event'-tier entry (the card title carries the headliner, e.g., 'Gassiev vs. Kadiru: IBA Pro 19'); explicit world-title cards get 'Major'. REQUIRES the Boxing Data API key below — ESPN has no boxing feed. Free tier looks ahead about 7 days. Note: covers boxing only; UFC/MMA is the separate 'UFC' toggle, and kickboxing/bare-knuckle have no free feed."
+    },
+    {
       "id": "enable_atp",
       "type": "boolean",
       "label": "ATP Tour (men's tennis)",
@@ -292,6 +299,14 @@
       "label": "Football-Data.org API key",
       "default": "",
       "help_text": "Register: https://www.football-data.org/client/register (free, 10 req/min). Free tier covers EPL, EFL Championship, UCL, Bundesliga, La Liga, Serie A, Ligue 1, and 5 more competitions."
+    },
+    {
+      "id": "boxing_data_api_key",
+      "type": "string",
+      "input_type": "password",
+      "label": "Boxing Data API key (RapidAPI)",
+      "default": "",
+      "help_text": "Register: https://rapidapi.com/bengroves1993/api/boxing-data-api (free tier, no credit card). Powers the 'Boxing' source. Free tier looks ahead about 7 days per refresh."
     },
     {
       "id": "odds_api_key",

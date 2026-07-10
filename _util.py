@@ -193,6 +193,34 @@ def is_field_event(away: Optional[str], extra: Optional[Dict[str, Any]] = None) 
     return away == FIELD_AWAY_SENTINEL
 
 
+def field_event_extra(
+    fd_competition_code: str,
+    stage: str,
+    short_name: str,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """Build the `GameRow.extra` dict shared by EVERY field-event source
+    (racing, golf, tennis, UFC, boxing). Single source of truth for the
+    field-event contract so the consumers (scoring's tournament_stage band via
+    extra["stage"], is_field_event() routing via extra["is_field_event"],
+    league-context lookup via extra["fd_competition_code"]) read the same keys
+    regardless of which source produced the row. DO NOT hand-build this dict in
+    a source and DO NOT let the key set drift; source-specific metadata goes in
+    **extra (e.g. espn_event_id, boxing_event_id, venue). See is_field_event()
+    above and sources/field_event.py.
+
+    `stage` is "MAJOR" (marquee: golf majors, tennis Slams, UFC PPVs, world-
+    title boxing) or "EVENT" (regular tour stop / fight night).
+    """
+    return {
+        "is_field_event": True,
+        "fd_competition_code": fd_competition_code,
+        "stage": stage,
+        "short_name": short_name,
+        **extra,
+    }
+
+
 # ---------- playoff-series rendering ----------
 #
 # The sport-agnostic `extra["series"]` schema that best-of-N sources populate

@@ -8,6 +8,7 @@ from dispatcharr_ranked_matchups._util import (
     CHANNEL_NUMBER_TIEBREAK_SLOTS,
     FIELD_AWAY_SENTINEL,
     extract_game_number_after_marker,
+    field_event_extra,
     group_advance_text,
     group_phase_text,
     group_results_lines,
@@ -43,6 +44,32 @@ class TestIsFieldEvent:
         assert is_field_event("Field", {}) is True
         assert is_field_event("Field", {"is_field_event": False}) is True
         assert is_field_event("Arsenal", {"is_field_event": False}) is False
+
+
+class TestFieldEventExtra:
+    """Single source of truth for the field-event GameRow.extra contract,
+    shared by field_event.py (ESPN) and boxing.py (RapidAPI)."""
+
+    def test_core_contract_keys(self):
+        e = field_event_extra("PGA", "MAJOR", "The Masters")
+        assert e["is_field_event"] is True
+        assert e["fd_competition_code"] == "PGA"
+        assert e["stage"] == "MAJOR"
+        assert e["short_name"] == "The Masters"
+
+    def test_source_specific_extra_merged(self):
+        e = field_event_extra("BOXING", "EVENT", "A vs. B", boxing_event_id="x1", venue="Arena")
+        assert e["boxing_event_id"] == "x1"
+        assert e["venue"] == "Arena"
+        # Core keys still present alongside the source-specific ones.
+        assert e["is_field_event"] is True
+        assert e["fd_competition_code"] == "BOXING"
+
+    def test_the_two_field_event_sources_agree_on_core_keys(self):
+        espn = field_event_extra("UFC", "MAJOR", "UFC 309", espn_event_id="e1")
+        box = field_event_extra("BOXING", "EVENT", "A vs. B", boxing_event_id="b1")
+        core = {"is_field_event", "fd_competition_code", "stage", "short_name"}
+        assert core <= set(espn) and core <= set(box)
 
 
 class TestParseIsoUtc:
