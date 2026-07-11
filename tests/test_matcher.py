@@ -37,6 +37,28 @@ class TestTeamKeywords:
         kws = _team_keywords("Boston College")
         assert "College" not in kws
 
+    def test_numeric_rematch_last_word_skipped(self):
+        # Regression (UFC 329 wildcard): a field-event title ending in a rematch
+        # number must NOT reduce to the bare number as a keyword. '2' is a
+        # substring of a huge fraction of channel names/numbers, so it dragged
+        # 'UFC 329: McGregor vs. Holloway 2' onto 8214 unrelated streams.
+        kws = _team_keywords("UFC 329: McGregor vs. Holloway 2")
+        assert "2" not in kws
+        # The real discriminators survive.
+        assert "UFC 329: McGregor vs. Holloway 2" in kws
+        assert "UFC 329:" in kws
+
+    def test_boxing_promo_number_last_word_skipped(self):
+        # Same shape from the boxing feed: '... IBA Pro 19' -> '19'.
+        kws = _team_keywords("Gassiev vs. Kadiru: IBA Pro 19")
+        assert "19" not in kws
+
+    def test_short_last_word_skipped(self):
+        # A 1-2 char last-word token (e.g. a Roman-numeral rematch marker) is
+        # also a wildcard and must not be emitted as a standalone keyword.
+        kws = _team_keywords("Ali vs. Frazier II")
+        assert "II" not in kws
+
     def test_first_two_words_added(self):
         kws = _team_keywords("North Carolina State")
         assert "North Carolina" in kws

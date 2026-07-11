@@ -5,6 +5,22 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-07-11
+
+### Fixed
+- **Field-event titles ending in a number no longer match every stream.** The
+  EPG keyword pre-filter relaxes a name down to its last word so abbreviated
+  titles still hit, but a bare number is a substring of a huge fraction of
+  channel names and numbers. A UFC rematch card, `UFC 329: McGregor vs.
+  Holloway 2`, reduced to the keyword `2` and matched 8214 unrelated streams
+  (NASCAR, BMX, MLB feeds, `TVA Sports 2`, `Dota 2`, ...). The last-word
+  fallback now skips weak tokens (a bare number, or a 1-2 char token such as a
+  Roman-numeral rematch marker), so the card matches only genuine `UFC 329`
+  feeds and the broadcasters actually airing it. This is a shared-matcher
+  backstop, so every field-event source is protected, not just the boxing
+  source that sanitised its own titles. Not gated on `enable_boxing`; the bug
+  affected UFC (and any field event) independently.
+
 ## [1.11.0] - 2026-07-10
 
 ### Added

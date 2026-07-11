@@ -92,7 +92,14 @@ def _match_name(title: str) -> str:
     formats every card as "Fighter vs. Fighter: Card Name", so when the pre-
     colon head names the fighters we match on THAT alone (distinctive
     surnames); only a title with no "vs." head falls back to the full string.
-    The full title is still used for MAJOR-tier detection and kept in extra."""
+    The full title is still used for MAJOR-tier detection and kept in extra.
+
+    Layered with, NOT replaced by, matcher._is_weak_last_word: that shared
+    backstop drops a bare-number/1-2-char last word so ANY field event (UFC
+    included) is protected even without source-side cleaning. Keep BOTH: this
+    also yields a cleaner display/home and a fighter-surname keyword the
+    backstop alone cannot recover from a generic promo suffix. DO NOT delete
+    one as redundant."""
     head = title.split(":", 1)[0].strip()
     # Strip a trailing "(Cancelled)"-style parenthetical from the head so a
     # non-cancelled parenthetical (e.g. "(II)") doesn't leak into keywords.
