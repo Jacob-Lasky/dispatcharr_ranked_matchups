@@ -81,6 +81,27 @@ _GENERIC_LAST_WORDS = frozenset(
 )
 
 
+def _is_weak_last_word(token: str) -> bool:
+    """Whether a last-word fallback keyword would substring-match wholesale.
+
+    The last-word fallback in _team_keywords() relaxes a name down to its final
+    token so abbreviated EPG titles still hit. But a bare NUMBER or a 1-2 char
+    token is not a discriminator: it appears inside a huge fraction of channel
+    names and numbers, so as a case-insensitive substring it matches almost
+    everything. DO NOT emit it as a standalone keyword. This is exactly how a
+    field-event card whose title ends in a rematch number reduced to a wildcard:
+    'UFC 329: McGregor vs. Holloway 2' -> last word '2' -> 10593 tier-1 matches
+    (NASCAR/BMX/MLB feeds, 'TVA Sports 2', 'Dota 2', ...). Same shape the boxing
+    source pre-empts at the source ('... IBA Pro 19' -> '19'); this is the
+    shared-matcher backstop so EVERY source (UFC, and any future field event) is
+    protected, not just the ones that remembered to sanitise their own title.
+    The full-name and first-two-words keywords remain the real discriminators,
+    so dropping this bonus token only removes false positives, never the match.
+    """
+    t = token.strip().strip(".:,-")
+    return t.isdigit() or len(t) < 3
+
+
 @dataclass
 class ChannelCandidate:
     channel_id: int
@@ -133,7 +154,9 @@ def _team_keywords(team_name: str) -> List[str]:
     Returns ordered list of progressively-relaxed keywords. Always deduped.
     Drops the last-word fallback for generic-suffix names so 'Manchester
     United' never reduces to just 'United' (which would false-match
-    'Brentford v West Ham United').
+    'Brentford v West Ham United'), and for weak tokens (a bare number or a
+    1-2 char token) so a field-event title ending in a rematch number never
+    reduces to a wildcard like '2' (see _is_weak_last_word).
 
     Pulls broadcaster aliases from team_aliases.json: "Manchester United"
     expands to include "Man United" / "Man Utd" / "Man U" / "MUFC" so
@@ -154,7 +177,11 @@ def _team_keywords(team_name: str) -> List[str]:
         # Re-derive parts so subsequent rules see the canonical form.
         parts = stripped.split()
 
-    if len(parts) > 1 and parts[-1].lower() not in _GENERIC_LAST_WORDS:
+    if (
+        len(parts) > 1
+        and parts[-1].lower() not in _GENERIC_LAST_WORDS
+        and not _is_weak_last_word(parts[-1])
+    ):
         keywords.append(parts[-1])
     if len(parts) >= 2:
         # First two words (only meaningful for 3+ word names; for 2-word names

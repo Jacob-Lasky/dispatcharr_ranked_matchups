@@ -24,3 +24,4 @@ __pycache__/
 .idea/
 *.swp
 .DS_Store
+dg_snapshot.json
