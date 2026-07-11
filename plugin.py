@@ -3972,10 +3972,15 @@ _ACTION_HANDLERS = {
 
 class Plugin:
     name = "Ranked Matchups (Top Games)"
-    # Single source of truth for the displayed version: the loader uses this
-    # class attr over plugin.json's "version". Keep all three in sync
-    # (this attr, plugin.json, __init__.py __version__).
-    version = "1.11.0"
+    # The version the loader DISPLAYS: it prefers this class attr over
+    # plugin.json's "version" (manifest only fills gaps). The version lives in
+    # three places that must stay in sync (this attr, plugin.json,
+    # __init__.py __version__) because plugin.json must be a static literal the
+    # loader can read WITHOUT executing code, and __init__ imports plugin before
+    # it defines __version__ (so this attr can't source it without a circular
+    # import). tests/test_version_consistency.py enforces the three-way match;
+    # if you bump one, bump all three or that test fails.
+    version = "1.11.1"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
