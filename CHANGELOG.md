@@ -5,6 +5,29 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-07-19
+
+### Added
+- **Trophy grounding for knockout previews (`honours.py` + `honours.json`).**
+  For knockout games in the three tracked competitions (World Cup, Euros,
+  Champions League) the preview context now carries each finalist's real title
+  count, e.g. `Honours (World Cup): Spain — 1 title (2010); Argentina — 3 titles
+  (1978, 1986, 2022)`. This is the fix for an LLM preview of the Spain v
+  Argentina World Cup final that claimed a side was "going for their third
+  crown" — false for both (Argentina already had three, Spain one). The model
+  now has the true numbers to ground on; the existing "ground every fact"
+  system-prompt rule does the rest. National-team competitions list every
+  winner, so a trophyless finalist is stated as "no World Cup titles yet"
+  rather than left silent; the Champions League list is partial, so unlisted
+  clubs are omitted rather than falsely called titleless.
+
+### Changed
+- **A final's subtitle/headline no longer appends the closeness descriptor.**
+  The Spain v Argentina final rendered as `Final · close spread`; for a final
+  the stage is the headline and "close spread" is redundant (and a category
+  error for soccer, which has no point spread). The descriptor is now
+  suppressed for finals only (any sport); semifinals and earlier keep it.
+
 ## [1.11.1] - 2026-07-11
 
 ### Fixed
