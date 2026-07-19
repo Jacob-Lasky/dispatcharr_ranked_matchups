@@ -16,7 +16,11 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   Argentina World Cup final that claimed a side was "going for their third
   crown" — false for both (Argentina already had three, Spain one). The model
   now has the true numbers to ground on; the existing "ground every fact"
-  system-prompt rule does the rest. National-team competitions list every
+  system-prompt rule does the rest. For a final the line also spells out the
+  conclusion ("a win would be their 4th") because, given only raw counts, Haiku
+  4.5 still miscounted (it wrote "three titles apiece" for Spain 1 / Argentina
+  3); stating the outcome removes the arithmetic the model got wrong.
+  National-team competitions list every
   winner, so a trophyless finalist is stated as "no World Cup titles yet"
   rather than left silent; the Champions League list is partial, so unlisted
   clubs are omitted rather than falsely called titleless.

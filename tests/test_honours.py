@@ -48,6 +48,23 @@ class TestHonoursLines:
         line = honours.honours_lines("Spain", "Argentina", "WC", "FINAL")[0]
         assert "2 titles" not in line
 
+    def test_final_spells_out_the_outcome(self):
+        """A final states the conclusion (a win would be their Nth) so the model
+        need not do the arithmetic it kept getting wrong ('three apiece')."""
+        line = honours.honours_lines("Spain", "Argentina", "WC", "FINAL")[0]
+        assert "Spain — 1 title (2010), a win would be their 2nd" in line
+        assert "Argentina — 3 titles (1978, 1986, 2022), a win would be their 4th" in line
+
+    def test_semifinal_has_no_win_would_be_framing(self):
+        """The 'a win would be their Nth' framing is final-only: a semifinal
+        win is not a title."""
+        line = honours.honours_lines("Spain", "France", "WC", "SEMI_FINALS")[0]
+        assert "a win would be" not in line
+
+    def test_final_zero_title_side_frames_first(self):
+        line = honours.honours_lines("Croatia", "Argentina", "WC", "FINAL")[0]
+        assert "Croatia — no World Cup titles yet, a win would be their 1st" in line
+
     def test_complete_comp_states_zero(self):
         """A WC finalist absent from the (complete) winners list is stated as
         zero, not omitted — that is what kills the hallucination for the
@@ -104,7 +121,15 @@ class TestHonoursLines:
 
     def test_long_year_list_collapses_to_recent(self):
         """A >5-year list shows the count + most recent year, not all years."""
-        assert honours._phrase("X", [1, 2, 3, 4, 5, 6], "Foo") == "X — 6 titles (most recent 6)"
+        assert honours._phrase("X", [1, 2, 3, 4, 5, 6], "Foo", False) == "X — 6 titles (most recent 6)"
+
+    def test_ordinal(self):
+        assert honours._ordinal(1) == "1st"
+        assert honours._ordinal(2) == "2nd"
+        assert honours._ordinal(3) == "3rd"
+        assert honours._ordinal(4) == "4th"
+        assert honours._ordinal(11) == "11th"
+        assert honours._ordinal(21) == "21st"
 
 
 class TestHonoursLoader:

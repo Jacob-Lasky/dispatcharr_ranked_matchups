@@ -124,22 +124,47 @@ def _count(val: TitleValue) -> int:
     return val if isinstance(val, int) else len(val)
 
 
-def _phrase(team: str, val: Optional[TitleValue], comp_label: str) -> Optional[str]:
+def _ordinal(n: int) -> str:
+    """1 -> 1st, 2 -> 2nd, 4 -> 4th, 11 -> 11th. Standalone copy (honours.py is
+    loaded by file path in tests, so it cannot import plugin._ordinal)."""
+    if 10 <= (n % 100) <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _phrase(
+    team: str, val: Optional[TitleValue], comp_label: str, is_final: bool
+) -> Optional[str]:
     """One team's honours phrase. `val is None` is only passed for COMPLETE
     competitions (absent => genuinely zero); partial competitions omit absent
-    teams before calling this."""
+    teams before calling this.
+
+    For a FINAL we spell out the conclusion ("a win would be their 4th") rather
+    than only the raw count. Load-bearing: given just "Spain 1 / Argentina 3",
+    Haiku 4.5 still wrote "three titles apiece" for the 2026 WC final. Stating
+    the outcome removes the arithmetic the model kept getting wrong; a win in a
+    final is a title, so "their Nth" is exactly count+1.
+    """
     if val is None:
-        return f"{team} — no {comp_label} titles yet"
+        base = f"{team} — no {comp_label} titles yet"
+        return f"{base}, a win would be their 1st" if is_final else base
     n = _count(val)
     if n <= 0:
         return None
     noun = "title" if n == 1 else "titles"
     if isinstance(val, list):
         if len(val) <= 5:
-            years = ", ".join(str(y) for y in val)
-            return f"{team} — {n} {noun} ({years})"
-        return f"{team} — {n} {noun} (most recent {max(val)})"
-    return f"{team} — {n} {noun}"
+            detail = ", ".join(str(y) for y in val)
+        else:
+            detail = f"most recent {max(val)}"
+        base = f"{team} — {n} {noun} ({detail})"
+    else:
+        base = f"{team} — {n} {noun}"
+    if is_final:
+        return f"{base}, a win would be their {_ordinal(n + 1)}"
+    return base
 
 
 def honours_lines(
@@ -172,6 +197,7 @@ def honours_lines(
     if not comp:
         return []
 
+    is_final = stage == "FINAL"
     phrases: List[str] = []
     for team in (home, away):
         if not team:
@@ -180,7 +206,7 @@ def honours_lines(
         if val is None and not complete:
             # Partial list: don't assert zero for a club we simply didn't list.
             continue
-        phrase = _phrase(team, val, label)
+        phrase = _phrase(team, val, label, is_final)
         if phrase:
             phrases.append(phrase)
 
