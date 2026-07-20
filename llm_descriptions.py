@@ -34,6 +34,7 @@ from ._util import (
     series_record_text,
     series_result_lines,
 )
+from .honours import honours_lines
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +194,16 @@ def build_llm_context(g: Dict[str, Any], tagline: str, boundary_summary: str = "
     group_advance = group_advance_text(group_stage)
     if group_advance:
         lines.append(f"Advancement: {group_advance}")
+
+    # Trophy grounding for knockout games in tracked international/continental
+    # competitions. Load-bearing against the "going for their third crown"
+    # hallucination: without the real title counts the model invents them. The
+    # existing "GROUND EVERY FACT in the lines above" rule then keeps the model
+    # honest about the numbers we supply. See honours.py.
+    for honours_line in honours_lines(
+        home, away, extra.get("fd_competition_code"), g.get("tournament_stage")
+    ):
+        lines.append(honours_line)
 
     matchday = extra.get("matchday")
     matchdays_total = extra.get("matchdays_total")

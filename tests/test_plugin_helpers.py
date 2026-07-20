@@ -2611,3 +2611,59 @@ class TestUsBroadcastPreference:
         values = {o["value"] for o in field["options"]}
         assert values == {plugin._STREAM_PRIORITY_QUALITY, plugin._STREAM_PRIORITY_US}
         assert field["default"] == plugin._STREAM_PRIORITY_QUALITY
+
+
+class TestFinalSuppressesCloseness:
+    """A final's stage is the headline; the closeness descriptor
+    ("close spread" / "toss-up") is suppressed there. Jake, 2026-07-19:
+    "idc that it's a close spread, it's a final." Semis/quarters keep it."""
+
+    def _wc_final(self):
+        # The real regression row: WC final, closeness 0.51 -> "close spread".
+        return {
+            "home": "Spain", "away": "Argentina",
+            "sport_label": "FIFA World Cup",
+            "closeness": 0.5095890410958905,
+            "tournament_stage": "FINAL",
+            "extra": {"fd_competition_code": "WC"},
+        }
+
+    def test_is_final_true_for_final(self, plugin):
+        assert plugin._is_final(self._wc_final()) is True
+
+    def test_is_final_false_for_semifinal(self, plugin):
+        g = self._wc_final()
+        g["tournament_stage"] = "SEMI_FINALS"
+        assert plugin._is_final(g) is False
+
+    def test_is_final_true_for_super_bowl(self, plugin):
+        assert plugin._is_final({"tournament_stage": "SB"}) is True
+
+    def test_subtitle_drops_close_spread_for_final(self, plugin):
+        sub = plugin._build_subtitle(self._wc_final(), tagline="Final")
+        assert sub == "Final"
+        assert "spread" not in sub
+
+    def test_subtitle_keeps_descriptor_for_semifinal(self, plugin):
+        g = self._wc_final()
+        g["tournament_stage"] = "SEMI_FINALS"
+        sub = plugin._build_subtitle(g, tagline="Semifinal")
+        assert "close spread" in sub
+
+    def test_description_headline_drops_descriptor_for_final(self, plugin):
+        desc = plugin._build_description(g=self._wc_final(), tagline="Final", placeholder=False)
+        assert desc.split("\n", 1)[0] == "A Final."
+
+
+class TestDescriptionHonoursSection:
+    def test_deterministic_description_includes_honours_for_wc_final(self, plugin):
+        g = {
+            "home": "Spain", "away": "Argentina",
+            "sport_label": "FIFA World Cup",
+            "closeness": 0.51, "tournament_stage": "FINAL",
+            "extra": {"fd_competition_code": "WC"},
+        }
+        desc = plugin._build_description(g=g, tagline="Final", placeholder=False)
+        assert "Honours (World Cup):" in desc
+        assert "Spain — 1 title (2010)" in desc
+        assert "Argentina — 3 titles" in desc

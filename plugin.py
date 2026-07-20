@@ -2107,6 +2107,22 @@ def _close_game_descriptor(
     return None
 
 
+# Stage codes that name a competition's ULTIMATE title game. For these the
+# stage IS the headline, so the closeness descriptor ("toss-up" / "close
+# spread") is redundant and, for soccer, an outright category error (soccer
+# has no point spread). It is therefore suppressed in the subtitle and the
+# deterministic description headline for finals only (Jake's call, 2026-07-19:
+# "idc that it's a close spread, it's a final"). Semis/quarters keep it.
+_FINAL_STAGES = frozenset(
+    {"FINAL", "CUP_FINAL", "SB", "NCG", "MCWS_F", "WCWS_F"}
+)
+
+
+def _is_final(g: Dict[str, Any]) -> bool:
+    """True when the game is a competition's ultimate final (any sport)."""
+    return (g.get("tournament_stage") or "").upper() in _FINAL_STAGES
+
+
 def _build_subtitle(g: Dict[str, Any], tagline: str) -> str:
     """Compressed one-line summary for the EPG sub-title field. Three pieces
     joined by ' · ': tagline, matchday/week, spread descriptor. Falls back
@@ -2124,7 +2140,11 @@ def _build_subtitle(g: Dict[str, Any], tagline: str) -> str:
         parts.append(f"{prefix} {matchday}/{matchdays_total}")
     elif extra.get("week"):  # NCAAF / NCAAM week-based sports
         parts.append(f"week {extra['week']}")
-    spread_desc = _close_game_descriptor(g.get("closeness"), g.get("spread"))
+    # Suppress the closeness tail for a final: the stage (already in `tagline`)
+    # is the headline there. See _FINAL_STAGES.
+    spread_desc = None if _is_final(g) else _close_game_descriptor(
+        g.get("closeness"), g.get("spread")
+    )
     if spread_desc:
         parts.append(spread_desc)
     if not parts:
@@ -2317,12 +2337,16 @@ def _build_description(
             "appears._"
         )
 
-    # 2. Headline: tagline + spread descriptor.
+    # 2. Headline: tagline + spread descriptor. Drop the closeness tail for a
+    # final so the headline reads "A Final." not "A Final: close spread." See
+    # _FINAL_STAGES.
     headline_parts = []
     if tagline:
         article = "An" if tagline[:1].lower() in "aeiou" else "A"
         headline_parts.append(f"{article} {tagline}")
-    spread_desc = _close_game_descriptor(g.get("closeness"), g.get("spread"))
+    spread_desc = None if _is_final(g) else _close_game_descriptor(
+        g.get("closeness"), g.get("spread")
+    )
     if spread_desc:
         headline_parts.append(spread_desc)
     if headline_parts:
@@ -2365,6 +2389,17 @@ def _build_description(
         advance = group_advance_text(group_stage)
         if advance:
             sections.append(advance)
+
+    # 2d. Honours for knockout games in tracked international/continental
+    # competitions (World Cup / Euros / Champions League). Same grounding the
+    # LLM context uses; here it keeps the deterministic fallback prose honest
+    # about title history instead of silent. See honours.py.
+    from .honours import honours_lines
+    for honours_line in honours_lines(
+        g.get("home", ""), g.get("away", ""),
+        extra.get("fd_competition_code"), g.get("tournament_stage"),
+    ):
+        sections.append(honours_line)
 
     # 3. Matchday line + league boundary reminder. Both are league-based
     # ("why is this a race"). Matchday tells you where in the season we
@@ -3980,7 +4015,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.11.1"
+    version = "1.12.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

@@ -211,6 +211,23 @@ class TestBuildLlmContext:
         ctx = llm.build_llm_context(g, tagline="")
         assert "toss-up" not in ctx
 
+    def test_honours_surfaced_for_wc_final(self):
+        """Regression: the WC final where the model invented 'their third
+        crown'. The real counts must reach the context so it can't."""
+        g = _sample_game()
+        g["home"] = "Spain"
+        g["away"] = "Argentina"
+        g["tournament_stage"] = "FINAL"
+        g["extra"]["fd_competition_code"] = "WC"
+        ctx = llm.build_llm_context(g, tagline="Final")
+        assert "Honours (World Cup):" in ctx
+        assert "Spain — 1 title (2010)" in ctx
+        assert "Argentina — 3 titles (1978, 1986, 2022)" in ctx
+
+    def test_no_honours_for_league_game(self):
+        ctx = llm.build_llm_context(_sample_game(), tagline="")
+        assert "Honours (" not in ctx
+
     def test_closeness_none_does_not_tag(self):
         g = _sample_game()
         g["closeness"] = None
