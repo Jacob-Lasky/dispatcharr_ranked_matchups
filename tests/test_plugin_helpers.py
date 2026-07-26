@@ -2755,3 +2755,126 @@ class TestDescriptionHonoursSection:
         assert "Honours (World Cup):" in desc
         assert "Spain — 1 title (2010)" in desc
         assert "Argentina — 3 titles" in desc
+
+
+class TestMaxGamesClamping:
+    """#158: max_games was read with a bare int() and no bounds.
+
+    The ceiling is not cosmetic. max_games multiplies apply's per-game network
+    pre-pass, which #136 hoisted out of the DB transaction and therefore INTO
+    the window where the scheduler lock is held; overshooting it expires the
+    lock mid-apply and lets a second run start against the same rows (#155)."""
+
+    def test_default_when_unset(self, plugin):
+        assert plugin._resolve_max_games({}) == plugin.DEFAULT_MAX_GAMES
+
+    def test_reads_an_ordinary_value(self, plugin):
+        assert plugin._resolve_max_games({"max_games": 12}) == 12
+
+    def test_accepts_a_numeric_string(self, plugin):
+        # The UI sends a number, but a value round-tripped through settings JSON
+        # can arrive as a string.
+        assert plugin._resolve_max_games({"max_games": "12"}) == 12
+
+    def test_non_numeric_falls_back_instead_of_raising(self, plugin):
+        # The bare int() threw ValueError straight out of refresh, killing the
+        # whole action over one bad settings value.
+        for bad in ("", "abc", None, [], {}):
+            assert plugin._resolve_max_games({"max_games": bad}) == plugin.DEFAULT_MAX_GAMES
+
+    def test_clamps_above_the_ceiling(self, plugin):
+        assert plugin._resolve_max_games({"max_games": 5000}) == plugin.MAX_GAMES_CEILING
+
+    def test_clamps_below_one(self, plugin):
+        for bad in (0, -1, -999):
+            assert plugin._resolve_max_games({"max_games": bad}) == 1
+
+    def test_preset_values_are_clamped_too(self, plugin):
+        # Preset values are our own literals, but clamping them means a future
+        # preset edit cannot quietly break the lock budget.
+        for key in plugin._CURATION_PRESETS:
+            if key == "manual":
+                continue
+            got = plugin._resolve_max_games({"curation_preset": key})
+            assert 1 <= got <= plugin.MAX_GAMES_CEILING, f"preset {key} out of range"
+
+    def test_manifest_declares_matching_bounds(self, plugin):
+        # The clamp is the backstop; the manifest bounds are what stop the value
+        # being entered in the first place. They must agree.
+        import json
+        import os
+        repo = os.path.dirname(os.path.abspath(plugin.__file__))
+        manifest = json.load(open(os.path.join(repo, "plugin.json"), encoding="utf-8"))
+        field = next(f for f in manifest["fields"] if f["id"] == "max_games")
+        assert field["min"] == 1
+        assert field["max"] == plugin.MAX_GAMES_CEILING
+        assert field["default"] == plugin.DEFAULT_MAX_GAMES
+
+
+class TestDeletableGroupNames:
+    """#157: the rename-cleanup sweep deleted a ChannelGroup whose name merely
+    CONTAINED 'top' or 'matchup', which also matches Rooftop, Stop, Laptop,
+    Topical and Utopia. It is the one delete in this file that did not gate on
+    provenance, and the group being empty is a state the sweep itself creates
+    two lines earlier by migrating our channels out."""
+
+    @staticmethod
+    def _deletable(plugin, group_name="Top Matchups", recordings="Matchups Recordings"):
+        # Calls the PRODUCTION helper. An earlier version of these tests mirrored
+        # the set comprehension instead, which meant reverting the real call site
+        # failed none of them. Never re-implement the logic under test.
+        return plugin._deletable_group_names_for(group_name, recordings)
+
+    def test_defaults_are_deletable(self, plugin):
+        d = self._deletable(plugin)
+        assert plugin.DEFAULT_GROUP_NAME.lower() in d
+        assert plugin.DEFAULT_RECORDINGS_GROUP.lower() in d
+
+    def test_currently_configured_name_is_deletable(self, plugin):
+        # Reclaiming a name WE create after a rename is legitimate.
+        d = self._deletable(plugin, group_name="!Top Matchups")
+        assert "!top matchups" in d
+
+    def test_user_groups_that_merely_contain_top_are_not_deletable(self, plugin):
+        d = self._deletable(plugin)
+        for name in ("Rooftop Cams", "Stop Motion", "Laptop Streams",
+                     "Topical News", "Utopia", "Top Gear", "Tops"):
+            assert name.strip().lower() not in d, (
+                f"{name!r} would be deleted: the substring heuristic is back"
+            )
+
+    def test_user_group_containing_matchup_is_not_deletable(self, plugin):
+        d = self._deletable(plugin)
+        assert "my matchup picks" not in d
+
+    def test_match_is_case_and_whitespace_insensitive(self, plugin):
+        d = self._deletable(plugin, group_name="  My Games  ")
+        assert "my games" in d
+        assert "  MY GAMES ".strip().lower() in d
+
+    def test_source_no_longer_uses_a_substring_test(self, plugin):
+        # The exact expression that caused the bug must not come back.
+        import inspect
+        src = inspect.getsource(plugin._action_apply)
+        assert 'any(s in old_g.name.lower()' not in src, (
+            "substring group-name heuristic reintroduced; see #157"
+        )
+        assert "_deletable_group_names" in src
+
+    def test_default_group_name_matches_the_manifest_default(self, plugin):
+        # DEFAULT_GROUP_NAME, the settings.get() fallback, and plugin.json's
+        # default are three places the same string could drift. If they diverge,
+        # a user on defaults gets a group the cleanup allowlist does not
+        # recognize, and the sweep silently stops reclaiming it.
+        import json
+        import os
+        repo = os.path.dirname(os.path.abspath(plugin.__file__))
+        manifest = json.load(open(os.path.join(repo, "plugin.json"), encoding="utf-8"))
+        field = next(f for f in manifest["fields"] if f["id"] == "channel_profile_name")
+        assert field["default"] == plugin.DEFAULT_GROUP_NAME
+
+    def test_action_apply_uses_the_constant_not_a_literal(self, plugin):
+        import inspect
+        src = inspect.getsource(plugin._action_apply)
+        assert 'settings.get("channel_profile_name", DEFAULT_GROUP_NAME)' in src
+        assert 'settings.get("channel_profile_name", "Top Matchups")' not in src

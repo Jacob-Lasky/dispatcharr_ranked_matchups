@@ -28,3 +28,27 @@ if PKG_NAME not in sys.modules:
     pkg.__file__ = os.path.join(REPO_ROOT, "__init__.py")
     pkg.__spec__ = spec
     sys.modules[PKG_NAME] = pkg
+
+
+import pytest  # noqa: E402  (must follow the package registration above)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleeps(monkeypatch):
+    """Neutralize Football-Data.org request pacing for the whole suite.
+
+    `sources/soccer._fd_get` paces calls at _FD_MIN_INTERVAL_S (6.5s) and backs
+    off on 429, which is correct against the live 10-req/min free tier and
+    catastrophic in tests: leaving it live took the suite from 7 seconds to 105.
+
+    Autouse so a NEW test that happens to exercise an FD.org path cannot
+    silently reintroduce that cost. Tests that assert on pacing behavior patch
+    `soccer._fd_sleep` themselves to record durations; this fixture only removes
+    the wall-clock wait, it does not change control flow.
+    """
+    try:
+        from dispatcharr_ranked_matchups.sources import soccer
+    except Exception:
+        # Django-less contexts where soccer isn't importable: nothing to patch.
+        return
+    monkeypatch.setattr(soccer, "_fd_sleep", lambda _seconds: None)

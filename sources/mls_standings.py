@@ -74,7 +74,7 @@ from .mls import (
     _h2h_to_closeness,
     _team_canonical_name,
 )
-from .._util import parse_iso_utc
+from .._util import parse_iso_utc, redact_secrets
 from ._espn import extract_espn_scoreboard_event
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_standings")
@@ -110,7 +110,10 @@ def _http_get(url: str, timeout: float = 15.0, **params: Any) -> Optional[Any]:
             return None
         return r.json()
     except (requests.RequestException, ValueError) as exc:
-        logger.warning("[mls_standings] %s failed: %s", url, exc)
+        # redact_secrets on BOTH: odds calls pass apiKey as a query param, and a
+        # requests ConnectionError renders the full URL (params included) in its
+        # message even though `url` here is the bare base. See #156.
+        logger.warning("[mls_standings] %s failed: %s", redact_secrets(url), redact_secrets(exc))
         return None
 
 

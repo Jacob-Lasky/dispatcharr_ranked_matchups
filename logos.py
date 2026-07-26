@@ -27,11 +27,21 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from ._util import is_field_event
+from ._util import is_field_event, redact_secrets
 
 logger = logging.getLogger(__name__)
 
+# TheSportsDB carries the API key as a PATH SEGMENT (/api/v1/json/<KEY>/...),
+# not a header or query param, so any log line containing a composed SportsDB
+# URL contains the user's key. `sportsdb_api_key` is an input_type=password
+# field: masking the form input does nothing for the logs, and Dispatcharr logs
+# go to container stdout.
+#
+# DO NOT pass a composed SportsDB URL to the logger. Route it through
+# _util.redact_secrets() instead, which is shared with the Odds-API query-param
+# leak of the same class so there is ONE redactor to keep correct. See #156.
 _SEARCH_URL = "https://www.thesportsdb.com/api/v1/json/{key}/searchevents.php?e={q}"
+
 _HTTP_TIMEOUT_S = 10.0
 _DOWNLOAD_TIMEOUT_S = 15.0
 _USER_AGENT = "dispatcharr_ranked_matchups"
@@ -240,7 +250,8 @@ def _http_get_json(url: str) -> Optional[dict]:
                 return None
             return json.load(resp)
     except Exception as e:
-        logger.debug("sportsdb GET %s failed: %s", url, e)
+        # _redact_key, NOT url: the key is a path segment. See #156.
+        logger.debug("sportsdb GET %s failed: %s", redact_secrets(url), redact_secrets(e))
         return None
 
 

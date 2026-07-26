@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import random
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -407,3 +408,42 @@ def group_advance_text(group_stage: Optional[Dict[str, Any]]) -> str:
     if not isinstance(group_stage, dict):
         return ""
     return (group_stage.get("advance") or "").strip()
+
+
+# ---------- secret redaction for log lines ----------
+
+# Two ways an API key reaches a log line in this plugin, both via strings we do
+# not construct ourselves:
+#
+#   1. Query-string keys. The Odds API takes `apiKey` as a query param, and
+#      `requests` embeds the FULL URL (params included) in its exception text:
+#      HTTPError from raise_for_status() renders "... for url: <url>?apiKey=...",
+#      and ConnectionError renders "Max retries exceeded with url: /...?apiKey=...".
+#      So logging a bare `exc` from any odds call leaks the key, at WARNING,
+#      which is visible at the container's default INFO level.
+#   2. Path-segment keys. TheSportsDB carries the key as a path component
+#      (/api/v1/json/<KEY>/...), so any composed SportsDB URL contains it.
+#
+# Both key fields are input_type=password in plugin.json, which masks the form
+# input and does nothing for logs, and Dispatcharr logs go to container stdout.
+#
+# DO NOT log a raw URL or a raw `requests` exception from a call that carries a
+# key. Wrap it in redact_secrets(). See #156.
+_SECRET_QUERY_PARAM_RE = re.compile(
+    r"((?:api_?key|apikey|token|secret)=)([^&\s\"']+)", re.IGNORECASE
+)
+_SECRET_PATH_SEGMENT_RE = re.compile(r"(/api/v\d+/json/)([^/\s]+)")
+
+
+def redact_secrets(value: Any) -> str:
+    """Mask API keys in a URL or an exception message, for safe logging.
+
+    Accepts any value (commonly a str or an Exception) and returns a string with
+    known key shapes replaced by '***'. Redacting the rendered text rather than
+    the individual call sites is deliberate: the leak arrives inside library
+    exception messages we never build, so there is no parameter to sanitize.
+    """
+    text = str(value)
+    text = _SECRET_QUERY_PARAM_RE.sub(r"\1***", text)
+    text = _SECRET_PATH_SEGMENT_RE.sub(r"\1***", text)
+    return text
