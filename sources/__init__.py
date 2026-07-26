@@ -11,7 +11,7 @@ from .field_event import (
     AtpSource, WtaSource, FieldEventSource,
 )
 from .boxing import BoxingSource
-from .friendlies import InternationalFriendliesSource
+from .friendlies import ClubFriendliesSource, InternationalFriendliesSource
 from .nba import NbaPlayoffSource, NbaRegularSource
 from .wnba import WnbaPlayoffSource, WnbaRegularSource
 from .ncaaw_basketball import (
@@ -48,7 +48,7 @@ __all__ = [
     "FieldEventSource", "F1Source", "NascarSource", "GolfSource", "UfcSource",
     "AtpSource", "WtaSource",
     "BoxingSource",
-    "InternationalFriendliesSource",
+    "InternationalFriendliesSource", "ClubFriendliesSource",
     "NbaRegularSource", "NbaPlayoffSource",
     "WnbaRegularSource", "WnbaPlayoffSource",
     "NcaawBasketballRegularSource", "NcaawBasketballPlayoffSource",

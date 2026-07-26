@@ -5,6 +5,55 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-07-25
+
+### Added
+- **Club friendlies source (`ClubFriendliesSource`, setting `enable_club_friendlies`).**
+  Pre-season tours and mid-season club exhibitions from ESPN's `club.friendly`
+  competition. Closes a coverage hole that made an entire class of game
+  unreachable: a live Wrexham v Leeds United pre-season friendly never appeared
+  in Top Matchups despite Wrexham being the top entry in Favorites, because
+  `InternationalFriendliesSource` sweeps `fifa.friendly` (national teams only)
+  and Football-Data.org's competition codes (PL, ELC, CL, ...) carry no
+  friendlies at all. The blind spot spanned the whole European pre-season
+  window, roughly July to mid-August, which is exactly when every league source
+  in the plugin returns zero games. Off by default; shares the existing
+  `friendlies_favorites_only` gate with the international sources. (#153)
+
+### Fixed
+- **Friendlies sweep went blind to fixtures in the 00:00Z-05:00Z window.**
+  ESPN buckets its scoreboard by US **Eastern** calendar date, not UTC, so the
+  `dates=YYYYMMDD` bucket for day D holds events running through `D+1 04:59Z`.
+  The sweep anchored on `now(utc).date()` and walked forward, so for those five
+  hours it never queried the bucket holding the games in progress or about to
+  start. Verified live at 2026-07-26T01:25Z: `dates=20260725` still held
+  Tottenham Hotspur at Auckland FC (2026-07-26T03:00Z, a favorite, 95 minutes
+  from kickoff) while `dates=20260726` held nothing before 12:00Z. The sweep now
+  starts one day earlier. Worst for the Americas and the Pacific, where prime
+  time falls inside the blind window. Roughly a dozen other sources share this
+  anchor and are tracked separately in #154.
+- **Stale fixtures could enter the guide as upcoming games.** Reaching one
+  bucket backwards exposed matches that ESPN leaves tagged SCHEDULED long after
+  full time (its status lag is why the Wrexham kickoff still read SCHEDULED two
+  hours in). Those sailed past the FINISHED filter and would have sorted to the
+  top of the guide, since channels are numbered by kickoff time. Fixtures that
+  kicked off more than six hours ago are now dropped, which keeps in-progress
+  games while discarding yesterday's leftovers.
+
+### Changed
+- **`sources/friendlies.py` refactored onto a shared `_EspnFriendliesBase`.**
+  The per-day ESPN sweep, the FINISHED drop, the favorites gate, and the
+  `GameRow` shape now live in one place, with `InternationalFriendliesSource`
+  and `ClubFriendliesSource` supplying only the competition slug, prefix, and
+  label. Aside from the two sweep fixes above (which the international sources
+  also receive), no behavior change to the international sources.
+- **`friendlies_favorites_only` relabelled** from "favorite national teams only"
+  to "favorites only", since it now governs the club toggle too.
+- **Friendlies test fixtures now use relative timestamps.** They carried
+  hardcoded 2026-05-31 / 2026-06-09 dates that had silently aged into "eight
+  weeks in the past", which the new staleness floor would have filtered out.
+  Absolute dates in a fixture are a time bomb; these are now offsets from now.
+
 ## [1.12.0] - 2026-07-19
 
 ### Added
