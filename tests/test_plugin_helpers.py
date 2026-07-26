@@ -167,9 +167,10 @@ class TestParseFavorites:
 class TestBuildSourcesFriendliesGate:
     """_build_sources is where the friendlies favorites-gate is wired: it
     reads friendlies_favorites_only (defaulting ON) and the user's Favorites
-    and hands both to InternationalFriendliesSource. Enable ONLY friendlies so
-    no API keys are needed and the returned list is just the friendlies
-    source(s)."""
+    and hands both to every friendlies source. ONE setting drives all three
+    (international men's, international women's, club), so each of the three
+    is asserted here. Enable ONLY friendlies so no API keys are needed and the
+    returned list is just the friendlies source(s)."""
 
     def _friendlies(self, plugin, settings):
         from dispatcharr_ranked_matchups.sources.friendlies import (
@@ -178,6 +179,15 @@ class TestBuildSourcesFriendliesGate:
         return [
             s for s in plugin._build_sources(settings)
             if isinstance(s, InternationalFriendliesSource)
+        ]
+
+    def _clubs(self, plugin, settings):
+        from dispatcharr_ranked_matchups.sources.friendlies import (
+            ClubFriendliesSource,
+        )
+        return [
+            s for s in plugin._build_sources(settings)
+            if isinstance(s, ClubFriendliesSource)
         ]
 
     def test_default_gates_on_and_passes_favorites(self, plugin):
@@ -211,6 +221,84 @@ class TestBuildSourcesFriendliesGate:
         assert srcs[0].gender == "w"
         assert srcs[0].favorites_only is True
         assert srcs[0].favorites == ["United States"]
+
+    def test_club_source_off_by_default(self, plugin):
+        # enable_club_friendlies OMITTED must not build the source: the
+        # manifest defaults it off, and an unrequested pre-season slate would
+        # be a surprise change for existing installs.
+        assert self._clubs(plugin, {"favorites": "Wrexham"}) == []
+
+    def test_club_source_wired_and_gated(self, plugin):
+        # #153: the club toggle builds ClubFriendliesSource, and it shares the
+        # SAME friendlies_favorites_only gate and Favorites list as the
+        # international sources.
+        srcs = self._clubs(plugin, {
+            "favorites": "Wrexham, Tottenham Hotspur",
+            "enable_club_friendlies": True,
+        })
+        assert len(srcs) == 1
+        assert srcs[0].favorites_only is True
+        assert srcs[0].favorites == ["Wrexham", "Tottenham Hotspur"]
+        assert srcs[0].sport_prefix == "CLUBFRIENDLY"
+
+    def test_club_source_honours_the_shared_opt_out(self, plugin):
+        srcs = self._clubs(plugin, {
+            "favorites": "Wrexham",
+            "enable_club_friendlies": True,
+            "friendlies_favorites_only": False,
+        })
+        assert len(srcs) == 1
+        assert srcs[0].favorites_only is False
+
+    def test_club_toggle_does_not_build_international(self, plugin):
+        # The two toggles are independent: enabling clubs must not drag in a
+        # national-team sweep (and _friendlies' isinstance check must not
+        # match the club source, which is a SIBLING under _EspnFriendliesBase,
+        # not a subclass of InternationalFriendliesSource).
+        settings = {"favorites": "Wrexham", "enable_club_friendlies": True}
+        assert self._friendlies(plugin, settings) == []
+        assert len(self._clubs(plugin, settings)) == 1
+
+    def test_all_three_friendlies_toggles_coexist(self, plugin):
+        settings = {
+            "favorites": "United States, Wrexham",
+            "enable_intl_friendlies": True,
+            "enable_intl_friendlies_women": True,
+            "enable_club_friendlies": True,
+        }
+        intl = self._friendlies(plugin, settings)
+        clubs = self._clubs(plugin, settings)
+        assert sorted(s.gender for s in intl) == ["m", "w"]
+        assert len(clubs) == 1
+        # One favorites list and one gate, shared by all three.
+        for s in intl + clubs:
+            assert s.favorites == ["United States", "Wrexham"]
+            assert s.favorites_only is True
+
+    def test_manifest_club_friendlies_field_matches_code(self, plugin):
+        # plugin.json must declare enable_club_friendlies with default False,
+        # or the toggle _build_sources reads would never appear in the UI and
+        # the source could not be switched on at all. Mirrors
+        # test_manifest_stream_priority_matches_code.
+        import json
+        import os
+        repo = os.path.dirname(os.path.abspath(plugin.__file__))
+        manifest = json.load(open(os.path.join(repo, "plugin.json"), encoding="utf-8"))
+        field = next(
+            (f for f in manifest["fields"] if f["id"] == "enable_club_friendlies"),
+            None,
+        )
+        assert field is not None, "enable_club_friendlies missing from plugin.json"
+        assert field["type"] == "boolean"
+        assert field["default"] is False
+        # The shared gate must still be declared too, since all three
+        # friendlies toggles read it.
+        gate = next(
+            (f for f in manifest["fields"] if f["id"] == "friendlies_favorites_only"),
+            None,
+        )
+        assert gate is not None
+        assert gate["default"] is True
 
 
 class TestIsPostseasonGame:

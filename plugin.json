@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "description": "Cross-sport interestingness curator. Pulls upcoming games per enabled sport, scores them on interestingness, matches to Dispatcharr channels via EPG, and renames+groups them into a Top Matchups channel profile so your guide shows only the games worth watching. Channels are numbered by kickoff time, so the list sorts soonest-first and the guide binds correctly in both the default M3U/EPG output and the Xtream Codes API with no special settings.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -111,11 +111,18 @@
       "help_text": "Senior women's national-team friendlies and FIFA-window warm-ups (e.g. a USWNT tune-up) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite national team are shown (see 'Friendlies: favorite national teams only' below); add the team to Favorites using the country name as ESPN spells it (e.g. \"United States\", not \"USA\"). Offseason → no rows. No API key required."
     },
     {
+      "id": "enable_club_friendlies",
+      "type": "boolean",
+      "label": "Club Friendlies (Pre-Season)",
+      "default": false,
+      "help_text": "Club friendlies from ESPN's unofficial API: pre-season tours and mid-season exhibitions (e.g. Wrexham v Leeds United in late July). Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite club are shown (see \"Friendlies: favorites only\" below); add the club to Favorites using the full name as ESPN spells it (e.g. \"Leeds United\", not \"Leeds\"; \"Tottenham Hotspur\", not \"Spurs\"). Most useful in July and early August, when every league below is between seasons and returns no games. Offseason → no rows. No API key required."
+    },
+    {
       "id": "friendlies_favorites_only",
       "type": "boolean",
-      "label": "Friendlies: favorite national teams only",
+      "label": "Friendlies: favorites only",
       "default": true,
-      "help_text": "When on (default), International Friendlies (men's and women's) show ONLY games involving a national team in your Favorites. A friendly is an exhibition with no standings or rank, so a game between two teams you don't follow has nothing to earn a guide slot, and a FIFA window produces dozens of them (Kenya vs Lesotho, Cambodia vs Hong Kong, ...). Match by the country name as ESPN spells it (\"United States\", not \"USA\"). Turn this OFF to see every international friendly in the lookahead window. No effect unless a Friendlies toggle above is on."
+      "help_text": "When on (default), the Friendlies toggles above (international men's, international women's, and club) show ONLY games involving a team in your Favorites. A friendly is an exhibition with no standings or rank, so a game between two teams you don't follow has nothing to earn a guide slot, and an unfiltered slate produces dozens of them (Kenya vs Lesotho, Cambodia vs Hong Kong, Bromley vs Crystal Palace, ...). Match by the name as ESPN spells it (\"United States\", not \"USA\"; \"Leeds United\", not \"Leeds\"). Turn this OFF to see every friendly in the lookahead window. No effect unless a Friendlies toggle above is on."
     },
     {
       "id": "enable_eredivisie",

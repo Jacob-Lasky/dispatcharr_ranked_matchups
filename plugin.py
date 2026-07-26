@@ -1038,6 +1038,7 @@ def _build_sources(settings: Dict[str, Any]):
         F1Source, NascarSource, GolfSource, UfcSource,
         AtpSource, WtaSource,
         BoxingSource,
+        ClubFriendliesSource,
         InternationalFriendliesSource,
     )
     from .sources.soccer import COMPETITIONS
@@ -1114,24 +1115,41 @@ def _build_sources(settings: Dict[str, Any]):
     # is the only path for a pre-tournament national-team warm-up (e.g. a
     # USMNT friendly the week before the World Cup) to reach the guide: the
     # world_cup source carries only FD.org tournament fixtures, not friendlies.
-    # friendlies_favorites_only (default on) gates these to favorite national
-    # teams only: a FIFA window yields dozens of exhibitions between teams the
-    # user doesn't follow, and a friendly has no standings/rank to earn a slot
-    # on its own. The source does the matching (reusing scoring.match_favorites)
-    # so we just hand it the user's favorites and the toggle.
-    intl_favorites = _parse_favorites(settings.get("favorites", ""))
-    intl_favorites_only = bool(settings.get("friendlies_favorites_only", True))
+    # friendlies_favorites_only (default on) gates every friendlies source
+    # below (both international genders AND clubs) to favorites only: an
+    # unfiltered slate yields dozens of exhibitions between teams the user
+    # doesn't follow, and a friendly has no standings/rank to earn a slot on
+    # its own. ONE setting drives all three deliberately, because the rationale
+    # doesn't differ by flavour. The source does the matching (reusing
+    # scoring.match_favorites) so we just hand it the favorites and the toggle.
+    friendlies_favorites = _parse_favorites(settings.get("favorites", ""))
+    friendlies_favorites_only_setting = bool(settings.get("friendlies_favorites_only", True))
     if settings.get("enable_intl_friendlies", False):
         sources.append(InternationalFriendliesSource(
             gender="m",
-            favorites=intl_favorites,
-            favorites_only=intl_favorites_only,
+            favorites=friendlies_favorites,
+            favorites_only=friendlies_favorites_only_setting,
         ))
     if settings.get("enable_intl_friendlies_women", False):
         sources.append(InternationalFriendliesSource(
             gender="w",
-            favorites=intl_favorites,
-            favorites_only=intl_favorites_only,
+            favorites=friendlies_favorites,
+            favorites_only=friendlies_favorites_only_setting,
+        ))
+
+    # Club friendlies (ESPN, no API key): pre-season tours and mid-season
+    # exhibitions. Same exhibition semantics as the international sources
+    # above and the SAME favorites gate setting, because the rationale is
+    # identical: a friendly has no standings or rank to earn a guide slot, so
+    # its only claim is the favorite signal, and an unfiltered pre-season
+    # Saturday is dozens of fixtures between clubs the user doesn't follow.
+    # This is the only path for a club pre-season friendly to reach the guide:
+    # Football-Data.org's competition codes carry no friendlies at all, and
+    # fifa.friendly is national teams only. See #153.
+    if settings.get("enable_club_friendlies", False):
+        sources.append(ClubFriendliesSource(
+            favorites=friendlies_favorites,
+            favorites_only=friendlies_favorites_only_setting,
         ))
 
     # Additional FD.org free-tier leagues. Same _make_soccer
@@ -4015,7 +4033,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.12.0"
+    version = "1.13.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

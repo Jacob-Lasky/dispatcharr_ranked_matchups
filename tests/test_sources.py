@@ -3,11 +3,12 @@ class-level constants and the shape-handling logic so a typo or refactor
 doesn't ship silently."""
 
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from dispatcharr_ranked_matchups.sources import (
+    ClubFriendliesSource,
     InternationalFriendliesSource,
     KnockoutSoccerSource,
     NcaafSource,
@@ -9867,6 +9868,62 @@ class TestTierFixturesChunkingForLongWindows:
         assert "PL" in out
         assert len(out["PL"]) == 1
 
+# ---------------------------------------------------------------------------
+# Friendlies sources (international + club) share one ESPN sweep, so they share
+# one HTTP stub. See sources/friendlies.py::_EspnFriendliesBase.
+# ---------------------------------------------------------------------------
+
+def _friendly_event(eid, home, away, *, hours_from_now=2.0, completed=False):
+    """One ESPN scoreboard event, shaped exactly like the live API returns.
+
+    `hours_from_now` is RELATIVE, never a hardcoded calendar date. The sweep
+    drops fixtures that kicked off more than `_MAX_AGE_AFTER_KICKOFF` ago, so a
+    hardcoded date is a time bomb: these fixtures originally carried literal
+    2026-05-31 / 2026-06-09 timestamps, which silently aged into "8 weeks in
+    the past" and would now be filtered out. Keep every fixture relative.
+
+    Team fields mirror the real payload, where ESPN sets
+    location == name == displayName on soccer endpoints (verified across 45
+    clubs on club.friendly).
+    """
+    when = datetime.now(timezone.utc) + timedelta(hours=hours_from_now)
+    return {
+        "id": eid,
+        "date": when.strftime("%Y-%m-%dT%H:%MZ"),
+        "competitions": [{
+            "status": {"type": {"completed": completed,
+                                "state": "post" if completed else "pre"}},
+            "competitors": [
+                {"homeAway": "home", "score": "1" if completed else None,
+                 "team": {"location": home, "name": home,
+                          "displayName": home}},
+                {"homeAway": "away", "score": "0" if completed else None,
+                 "team": {"location": away, "name": away,
+                          "displayName": away}},
+            ],
+        }],
+    }
+
+
+def _patch_friendlies_http(monkeypatch, events):
+    """Stub the friendlies module's requests.get to serve `events` for every
+    date bucket. Returns the list of `dates=` values the sweep asked for, so a
+    caller can assert on the window as well as on the rows."""
+    from dispatcharr_ranked_matchups.sources import friendlies as friendlies_mod
+
+    requested_dates = []
+
+    class FakeResp:
+        status_code = 200
+        def json(self): return {"events": events}
+
+    def _get(url, *a, **kw):
+        requested_dates.append(url.split("dates=")[1])
+        return FakeResp()
+
+    monkeypatch.setattr(friendlies_mod.requests, "get", _get)
+    return requested_dates
+
 
 class TestInternationalFriendliesSource:
     """ESPN national-team friendlies. Exhibition games: no importance
@@ -9896,35 +9953,10 @@ class TestInternationalFriendliesSource:
             InternationalFriendliesSource(gender="x")
 
     def test_fetch_drops_finished_keeps_scheduled(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import friendlies as friendlies_mod
-
-        def _event(eid, home, away, completed):
-            return {
-                "id": eid,
-                "date": "2026-05-31T19:30Z",
-                "competitions": [{
-                    "status": {"type": {"completed": completed,
-                                        "state": "post" if completed else "pre"}},
-                    "competitors": [
-                        {"homeAway": "home", "score": "1" if completed else None,
-                         "team": {"location": home}},
-                        {"homeAway": "away", "score": "0" if completed else None,
-                         "team": {"location": away}},
-                    ],
-                }],
-            }
-
-        payload = {"events": [
-            _event("1", "United States", "Senegal", completed=False),
-            _event("2", "Brazil", "Panama", completed=True),  # finished -> dropped
-        ]}
-
-        class FakeResp:
-            status_code = 200
-            def json(self): return payload
-
-        monkeypatch.setattr(friendlies_mod.requests, "get",
-                            lambda *a, **kw: FakeResp())
+        _patch_friendlies_http(monkeypatch, [
+            _friendly_event("1", "United States", "Senegal"),
+            _friendly_event("2", "Brazil", "Panama", completed=True),  # dropped
+        ])
 
         rows = InternationalFriendliesSource(gender="m").fetch_upcoming(days_ahead=0)
 
@@ -9937,40 +9969,14 @@ class TestInternationalFriendliesSource:
         assert row.rank_home is None and row.rank_away is None
         assert row.extra["espn_league_slug"] == "fifa.friendly"
 
-    @staticmethod
-    def _scheduled_event(eid, home, away):
-        return {
-            "id": eid,
-            "date": "2026-06-09T19:30Z",
-            "competitions": [{
-                "status": {"type": {"completed": False, "state": "pre"}},
-                "competitors": [
-                    {"homeAway": "home", "score": None,
-                     "team": {"location": home}},
-                    {"homeAway": "away", "score": None,
-                     "team": {"location": away}},
-                ],
-            }],
-        }
-
-    def _patch_events(self, monkeypatch, events):
-        from dispatcharr_ranked_matchups.sources import friendlies as friendlies_mod
-
-        class FakeResp:
-            status_code = 200
-            def json(self): return {"events": events}
-
-        monkeypatch.setattr(friendlies_mod.requests, "get",
-                            lambda *a, **kw: FakeResp())
-
     def test_favorites_only_keeps_favorite_drops_rest(self, monkeypatch):
         # The favorites gate: only games involving a configured favorite
         # national team survive. The country name must match ESPN's `location`
         # spelling ("United States"), which is what match_favorites sees.
-        self._patch_events(monkeypatch, [
-            self._scheduled_event("1", "United States", "Senegal"),
-            self._scheduled_event("2", "Kenya", "Lesotho"),       # dropped
-            self._scheduled_event("3", "Cambodia", "Hong Kong"),  # dropped
+        _patch_friendlies_http(monkeypatch, [
+            _friendly_event("1", "United States", "Senegal"),
+            _friendly_event("2", "Kenya", "Lesotho"),       # dropped
+            _friendly_event("3", "Cambodia", "Hong Kong"),  # dropped
         ])
         rows = InternationalFriendliesSource(
             gender="m",
@@ -9982,9 +9988,9 @@ class TestInternationalFriendliesSource:
 
     def test_favorites_only_off_keeps_all(self, monkeypatch):
         # Opt-out path: a user who wants every friendly disables the gate.
-        self._patch_events(monkeypatch, [
-            self._scheduled_event("1", "United States", "Senegal"),
-            self._scheduled_event("2", "Kenya", "Lesotho"),
+        _patch_friendlies_http(monkeypatch, [
+            _friendly_event("1", "United States", "Senegal"),
+            _friendly_event("2", "Kenya", "Lesotho"),
         ])
         rows = InternationalFriendliesSource(
             gender="m",
@@ -9996,8 +10002,8 @@ class TestInternationalFriendliesSource:
     def test_favorites_only_default_off_keeps_all(self, monkeypatch):
         # The SOURCE defaults favorites_only False (the plugin layer is what
         # defaults it on). A bare source must not silently filter.
-        self._patch_events(monkeypatch, [
-            self._scheduled_event("1", "Kenya", "Lesotho"),
+        _patch_friendlies_http(monkeypatch, [
+            _friendly_event("1", "Kenya", "Lesotho"),
         ])
         rows = InternationalFriendliesSource(gender="m").fetch_upcoming(
             days_ahead=0)
@@ -10006,10 +10012,209 @@ class TestInternationalFriendliesSource:
     def test_favorites_only_no_favorites_drops_all(self, monkeypatch):
         # Gate on but no favorites configured: nothing can match, so the
         # section is empty (and a warning is logged, not an exception).
-        self._patch_events(monkeypatch, [
-            self._scheduled_event("1", "United States", "Senegal"),
+        _patch_friendlies_http(monkeypatch, [
+            _friendly_event("1", "United States", "Senegal"),
         ])
         rows = InternationalFriendliesSource(
             gender="m", favorites=[], favorites_only=True,
         ).fetch_upcoming(days_ahead=0)
+        assert rows == []
+
+
+class TestClubFriendliesSource:
+    """ESPN club friendlies (pre-season tours, mid-season exhibitions).
+
+    Regression cover for #153: a live Wrexham v Leeds United pre-season
+    friendly never reached the guide because no source queried ESPN's
+    `club.friendly` competition. `InternationalFriendliesSource` covers only
+    `fifa.friendly` (national teams), and Football-Data.org carries no
+    friendlies at all, so the fixture was unreachable end to end.
+    """
+
+    def test_implements_interface(self):
+        assert issubclass(ClubFriendliesSource, SportSource)
+
+    def test_no_importance_simulation(self):
+        # Same reasoning as the international source: an exhibition has no
+        # table to simulate, so compute_match_importance would have nothing
+        # to threshold against. DO NOT flip this on.
+        assert ClubFriendliesSource().supports_importance is False
+
+    def test_constants(self):
+        src = ClubFriendliesSource()
+        assert src.sport_prefix == "CLUBFRIENDLY"
+        assert src.sport_label == "Club Friendly"
+        assert src._espn_slug == "club.friendly"
+
+    def test_prefix_distinct_from_international(self):
+        # rivalries.json and logos.SPORTSDB_TOURNAMENT_LEAGUE_IDS are keyed on
+        # sport_prefix, so a collision with the national-team source would
+        # cross-wire both maps.
+        assert (ClubFriendliesSource().sport_prefix
+                != InternationalFriendliesSource(gender="m").sport_prefix)
+
+    def test_base_class_is_abstract(self):
+        # _EspnFriendliesBase carries the sweep but declares no competition,
+        # so instantiating it directly must fail rather than silently sweep a
+        # bogus URL.
+        from dispatcharr_ranked_matchups.sources.friendlies import (
+            _EspnFriendliesBase,
+        )
+        with pytest.raises(TypeError):
+            _EspnFriendliesBase()
+
+    @staticmethod
+    def _wrexham_leeds():
+        """The #153 fixture, with the field shape ESPN really returned for
+        event 401897749. `location` carries the FULL club name ("Leeds
+        United"), not the city: sampled across 45 distinct clubs,
+        location == name == displayName on every one, which is why the club
+        source reuses the shared soccer namer rather than declaring its own."""
+        ev = _friendly_event("401897749", "Wrexham", "Leeds United")
+        for c in ev["competitions"][0]["competitors"]:
+            c["team"]["abbreviation"] = (
+                "WXM" if c["homeAway"] == "home" else "LEE")
+        return ev
+
+    def test_fetches_the_153_fixture(self, monkeypatch):
+        # The exact game from the bug report, with Wrexham as the favorite.
+        _patch_friendlies_http(monkeypatch, [self._wrexham_leeds()])
+        rows = ClubFriendliesSource(
+            favorites=["Wrexham", "Tottenham Hotspur"], favorites_only=True,
+        ).fetch_upcoming(days_ahead=0)
+
+        assert len(rows) == 1
+        row = rows[0]
+        assert (row.home, row.away) == ("Wrexham", "Leeds United")
+        assert row.sport_prefix == "CLUBFRIENDLY"
+        assert row.sport_label == "Club Friendly"
+        # No poll, no league context: an exhibition contributes zero importance.
+        assert row.rank_home is None and row.rank_away is None
+        assert row.extra["espn_league_slug"] == "club.friendly"
+        assert row.extra["espn_event_id"] == "401897749"
+
+    def test_full_club_name_survives_not_the_city(self, monkeypatch):
+        # Guards the namer choice. If a future refactor swapped in a
+        # shortDisplayName-first or city-first namer, "Leeds United" would
+        # degrade to "Leeds" and both favorite matching and EPG title
+        # matching would silently start missing.
+        _patch_friendlies_http(monkeypatch, [self._wrexham_leeds()])
+        rows = ClubFriendliesSource().fetch_upcoming(days_ahead=0)
+        assert rows[0].away == "Leeds United"
+
+    def test_favorites_only_drops_non_favorites(self, monkeypatch):
+        # A pre-season slate is dozens of fixtures between clubs the user
+        # doesn't follow. Same gate rationale as the international source.
+        _patch_friendlies_http(monkeypatch, [
+            self._wrexham_leeds(),
+            _friendly_event("2", "Bromley", "Crystal Palace"),
+        ])
+        rows = ClubFriendliesSource(
+            favorites=["Wrexham"], favorites_only=True,
+        ).fetch_upcoming(days_ahead=0)
+        assert len(rows) == 1
+        assert rows[0].home == "Wrexham"
+
+    def test_favorites_only_off_keeps_all(self, monkeypatch):
+        _patch_friendlies_http(monkeypatch, [
+            self._wrexham_leeds(),
+            _friendly_event("2", "Bromley", "Crystal Palace"),
+        ])
+        rows = ClubFriendliesSource(
+            favorites=["Wrexham"], favorites_only=False,
+        ).fetch_upcoming(days_ahead=0)
+        assert len(rows) == 2
+
+    def test_drops_finished(self, monkeypatch):
+        _patch_friendlies_http(monkeypatch, [
+            _friendly_event("1", "Wrexham", "Leeds United", completed=True),
+        ])
+        assert ClubFriendliesSource().fetch_upcoming(days_ahead=0) == []
+
+    def test_no_gender_kwarg(self):
+        # Clubs aren't gendered the way national-team squads are, and ESPN has
+        # no `club.friendly.w`. The kwarg must not exist rather than silently
+        # accepting a value that does nothing.
+        with pytest.raises(TypeError):
+            ClubFriendliesSource(gender="w")
+
+
+class TestFriendliesSweepWindow:
+    """ESPN buckets its scoreboard by US EASTERN calendar date, not UTC, so the
+    sweep must start one day BEFORE today-UTC or it goes blind to fixtures in
+    the 00:00Z-05:00Z window.
+
+    Caught live at 2026-07-26T01:25Z: the `dates=20260725` bucket still held
+    "Tottenham Hotspur at Auckland FC" at 2026-07-26T03:00Z (a favorite, 95
+    minutes from kickoff) while `dates=20260726` did not. Applies to BOTH
+    friendlies sources, since the sweep lives in the shared base.
+
+    Reaching backwards has a cost the sweep must pay for: ESPN's status lag
+    leaves finished matches tagged SCHEDULED, so the window also needs a floor
+    (_MAX_AGE_AFTER_KICKOFF). Both halves are pinned here.
+    """
+
+    def test_sweep_starts_one_day_before_today_utc(self, monkeypatch):
+        seen = _patch_friendlies_http(monkeypatch, [])
+        ClubFriendliesSource().fetch_upcoming(days_ahead=0)
+        today = datetime.now(timezone.utc).date()
+        assert (today - timedelta(days=1)).strftime("%Y%m%d") in seen, (
+            "sweep must query yesterday-UTC: ESPN files a 03:00Z fixture under "
+            "the previous US Eastern date"
+        )
+        assert today.strftime("%Y%m%d") in seen
+
+    def test_sweep_still_covers_the_full_lookahead(self, monkeypatch):
+        # Widening the start must not shorten the far end of the window.
+        seen = _patch_friendlies_http(monkeypatch, [])
+        ClubFriendliesSource().fetch_upcoming(days_ahead=7)
+        today = datetime.now(timezone.utc).date()
+        assert (today + timedelta(days=7)).strftime("%Y%m%d") in seen
+        assert len(seen) == 9  # yesterday + today + 7 ahead
+
+    def test_international_source_gets_the_same_window(self, monkeypatch):
+        seen = _patch_friendlies_http(monkeypatch, [])
+        InternationalFriendliesSource(gender="m").fetch_upcoming(days_ahead=0)
+        today = datetime.now(timezone.utc).date()
+        assert (today - timedelta(days=1)).strftime("%Y%m%d") in seen
+
+    def test_overlap_does_not_duplicate_rows(self, monkeypatch):
+        """The extra bucket overlaps the next one; `seen_ids` must dedupe so
+        widening the sweep cannot double-emit a fixture."""
+        _patch_friendlies_http(monkeypatch, [
+            _friendly_event("dup-1", "Wrexham", "Leeds United"),
+        ])
+        rows = ClubFriendliesSource().fetch_upcoming(days_ahead=3)
+        assert len(rows) == 1
+
+    def test_keeps_a_game_that_just_kicked_off(self, monkeypatch):
+        # The whole point of reaching backwards: a match in progress is still
+        # a Top Matchup. ESPN reports it as SCHEDULED (status lag), and it must
+        # survive both the FINISHED filter and the staleness floor.
+        _patch_friendlies_http(monkeypatch, [
+            _friendly_event("live-1", "Wrexham", "Leeds United",
+                            hours_from_now=-1.0),
+        ])
+        rows = ClubFriendliesSource().fetch_upcoming(days_ahead=0)
+        assert len(rows) == 1
+
+    def test_drops_a_stale_game_espn_never_marked_finished(self, monkeypatch):
+        # The cost of reaching backwards. A match that kicked off well past
+        # _MAX_AGE_AFTER_KICKOFF cannot still be running, so a SCHEDULED tag on
+        # it is ESPN lag, not a live game. Keeping it would seat a finished
+        # match in the guide as "upcoming", and because channels are numbered
+        # by kickoff time it would sort to the very top.
+        _patch_friendlies_http(monkeypatch, [
+            _friendly_event("stale-1", "Bayern Munich", "Celtic",
+                            hours_from_now=-9.0),
+        ])
+        assert ClubFriendliesSource().fetch_upcoming(days_ahead=0) == []
+
+    def test_staleness_floor_applies_to_international_too(self, monkeypatch):
+        _patch_friendlies_http(monkeypatch, [
+            _friendly_event("stale-2", "Kenya", "Lesotho",
+                            hours_from_now=-9.0),
+        ])
+        rows = InternationalFriendliesSource(gender="m").fetch_upcoming(
+            days_ahead=0)
         assert rows == []
