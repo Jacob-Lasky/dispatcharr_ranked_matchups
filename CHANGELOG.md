@@ -5,6 +5,72 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-07-26
+
+Security and correctness pass over the whole plugin. No new features.
+
+### Security
+- **API keys no longer reach the logs.** Two shapes, both arriving inside strings
+  the plugin never builds, so there was no parameter to sanitize:
+  the Odds API takes `apiKey` as a **query param** and `requests` embeds the full
+  URL in its exception text (`HTTPError` renders "... for url: ...?apiKey=...",
+  `ConnectionError` renders "Max retries exceeded with url: ...?apiKey=..."), and
+  TheSportsDB carries its key as a **path segment** (`/api/v1/json/<KEY>/...`)
+  which was logged whole on every failed lookup. The Odds leak was at WARNING,
+  visible at the default INFO log level; the SportsDB one was at DEBUG. Both key
+  fields are `input_type: password`, which masks the form input and does nothing
+  for logs, and Dispatcharr logs go to container stdout. Added
+  `_util.redact_secrets`, applied at every affected site in `logos.py`,
+  `sources/soccer.py`, `sources/mls.py`, and `sources/mls_standings.py`, with a
+  source-level contract test so a new log line cannot reintroduce it. (#156)
+
+### Fixed
+- **The scheduler lock could be released by a different holder, allowing two
+  concurrent destructive applies.** The lock value was the constant `"1"` and
+  release was an unconditional `DELETE`, so a run that outlived the TTL deleted
+  whichever holder had replaced it and a third run could start alongside the
+  second. Two applies interleaving `Channel.delete()`, `ProgramData.delete()` and
+  guide renumbering can drop rows the other just wrote. Now a unique per-run
+  token with an atomic compare-and-delete release. The TTL also moved from 30 to
+  90 minutes: the refresh subprocess alone may legitimately take 25, and apply's
+  per-game network pre-pass could exhaust the remaining 5 at *default* settings.
+  Redis being unreachable now fails **closed** for apply/auto_pipeline (declining
+  to run beats running unserialized) and still fails **open** for refresh, which
+  only reads upstream and rewrites `cache.json`. (#155)
+- **`apply` took no lock at all.** It was dispatched straight to the bare
+  `_action_apply`, so clicking Apply during a scheduled `auto_pipeline` raced it
+  directly, with no TTL overrun needed. The manifest action now points at
+  `_action_apply_locked`; the bare function stays lock-free on purpose so
+  `_action_auto_pipeline_sync` can call it from inside the already-locked
+  subprocess. (#155)
+- **Rename cleanup could delete a group the user created.** An empty group was
+  deleted when its name merely *contained* `"top"` or `"matchup"`, which also
+  matches Rooftop, Stop, Laptop, Topical and Utopia; and emptiness is a state the
+  sweep itself creates by migrating our channels out. This was the one delete in
+  the plugin not gated on provenance. Now an exact, case-insensitive allowlist of
+  names the plugin itself creates. A custom-to-custom rename now leaves the old
+  empty group behind, which is the safe direction, and says so in the log. (#157)
+- **Football-Data.org calls now pace and retry.** Three call sites fired back to
+  back against a 10 req/min free tier with no throttle, backoff, or retry, so a
+  single 429 or connection drop zeroed whatever had not been fetched and the
+  soccer slate silently read "0 games" until the next refresh six hours later,
+  indistinguishable from an off-season. All three now route through one paced
+  `_fd_get` (7.0s spacing, at most nine requests in any rolling 60s window) that
+  retries 429s and transport drops with backoff, honoring FD.org's
+  `X-Requestcounter-Reset` header. A contract test rejects any new bare
+  `requests.get` against `FD_BASE`. (#159)
+- **`max_games` is validated.** It was read with a bare `int()`, so a non-numeric
+  stored value raised `ValueError` out of refresh and killed the action, and an
+  unbounded large value stretched apply's pre-pass past the lock TTL. Now clamped
+  to `[1, 60]` with a fallback and a warning, and the manifest declares matching
+  bounds. The ceiling is derived from the lock budget, not chosen for roundness.
+  (#158)
+
+### Changed
+- Test suite gained an autouse fixture neutralizing FD.org pacing. Leaving the
+  real sleeps in took the suite from 7 seconds to 105; the fixture is autouse so
+  a new test touching an FD path cannot silently reintroduce that cost.
+
 ## [1.13.0] - 2026-07-25
 
 ### Added

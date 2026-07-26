@@ -183,10 +183,19 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
     # Lazy import: keeps tasks.py importable without Django configured.
     from .plugin import _try_acquire_scheduler_lock, _release_scheduler_lock
 
-    if not _try_acquire_scheduler_lock():
+    # Whether this run WRITES. auto_pipeline chains refresh + apply, so it
+    # deletes Channels / ProgramData and renumbers the guide; a bare refresh
+    # only reads upstream APIs and rewrites cache.json. The flag decides what
+    # happens when Redis is unreachable: destructive work refuses to run
+    # unserialized, non-destructive work proceeds. See _try_acquire_scheduler_lock.
+    destructive = kind != "refresh"
+
+    lock_token = _try_acquire_scheduler_lock(destructive=destructive)
+    if not lock_token:
         logger.info(
-            "[ranked_matchups.tasks] %s task %s: scheduler lock held; "
-            "skipping (another refresh / auto_pipeline is in flight)",
+            "[ranked_matchups.tasks] %s task %s: scheduler lock unavailable; "
+            "skipping (another refresh / auto_pipeline is in flight, or Redis is "
+            "unreachable and this action writes)",
             kind, task_id,
         )
         # Best-effort: publish a short-lived 'busy' marker so the UI's
@@ -207,7 +216,7 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
         )
     finally:
         _clear_inflight()
-        _release_scheduler_lock()
+        _release_scheduler_lock(lock_token)
 
 
 def _new_task_id() -> str:

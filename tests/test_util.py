@@ -3,6 +3,8 @@ and the playoff-series rendering helpers."""
 
 from datetime import datetime, timedelta, timezone
 
+from dispatcharr_ranked_matchups import _util
+
 from dispatcharr_ranked_matchups._util import (
     CHANNEL_NUMBER_ORIGIN,
     CHANNEL_NUMBER_TIEBREAK_SLOTS,
@@ -452,3 +454,118 @@ class TestStableChannelNumber:
                     stable_channel_number(5000, start, f"m:cfb:{day}_{i}", _ET)
                 )
         assert len(numbers) == len(set(numbers))
+
+
+class TestRedactSecrets:
+    """#156: API keys reached log lines through strings this plugin never
+    builds, so there was no parameter to sanitize.
+
+    Two shapes:
+      - Odds API takes `apiKey` as a QUERY PARAM, and requests embeds the full
+        URL (params included) in its exception text. HTTPError renders
+        "... for url: <url>?apiKey=...", ConnectionError renders
+        "Max retries exceeded with url: /...?apiKey=...". Logged at WARNING,
+        which is visible at the container's default INFO level.
+      - TheSportsDB carries the key as a PATH SEGMENT (/api/v1/json/<KEY>/...).
+    """
+
+    def test_masks_query_param_key(self):
+        out = _util.redact_secrets(
+            "https://api.the-odds-api.com/v4/x?apiKey=SECRET123&regions=uk"
+        )
+        assert "SECRET123" not in out
+        assert "apiKey=***" in out
+        assert "regions=uk" in out, "redaction must not eat the rest of the query"
+
+    def test_masks_key_inside_a_requests_httperror_message(self):
+        msg = ("401 Client Error: Unauthorized for url: "
+               "https://api.the-odds-api.com/v4/sports/soccer_epl/odds/"
+               "?apiKey=SECRET123&oddsFormat=decimal")
+        out = _util.redact_secrets(msg)
+        assert "SECRET123" not in out
+        assert "401 Client Error" in out, "the diagnostic itself must survive"
+
+    def test_masks_key_inside_a_connectionerror_message(self):
+        msg = ("HTTPSConnectionPool(host='api.the-odds-api.com', port=443): "
+               "Max retries exceeded with url: /v4/sports/s/odds/"
+               "?regions=uk&apiKey=SECRET123 (Caused by NewConnectionError(...))")
+        assert "SECRET123" not in _util.redact_secrets(msg)
+
+    def test_masks_sportsdb_path_segment_key(self):
+        out = _util.redact_secrets(
+            "https://www.thesportsdb.com/api/v1/json/MYPATREONKEY/searchevents.php?e=a_vs_b"
+        )
+        assert "MYPATREONKEY" not in out
+        assert "/api/v1/json/***/" in out
+        assert "searchevents.php" in out
+
+    def test_masks_the_league_lookup_url_too(self):
+        # Both SportsDB templates must be covered; only one was being thought
+        # about when the leak shipped.
+        out = _util.redact_secrets(
+            "https://www.thesportsdb.com/api/v1/json/MYKEY/lookupleague.php?id=4328"
+        )
+        assert "MYKEY" not in out
+
+    def test_accepts_an_exception_object_not_just_a_string(self):
+        exc = ValueError("failed for url: http://x?api_key=SECRET123")
+        assert "SECRET123" not in _util.redact_secrets(exc)
+
+    def test_case_insensitive_param_names(self):
+        for param in ("apiKey", "APIKEY", "api_key", "token", "secret"):
+            out = _util.redact_secrets(f"http://x?{param}=SECRET123")
+            assert "SECRET123" not in out, f"{param} not redacted"
+
+    def test_leaves_clean_text_alone(self):
+        clean = "https://site.api.espn.com/apis/site/v2/sports/soccer/club.friendly/scoreboard?dates=20260725"
+        assert _util.redact_secrets(clean) == clean
+
+
+class TestNoRawSecretLogging:
+    """Contract guard. The redactor only helps if the leak sites actually call
+    it, and the failure mode is a NEW log line added later, which no runtime
+    test would exercise. Source-level check instead."""
+
+    @staticmethod
+    def _src(*parts):
+        import os
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        return open(os.path.join(root, *parts), encoding="utf-8").read()
+
+    @staticmethod
+    def _code_only(src):
+        """Strip comment lines. A bare `"redact_secrets" in src` check passes on
+        a file where the only occurrence is a COMMENT saying to use it, which is
+        exactly how an earlier version of this test green-lit reverted code."""
+        return "\n".join(
+            ln for ln in src.split("\n") if not ln.lstrip().startswith("#")
+        )
+
+    def test_odds_carrying_handlers_redact(self):
+        # Every module that passes apiKey as a query param must redact what it
+        # logs, because a requests exception carries the full URL.
+        import re
+        for parts in (("sources", "mls.py"), ("sources", "mls_standings.py"),
+                      ("sources", "soccer.py")):
+            code = self._code_only(self._src(*parts))
+            if "apiKey" not in code:
+                continue
+            # An actual CALL, not just the identifier appearing somewhere.
+            calls = re.findall(r"redact_secrets\(\s*\w+\s*\)", code)
+            assert calls, (
+                f"{parts[-1]} sends apiKey as a query param but never calls "
+                "redact_secrets(); a requests exception will carry the key "
+                "into the logs"
+            )
+            # And it must be imported, not just referenced.
+            assert re.search(r"from \.\._util import .*redact_secrets", code), (
+                f"{parts[-1]} references redact_secrets without importing it"
+            )
+
+    def test_sportsdb_fetch_redacts_its_url(self):
+        code = self._code_only(self._src("logos.py"))
+        assert "redact_secrets(url)" in code, (
+            "logos._http_get_json must redact: the SportsDB key is a path segment"
+        )
+        # And the raw form must be gone.
+        assert 'logger.debug("sportsdb GET %s failed: %s", url,' not in code

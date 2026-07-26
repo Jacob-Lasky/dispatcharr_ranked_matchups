@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple, TypedDict
@@ -30,7 +31,7 @@ import requests
 
 from .base import GameRow, MatchResult, SoccerTeamRow, SportSource
 from .bracket import AggregateLegSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .._util import parse_iso_utc, poisson_sample as _poisson, redact_secrets
 
 
 class SoccerLeagueState(TypedDict):
@@ -67,6 +68,141 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.soccer")
 
 FD_BASE = "https://api.football-data.org/v4"
 ODDS_BASE = "https://api.the-odds-api.com/v4"
+
+
+# ---------- FD.org request pacing ----------
+#
+# Football-Data.org's free tier allows 10 requests/minute PER KEY. The caches
+# below cut the call COUNT, but they do not pace what remains: a refresh with
+# several competitions enabled still fires the survivors back to back, and the
+# tier-fixtures path chunks a date range into several windows on top of that.
+#
+# Over quota FD.org returns 429 or drops the connection outright (SSLEOFError /
+# RemoteDisconnected). Before this gate there was no retry anywhere, so a single
+# quota hit mid-burst zeroed whatever had not been fetched yet and the soccer
+# slate silently reported "0 games" until the next scheduled refresh six hours
+# later. Indistinguishable, from the summary alone, from a genuine off-season.
+#
+# DO NOT add a fourth bare `requests.get` to FD.org. Call _fd_get(), which is
+# the single paced+retrying entry point. Four independent call sites is exactly
+# how the pacing gets forgotten at the fifth. See #159.
+#
+# Process scope: refresh runs in the forked _pipeline_runner.py subprocess, so
+# this module-level state is per-run, which is correct for a sequential refresh.
+# It does NOT coordinate across two concurrent refreshes; the scheduler lock is
+# what prevents those (#155).
+# 7.0s, NOT 6.5s. The cap is 10 requests per 60s, and 6.5s spacing fits exactly
+# ten in a 60-second window (t=0, 6.5, ... 58.5), which sits ON the limit rather
+# than under it and depends on FD.org's window aligning with ours. A live run at
+# 6.5s measured 11.0 req/min over its sampling window. 7.0s fits at most nine
+# (t=0, 7, ... 56), leaving one request of headroom for clock jitter and for the
+# retry path spending an extra slot.
+_FD_MIN_INTERVAL_S = 7.0
+_FD_MAX_ATTEMPTS = 3
+_FD_BACKOFF_CAP_S = 90.0
+_fd_last_request_at: float = 0.0
+
+
+def _fd_sleep(seconds: float) -> None:
+    """The ONLY place this module blocks. Exists as an indirection so the test
+    suite can neutralize pacing without wall-clock delay: tests/conftest.py
+    patches this to a no-op autouse, and the pacing tests patch it to record
+    durations instead. Wiring `time.sleep` in directly cost 100 seconds of
+    suite runtime the first time this landed.
+
+    DO NOT call time.sleep elsewhere in this module."""
+    if seconds > 0:
+        time.sleep(seconds)
+
+
+def _fd_sleep_until_slot() -> None:
+    """Block until at least _FD_MIN_INTERVAL_S has passed since the last call."""
+    global _fd_last_request_at
+    now = time.monotonic()
+    wait = _FD_MIN_INTERVAL_S - (now - _fd_last_request_at)
+    if wait > 0:
+        _fd_sleep(wait)
+    _fd_last_request_at = time.monotonic()
+
+
+def _fd_retry_after_seconds(resp: Optional[requests.Response], attempt: int) -> float:
+    """How long to wait before retrying, preferring what FD.org tells us.
+
+    FD.org publishes `X-Requestcounter-Reset` (seconds until the per-minute
+    counter resets) on a 429; honoring it beats guessing, because a fixed sleep
+    either wastes time or retries straight back into the same closed window.
+    Falls back to exponential backoff when the header is absent (connection
+    drops carry no response at all)."""
+    if resp is not None:
+        for header in ("X-Requestcounter-Reset", "Retry-After"):
+            raw = resp.headers.get(header)
+            if raw:
+                try:
+                    return min(float(raw) + 0.5, _FD_BACKOFF_CAP_S)
+                except (TypeError, ValueError):
+                    pass
+    return min(_FD_MIN_INTERVAL_S * (2 ** attempt), _FD_BACKOFF_CAP_S)
+
+
+def _fd_get(
+    url: str,
+    fd_api_key: str,
+    params: Optional[Dict[str, Any]] = None,
+    timeout: float = 15.0,
+) -> requests.Response:
+    """Paced, retrying GET against Football-Data.org.
+
+    Waits for a rate-limit slot before every attempt, retries 429 and transport
+    errors with backoff, and raises the final exception if all attempts fail so
+    each caller keeps its existing error handling. Non-429 HTTP errors are NOT
+    retried: a 403 (bad key) or 404 will fail identically on the next attempt.
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(_FD_MAX_ATTEMPTS):
+        _fd_sleep_until_slot()
+        try:
+            r = requests.get(
+                url,
+                headers={"X-Auth-Token": fd_api_key},
+                params=params,
+                timeout=timeout,
+            )
+        except requests.RequestException as exc:
+            # Connection dropped: FD.org does this instead of a clean 429 when
+            # the quota is blown mid-burst.
+            last_exc = exc
+            if attempt == _FD_MAX_ATTEMPTS - 1:
+                break
+            delay = _fd_retry_after_seconds(None, attempt)
+            # redact_secrets even though FD.org authenticates by HEADER (so its
+            # exception text carries no key today): this is the one place a
+            # future query-param would slip straight into a log line.
+            logger.warning(
+                "[soccer:fd] transport error (%s); retry %d/%d in %.1fs",
+                redact_secrets(exc), attempt + 1, _FD_MAX_ATTEMPTS - 1, delay,
+            )
+            _fd_sleep(delay)
+            continue
+        if r.status_code != 429:
+            r.raise_for_status()
+            return r
+        last_exc = requests.HTTPError(f"429 rate limited: {url}", response=r)
+        if attempt == _FD_MAX_ATTEMPTS - 1:
+            break
+        delay = _fd_retry_after_seconds(r, attempt)
+        logger.warning(
+            "[soccer:fd] 429 rate limited; retry %d/%d in %.1fs",
+            attempt + 1, _FD_MAX_ATTEMPTS - 1, delay,
+        )
+        _fd_sleep(delay)
+    # Explicit raise, NOT `assert last_exc is not None`: asserts are stripped
+    # under `python -O`, which would turn an exhausted retry loop into a silent
+    # `return None` and hand every caller a None it does not type-check for.
+    if last_exc is None:  # pragma: no cover - loop always sets it before breaking
+        raise RuntimeError(
+            f"_fd_get exhausted {_FD_MAX_ATTEMPTS} attempts without recording an error"
+        )
+    raise last_exc
 
 
 # ---------- Module-level FD.org caches (refresh-scoped) ----------
@@ -163,13 +299,11 @@ def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dic
         chunk_from = chunk_start.strftime("%Y-%m-%d")
         chunk_to = chunk_end.strftime("%Y-%m-%d")
         try:
-            r = requests.get(
+            r = _fd_get(
                 f"{FD_BASE}/matches",
-                headers={"X-Auth-Token": fd_api_key},
+                fd_api_key,
                 params={"dateFrom": chunk_from, "dateTo": chunk_to},
-                timeout=15,
             )
-            r.raise_for_status()
             data = r.json()
         except Exception as e:
             logger.error(
@@ -216,12 +350,7 @@ def _fetch_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[Dict]:
         _SEASON_MATCHES_CACHE[fd_code] = []
         return []
     try:
-        r = requests.get(
-            f"{FD_BASE}/competitions/{fd_code}/matches",
-            headers={"X-Auth-Token": fd_api_key},
-            timeout=15,
-        )
-        r.raise_for_status()
+        r = _fd_get(f"{FD_BASE}/competitions/{fd_code}/matches", fd_api_key)
         data = r.json()
     except Exception as e:
         logger.warning("[soccer:%s] all-matches fetch failed: %s", fd_code, e)
@@ -558,13 +687,11 @@ class SoccerSource(SportSource):
         a historical final table (B.2 cold-start seed).
         """
         try:
-            r = requests.get(
+            r = _fd_get(
                 f"{FD_BASE}/competitions/{self.config.fd_code}/standings",
-                headers={"X-Auth-Token": self.fd_api_key},
+                self.fd_api_key,
                 params={"season": season} if season is not None else None,
-                timeout=15,
             )
-            r.raise_for_status()
             data = r.json()
         except Exception as e:
             logger.error("[soccer:%s] standings fetch failed (season=%s): %s",
@@ -686,8 +813,11 @@ class SoccerSource(SportSource):
             r.raise_for_status()
             data = r.json()
         except Exception as e:
+            # redact_secrets, NOT e: the Odds API takes apiKey as a QUERY PARAM
+            # and requests embeds the full URL in its exception text, so a bare
+            # %s here logs the user's key at WARNING. See #156.
             logger.warning("[soccer:%s] odds fetch failed: %s",
-                           self.config.fd_code, e)
+                           self.config.fd_code, redact_secrets(e))
             return {}
 
         out: Dict[Tuple[str, str], float] = {}

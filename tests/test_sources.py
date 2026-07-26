@@ -9483,6 +9483,7 @@ class TestFdCacheBatching:
         call_log = []
 
         class FakeResponse:
+            status_code = 200  # _fd_get checks this before raise_for_status
             def __init__(self, payload):
                 self._payload = payload
             def raise_for_status(self):
@@ -9530,6 +9531,7 @@ class TestFdCacheBatching:
         ]}
 
         class FakeResponse:
+            status_code = 200  # _fd_get checks this before raise_for_status
             def raise_for_status(self): pass
             def json(self): return payload
 
@@ -9552,6 +9554,7 @@ class TestFdCacheBatching:
         from dispatcharr_ranked_matchups.sources import soccer
 
         class FakeResponse:
+            status_code = 200  # _fd_get checks this before raise_for_status
             def raise_for_status(self): pass
             def json(self):
                 return {"matches": [
@@ -9604,6 +9607,7 @@ class TestFdCacheBatching:
         call_log = []
 
         class FakeResponse:
+            status_code = 200  # _fd_get checks this before raise_for_status
             def raise_for_status(self): pass
             def json(self):
                 return {"matches": [
@@ -9642,6 +9646,7 @@ class TestFdCacheBatching:
         call_log = []
 
         class FakeResponse:
+            status_code = 200  # _fd_get checks this before raise_for_status
             def raise_for_status(self): pass
             def json(self):
                 return {"matches": [
@@ -9692,6 +9697,7 @@ class TestFdCacheBatching:
         call_log = []
 
         class FakeResponse:
+            status_code = 200  # _fd_get checks this before raise_for_status
             def __init__(self, code):
                 self._code = code
             def raise_for_status(self): pass
@@ -9754,6 +9760,7 @@ class TestTierFixturesChunkingForLongWindows:
         call_log = []
 
         class FakeResponse:
+            status_code = 200  # _fd_get checks this before raise_for_status
             def raise_for_status(self): pass
             def json(self): return {"matches": []}
 
@@ -9774,6 +9781,7 @@ class TestTierFixturesChunkingForLongWindows:
         call_log = []
 
         class FakeResponse:
+            status_code = 200  # _fd_get checks this before raise_for_status
             def __init__(self, code_prefix):
                 self._code_prefix = code_prefix
             def raise_for_status(self): pass
@@ -9818,6 +9826,7 @@ class TestTierFixturesChunkingForLongWindows:
         call_log = []
 
         class FakeResponse:
+            status_code = 200  # _fd_get checks this before raise_for_status
             def raise_for_status(self): pass
             def json(self): return {"matches": []}
 
@@ -9838,14 +9847,19 @@ class TestTierFixturesChunkingForLongWindows:
             )
 
     def test_partial_failure_returns_chunks_fetched_so_far(self, monkeypatch):
-        # If chunk 1 succeeds and chunk 2 hits 429, the chunk-1 data
-        # is still cached and returned. Better than throwing away
-        # everything when a quota hit lands mid-burst.
+        # If chunk 1 succeeds and chunk 2 keeps failing, the chunk-1 data is
+        # still cached and returned. Better than throwing away everything when a
+        # quota hit lands mid-burst.
+        #
+        # Chunk 2 is now RETRIED before giving up (#159), so the expected call
+        # count is 1 (chunk 1) + _FD_MAX_ATTEMPTS (chunk 2 exhausting retries),
+        # not the flat 2 this asserted before pacing existed.
         from dispatcharr_ranked_matchups.sources import soccer
 
         call_count = {"n": 0}
 
         class FakeResponse:
+            status_code = 200  # _fd_get checks this before raise_for_status
             def raise_for_status(self): pass
             def json(self):
                 return {"matches": [
@@ -9856,17 +9870,150 @@ class TestTierFixturesChunkingForLongWindows:
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return FakeResponse()
-            # Chunk 2: simulate 429.
+            # Chunk 2: transport drop, which is how FD.org presents a blown
+            # quota when it does not return a clean 429.
             raise soccer.requests.RequestException("simulated 429")
 
         monkeypatch.setattr(soccer.requests, "get", fake_get)
         out = soccer._fetch_tier_fixtures("testkey", days_ahead=20)
 
-        # First chunk landed; second 429'd.
-        assert call_count["n"] == 2
-        # First chunk's data is still in the result.
+        assert call_count["n"] == 1 + soccer._FD_MAX_ATTEMPTS
+        # First chunk's data survives the second chunk's failure.
         assert "PL" in out
         assert len(out["PL"]) == 1
+
+    def test_transient_failure_recovers_on_retry(self, monkeypatch):
+        """The point of the retry: a single transient drop no longer zeroes the
+        slate. Before #159 there was no retry at all, so one blip mid-burst lost
+        every competition that had not been fetched yet until the next scheduled
+        refresh six hours later."""
+        from dispatcharr_ranked_matchups.sources import soccer
+
+        calls = {"n": 0}
+
+        class FakeResponse:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self):
+                return {"matches": [{"competition": {"code": "PL"}, "id": 1}]}
+
+        def fake_get(url, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise soccer.requests.RequestException("transient drop")
+            return FakeResponse()
+
+        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        out = soccer._fetch_tier_fixtures("testkey", days_ahead=0)
+
+        assert calls["n"] == 2          # failed once, succeeded on retry
+        assert out.get("PL")            # and the data actually landed
+
+
+class TestFdRequestPacing:
+    """Football-Data.org free tier is 10 req/min per key. Over quota it returns
+    429 or drops the connection, and before #159 nothing paced or retried, so a
+    single quota hit silently zeroed the soccer slate for six hours."""
+
+    def _patch(self, monkeypatch, responses):
+        """Serve `responses` in order; each is a status code or an Exception."""
+        from dispatcharr_ranked_matchups.sources import soccer
+        slept = []
+        monkeypatch.setattr(soccer, "_fd_sleep", lambda s: slept.append(s))
+
+        seq = list(responses)
+
+        class Resp:
+            def __init__(self, code, headers=None):
+                self.status_code = code
+                self.headers = headers or {}
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise soccer.requests.HTTPError(f"{self.status_code}")
+            def json(self):
+                return {"ok": True}
+
+        def fake_get(url, **kwargs):
+            item = seq.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            if isinstance(item, tuple):
+                return Resp(item[0], item[1])
+            return Resp(item)
+
+        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        return slept
+
+    def test_paces_between_consecutive_calls(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import soccer
+        slept = self._patch(monkeypatch, [200, 200])
+        soccer._fd_last_request_at = 0.0
+        soccer._fd_get("http://x", "key")
+        soccer._fd_get("http://x", "key")
+        # The second call must have waited for a slot. The first may not (the
+        # clock starts arbitrarily far in the past).
+        assert any(s > 0 for s in slept), "no pacing wait before the second call"
+
+    def test_retries_429_then_succeeds(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import soccer
+        self._patch(monkeypatch, [429, 200])
+        r = soccer._fd_get("http://x", "key")
+        assert r.status_code == 200
+
+    def test_honours_requestcounter_reset_header(self, monkeypatch):
+        # FD.org publishes seconds-until-reset; honoring it beats guessing,
+        # because a fixed sleep either wastes time or retries straight back
+        # into the same closed window.
+        from dispatcharr_ranked_matchups.sources import soccer
+        slept = self._patch(
+            monkeypatch, [(429, {"X-Requestcounter-Reset": "17"}), 200],
+        )
+        soccer._fd_get("http://x", "key")
+        assert any(16.9 < s < 18.1 for s in slept), slept
+
+    def test_gives_up_after_max_attempts_and_raises(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import soccer
+        self._patch(monkeypatch, [429] * soccer._FD_MAX_ATTEMPTS)
+        with pytest.raises(soccer.requests.HTTPError):
+            soccer._fd_get("http://x", "key")
+
+    def test_does_not_retry_a_non_429_http_error(self, monkeypatch):
+        # A 403 (bad key) or 404 fails identically next attempt; retrying just
+        # burns quota that a recoverable call could have used.
+        from dispatcharr_ranked_matchups.sources import soccer
+        self._patch(monkeypatch, [403, 200])
+        with pytest.raises(soccer.requests.HTTPError):
+            soccer._fd_get("http://x", "key")
+
+    def test_backoff_is_capped(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import soccer
+        slept = self._patch(
+            monkeypatch, [(429, {"X-Requestcounter-Reset": "99999"}), 200],
+        )
+        soccer._fd_get("http://x", "key")
+        assert max(slept) <= soccer._FD_BACKOFF_CAP_S
+
+    def test_all_fd_calls_go_through_the_paced_helper(self):
+        """Contract guard: no bare requests.get against FD_BASE may be added.
+
+        The pacing only works if every call site uses _fd_get. This is a source
+        check rather than a runtime one because the failure mode is a NEW call
+        site added later, which no existing runtime test would exercise."""
+        import os
+        import re
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "sources", "soccer.py",
+        )
+        src = open(path, encoding="utf-8").read()
+        # Strip comments so the DO-NOT note in the header isn't a false positive.
+        code = "\n".join(
+            ln for ln in src.split("\n") if not ln.lstrip().startswith("#")
+        )
+        bare = re.findall(r"requests\.get\(\s*\n?\s*f?\"\{FD_BASE\}", code)
+        assert not bare, (
+            f"{len(bare)} bare requests.get against FD_BASE; route them through "
+            "_fd_get so they are paced and retried (#159)"
+        )
 
 # ---------------------------------------------------------------------------
 # Friendlies sources (international + club) share one ESPN sweep, so they share

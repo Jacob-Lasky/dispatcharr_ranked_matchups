@@ -34,6 +34,7 @@ import os
 import sys
 import threading
 import types
+import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -229,6 +230,46 @@ def _owned_tvg_id_q(field_prefix: str = ""):
 # setting. The group is created lazily (only when a recording needs preserving)
 # and removed again once it holds no recordings.
 DEFAULT_RECORDINGS_GROUP = "Matchups Recordings"
+
+# Group name this plugin creates when the user has not set channel_profile_name.
+# A literal so the rename-cleanup allowlist and the settings default cannot drift.
+DEFAULT_GROUP_NAME = "Top Matchups"
+
+# Group names the rename-cleanup sweep is allowed to DELETE once empty, beyond
+# the currently-configured names (which the caller adds).
+#
+# This is an exact, case-insensitive allowlist and it replaced a substring test
+# (`any(s in name.lower() for s in ("matchup", "top"))`). That heuristic also
+# matched "Rooftop Cams", "Stop Motion", "Laptop", "Topical", and "Utopia": a
+# user who dragged one matchup channel into their OWN group named like that had
+# it deleted on the next apply, because the sweep migrates our channel out and
+# then sees an empty group with a matching name. Deleting a row we did not
+# create is the one thing the provenance rules here exist to prevent, and every
+# other delete in this file gates on _owned_tvg_id_q().
+#
+# DO NOT widen this back to a substring match. The deliberate cost of exact
+# matching is that a custom-to-custom rename ("Sports A" -> "Sports B") leaves
+# the old empty group behind for the user to remove; that is the safe direction,
+# and it is logged rather than silent. See #157.
+_DELETABLE_LEGACY_GROUP_NAMES: tuple = (DEFAULT_GROUP_NAME, DEFAULT_RECORDINGS_GROUP)
+
+
+def _deletable_group_names_for(group_name: str, recordings_group_name: str) -> set:
+    """Names the rename-cleanup sweep may DELETE once empty, normalized for
+    case-insensitive comparison.
+
+    The plugin's own defaults plus whatever the user has currently configured (a
+    configured name is one WE create, so reclaiming it after a rename is
+    legitimate). A real function rather than an inline set comprehension so the
+    tests exercise THIS logic instead of a copy of it: an earlier version lived
+    inline in _action_apply and the behavioral tests mirrored it, which meant
+    reverting the call site did not fail a single behavioral test.
+    """
+    return {
+        n.strip().lower()
+        for n in (*_DELETABLE_LEGACY_GROUP_NAMES, group_name, recordings_group_name)
+        if n and str(n).strip()
+    }
 
 # Stable tvg_id for the single archive channel. Lives under TVG_ID_PREFIX so it
 # reads as "ours" and is therefore excluded from the matcher (it must never be
@@ -923,17 +964,84 @@ def _build_weights(settings: Dict[str, Any]):
     )
 
 
+DEFAULT_MAX_GAMES = 25
+
+# Worst-case seconds apply's network pre-pass can spend on ONE game, as the sum
+# of the timeouts it can hit: the LLM description (llm_descriptions
+# ANTHROPIC_TIMEOUT_S = 30) plus the SportsDB thumb search (logos
+# _HTTP_TIMEOUT_S = 10) and its download (logos _DOWNLOAD_TIMEOUT_S = 15).
+#
+# A named constant because MAX_GAMES_CEILING is DERIVED from it and a test
+# asserts the derivation still holds; leaving it as a literal in a comment let
+# the two drift silently. Re-derive both if any of those three timeouts change.
+APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME = 30 + 10 + 15
+
+# Hard ceiling on max_games, derived from the scheduler-lock budget rather than
+# picked for roundness.
+#
+# max_games multiplies the per-game pre-pass above, which #136 hoisted OUT of
+# the DB transaction and therefore INTO the window where the lock is held. The
+# budget is _SCHEDULER_LOCK_TTL_SECONDS (90 min) minus
+# tasks._SUBPROCESS_TIMEOUT_SECONDS (25 min) = 65 min for the apply half; at
+# 55s/game that is ~70 games. 60 leaves margin for the DB work itself.
+#
+# Exceeding the budget is not a slow run, it is a CORRECTNESS failure: the lock
+# expires mid-apply and a second run starts against the same rows (#155). DO NOT
+# raise this without raising _SCHEDULER_LOCK_TTL_SECONDS to match;
+# TestSchedulerLockOwnership::test_ttl_exceeds_the_subprocess_timeout fails if
+# the two stop being consistent.
+MAX_GAMES_CEILING = 60
+
+
 def _resolve_max_games(settings: Dict[str, Any]) -> int:
     """Returns max_games for the curated list, honoring an active preset.
 
     Non-manual preset → preset's max_games cap wins over individual setting.
     Manual / unrecognized → read the user's max_games setting (default 25,
     matching the balanced preset).
+
+    Clamped to [1, MAX_GAMES_CEILING], and a non-numeric stored value falls back
+    to the default instead of raising. The bare `int(settings.get(...))` this
+    replaces did both wrong: an empty or non-numeric value (hand-edited settings
+    JSON, a field cleared in the UI, a value persisted by an older version) threw
+    ValueError straight out of refresh, and an unbounded large value ran apply
+    past the scheduler-lock TTL. See #158 and #155.
     """
     preset_key = str(settings.get("curation_preset", "manual") or "manual").lower()
     if preset_key != "manual" and preset_key in _CURATION_PRESETS:
-        return int(_CURATION_PRESETS[preset_key]["max_games"])
-    return int(settings.get("max_games", 25))
+        # Preset values are our own literals, so they are trusted, but still
+        # clamped so a future preset edit cannot quietly break the lock budget.
+        return _clamp_max_games(_CURATION_PRESETS[preset_key]["max_games"], source=preset_key)
+    return _clamp_max_games(settings.get("max_games", DEFAULT_MAX_GAMES), source="max_games")
+
+
+def _clamp_max_games(raw: Any, source: str) -> int:
+    """Coerce `raw` to an int in [1, MAX_GAMES_CEILING], falling back to the
+    default on anything non-numeric. Logs when it has to intervene so a value
+    that is being ignored is visible rather than silent."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "[ranked_matchups] %s=%r is not a number; using default %d",
+            source, raw, DEFAULT_MAX_GAMES,
+        )
+        return DEFAULT_MAX_GAMES
+    if value < 1:
+        logger.warning(
+            "[ranked_matchups] %s=%d is below 1; using 1 (a zero-length guide is "
+            "almost certainly not what was meant)", source, value,
+        )
+        return 1
+    if value > MAX_GAMES_CEILING:
+        logger.warning(
+            "[ranked_matchups] %s=%d exceeds the ceiling of %d; clamping. Above "
+            "this, apply's per-game network pre-pass can outlast the scheduler "
+            "lock and let a second run start against the same channels.",
+            source, value, MAX_GAMES_CEILING,
+        )
+        return MAX_GAMES_CEILING
+    return value
 
 
 # Stage strings that are NOT postseason. A game with any OTHER non-empty
@@ -2500,7 +2608,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     if not games:
         return {"status": "ok", "message": "Cache empty; run refresh first."}
 
-    group_name = settings.get("channel_profile_name", "Top Matchups")
+    group_name = settings.get("channel_profile_name", DEFAULT_GROUP_NAME)
     # Archive group for preserved DVR recordings (#146). Blank falls back to the
     # default. It MUST differ from the live group: if they collide the archive
     # channel would land in the reaped group and defeat the feature, so we
@@ -2558,6 +2666,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # it), which would otherwise make this sweep migrate it into the live group
     # and delete the archive group out from under preserved recordings.
     _protected_group_names = [group_name, recordings_group_name]
+    # Names the cleanup sweep may delete once empty. See #157.
+    _deletable_group_names = _deletable_group_names_for(
+        group_name, recordings_group_name,
+    )
     foreign_owned_groups = list(
         ChannelGroup.objects.exclude(name__in=_protected_group_names)
         .filter(_owned_tvg_id_q("channels__"))
@@ -2608,15 +2720,24 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             n = old_chans.count()
             old_chans.update(channel_group=target_group)
             migrated_from_old_group += n
-            # If the old group is now empty AND was named like a Top Matchups
-            # (heuristic: contains 'matchup' or 'top' in name), delete it too.
-            if (
-                Channel.objects.filter(channel_group=old_g).count() == 0
-                and any(s in old_g.name.lower() for s in ("matchup", "top"))
-            ):
-                old_g.delete()
-                deleted_old_groups += 1
-                logger.info("[ranked_matchups] deleted empty old group %r", old_g.name)
+            # Delete the old group only if it is now empty AND its name is one
+            # this plugin itself would have created. Exact, case-insensitive:
+            # see _DELETABLE_LEGACY_GROUP_NAMES for why this is not a substring
+            # test and must not become one again (#157).
+            if Channel.objects.filter(channel_group=old_g).count() == 0:
+                if old_g.name.strip().lower() in _deletable_group_names:
+                    old_g.delete()
+                    deleted_old_groups += 1
+                    logger.info("[ranked_matchups] deleted empty old group %r", old_g.name)
+                else:
+                    # A group WE did not name, that happened to hold our channels
+                    # (typically the user filed one there by hand). Our channels
+                    # are migrated out; the empty shell is the user's to remove.
+                    logger.info(
+                        "[ranked_matchups] left empty group %r in place: not a name "
+                        "this plugin creates, so it is not ours to delete",
+                        old_g.name,
+                    )
 
     # Same for old EPGSources we own
     deleted_old_sources = 0
@@ -3394,6 +3515,37 @@ def _action_refresh_async(settings: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _action_apply_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """HTTP-facing apply: takes the cross-worker lock, then applies.
+
+    Apply is the DESTRUCTIVE half of the plugin (it deletes Channels and
+    ProgramData and renumbers the guide), and unlike refresh/auto_pipeline it
+    used to run with no mutex at all. A user clicking Apply while the scheduler
+    was mid-auto_pipeline therefore raced it directly, with no TTL overrun
+    needed: two runs deleting and recreating the same channels can drop rows the
+    other just wrote. See #155.
+
+    DO NOT point the manifest "apply" action back at _action_apply. The bare
+    function stays lock-free ON PURPOSE so _action_auto_pipeline_sync can call it
+    while the parent process already holds the lock; that call runs in the forked
+    subprocess, where the token global is empty, so acquiring again would fail and
+    silently skip the apply half of every scheduled run.
+    """
+    token = _try_acquire_scheduler_lock(destructive=True)
+    if not token:
+        return {
+            "status": "busy",
+            "message": (
+                "Another refresh or apply is already running (or Redis is "
+                "unreachable). Nothing was changed. Try again shortly."
+            ),
+        }
+    try:
+        return _action_apply(settings)
+    finally:
+        _release_scheduler_lock(token)
+
+
 # ---------- preview / test naming convention ----------
 
 def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -3984,24 +4136,113 @@ def _scheduler_loop(plugin_ref, stop_event):
 
 _SCHEDULER_LOCK_KEY = f"plugins:{PLUGIN_KEY}:scheduler:lock"
 
+# Lock TTL. Must comfortably exceed the LONGEST a single run can legitimately
+# hold the lock, because on expiry another worker starts a second, concurrent
+# run against the same channels and EPG rows.
+#
+# The budget: auto_pipeline is refresh (out of process, capped at
+# tasks._SUBPROCESS_TIMEOUT_SECONDS = 25 min) FOLLOWED BY an inline apply. Apply
+# resolves every per-game LLM description and SportsDB logo in a pre-pass before
+# opening its transaction (#136), and those are per-game network calls:
+# ANTHROPIC_TIMEOUT_S=30 plus SportsDB 10s search + 15s download, times
+# max_games. At the default max_games of 25 the LLM pre-pass alone is up to
+# 12.5 min, so the old 30-minute TTL left only 5 minutes of headroom over the
+# subprocess cap and could be exceeded at DEFAULT settings. 90 minutes covers
+# 25 min refresh + a fully-timing-out apply pre-pass with real margin.
+#
+# DO NOT lower this below _SUBPROCESS_TIMEOUT_SECONDS plus the worst-case apply
+# pre-pass; see _resolve_max_games, which clamps max_games against this budget.
+_SCHEDULER_LOCK_TTL_SECONDS = 90 * 60
 
-def _try_acquire_scheduler_lock() -> bool:
-    """Cross-worker mutex via Redis. ttl 30 min so a crashed run releases."""
+# Sentinel returned by _try_acquire_scheduler_lock on the fail-open path: the
+# caller may proceed but holds nothing, so releasing must be a no-op.
+_LOCK_NOT_HELD = "__not_held__"
+
+# Atomic compare-and-delete. Plain get-then-delete is racy: the lock can expire
+# and be re-acquired between the two calls, which is the exact bug this replaces.
+_RELEASE_LOCK_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+
+def _try_acquire_scheduler_lock(destructive: bool = True) -> Optional[str]:
+    """Cross-worker mutex via Redis. Returns the caller's TOKEN on success (a
+    truthy string), or None if the lock is held elsewhere / we refuse to run.
+
+    Pass the returned token to _release_scheduler_lock. DO NOT stash it in a
+    module global: the scheduler daemon thread and an HTTP request greenlet can
+    both be in this function in the SAME worker process, so a shared global lets
+    one clobber the other's token and turn its release into a silent no-op,
+    leaking the lock until the TTL expires.
+
+    The VALUE stored in Redis is that unique token so release can prove
+    ownership. DO NOT go back to a constant: with one, a run that overruns the
+    TTL deletes the lock belonging to the run that replaced it, and a third run
+    then starts while the second is still writing.
+
+    `destructive` selects the behavior when REDIS ITSELF is unreachable, which
+    is a real judgement call rather than an oversight:
+      - destructive=False (refresh): fail OPEN, returning _LOCK_NOT_HELD.
+        Refresh only reads upstream APIs and rewrites cache.json, so a duplicate
+        run wastes API quota but cannot corrupt anything. Silently freezing all
+        refreshes because Redis blipped is the worse outcome.
+      - destructive=True (apply / auto_pipeline, the default): fail CLOSED,
+        returning None. These delete Channels and ProgramData and renumber the
+        guide. Two concurrent runs can drop channels the other just created. A
+        skipped cycle is recoverable; an interleaved apply is not.
+    """
+    token = uuid.uuid4().hex
     try:
         from core.utils import RedisClient
         r = RedisClient.get_client()
-        return bool(r.set(_SCHEDULER_LOCK_KEY, "1", nx=True, ex=1800))
+        acquired = bool(r.set(
+            _SCHEDULER_LOCK_KEY, token, nx=True, ex=_SCHEDULER_LOCK_TTL_SECONDS,
+        ))
     except Exception as e:
-        logger.warning("[ranked_matchups] redis lock failed (%s); proceeding without lock", e)
-        return True
+        if destructive:
+            logger.error(
+                "[ranked_matchups] redis lock unavailable (%s); REFUSING to run a "
+                "destructive action unserialized (two concurrent applies can drop "
+                "channels). Retry once Redis is reachable.", e,
+            )
+            return None
+        logger.warning(
+            "[ranked_matchups] redis lock unavailable (%s); proceeding without it "
+            "(non-destructive action, worst case is duplicate upstream fetches)", e,
+        )
+        return _LOCK_NOT_HELD
+    return token if acquired else None
 
 
-def _release_scheduler_lock() -> None:
+def _release_scheduler_lock(token: Optional[str]) -> None:
+    """Release ONLY if `token` still owns the lock, via atomic compare-and-delete.
+
+    A run that overran the TTL no longer owns the lock: the key it sees belongs
+    to whoever acquired next. Deleting unconditionally there is what let a third
+    run start while the second was still applying. The token check makes an
+    overrun release a no-op instead.
+
+    `token` is whatever _try_acquire_scheduler_lock returned. None or
+    _LOCK_NOT_HELD means nothing was acquired, so there is nothing to release.
+    """
+    if not token or token == _LOCK_NOT_HELD:
+        return
     try:
         from core.utils import RedisClient
-        RedisClient.get_client().delete(_SCHEDULER_LOCK_KEY)
-    except Exception:
-        pass
+        r = RedisClient.get_client()
+        released = r.eval(_RELEASE_LOCK_LUA, 1, _SCHEDULER_LOCK_KEY, token)
+        if not released:
+            logger.warning(
+                "[ranked_matchups] scheduler lock was NOT ours at release: the run "
+                "outlived the %ds TTL and another run may have started alongside it. "
+                "If this recurs, the TTL or max_games needs revisiting.",
+                _SCHEDULER_LOCK_TTL_SECONDS,
+            )
+    except Exception as e:
+        logger.warning("[ranked_matchups] scheduler lock release failed: %s", e)
 
 
 # ---------- Plugin entry ----------
@@ -4015,7 +4256,8 @@ def _release_scheduler_lock() -> None:
 # (the HTTP-facing wrappers); see #84 and the run() docstring.
 _ACTION_HANDLERS = {
     "refresh": _action_refresh_async,
-    "apply": _action_apply,
+    # Locked wrapper, NOT the bare _action_apply: see _action_apply_locked.
+    "apply": _action_apply_locked,
     "auto_pipeline": _action_auto_pipeline_async,
     "show_status": _action_show_status,
     "preview_names": _action_preview_names,
@@ -4033,7 +4275,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.13.0"
+    version = "1.14.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
