@@ -1878,7 +1878,12 @@ def _build_epg_lookup():
     against the old uncapped path was ch_id=111919 'EPL 07ⓧ: ... vs Brentford
     FC' getting omitted from the candidate list for the live game window).
     """
-    from .matcher import ChannelCandidate, _team_keywords, both_teams_in_one_segment
+    from .matcher import (
+        ChannelCandidate,
+        _strong_team_keywords,
+        _team_keywords,
+        both_teams_in_one_segment,
+    )
     from apps.channels.models import Channel, Stream
     from apps.epg.models import ProgramData
     from django.db.models import Q
@@ -1896,14 +1901,25 @@ def _build_epg_lookup():
         # title pre-filter and the Path B channel-name query below, mirroring
         # the matcher's single-sided tiers. Two-team games keep both sides.
         field = is_field_event(game.away, getattr(game, "extra", None))
+        # Two keyword tiers (#162). The both-teams gates below (Path B channel
+        # name, Path C stream name) may use WEAK place-name keywords, because
+        # requiring both sides in one segment is specific enough that a
+        # city-only feed name like 'Cincinnati vs. San Jose' is a correct match.
+        # Path A's title query admits on a SINGLE keyword, so it must use strong
+        # keywords only, or the bare metro pulls every same-city franchise into
+        # the pool. Field events are single-sided, so everything they do is a
+        # single-keyword admission and they use strong keywords throughout.
         home_kws = _team_keywords(game.home)
         away_kws = [] if field else _team_keywords(game.away)
+        strong_home = _strong_team_keywords(game.home)
+        strong_away = [] if field else _strong_team_keywords(game.away)
         if field:
-            all_kws = home_kws
+            home_kws = strong_home
+            all_kws = strong_home
             if not home_kws:
                 return []
         else:
-            all_kws = home_kws + away_kws
+            all_kws = strong_home + strong_away
             if not (home_kws and away_kws):
                 return []
 
@@ -2869,6 +2885,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     matchup_logos_used = 0
     matchup_logos_badge = 0
     matchup_logos_fallback = 0
+    # Streams dropped by the different-matchup gate (#162). Counted so the drop
+    # is never silent: a wrong gate that starts eating real feeds shows up here
+    # in the apply summary rather than as quietly missing streams.
+    foreign_streams_dropped = 0
     if matchup_logos_enabled and not dry_run:
         sportsdb_api_key = (
             _resolve_key(settings, "sportsdb_api_key", SPORTSDB_KEY_PATH)
@@ -2982,6 +3002,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # placeholder / bad-start-time semantics of the write loop exactly (same
     # marker key, same seen_markers set, same counters) so the two stay in lockstep.
     from types import SimpleNamespace
+    from .matcher import _strong_team_keywords, select_streams_for_game
     from .scoring import pick_tagline
     prep_by_marker: Dict[str, Any] = {}
     for g in games:
@@ -3074,10 +3095,31 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 llm_used += 1
 
         # Rank the streams from every matched source channel (DB reads only).
+        #
+        # A whole-channel match donates every stream the channel carries, so a
+        # provider that bundles dedicated per-matchup feeds onto one channel
+        # turns one match into a pile of other games' broadcasts (#162). Gate
+        # each channel's streams on naming THIS game, relative to that channel
+        # (see select_streams_for_game for why relative, and why the gate is not
+        # inverted). Field events are single-sided and their feed naming is
+        # already delicate (#135), so they keep every stream.
+        field_event = is_field_event(g.get("away"), g.get("extra"))
+        home_kws = [] if field_event else _strong_team_keywords(g.get("home") or "")
+        away_kws = [] if field_event else _strong_team_keywords(g.get("away") or "")
         stream_pool = []  # list of (sort_key, src_order, stream_id)
         seen_stream_ids = set()
         for src_order, src in enumerate(sources):
-            for s in src.streams.all().only("id", "name", "stream_stats"):
+            chan_streams = list(src.streams.all().only("id", "name", "stream_stats"))
+            if field_event:
+                keep_flags = [True] * len(chan_streams)
+            else:
+                keep_flags = select_streams_for_game(
+                    [s.name or "" for s in chan_streams], home_kws, away_kws,
+                )
+            for s, keep in zip(chan_streams, keep_flags):
+                if not keep:
+                    foreign_streams_dropped += 1
+                    continue
                 if s.id in seen_stream_ids:
                     continue
                 seen_stream_ids.add(s.id)
@@ -3431,6 +3473,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             f"{matchup_logos_fallback} fell back to source-channel logo, "
             f"{stale_logo_files_swept} stale file(s) swept."
         )
+    # Never let the different-matchup gate (#162) drop streams silently: a gate
+    # that starts eating real feeds has to be visible somewhere. Logged always,
+    # and added to the toast only when it fired, since the toast clips.
+    foreign_msg = ""
+    if foreign_streams_dropped:
+        logger.info(
+            "[ranked_matchups] apply: dropped %d stream(s) naming a different "
+            "matchup from whole-channel matches",
+            foreign_streams_dropped,
+        )
+        foreign_msg = f" Other-matchup streams skipped: {foreign_streams_dropped}."
     rec_msg = ""
     if rehomed_recordings or kept_for_recording_n:
         rec_msg = (
@@ -3442,7 +3495,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         f"(placeholders={placeholder_channels_created} included), "
         f"stale_deleted={deleted_stale}, "
         f"orphan_epg_deleted={orphan_epg_deleted if 'orphan_epg_deleted' in locals() else 0}, "
-        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{rec_msg}{llm_msg}{logo_msg} "
+        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{rec_msg}{llm_msg}{logo_msg}{foreign_msg} "
         f"WHY descriptions written to EPG source."
     )
     return {"status": "ok", "message": msg}
@@ -3783,7 +3836,11 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     """
     del settings  # interface-required (Plugin.run dispatch), not read here
     from types import SimpleNamespace
-    from .matcher import _team_keywords, _regex_filter_channel_name
+    from .matcher import (
+        _regex_filter_channel_name,
+        _strong_team_keywords,
+        _team_keywords,
+    )
 
     cache = _read_cache()
     games = cache.get("games", [])
@@ -3856,7 +3913,11 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
         # away side to search for, so away_kws is empty and the both-teams
         # bookkeeping below collapses to a single "names the event" signal.
         field = is_field_event(away, target.get("extra"))
-        home_kws = _team_keywords(home)
+        # Mirror the matcher's keyword tier exactly (#162), or the explanation
+        # drifts from the behaviour it is explaining: a field event is gated
+        # single-sided on STRONG keywords only, while a two-team game may use the
+        # weak place-name keywords because both sides have to hit.
+        home_kws = _strong_team_keywords(home) if field else _team_keywords(home)
         away_kws = [] if field else _team_keywords(away)
         start_dt = parse_iso_utc(target.get("start_time_utc"))
         head = f"Closest of {len(unmatched)} unmatched: {_label(target)}"
@@ -4275,7 +4336,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.14.0"
+    version = "1.14.1"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

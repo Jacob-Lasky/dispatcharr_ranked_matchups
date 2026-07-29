@@ -5,6 +5,50 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.14.1] - 2026-07-29
+
+Matching precision. Two defects that composed to attach a different sport's
+dead feeds to a game channel (#162).
+
+### Fixed
+- **A bare city can no longer admit a candidate on its own.** `New York Yankees`
+  expanded to the keywords `New York Yankees`, `Yankees`, **`New York`**, `NYY`,
+  and the EPG title pre-filter admits a candidate on any ONE keyword, so every
+  same-city franchise entered the pool: an MLB Yankees game came back carrying
+  the NFL Giants and Jets, the NBA Knicks, the WNBA Liberty and the Mets. The
+  sport prefix never guarded against this (it only sizes the match time window).
+
+  Keywords are now split into **strong** (identify the team alone) and **weak**
+  (bare place-name relaxations). Single-keyword admissions use strong keywords
+  only; the both-teams gates keep using everything, because requiring both sides
+  in one segment is specific enough that a city-only feed name is a correct
+  match. That distinction matters in both directions: dropping the city
+  everywhere also broke a real Tier-1 match, since providers do name feeds
+  `(Apple) (MLS) 006 | Cincinnati vs. San Jose`. Two related keyword leaks went
+  with it: `New York City FC` re-emitted the bare `New York` via its
+  suffix-stripped form, and `Red Bull New York` reduced to `York`, which
+  substring-matches every New York franchise (it now yields the actually
+  discriminating `Red Bull`). `North Carolina State` still keeps `North Carolina`
+  and `UFC 329: McGregor vs. Holloway 2` still keeps `UFC 329:`, because for
+  those the prefix is the only relaxed form left.
+
+  Verified by replaying the real slate of a 6594-channel instance against the
+  pre-fix baseline: candidate pool 28 to 17 for the affected game with zero
+  cross-sport entries left, the correctly matched game keeping the identical 14
+  channels and 22 streams, and exactly one behaviour change across the whole
+  slate, a UFC event that had matched a *different* event's preview show
+  (`UFC Fight Night Preview Show: Gamrot vs. Salkilld`) via the `UFC Fight`
+  prefix and is now correctly unmatched.
+- **A whole-channel match no longer donates streams for other games.** Apply
+  attached every stream on a matched channel with no name check, so one bad
+  match delivered every feed bundled onto that channel rather than one wrong
+  feed. Streams are now gated per channel: only when some stream on the channel
+  names one of this game's sides are the streams naming neither side dropped, so
+  a generic broadcaster channel (`MLB Network HD` / `FHD`) still contributes all
+  of them. Dropped counts are logged and reported in the apply summary rather
+  than being silent. Field events keep every stream, since they are single-sided
+  and their feed naming is tracked separately (#135).
+
 ## [1.14.0] - 2026-07-26
 
 Security and correctness pass over the whole plugin. No new features.

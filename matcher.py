@@ -76,8 +76,15 @@ _TEAM_ALIASES = _load_team_aliases()
 # Last-word tokens we never use as a standalone keyword fallback. 'state' /
 # 'college' / 'university' are college-football generic; the soccer
 # second-words ('united', 'city', etc.) collide across many EPL/EFL clubs.
+# 'york' is here for the same reason as the bare-city rule below (#162): MLS
+# writes one club as 'Red Bull New York', whose last word 'York' is long enough
+# to survive _is_weak_last_word yet substring-matches EVERY New York franchise
+# in the guide. Suppressing it promotes the genuinely discriminating 'Red Bull'
+# prefix instead. Extended here rather than in _util's
+# GENERIC_TEAM_SECOND_WORDS because that tuple is the shared soccer
+# second-word list, and this is a matcher-only keyword concern.
 _GENERIC_LAST_WORDS = frozenset(
-    {"state", "college", "university"} | set(GENERIC_TEAM_SECOND_WORDS)
+    {"state", "college", "university", "york"} | set(GENERIC_TEAM_SECOND_WORDS)
 )
 
 
@@ -148,10 +155,86 @@ class MatchResult:
             self.stream_ids = []
 
 
-def _team_keywords(team_name: str) -> List[str]:
-    """Build keyword variants for a team name to use in EPG title regex pre-filter.
+def _team_keywords_split(team_name: str) -> Tuple[List[str], List[str]]:
+    """Split a team's keyword variants into (strong, weak).
 
-    Returns ordered list of progressively-relaxed keywords. Always deduped.
+    STRONG keywords identify the team on their own, so they are safe anywhere,
+    including a single-keyword admission (Path A's programme-title pre-filter, a
+    field event's single-sided gate, the whole-channel stream gate).
+
+    WEAK keywords are bare place-name relaxations: 'New York' from 'New York
+    Yankees', 'San Jose' from 'San Jose Earthquakes'. They are ONLY trustworthy
+    when the OTHER side of the fixture also hits the same text, because a metro
+    is shared by every franchise in it. Admitting on a weak keyword alone is
+    what put the NFL Giants and Jets in an MLB Yankees game's candidate pool
+    (#162). Requiring both sides makes them safe AND necessary: providers really
+    do name feeds by city alone ('(Apple) (MLS) 006 | Cincinnati vs. San Jose'),
+    and that is a correct Tier-1 match that only the weak keyword can find. DO
+    NOT collapse the two lists back together at a single-keyword call site; that
+    is the whole distinction.
+    """
+    name = team_name.strip()
+    strong = [name]
+    weak: List[str] = []
+    parts = name.split()
+
+    # Strip trailing club tag for soccer-style names so 'Brentford FC' also
+    # matches 'Brentford' in a channel/program title.
+    stripped: Optional[str] = None
+    if len(parts) >= 2 and parts[-1].lower() in TEAM_SUFFIX_TOKENS:
+        stripped = " ".join(parts[:-1])
+        strong.append(stripped)
+        # Re-derive parts so subsequent rules see the canonical form.
+        parts = stripped.split()
+
+    emitted_last_word = (
+        len(parts) > 1
+        and parts[-1].lower() not in _GENERIC_LAST_WORDS
+        and not _is_weak_last_word(parts[-1])
+    )
+    if emitted_last_word:
+        strong.append(parts[-1])
+
+    if len(parts) >= 2:
+        # First two words (for 2-word names this duplicates the full name and
+        # gets deduped). It is STRONG only as a last resort, when no other
+        # relaxed form exists: 'North Carolina State' has no club tag to strip
+        # and loses 'State' as a generic, so 'North Carolina' is all that is
+        # left, and 'UFC 329: McGregor vs. Holloway 2' likewise needs
+        # 'UFC 329:'. Otherwise a stronger relaxation already exists (the
+        # nickname, or the suffix-stripped name) and this prefix is the bare
+        # metro, so it is WEAK.
+        prefix = " ".join(parts[:2])
+        if not emitted_last_word and stripped is None:
+            strong.append(prefix)
+        else:
+            weak.append(prefix)
+
+    # Broadcaster aliases (#4). Look up both the original name AND the
+    # FC-stripped form because the JSON has "Manchester United" but FD.org
+    # returns "Manchester United FC". Aliases are curated per team, so they are
+    # strong by construction.
+    for lookup in (name, stripped):
+        if lookup and lookup in _TEAM_ALIASES:
+            strong.extend(_TEAM_ALIASES[lookup])
+
+    strong = list(dict.fromkeys(strong))
+    weak = [k for k in dict.fromkeys(weak) if k not in strong]
+    return strong, weak
+
+
+def _strong_team_keywords(team_name: str) -> List[str]:
+    """Keywords that may admit a candidate on their OWN. See _team_keywords_split."""
+    return _team_keywords_split(team_name)[0]
+
+
+def _team_keywords(team_name: str) -> List[str]:
+    """Every keyword variant, strong and weak. ONLY for both-teams gates.
+
+    A caller that admits a candidate on a single keyword hit must use
+    _strong_team_keywords instead, or a bare metro name will drag in every
+    franchise in town (#162).
+
     Drops the last-word fallback for generic-suffix names so 'Manchester
     United' never reduces to just 'United' (which would false-match
     'Brentford v West Ham United'), and for weak tokens (a bare number or a
@@ -164,38 +247,8 @@ def _team_keywords(team_name: str) -> List[str]:
     AND its trailing-suffix-stripped form to catch FD.org names that
     arrive with "FC" / "AFC" appended.
     """
-    name = team_name.strip()
-    keywords = [name]
-    parts = name.split()
-
-    # Strip trailing club tag for soccer-style names so 'Brentford FC' also
-    # matches 'Brentford' in a channel/program title.
-    stripped: Optional[str] = None
-    if len(parts) >= 2 and parts[-1].lower() in TEAM_SUFFIX_TOKENS:
-        stripped = " ".join(parts[:-1])
-        keywords.append(stripped)
-        # Re-derive parts so subsequent rules see the canonical form.
-        parts = stripped.split()
-
-    if (
-        len(parts) > 1
-        and parts[-1].lower() not in _GENERIC_LAST_WORDS
-        and not _is_weak_last_word(parts[-1])
-    ):
-        keywords.append(parts[-1])
-    if len(parts) >= 2:
-        # First two words (only meaningful for 3+ word names; for 2-word names
-        # this duplicates the full name and gets deduped below).
-        keywords.append(" ".join(parts[:2]))
-
-    # Broadcaster aliases (#4). Look up both the original name AND the
-    # FC-stripped form because the JSON has "Manchester United" but FD.org
-    # returns "Manchester United FC".
-    for lookup in (name, stripped):
-        if lookup and lookup in _TEAM_ALIASES:
-            keywords.extend(_TEAM_ALIASES[lookup])
-
-    return list(dict.fromkeys(keywords))
+    strong, weak = _team_keywords_split(team_name)
+    return strong + weak
 
 
 def _kw_hit(text: str, keywords: List[str]) -> bool:
@@ -238,6 +291,50 @@ def both_teams_in_one_segment(
     return False
 
 
+def select_streams_for_game(
+    names: List[str], home_kws: List[str], away_kws: List[str]
+) -> List[bool]:
+    """Which of ONE channel's stream names belong to this game. Aligned mask.
+
+    A matched channel donates every stream it carries. On a provider that
+    bundles dedicated per-matchup feeds onto one channel, that turns a single
+    channel match into a pile of unrelated feeds: an MLB Yankees game came back
+    carrying dedicated NFL Giants and Jets feeds, dead on a baseball night
+    (#162).
+
+    The gate is RELATIVE to the channel, which is what makes it safe. Only when
+    at least one stream on this channel names one of our sides do we take the
+    channel as evidence that this provider puts team names in stream names, and
+    drop the streams that name neither side. A generic broadcaster channel whose
+    streams are 'MLB Network HD' / 'MLB Network FHD' names no team anywhere, so
+    nothing is dropped and its behaviour is unchanged.
+
+    DO NOT invert this into "attach only streams that name our teams". The
+    asymmetry is the whole point: naming ANOTHER team is evidence against a
+    stream, but naming NO team is not, and most legitimate broadcaster feeds
+    name no team at all. Inverting it would strip the common case bare.
+
+    Accepts an empty `away_kws` for field events (#127), where there is no
+    opponent to name; the caller decides whether the single-sided case is worth
+    gating at all.
+
+    An unnamed stream is kept unconditionally: a blank name is not evidence that
+    the stream belongs to someone else's game.
+
+    Known cost: an alternate feed for the RIGHT game that happens to name
+    nobody ('Feed 2' next to 'Yankees vs White Sox HD') is dropped along with
+    the wrong-game feeds. The primary feed always survives, so this trades a
+    backup stream for not attaching a different sport's broadcast.
+    """
+    hits = [
+        _kw_hit(n, home_kws) or (bool(away_kws) and _kw_hit(n, away_kws))
+        for n in names
+    ]
+    if not any(hits):
+        return [True] * len(names)
+    return [hit or not (name or "").strip() for hit, name in zip(hits, names)]
+
+
 def _regex_filter(
     candidates: List[ChannelCandidate],
     team_a: str,
@@ -249,9 +346,13 @@ def _regex_filter(
     no opponent, so we match on the event name (`team_a`) alone. The both-teams
     gate would otherwise be unsatisfiable against the "Field" away sentinel.
     """
-    a_kws = _team_keywords(team_a)
     if team_b is None:
+        # Single-sided: one keyword admits, so weak place-name keywords are
+        # unsafe here (#162).
+        a_kws = _strong_team_keywords(team_a)
         return [c for c in candidates if _kw_hit(c.program_title, a_kws)]
+    # Both-teams gate: weak keywords are safe and needed (city-only feed names).
+    a_kws = _team_keywords(team_a)
     b_kws = _team_keywords(team_b)
     return [c for c in candidates
             if _kw_hit(c.program_title, a_kws) and _kw_hit(c.program_title, b_kws)]
@@ -278,9 +379,11 @@ def _regex_filter_channel_name(
     `team_b=None` is the single-sided mode for field events (#127): the event
     name (`team_a`) alone identifies the broadcast, since there is no opponent.
     """
-    a_kws = _team_keywords(team_a)
     if team_b is None:
+        # Single-sided: see the matching note in _regex_filter.
+        a_kws = _strong_team_keywords(team_a)
         return [c for c in candidates if _kw_hit(c.channel_name, a_kws)]
+    a_kws = _team_keywords(team_a)
     b_kws = _team_keywords(team_b)
     return [c for c in candidates
             if _kw_hit(c.channel_name, a_kws) and _kw_hit(c.channel_name, b_kws)]
