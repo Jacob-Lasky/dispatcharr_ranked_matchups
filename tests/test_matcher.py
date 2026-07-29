@@ -11,8 +11,10 @@ from dispatcharr_ranked_matchups.matcher import (
     _regex_filter,
     _regex_filter_channel_name,
     _strip_preview_titles,
+    _strong_team_keywords,
     _team_keywords,
     match_games_to_channels,
+    select_streams_for_game,
 )
 
 
@@ -120,6 +122,170 @@ class TestTeamKeywords:
         # Existing college-football skips (state/college/university) preserved.
         assert "State" not in _team_keywords("Penn State")
         assert "College" not in _team_keywords("Boston College")
+
+    @pytest.mark.parametrize(
+        "team,city,nickname",
+        [
+            ("New York Yankees", "New York", "Yankees"),
+            ("New York Giants", "New York", "Giants"),
+            ("Los Angeles Lakers", "Los Angeles", "Lakers"),
+            ("Tampa Bay Buccaneers", "Tampa Bay", "Buccaneers"),
+            ("Kansas City Chiefs", "Kansas City", "Chiefs"),
+            ("San Francisco Giants", "San Francisco", "Giants"),
+            ("New England Patriots", "New England", "Patriots"),
+        ],
+    )
+    def test_bare_city_not_a_keyword_when_nickname_survives(self, team, city, nickname):
+        # Regression (#162): the first-two-words rule emitted the bare CITY for
+        # every multi-word-city franchise, and Path A admits a candidate on any
+        # ONE keyword, so 'New York' dragged the NFL Giants and Jets onto an MLB
+        # Yankees game. The nickname is the discriminator; the city is a
+        # wildcard across every franchise in town.
+        # The city must not be able to admit a candidate on its OWN...
+        assert city not in _strong_team_keywords(team)
+        # ...but it stays available to the both-teams gates, where requiring the
+        # other side too makes a city-only feed name a correct match.
+        assert city in _team_keywords(team)
+        # The real discriminators survive, so recall is unchanged.
+        kws = _team_keywords(team)
+        assert team in kws
+        assert nickname in kws
+
+    def test_geographic_prefix_kept_when_last_word_is_generic(self):
+        # The mirror of the rule above, and why it is conditional rather than a
+        # blanket drop: 'State' is suppressed as a generic, so 'North Carolina'
+        # is the ONLY relaxed form left and must stay.
+        kws = _team_keywords("North Carolina State")
+        assert "North Carolina" in kws
+        assert "State" not in kws
+        # And it must be STRONG: with nothing else left, it has to be able to
+        # admit a candidate on its own.
+        assert "North Carolina" in _strong_team_keywords("North Carolina State")
+
+    def test_bare_city_not_reintroduced_via_suffix_strip(self):
+        # Second shape of the same #162 defect. 'New York City FC' strips its
+        # club tag to 'New York City', whose 'City' is dropped as a generic,
+        # which used to let the first-two-words rule re-emit the bare 'New York'
+        # for a club sharing the metro with the Yankees, Mets, Giants and Jets.
+        # The stripped form is already a relaxed keyword, so the prefix is not
+        # needed.
+        assert "New York" not in _strong_team_keywords("New York City FC")
+        kws = _team_keywords("New York City FC")
+        assert "New York City" in kws
+        assert "New York City FC" in kws
+
+    def test_place_last_word_suppressed_promotes_real_discriminator(self):
+        # MLS writes one club as 'Red Bull New York'. 'York' is 4 chars so it
+        # survived the weak-token guard, yet it substring-matches every New York
+        # franchise in the guide (#162). Suppressing it promotes 'Red Bull',
+        # which actually identifies the club.
+        kws = _team_keywords("Red Bull New York")
+        assert "York" not in kws
+        assert "Red Bull" in kws
+        assert "Red Bull New York" in kws
+
+    def test_club_short_form_survives_prefix_drop(self):
+        # The prefix rule must not cost a real short name: 'West Ham' comes from
+        # the suffix-stripped form and the alias table, not the prefix rule.
+        kws = _team_keywords("West Ham United FC")
+        assert "West Ham" in kws
+        assert "West Ham United" in kws
+
+    def test_event_prefix_kept_when_last_word_is_weak(self):
+        # Same conditionality for field events: the trailing rematch number is
+        # dropped as weak, so the 'UFC 329:' prefix is the only relaxed form.
+        kws = _team_keywords("UFC 329: McGregor vs. Holloway 2")
+        assert "UFC 329:" in kws
+        assert "2" not in kws
+
+
+class TestWeakKeywordsStillMatchBothTeamsGates:
+    """The recall half of #162: weak keywords must stay usable when BOTH sides hit.
+
+    Caught by replaying the real slate: an earlier cut of this fix dropped the
+    bare city everywhere, which lost a CORRECT Tier-1 match because providers do
+    name feeds by city alone. Requiring both sides is what makes that safe.
+    """
+
+    def _chan(self, name):
+        return ChannelCandidate(
+            channel_id=1, channel_name=name, program_title="",
+            program_start=datetime(2026, 8, 1, 19, 25, tzinfo=timezone.utc),
+            program_end=datetime(2026, 8, 1, 21, 25, tzinfo=timezone.utc),
+        )
+
+    def test_city_only_feed_name_still_matches_both_teams_gate(self):
+        # Real feed + real fixture from a live instance: the away side is only
+        # ever written 'San Jose' here, so the weak keyword is the only way in.
+        cands = [self._chan("(Apple) (MLS) 006 |  Cincinnati vs. San Jose  (2026-08-01 19:25:00)")]
+        got = _regex_filter_channel_name(cands, "FC Cincinnati", "San Jose Earthquakes")
+        assert len(got) == 1
+
+    def test_city_only_name_does_not_match_one_sided(self):
+        # The same weak keyword must NOT be enough on its own: a Yankees game
+        # cannot claim a channel that merely says 'New York'.
+        cands = [self._chan("New York Giants")]
+        assert _regex_filter_channel_name(cands, "New York Yankees", "Chicago White Sox") == []
+        # Single-sided (field-event) mode is a single-keyword admission, so it is
+        # gated on strong keywords and must also refuse.
+        assert _regex_filter_channel_name(cands, "New York Yankees", None) == []
+
+
+class TestSelectStreamsForGame:
+    """The whole-channel stream gate (#162)."""
+
+    # STRONG keywords, mirroring the apply call site: this gate keeps a stream on
+    # a SINGLE side's hit, so a weak place-name keyword here would let 'New York
+    # Giants' pass as a Yankees feed, which is the bug (#162). If this fixture is
+    # ever relaxed to _team_keywords, the gate stops working in production while
+    # the tests still pass.
+    YANKEES = _strong_team_keywords("New York Yankees")
+    WHITE_SOX = _strong_team_keywords("Chicago White Sox")
+
+    def _mask(self, names):
+        return select_streams_for_game(names, self.YANKEES, self.WHITE_SOX)
+
+    def test_generic_broadcaster_streams_all_kept(self):
+        # THE non-regression that matters: a broadcaster channel names no team
+        # on any stream, so naming no team cannot be evidence against a stream.
+        # Inverting the gate would strip this channel bare.
+        names = ["MLB Network HD", "MLB Network FHD", "MLB Network SD"]
+        assert self._mask(names) == [True, True, True]
+
+    def test_other_matchup_streams_dropped_when_ours_present(self):
+        # The reported bug: dedicated NFL feeds riding along on a channel that
+        # also carries this game's feed.
+        names = [
+            "MLB 23 | New York Yankees at Chicago White Sox AWAY",
+            "NFL 05 | New York Giants at Chicago Bears",
+            "NFL 06 | New York Jets at New England Patriots",
+        ]
+        assert self._mask(names) == [True, False, False]
+
+    def test_single_matching_stream_kept(self):
+        names = ["ESPN UNLTD 101: Baseball: Yankees vs. White Sox"]
+        assert self._mask(names) == [True]
+
+    def test_one_side_named_is_enough(self):
+        # A feed naming only one side (a team-branded home broadcast of this
+        # game) is still this game's feed.
+        names = ["Yankees Broadcast", "NBA 07 | Lakers at Celtics"]
+        assert self._mask(names) == [True, False]
+
+    def test_unnamed_stream_kept_alongside_named_ones(self):
+        # A blank name is not evidence that a stream belongs to another game.
+        names = ["Yankees vs White Sox HD", "", "   "]
+        assert self._mask(names) == [True, True, True]
+
+    def test_empty_channel_returns_empty_mask(self):
+        assert self._mask([]) == []
+
+    def test_field_event_single_sided_gate(self):
+        # away_kws empty (the "Field" sentinel has no keywords): the gate keys on
+        # the event name alone and must not treat the empty away side as a hit.
+        event = _team_keywords("UFC 329: McGregor vs. Holloway 2")
+        names = ["UFC 329: McGregor vs. Holloway 2 Main Card", "NBA 07 | Lakers at Celtics"]
+        assert select_streams_for_game(names, event, []) == [True, False]
 
 
 class TestRegexFilter:

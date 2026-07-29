@@ -56,3 +56,26 @@ def test_apply_reads_stream_ids(plugin_src):
     body = ast.get_source_segment(plugin_src, fn)
     assert 'get("stream_ids")' in body, "_action_apply must read g.get('stream_ids')"
     assert "explicit_stream_ids" in body, "apply must attach the explicit streams"
+
+
+def test_apply_gates_whole_channel_streams_on_this_game(plugin_src):
+    # A whole-channel match donates every stream the channel carries, so without
+    # this gate one match drags in other games' broadcasts (#162: dedicated NFL
+    # feeds attached to an MLB game). The gate lives in matcher, but the WIRING
+    # is here in apply and is what a refactor would silently drop: the unit tests
+    # for select_streams_for_game would all still pass with apply not calling it.
+    fn = _func(plugin_src, "_action_apply")
+    body = ast.get_source_segment(plugin_src, fn)
+    assert "select_streams_for_game" in body, (
+        "_action_apply must gate whole-channel streams through "
+        "matcher.select_streams_for_game"
+    )
+    assert "foreign_streams_dropped" in body, (
+        "dropped streams must be counted so the gate is never silent"
+    )
+    # The gate admits a stream on ONE side's hit, so it must be fed STRONG
+    # keywords. Feeding it _team_keywords would re-admit the bare metro and the
+    # gate would silently stop working with every unit test still green (#162).
+    assert "_strong_team_keywords" in body, (
+        "the stream gate must be fed _strong_team_keywords, not _team_keywords"
+    )

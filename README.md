@@ -206,7 +206,11 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   Plain text is literal; a `{group}` collapses entirely when its variable is
   blank. Set your own under "Channel Naming"; preview with `preview_names`.
 - Streams: cloned via `ChannelStream` from the matched source channel, so
-  playback works
+  playback works. Some providers bundle dedicated per-matchup feeds onto one
+  channel, so when a matched channel's stream names mention teams, only the
+  streams naming *this* game are attached. A plain broadcaster channel whose
+  streams name no team at all (`MLB Network HD`, `MLB Network FHD`) contributes
+  every stream, unchanged
 - EPG: a dummy `EPGSource` (auto-created with the same name as the group)
   holds one `EPGData` row per virtual channel, with a `ProgramData` entry
   whose `description` shows the full WHY breakdown — TiviMate, Plex, and
