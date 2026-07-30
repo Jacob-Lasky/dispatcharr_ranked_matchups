@@ -133,6 +133,12 @@ class ChannelCandidate:
     # negative sentinel (-stream_id), never a real PK, so the partition below
     # never expands a parent channel for them.
     stream_id: Optional[int] = None
+    # Programme sub-title + description, when the source had them (#143).
+    # European public broadcasters put a generic competition name in the title
+    # and the actual fixture in these fields, so the both-teams regex tier has
+    # to see them or the game only ever reaches the LLM. Empty for Path B / C
+    # candidates, which have no programme behind them.
+    program_extra: str = ""
 
 
 @dataclass
@@ -395,17 +401,32 @@ def _regex_filter(
     `team_b=None` is the single-sided mode for field events (#127): one event,
     no opponent, so we match on the event name (`team_a`) alone. The both-teams
     gate would otherwise be unsatisfiable against the "Field" away sentinel.
+
+    The both-teams gate reads the sub-title and description alongside the title
+    (#143). European public broadcasters title the programme with the
+    competition ('FIFA Fussball WM 2026') and put the fixture in the sub-title
+    ('Gruppe F: Schweden - Tunesien'), so a title-only gate sent every one of
+    those broadcasts to the LLM tier for a match the sub-title states outright.
+
+    The SINGLE-SIDED branch deliberately still reads the title only. One keyword
+    admits there, and a description is free prose that name-drops other teams
+    and events in passing, so widening it would turn a single event keyword into
+    a wildcard over the whole guide.
     """
     if team_b is None:
         # Single-sided: one keyword admits, so weak place-name keywords are
-        # unsafe here (#162).
+        # unsafe here (#162), and so is the description (see above).
         a_kws = _strong_team_keywords(team_a)
         return [c for c in candidates if _kw_hit(c.program_title, a_kws)]
     # Both-teams gate: weak keywords are safe and needed (city-only feed names).
     a_kws = _team_keywords(team_a)
     b_kws = _team_keywords(team_b)
+
+    def _text(c: ChannelCandidate) -> str:
+        return f"{c.program_title} {c.program_extra}" if c.program_extra else c.program_title
+
     return [c for c in candidates
-            if _kw_hit(c.program_title, a_kws) and _kw_hit(c.program_title, b_kws)]
+            if _kw_hit(_text(c), a_kws) and _kw_hit(_text(c), b_kws)]
 
 
 def _regex_filter_channel_name(

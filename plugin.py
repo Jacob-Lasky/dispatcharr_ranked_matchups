@@ -1969,13 +1969,37 @@ def _build_epg_lookup(local_tz=timezone.utc):
                 q |= Q(**{f"{dbfield}__icontains": kw})
             return q
 
-        # Path A: programs in window whose TITLE mentions any team keyword.
-        title_q = _or_icontains("title", all_kws)
+        # Path A: programs in window whose TITLE mentions any team keyword,
+        # OR whose SUB-TITLE does, OR whose DESCRIPTION names BOTH sides (#143).
+        #
+        # European public broadcasters (ORF, ARD, ZDF, SRF) put the competition
+        # in the title and the fixture underneath it: title 'FIFA Fussball WM
+        # 2026', sub-title 'Gruppe F: Schweden - Tunesien', description naming
+        # both squads in prose. Reading only the title produced ZERO candidates
+        # for those broadcasts, so the games never matched at all.
+        #
+        # The three fields get DIFFERENT gates on purpose. Title and sub-title
+        # are short, curated, and about this programme, so a single keyword is
+        # enough. A description is long free prose that routinely name-drops
+        # other teams ('... beat Brazil last week'), so admitting on one keyword
+        # there would drag half the guide into the Tier-3 candidate pool. It
+        # requires BOTH sides, which is the same reasoning that makes the Path B
+        # channel-name gate two-sided.
+        title_q = _or_icontains("title", all_kws) | _or_icontains("sub_title", all_kws)
+        if field:
+            # Single-sided: there is no opponent to require.
+            title_q |= _or_icontains("description", strong_home)
+        elif strong_home and strong_away:
+            title_q |= (
+                _or_icontains("description", strong_home)
+                & _or_icontains("description", strong_away)
+            )
         title_progs = list(
             ProgramData.objects
             .filter(start_time__lt=window_end, end_time__gt=window_start)
             .filter(title_q)
-            .only("id", "title", "start_time", "end_time", "epg_id")
+            .only("id", "title", "sub_title", "description",
+                  "start_time", "end_time", "epg_id")
         )
 
         # Path B: channels whose NAME mentions BOTH teams. Include them even
@@ -2030,6 +2054,20 @@ def _build_epg_lookup(local_tz=timezone.utc):
                         program_title=p.title or "",
                         program_start=p.start_time,
                         program_end=p.end_time,
+                        # Carried so Tier 2 can win on a fixture that lives
+                        # BELOW the title (#143). Without it an ORF programme
+                        # titled 'FIFA Fussball WM 2026' becomes a candidate and
+                        # then loses every regex tier, falling through to the
+                        # LLM for a match the sub-title states outright.
+                        # getattr, not attribute access: the offline replay
+                        # harness and the test fake-ORM build lightweight row
+                        # stubs, and a snapshot taken before these columns were
+                        # exported has neither. Missing == no extra text, which
+                        # is exactly the pre-#143 behaviour.
+                        program_extra=" ".join(
+                            x for x in (getattr(p, "sub_title", "") or "",
+                                        getattr(p, "description", "") or "") if x
+                        ),
                     ))
 
         for c in name_match_chans:

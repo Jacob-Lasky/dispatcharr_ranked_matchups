@@ -13,7 +13,7 @@ only the ORM backend is swapped for an in-memory store over the snapshot.
 
 Snapshot format (see tools/export_snapshot.py / the skill):
   {"channels":[{"id","name","tvg_id","epg_data_id"}...],
-   "programs":[{"id","title","start_time"(iso),"end_time"(iso),"epg_id"}...]}
+   "programs":[{"id","title","sub_title","description","start_time"(iso),"end_time"(iso),"epg_id"}...]}
 
 Usage:
   python tools/replay_match.py SNAPSHOT.json --cache CACHE.json
@@ -149,6 +149,8 @@ def load_snapshot(path):
     chans = [_Row(id=c["id"], name=c["name"] or "", tvg_id=c.get("tvg_id") or "",
                   epg_data_id=c["epg_data_id"]) for c in data["channels"]]
     progs = [_Row(id=p["id"], title=p["title"] or "", epg_id=p["epg_id"],
+                  sub_title=p.get("sub_title") or "",
+                  description=p.get("description") or "",
                   start_time=_dt(p["start_time"]), end_time=_dt(p["end_time"]))
              for p in data["programs"]]
     # Streams power Path C (stream-name matching). Older snapshots predate the

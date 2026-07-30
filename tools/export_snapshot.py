@@ -35,10 +35,14 @@ def main():
     ]
     progs = [
         {"id": p.id, "title": p.title,
+         # sub_title/description feed the #143 European-broadcaster path; a
+         # snapshot without them replays as if every programme were untitled
+         # below the headline, which is the bug that path exists to fix.
+         "sub_title": p.sub_title, "description": p.description,
          "start_time": p.start_time.isoformat() if p.start_time else None,
          "end_time": p.end_time.isoformat() if p.end_time else None,
          "epg_id": p.epg_id}
-        for p in ProgramData.objects.all().only("id", "title", "start_time", "end_time", "epg_id")
+        for p in ProgramData.objects.all().only("id", "title", "sub_title", "description", "start_time", "end_time", "epg_id")
     ]
     # Streams power Path C (stream-name matching). Only id + name are needed by
     # the lookup; SELECT just those columns.

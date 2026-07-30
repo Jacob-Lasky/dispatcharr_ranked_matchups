@@ -968,6 +968,79 @@ class _FieldGame:
         self.extra = {"is_field_event": True}
 
 
+class TestEuropeanBroadcasterMatching:
+    """#143: ORF/ARD/ZDF/SRF title the programme with the COMPETITION and put
+    the fixture in the sub-title, in German.
+
+    Real EPG row from the issue:
+      channel   'AT: ORF 1 HD'
+      title     'FIFA Fussball WM 2026'          <- names no team
+      sub-title 'Gruppe F: Schweden - Tunesien'  <- the fixture lives here
+    Reading only the title produced ZERO candidates, so the game never matched.
+    """
+
+    def _cand(self, title, extra="", channel="AT: ORF 1 HD"):
+        from datetime import datetime, timezone
+        t = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        return ChannelCandidate(channel_id=1, channel_name=channel,
+                                program_title=title, program_extra=extra,
+                                program_start=t, program_end=t)
+
+    def test_fixture_in_the_subtitle_wins_tier_2(self):
+        cands = [self._cand("FIFA Fussball WM 2026", "Gruppe F: Schweden - Tunesien")]
+        assert len(_regex_filter(cands, "Sweden", "Tunisia")) == 1
+
+    def test_same_row_without_the_subtitle_does_not_match(self):
+        # The control: it is genuinely the sub-title doing the work.
+        cands = [self._cand("FIFA Fussball WM 2026")]
+        assert _regex_filter(cands, "Sweden", "Tunisia") == []
+
+    def test_fixture_in_the_description_wins_tier_2(self):
+        cands = [self._cand(
+            "FIFA Fussball WM 2026",
+            "Frankreich und Senegal treffen aufeinander. Bei Frankreich steht "
+            "Kapitan Kylian Mbappe ... Senegal kontert mit Sadio Mane ...")]
+        assert len(_regex_filter(cands, "France", "Senegal")) == 1
+
+    def test_a_description_naming_only_one_side_still_does_not_match(self):
+        # Prose name-drops other teams constantly; the both-teams gate is what
+        # keeps reading descriptions from becoming a wildcard.
+        cands = [self._cand("FIFA Fussball WM 2026",
+                            "Frankreich schlug Brasilien in der Vorrunde.")]
+        assert _regex_filter(cands, "France", "Senegal") == []
+
+    def test_field_event_gate_still_reads_the_title_only(self):
+        # Single-sided admission on free prose would be a wildcard, so the
+        # one-keyword branch deliberately does NOT widen.
+        cands = [self._cand("Motorsport heute", "Heute im Programm: The Masters")]
+        assert _regex_filter(cands, "The Masters", None) == []
+
+    @pytest.mark.parametrize("english,german", [
+        ("France", "Frankreich"), ("Sweden", "Schweden"), ("Tunisia", "Tunesien"),
+        ("Switzerland", "Schweiz"), ("Spain", "Spanien"), ("Croatia", "Kroatien"),
+        ("Netherlands", "Niederlande"), ("Turkey", "Tuerkei"), ("Greece", "Griechenland"),
+        ("Ivory Coast", "Elfenbeinkueste"), ("South Korea", "Suedkorea"),
+    ])
+    def test_german_exonyms_are_keywords(self, english, german):
+        kws = [k.lower() for k in _team_keywords(english)]
+        assert german.lower() in kws, f"{german!r} missing from {english!r} aliases"
+
+    def test_umlaut_and_ascii_forms_both_present(self):
+        # EPG sources are inconsistent about umlauts, and _kw_hit is a plain
+        # case-insensitive match with no unicode folding, so both spellings
+        # have to be listed or one of them silently never matches.
+        kws = [k.lower() for k in _team_keywords("Turkey")]
+        assert "türkei" in kws and "tuerkei" in kws
+
+    def test_path_b_and_c_candidates_have_no_extra_text(self):
+        # program_extra defaults empty; a channel-name or stream-name candidate
+        # has no programme behind it, and inventing text would let the Tier-2
+        # gate fire on something that was never in the guide.
+        c = ChannelCandidate(channel_id=1, channel_name="x", program_title="y",
+                             program_start=None, program_end=None)
+        assert c.program_extra == ""
+
+
 class TestStreamDateParsing:
     """#164: Path C has no time-window filter (streams carry no schedule), so
     a series stacks every night's dedicated feed. The date, when present, is in
