@@ -563,6 +563,54 @@ MATCHER_SYSTEM_PROMPT = (
 )
 
 
+# Channel-NAME markers for a feed that legitimately names the event but is not
+# the event itself: the pre-show, the prelims, the post-fight presser, the
+# multiview mosaic. Tier-1 stacks every channel naming the event, so for a UFC
+# card these ride along with the main card and, because the primary was just
+# first-seen, one of them could BE the primary (#135).
+#
+# DELIBERATELY SEPARATE from _PREVIEW_TITLE_PATTERNS, which is tuned for the
+# two-team case (a team-branded home channel emitting a 'Next Game:' EPG card)
+# and is used to REJECT candidates. Extending that list with these would start
+# rejecting real broadcasts. These only REORDER.
+_NON_MAIN_CARD_NAME_MARKERS = (
+    "pre show", "pre-show", "preshow",
+    "prelim",                      # 'prelims', 'preliminary', 'early prelims'
+    "post fight", "post-fight",
+    "press conference",
+    "countdown",
+    "multiview", "multi view", "multi-view",
+    "pre game", "pre-game", "pregame",
+    "post game", "post-game", "postgame",
+    "weigh in", "weigh-in",
+)
+
+
+def _is_non_main_card(channel_name: str) -> bool:
+    """Whether a channel NAME marks itself as undercard/ancillary programming."""
+    n = (channel_name or "").lower()
+    return any(m in n for m in _NON_MAIN_CARD_NAME_MARKERS)
+
+
+def _main_card_first(cands: List[ChannelCandidate]) -> List[ChannelCandidate]:
+    """Stable-sort Tier-1 matches so a plain feed outranks an undercard one.
+
+    DEMOTE, DO NOT DROP. A provider that labels every one of its feeds
+    'Prelims' would otherwise lose the event entirely, and the whole point of
+    Tier-1 stacking is that a viewer can fall through to another feed. Sorting
+    on a bool is stable, so within each group the original discovery order (and
+    therefore every existing expectation about variant ordering) is untouched;
+    the only thing that changes is that an ancillary feed can no longer sit in
+    front of a main-card one.
+
+    Applied to BOTH the field-event and two-team paths. #135 observed it on a
+    UFC card, but 'PRE SHOW: Man Utd vs Brentford' winning primary over the
+    actual match feed is the same defect, and since this only reorders there is
+    no recall cost to covering both.
+    """
+    return sorted(cands, key=lambda c: _is_non_main_card(c.channel_name))
+
+
 def _partition_attach_targets(
     primary: ChannelCandidate, cands: List[ChannelCandidate]
 ) -> Tuple[List[int], List[int]]:
@@ -645,7 +693,12 @@ def match_games_to_channels(
         # land here when their name names both teams (their channel_name IS the
         # stream name), so a stream-name match is treated with the same
         # confidence as a channel-name match.
-        strict = _regex_filter_channel_name(candidates, game.home, match_away)
+        # Main-card feeds first, so the primary is never the pre-show or the
+        # multiview just because it was discovered first (#135). Reorder only:
+        # every ancillary feed still stacks behind as a fallback.
+        strict = _main_card_first(
+            _regex_filter_channel_name(candidates, game.home, match_away)
+        )
         # Tier 2: program-title regex, with previews ('Next Game:', 'Preview:',
         # 'Pre-game ...') stripped: those mark team-branded home channels
         # that surface upcoming-game EPG cards but don't broadcast the match.

@@ -7,7 +7,9 @@ import pytest
 from dispatcharr_ranked_matchups.matcher import (
     ChannelCandidate,
     _extract_json,
+    _is_non_main_card,
     _is_preview_title,
+    _main_card_first,
     _kw_hit,
     _regex_filter,
     _regex_filter_channel_name,
@@ -962,6 +964,97 @@ class _FieldGame:
         self.sport_label = "UFC"
         self.start_time = datetime(2026, 4, 27, tzinfo=timezone.utc)
         self.extra = {"is_field_event": True}
+
+
+class TestMainCardFirst:
+    """#135: Tier-1 stacks every channel naming the event, so a UFC card's
+    pre-show / prelims / press-conference / multiview feeds ride along with the
+    main card, and the primary was whichever was seen first.
+
+    Channel names below are verbatim from the live run recorded in the issue
+    (UFC Freedom 250: Topuria vs. Gaethje, method regex_strict, 16 stacked).
+    """
+
+    REAL_STACK = [
+        "EVENT 01: PRE SHOW UFC Freedom 250 (6.14 6:00 PM ET)",
+        "LIVE EVENT 01 - 6pm UFC Freedom 250 Prelims",
+        "LIVE EVENT 02 - 8pm UFC Freedom 250",
+        "EVENT 05: UFC Freedom 250 Multiview",
+        "EVENT 06: Post Fight Press Conference UFC Freedom 250 (6.15 1:00 AM ET)",
+    ]
+
+    def _cands(self, names):
+        from datetime import datetime, timezone
+        t = datetime(2026, 6, 14, tzinfo=timezone.utc)
+        return [ChannelCandidate(channel_id=i, channel_name=n, program_title="",
+                                 program_start=t, program_end=t)
+                for i, n in enumerate(names)]
+
+    def test_pre_show_no_longer_wins_primary(self):
+        # The reported ordering: the pre-show is discovered FIRST.
+        ordered = _main_card_first(self._cands(self.REAL_STACK))
+        assert ordered[0].channel_name == "LIVE EVENT 02 - 8pm UFC Freedom 250"
+
+    def test_every_ancillary_feed_is_still_stacked(self):
+        # DEMOTE, not drop: the fallback stack is the point of Tier-1 stacking.
+        ordered = _main_card_first(self._cands(self.REAL_STACK))
+        assert len(ordered) == len(self.REAL_STACK)
+        assert {c.channel_name for c in ordered} == set(self.REAL_STACK)
+
+    def test_ancillary_order_among_themselves_is_preserved(self):
+        # Stable sort: only the main-card/ancillary split moves anything.
+        ordered = [c.channel_name for c in _main_card_first(self._cands(self.REAL_STACK))]
+        anc = [n for n in ordered if n != "LIVE EVENT 02 - 8pm UFC Freedom 250"]
+        assert anc == [n for n in self.REAL_STACK if n != "LIVE EVENT 02 - 8pm UFC Freedom 250"]
+
+    def test_all_ancillary_still_yields_a_primary(self):
+        # A provider that labels everything 'Prelims' must not lose the event.
+        names = ["EVENT 01: PRE SHOW X", "LIVE EVENT 01 Prelims X"]
+        ordered = _main_card_first(self._cands(names))
+        assert [c.channel_name for c in ordered] == names
+
+    @pytest.mark.parametrize("name", [
+        "EVENT 01: PRE SHOW UFC Freedom 250",
+        "LIVE EVENT 01 - 6pm UFC Freedom 250 Prelims",
+        "EVENT 05: UFC Freedom 250 Multiview",
+        "EVENT 06: Post Fight Press Conference UFC Freedom 250",
+        "UFC 300 Countdown",
+        "PPV 02: UFC 300 Weigh-In",
+        "Pre-Game: Lakers at Celtics",
+    ])
+    def test_marked_as_ancillary(self, name):
+        assert _is_non_main_card(name)
+
+    @pytest.mark.parametrize("name", [
+        "LIVE EVENT 02 - 8pm UFC Freedom 250",
+        "PPV 01: UFC Freedom 250 Main Card",
+        "EPL01: Manchester United 20:00 Brentford",
+        "ESPN UNLTD 028: Yankees at White Sox",
+    ])
+    def test_not_marked_as_ancillary(self, name):
+        assert not _is_non_main_card(name)
+
+    def test_two_team_path_gets_the_same_ordering(self):
+        # #135 observed this on a field event, but a pre-show winning primary
+        # over the real match feed is the same defect for a two-team game.
+        cands = self._cands([
+            "PRE SHOW: Manchester United vs Brentford",
+            "EPL01: Manchester United 20:00 Brentford",
+        ])
+        out = _regex_filter_channel_name(cands, "Manchester United FC", "Brentford FC")
+        assert len(out) == 2, "both must survive; this reorders, it does not filter"
+        assert _main_card_first(out)[0].channel_name == "EPL01: Manchester United 20:00 Brentford"
+
+    def test_tier1_end_to_end_picks_the_main_card(self):
+        games = [(_FieldGame("UFC Freedom 250: Topuria vs. Gaethje"), None, None)]
+        cands = [_cand(i, n, "Live") for i, n in enumerate([
+            "EVENT 01: PRE SHOW UFC Freedom 250: Topuria vs. Gaethje",
+            "LIVE EVENT 02 - 8pm UFC Freedom 250: Topuria vs. Gaethje",
+        ])]
+        results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
+        assert results[0].method == "regex_strict"
+        assert results[0].channel_name == "LIVE EVENT 02 - 8pm UFC Freedom 250: Topuria vs. Gaethje"
+        assert len(results[0].channel_ids) == 2, "the pre-show still stacks behind"
 
 
 class TestFieldEventMatching:
