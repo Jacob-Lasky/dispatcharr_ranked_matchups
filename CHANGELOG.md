@@ -5,6 +5,32 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-07-30
+
+### Changed
+
+- **Apply now runs in the pipeline subprocess, not in the web worker (#142).**
+  Standalone `apply` was the last plugin action doing heavy DB work inside the
+  gevent uwsgi worker, and it kept intermittently freezing one worker: nginx
+  round-robins into it, so login (a multi-request flow) failed for roughly a
+  quarter of attempts, and the `3/minute` throttle then locked out the retries.
+  It survived both earlier fixes aimed at it — after 1.7.1 shrank the apply
+  transaction to sub-second and 1.8.x closed the scheduler DB-connection leak, a
+  0.55s apply on a warm container still produced a 20s login timeout.
+
+  Rather than keep hunting the exact non-yielding call with tools that cannot
+  see individual greenlets, the surface is gone: `apply` forks the same
+  `_pipeline_runner.py` child that `refresh` and `auto_pipeline` already use, so
+  no plugin action does bulk DB work in the worker any more.
+
+  **This is not a UX change.** Apply stays synchronous and still returns the
+  real summary in the toast, unlike refresh which returns a queued envelope: the
+  subprocess wait is gevent-cooperative, so the hub keeps serving requests while
+  the child works. The only visible difference is roughly one to two extra
+  seconds for the child's Django startup. `auto_pipeline` is unaffected — it
+  still chains refresh and apply inside ONE child, not two. The destructive
+  cross-worker lock is still taken in the parent for the whole run.
+
 ## [1.14.2] - 2026-07-30
 
 Matching precision, part two. Two long-standing loose-match defects that

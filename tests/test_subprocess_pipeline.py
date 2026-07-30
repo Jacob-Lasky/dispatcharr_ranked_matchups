@@ -187,4 +187,62 @@ class TestLaunchersRouteThroughSubprocess:
         # ids the UI and plugin.run dispatch on, or a scheduled/HTTP run would
         # hand the runner a name it doesn't know.
         assert tasks_mod.ACTION_REFRESH == "refresh"
+        assert tasks_mod.ACTION_APPLY == "apply"
         assert tasks_mod.ACTION_AUTO_PIPELINE == "auto_pipeline"
+
+
+class TestApplyRunsOutOfProcess:
+    """#142: standalone apply was the last action doing heavy DB work inside
+    the gevent uwsgi worker, and it kept wedging login on a warm container even
+    after #137 (transaction shape) and #140 (scheduler connection leak). These
+    pin the surface as removed, since the failure it prevents is intermittent
+    and cannot be reproduced in a unit test.
+    """
+
+    def _source(self, name):
+        with open(os.path.join(REPO_ROOT, name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_apply_action_is_dispatched_by_the_runner(self):
+        # The child must know the action, or every apply returns
+        # "unknown action" and the user's channels silently stop updating.
+        runner = self._source("_pipeline_runner.py")
+        assert "tasks.ACTION_APPLY: plugin._action_apply," in runner
+
+    def test_runner_maps_apply_to_the_bare_lock_free_function(self):
+        # Mapping to _action_apply_locked would deadlock the feature: the parent
+        # holds the lock across the subprocess call and the token is a
+        # parent-process global, so the child's acquire fails and the apply is
+        # skipped with a "busy" that no one sees.
+        runner = self._source("_pipeline_runner.py")
+        assert "plugin._action_apply_locked" not in runner
+
+    def test_http_apply_routes_through_the_subprocess(self):
+        # plugin.py needs Django to import, so assert on the source: a unit
+        # test of _action_apply_locked would pass with apply back inline.
+        src = self._source("plugin.py")
+        start = src.index("def _action_apply_locked(")
+        body = src[start:src.index("\ndef ", start + 10)]
+        assert "tasks.run_pipeline_subprocess(tasks.ACTION_APPLY, settings)" in body
+        assert "return _action_apply(settings)" not in body, (
+            "apply is back inline in the gevent worker; see #142"
+        )
+
+    def test_http_apply_still_takes_the_destructive_lock(self):
+        # Moving the work out of process must not drop the #155 mutex: apply
+        # deletes and renumbers channels and can still race the scheduler.
+        src = self._source("plugin.py")
+        start = src.index("def _action_apply_locked(")
+        body = src[start:src.index("\ndef ", start + 10)]
+        assert "_try_acquire_scheduler_lock(destructive=True)" in body
+        assert "_release_scheduler_lock(token)" in body
+
+    def test_apply_stays_synchronous(self):
+        # Apply must keep returning the real summary, not a queued envelope:
+        # the subprocess wait is gevent-cooperative, so there is no reason to
+        # go async and lose the toast (unlike refresh, which is minutes).
+        src = self._source("plugin.py")
+        start = src.index("def _action_apply_locked(")
+        body = src[start:src.index("\ndef ", start + 10)]
+        assert '"status": "queued"' not in body
+        assert "run_apply_background" not in src

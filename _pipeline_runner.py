@@ -60,13 +60,23 @@ def main() -> int:
     plugin = __import__(f"{pkg_name}.plugin", fromlist=["plugin"])
     tasks = __import__(f"{pkg_name}.tasks", fromlist=["tasks"])
 
-    # Only the GIL-holding actions run out of process. auto_pipeline chains
-    # refresh + apply internally (transitioning the inflight phase the parent
-    # published); standalone apply stays inline in the worker because it's
-    # I/O-bound DB work that yields to the gevent hub. Action names come from
-    # tasks so the caller/runner contract has one source of truth.
+    # Every action that does bulk work runs out of process (#142): the
+    # GIL-holding Monte Carlo in refresh, and apply's bulk DB writes, which
+    # kept wedging a gevent worker even after the transaction was shrunk to
+    # sub-second. auto_pipeline chains refresh + apply internally (transitioning
+    # the inflight phase the parent published), so it is ONE child, not two.
+    #
+    # apply maps to the BARE _action_apply, never _action_apply_locked: the
+    # parent already holds the scheduler lock across the subprocess call, and
+    # the lock token is a parent-process global, so a second acquire in here
+    # would fail and silently skip the work. Same reason
+    # _action_auto_pipeline_sync calls the bare function.
+    #
+    # Action names come from tasks so the caller/runner contract has one source
+    # of truth.
     actions = {
         tasks.ACTION_REFRESH: plugin._action_refresh,
+        tasks.ACTION_APPLY: plugin._action_apply,
         tasks.ACTION_AUTO_PIPELINE: plugin._action_auto_pipeline_sync,
     }
     fn = actions.get(action)
