@@ -1,137 +1,598 @@
 {
   "_comment": "Curated team-name aliases for EPG matching. Maps a canonical team name (e.g. 'Manchester United') to a list of common abbreviations broadcasters use in EPG titles ('Man United', 'Man Utd'). Used by matcher._team_keywords to expand the regex pre-filter so 'Man United vs Brentford' EPG entries match the canonical 'Manchester United' from Football-Data.org. Match is case-insensitive. See #4.",
-
-  "Manchester United": ["Man United", "Man Utd", "Man U", "MUFC"],
-  "Manchester City": ["Man City", "MCFC"],
-  "Newcastle United": ["Newcastle", "NUFC", "The Magpies"],
-  "Tottenham Hotspur": ["Tottenham", "Spurs"],
-  "West Ham United": ["West Ham"],
-  "Wolverhampton Wanderers": ["Wolves", "Wolverhampton"],
-  "Brighton & Hove Albion": ["Brighton", "Brighton & Hove"],
-  "Sheffield United": ["Sheffield Utd", "Sheff United", "The Blades"],
-  "Sheffield Wednesday": ["Sheffield Wed", "Sheff Wednesday", "The Owls"],
-  "Nottingham Forest": ["Notts Forest", "Forest", "NFFC"],
-  "AFC Bournemouth": ["Bournemouth"],
-  "Wrexham": ["AFC Wrexham", "Wrexham AFC"],
-  "Arsenal": ["Arsenal FC", "The Gunners"],
-  "Chelsea": ["Chelsea FC", "The Blues"],
-  "Liverpool": ["Liverpool FC", "LFC", "The Reds"],
-
-  "Borussia Dortmund": ["Dortmund", "BVB", "Borussia"],
-  "Bayern Munich": ["FC Bayern", "Bayern Munchen", "Bayern", "FCB"],
-  "Bayer Leverkusen": ["Leverkusen", "Bayer 04"],
-  "Borussia Mönchengladbach": ["Borussia M'gladbach", "M'gladbach", "BMG", "Gladbach"],
-  "Borussia Monchengladbach": ["Borussia M'gladbach", "M'gladbach", "BMG", "Gladbach"],
-  "VfL Wolfsburg": ["Wolfsburg"],
-  "Eintracht Frankfurt": ["Frankfurt", "SGE"],
-  "RB Leipzig": ["Leipzig"],
-  "VfB Stuttgart": ["Stuttgart"],
-
-  "Real Madrid": ["Real", "Real Madrid CF", "RMA"],
-  "Barcelona": ["Barca", "FC Barcelona", "FCB"],
-  "Atletico Madrid": ["Atletico", "Atletico de Madrid", "Atleti"],
-  "Athletic Bilbao": ["Athletic Club", "Athletic"],
-  "Real Sociedad": ["Sociedad", "La Real"],
-  "Real Betis": ["Betis"],
-  "Sevilla": ["Sevilla FC"],
-
-  "Paris Saint-Germain": ["Paris SG", "PSG", "Paris", "Paris S-G", "Paris St-Germain"],
-  "Olympique de Marseille": ["Marseille", "OM"],
-  "Olympique Lyonnais": ["Lyon", "OL"],
-  "AS Saint-Etienne": ["Saint-Etienne", "St Etienne", "ASSE"],
-
-  "Inter Milan": ["Inter", "Internazionale", "Inter Milano"],
-  "AC Milan": ["Milan", "Milan AC"],
-  "Juventus": ["Juve", "Juventus FC"],
-  "Napoli": ["Napoli SSC", "SSC Napoli"],
-
-  "Pumas UNAM": ["Pumas"],
-  "Club America": ["America", "Aguilas del America"],
-  "Chivas Guadalajara": ["Chivas", "Guadalajara"],
-  "Cruz Azul": ["La Maquina", "Maquina Cementera"],
-
-  "Los Angeles FC": ["LAFC"],
-  "LA Galaxy": ["Galaxy", "Los Angeles Galaxy"],
-  "Seattle Sounders": ["Sounders", "Sounders FC"],
-  "Portland Timbers": ["Timbers"],
-  "New York City FC": ["NYCFC", "New York City"],
-  "New York Red Bulls": ["Red Bulls", "NY Red Bulls", "NYRB"],
-
-  "Boston Celtics": ["Celtics", "BOS"],
-  "Los Angeles Lakers": ["Lakers", "LAL"],
-  "Golden State Warriors": ["Warriors", "GSW"],
-  "Philadelphia 76ers": ["76ers", "Sixers", "PHI"],
-  "New York Knicks": ["Knicks", "NYK"],
-  "San Antonio Spurs": ["Spurs", "SAS"],
-
-  "Pittsburgh Steelers": ["Steelers", "PIT"],
-  "Green Bay Packers": ["Packers", "GB"],
-  "New England Patriots": ["Patriots", "Pats", "NE"],
-  "Kansas City Chiefs": ["Chiefs", "KC"],
-  "Dallas Cowboys": ["Cowboys", "DAL", "America's Team"],
-  "Philadelphia Eagles": ["Eagles", "PHI"],
-  "San Francisco 49ers": ["49ers", "Niners", "SF"],
-  "Las Vegas Raiders": ["Raiders", "LV"],
-  "Cincinnati Bengals": ["Bengals", "CIN"],
-  "Cleveland Browns": ["Browns", "CLE"],
-  "Pittsburgh Penguins": ["Penguins", "Pens", "PIT"],
-  "Toronto Maple Leafs": ["Maple Leafs", "Leafs", "TOR"],
-  "Vegas Golden Knights": ["Golden Knights", "VGK"],
-  "Detroit Red Wings": ["Red Wings", "DET"],
-  "Edmonton Oilers": ["Oilers", "EDM"],
-
-  "New York Yankees": ["Yankees", "NYY"],
-  "Boston Red Sox": ["Red Sox", "BOS"],
-  "Los Angeles Dodgers": ["Dodgers", "LAD"],
-  "San Francisco Giants": ["Giants", "SFG"],
-  "St. Louis Cardinals": ["Cardinals", "Cards", "STL"],
-  "Chicago Cubs": ["Cubs", "CHC"],
-  "Chicago White Sox": ["White Sox", "CWS"],
-  "Houston Astros": ["Astros", "HOU"],
-
+  "Manchester United": [
+    "Man United",
+    "Man Utd",
+    "Man U",
+    "MUFC"
+  ],
+  "Manchester City": [
+    "Man City",
+    "MCFC"
+  ],
+  "Newcastle United": [
+    "Newcastle",
+    "NUFC",
+    "The Magpies"
+  ],
+  "Tottenham Hotspur": [
+    "Tottenham",
+    "Spurs"
+  ],
+  "West Ham United": [
+    "West Ham"
+  ],
+  "Wolverhampton Wanderers": [
+    "Wolves",
+    "Wolverhampton"
+  ],
+  "Brighton & Hove Albion": [
+    "Brighton",
+    "Brighton & Hove"
+  ],
+  "Sheffield United": [
+    "Sheffield Utd",
+    "Sheff United",
+    "The Blades"
+  ],
+  "Sheffield Wednesday": [
+    "Sheffield Wed",
+    "Sheff Wednesday",
+    "The Owls"
+  ],
+  "Nottingham Forest": [
+    "Notts Forest",
+    "Forest",
+    "NFFC"
+  ],
+  "AFC Bournemouth": [
+    "Bournemouth"
+  ],
+  "Wrexham": [
+    "AFC Wrexham",
+    "Wrexham AFC"
+  ],
+  "Arsenal": [
+    "Arsenal FC",
+    "The Gunners"
+  ],
+  "Chelsea": [
+    "Chelsea FC",
+    "The Blues"
+  ],
+  "Liverpool": [
+    "Liverpool FC",
+    "LFC",
+    "The Reds"
+  ],
+  "Borussia Dortmund": [
+    "Dortmund",
+    "BVB",
+    "Borussia"
+  ],
+  "Bayern Munich": [
+    "FC Bayern",
+    "Bayern Munchen",
+    "Bayern",
+    "FCB"
+  ],
+  "Bayer Leverkusen": [
+    "Leverkusen",
+    "Bayer 04"
+  ],
+  "Borussia Mönchengladbach": [
+    "Borussia M'gladbach",
+    "M'gladbach",
+    "BMG",
+    "Gladbach"
+  ],
+  "Borussia Monchengladbach": [
+    "Borussia M'gladbach",
+    "M'gladbach",
+    "BMG",
+    "Gladbach"
+  ],
+  "VfL Wolfsburg": [
+    "Wolfsburg"
+  ],
+  "Eintracht Frankfurt": [
+    "Frankfurt",
+    "SGE"
+  ],
+  "RB Leipzig": [
+    "Leipzig"
+  ],
+  "VfB Stuttgart": [
+    "Stuttgart"
+  ],
+  "Real Madrid": [
+    "Real",
+    "Real Madrid CF",
+    "RMA"
+  ],
+  "Barcelona": [
+    "Barca",
+    "FC Barcelona",
+    "FCB"
+  ],
+  "Atletico Madrid": [
+    "Atletico",
+    "Atletico de Madrid",
+    "Atleti"
+  ],
+  "Athletic Bilbao": [
+    "Athletic Club",
+    "Athletic"
+  ],
+  "Real Sociedad": [
+    "Sociedad",
+    "La Real"
+  ],
+  "Real Betis": [
+    "Betis"
+  ],
+  "Sevilla": [
+    "Sevilla FC"
+  ],
+  "Paris Saint-Germain": [
+    "Paris SG",
+    "PSG",
+    "Paris",
+    "Paris S-G",
+    "Paris St-Germain"
+  ],
+  "Olympique de Marseille": [
+    "Marseille",
+    "OM"
+  ],
+  "Olympique Lyonnais": [
+    "Lyon",
+    "OL"
+  ],
+  "AS Saint-Etienne": [
+    "Saint-Etienne",
+    "St Etienne",
+    "ASSE"
+  ],
+  "Inter Milan": [
+    "Inter",
+    "Internazionale",
+    "Inter Milano"
+  ],
+  "AC Milan": [
+    "Milan",
+    "Milan AC"
+  ],
+  "Juventus": [
+    "Juve",
+    "Juventus FC"
+  ],
+  "Napoli": [
+    "Napoli SSC",
+    "SSC Napoli"
+  ],
+  "Pumas UNAM": [
+    "Pumas"
+  ],
+  "Club America": [
+    "America",
+    "Aguilas del America"
+  ],
+  "Chivas Guadalajara": [
+    "Chivas",
+    "Guadalajara"
+  ],
+  "Cruz Azul": [
+    "La Maquina",
+    "Maquina Cementera"
+  ],
+  "Los Angeles FC": [
+    "LAFC"
+  ],
+  "LA Galaxy": [
+    "Galaxy",
+    "Los Angeles Galaxy"
+  ],
+  "Seattle Sounders": [
+    "Sounders",
+    "Sounders FC"
+  ],
+  "Portland Timbers": [
+    "Timbers"
+  ],
+  "New York City FC": [
+    "NYCFC",
+    "New York City"
+  ],
+  "New York Red Bulls": [
+    "Red Bulls",
+    "NY Red Bulls",
+    "NYRB"
+  ],
+  "Boston Celtics": [
+    "Celtics",
+    "BOS"
+  ],
+  "Los Angeles Lakers": [
+    "Lakers",
+    "LAL"
+  ],
+  "Golden State Warriors": [
+    "Warriors",
+    "GSW"
+  ],
+  "Philadelphia 76ers": [
+    "76ers",
+    "Sixers",
+    "PHI"
+  ],
+  "New York Knicks": [
+    "Knicks",
+    "NYK"
+  ],
+  "San Antonio Spurs": [
+    "Spurs",
+    "SAS"
+  ],
+  "Pittsburgh Steelers": [
+    "Steelers",
+    "PIT"
+  ],
+  "Green Bay Packers": [
+    "Packers",
+    "GB"
+  ],
+  "New England Patriots": [
+    "Patriots",
+    "Pats",
+    "NE"
+  ],
+  "Kansas City Chiefs": [
+    "Chiefs",
+    "KC"
+  ],
+  "Dallas Cowboys": [
+    "Cowboys",
+    "DAL",
+    "America's Team"
+  ],
+  "Philadelphia Eagles": [
+    "Eagles",
+    "PHI"
+  ],
+  "San Francisco 49ers": [
+    "49ers",
+    "Niners",
+    "SF"
+  ],
+  "Las Vegas Raiders": [
+    "Raiders",
+    "LV"
+  ],
+  "Cincinnati Bengals": [
+    "Bengals",
+    "CIN"
+  ],
+  "Cleveland Browns": [
+    "Browns",
+    "CLE"
+  ],
+  "Pittsburgh Penguins": [
+    "Penguins",
+    "Pens",
+    "PIT"
+  ],
+  "Toronto Maple Leafs": [
+    "Maple Leafs",
+    "Leafs",
+    "TOR"
+  ],
+  "Vegas Golden Knights": [
+    "Golden Knights",
+    "VGK"
+  ],
+  "Detroit Red Wings": [
+    "Red Wings",
+    "DET"
+  ],
+  "Edmonton Oilers": [
+    "Oilers",
+    "EDM"
+  ],
+  "New York Yankees": [
+    "Yankees",
+    "NYY"
+  ],
+  "Boston Red Sox": [
+    "Red Sox",
+    "BOS"
+  ],
+  "Los Angeles Dodgers": [
+    "Dodgers",
+    "LAD"
+  ],
+  "San Francisco Giants": [
+    "Giants",
+    "SFG"
+  ],
+  "St. Louis Cardinals": [
+    "Cardinals",
+    "Cards",
+    "STL"
+  ],
+  "Chicago Cubs": [
+    "Cubs",
+    "CHC"
+  ],
+  "Chicago White Sox": [
+    "White Sox",
+    "CWS"
+  ],
+  "Houston Astros": [
+    "Astros",
+    "HOU"
+  ],
   "_comment_national": "National teams (World Cup / EUROs / friendlies). Providers name dedicated per-game channels with broadcast forms the canonical Football-Data name lacks: 'USA' for United States, and Spanish exonyms on '- En Espanol' feeds (Estados Unidos, Alemania, Brasil). Values are matched as case-insensitive SUBSTRINGS and the channel-name match requires BOTH teams, so full-word Spanish exonyms are safe; bare 2-3 letter FIFA codes are deliberately omitted (too substring-collision-prone, e.g. 'POR' in 'sport'). Accented and unaccented Spanish forms are both listed since provider EPGs are inconsistent. See #123.",
-
-  "United States": ["USA", "Estados Unidos", "USMNT", "United States of America"],
-  "Brazil": ["Brasil"],
-  "Germany": ["Alemania", "Deutschland"],
-  "Spain": ["Espana", "España"],
-  "England": ["Inglaterra"],
-  "France": ["Francia"],
-  "Italy": ["Italia"],
-  "Netherlands": ["Holanda", "Holland", "Paises Bajos", "Países Bajos"],
-  "Belgium": ["Belgica", "Bélgica"],
-  "Switzerland": ["Suiza", "Schweiz"],
-  "Croatia": ["Croacia", "Hrvatska"],
-  "Sweden": ["Suecia", "Sverige"],
-  "Norway": ["Noruega"],
-  "Denmark": ["Dinamarca"],
-  "Poland": ["Polonia"],
-  "Austria": ["Österreich"],
-  "Czechia": ["Czech Republic", "Republica Checa", "República Checa", "Chequia"],
-  "Turkey": ["Turquia", "Turquía", "Turkiye", "Türkiye"],
-  "Mexico": ["Mexico", "México"],
-  "Canada": ["Canada", "Canadá"],
-  "Panama": ["Panama", "Panamá"],
-  "Japan": ["Japon", "Japón", "Nippon"],
-  "South Korea": ["Korea Republic", "Corea del Sur", "Corea"],
-  "Australia": ["Socceroos"],
-  "New Zealand": ["Nueva Zelanda"],
-  "Saudi Arabia": ["Arabia Saudita", "Arabia Saudi", "Arabia Saudí"],
-  "Iran": ["Iran", "Irán"],
-  "Iraq": ["Irak"],
-  "Jordan": ["Jordania"],
-  "Uzbekistan": ["Uzbekistan", "Uzbekistán"],
-  "Morocco": ["Marruecos"],
-  "Tunisia": ["Tunez", "Túnez"],
-  "Algeria": ["Argelia"],
-  "Ivory Coast": ["Cote d'Ivoire", "Côte d'Ivoire", "Costa de Marfil"],
-  "South Africa": ["Sudafrica", "Sudáfrica"],
-  "Cape Verde Islands": ["Cape Verde", "Cabo Verde"],
-  "Curacao": ["Curaçao"],
-  "Curaçao": ["Curacao"],
-  "Haiti": ["Haiti", "Haití"],
-  "Scotland": ["Escocia"],
-  "Wales": ["Gales"],
-  "Bosnia-Herzegovina": ["Bosnia and Herzegovina", "Bosnia y Herzegovina", "Bosnia"],
-  "Congo DR": ["DR Congo", "RD Congo", "Democratic Republic of Congo"]
+  "United States": [
+    "USA",
+    "Estados Unidos",
+    "USMNT",
+    "United States of America",
+    "Vereinigte Staaten",
+    "Vereinigte Staaten von Amerika"
+  ],
+  "Brazil": [
+    "Brasil",
+    "Brasilien"
+  ],
+  "Germany": [
+    "Alemania",
+    "Deutschland"
+  ],
+  "Spain": [
+    "Espana",
+    "España",
+    "Spanien"
+  ],
+  "England": [
+    "Inglaterra"
+  ],
+  "France": [
+    "Francia",
+    "Frankreich"
+  ],
+  "Italy": [
+    "Italia",
+    "Italien"
+  ],
+  "Netherlands": [
+    "Holanda",
+    "Holland",
+    "Paises Bajos",
+    "Países Bajos",
+    "Niederlande"
+  ],
+  "Belgium": [
+    "Belgica",
+    "Bélgica",
+    "Belgien"
+  ],
+  "Switzerland": [
+    "Suiza",
+    "Schweiz",
+    "Suisse"
+  ],
+  "Croatia": [
+    "Croacia",
+    "Hrvatska",
+    "Kroatien"
+  ],
+  "Sweden": [
+    "Suecia",
+    "Sverige",
+    "Schweden"
+  ],
+  "Norway": [
+    "Noruega",
+    "Norwegen"
+  ],
+  "Denmark": [
+    "Dinamarca",
+    "Dänemark",
+    "Daenemark"
+  ],
+  "Poland": [
+    "Polonia",
+    "Polen"
+  ],
+  "Austria": [
+    "Österreich",
+    "Oesterreich"
+  ],
+  "Czechia": [
+    "Czech Republic",
+    "Republica Checa",
+    "República Checa",
+    "Chequia",
+    "Tschechien"
+  ],
+  "Turkey": [
+    "Turquia",
+    "Turquía",
+    "Turkiye",
+    "Türkiye",
+    "Türkei",
+    "Tuerkei"
+  ],
+  "Mexico": [
+    "Mexico",
+    "México",
+    "Mexiko"
+  ],
+  "Canada": [
+    "Canada",
+    "Canadá",
+    "Kanada"
+  ],
+  "Panama": [
+    "Panama",
+    "Panamá"
+  ],
+  "Japan": [
+    "Japon",
+    "Japón",
+    "Nippon"
+  ],
+  "South Korea": [
+    "Korea Republic",
+    "Corea del Sur",
+    "Corea",
+    "Südkorea",
+    "Suedkorea"
+  ],
+  "Australia": [
+    "Socceroos",
+    "Australien"
+  ],
+  "New Zealand": [
+    "Nueva Zelanda",
+    "Neuseeland"
+  ],
+  "Saudi Arabia": [
+    "Arabia Saudita",
+    "Arabia Saudi",
+    "Arabia Saudí",
+    "Saudi-Arabien"
+  ],
+  "Iran": [
+    "Iran",
+    "Irán"
+  ],
+  "Iraq": [
+    "Irak"
+  ],
+  "Jordan": [
+    "Jordania"
+  ],
+  "Uzbekistan": [
+    "Uzbekistan",
+    "Uzbekistán"
+  ],
+  "Morocco": [
+    "Marruecos",
+    "Marokko"
+  ],
+  "Tunisia": [
+    "Tunez",
+    "Túnez",
+    "Tunesien"
+  ],
+  "Algeria": [
+    "Argelia",
+    "Algerien"
+  ],
+  "Ivory Coast": [
+    "Cote d'Ivoire",
+    "Côte d'Ivoire",
+    "Costa de Marfil",
+    "Elfenbeinküste",
+    "Elfenbeinkueste"
+  ],
+  "South Africa": [
+    "Sudafrica",
+    "Sudáfrica",
+    "Südafrika",
+    "Suedafrika"
+  ],
+  "Cape Verde Islands": [
+    "Cape Verde",
+    "Cabo Verde"
+  ],
+  "Curacao": [
+    "Curaçao"
+  ],
+  "Curaçao": [
+    "Curacao"
+  ],
+  "Haiti": [
+    "Haiti",
+    "Haití"
+  ],
+  "Scotland": [
+    "Escocia",
+    "Schottland"
+  ],
+  "Wales": [
+    "Gales"
+  ],
+  "Bosnia-Herzegovina": [
+    "Bosnia and Herzegovina",
+    "Bosnia y Herzegovina",
+    "Bosnia"
+  ],
+  "Congo DR": [
+    "DR Congo",
+    "RD Congo",
+    "Democratic Republic of Congo"
+  ],
+  "Greece": [
+    "Griechenland",
+    "Grecia"
+  ],
+  "Czech Republic": [
+    "Tschechien"
+  ],
+  "Hungary": [
+    "Ungarn"
+  ],
+  "Romania": [
+    "Rumänien",
+    "Rumaenien"
+  ],
+  "Serbia": [
+    "Serbien"
+  ],
+  "Slovakia": [
+    "Slowakei"
+  ],
+  "Slovenia": [
+    "Slowenien"
+  ],
+  "Ireland": [
+    "Irland",
+    "Irlanda"
+  ],
+  "Republic of Ireland": [
+    "Irland",
+    "Ireland"
+  ],
+  "Finland": [
+    "Finnland"
+  ],
+  "Iceland": [
+    "Island",
+    "Islandia"
+  ],
+  "Russia": [
+    "Russland",
+    "Rusia"
+  ],
+  "Egypt": [
+    "Ägypten",
+    "Aegypten",
+    "Egipto"
+  ],
+  "Cameroon": [
+    "Kamerun",
+    "Camerun"
+  ],
+  "Colombia": [
+    "Kolumbien"
+  ],
+  "Qatar": [
+    "Katar"
+  ],
+  "Argentina": [
+    "Argentinien"
+  ]
 }

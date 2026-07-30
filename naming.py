@@ -105,6 +105,49 @@ def validate_template(template: str) -> List[str]:
     return errors
 
 
+def resolve_template(raw: Optional[str]) -> "tuple[str, List[str], bool]":
+    """Decide which template to actually use. Returns (template, errors, is_default).
+
+    THE single place the "your template is broken, falling back to the default"
+    decision is made. It exists because apply and the preview action each made
+    that decision independently and disagreed about how loud to be: preview
+    returned `status: error` with the brace problem listed, while apply set the
+    template to None, emitted a `logger.warning` nobody reads, and named every
+    channel with the default. A user who edited the template to drop the score,
+    and never happened to run preview, saw the score keep appearing with no
+    explanation anywhere in the UI (#126). Route every new caller through here
+    rather than re-deriving it, or the two paths drift apart again.
+
+    An EMPTY template is not an error, it just means "use the default", so
+    `errors` stays empty and only `is_default` flips. A NON-empty template that
+    fails validation returns the default AND the problems, and the caller is
+    expected to show them.
+    """
+    stripped = (raw or "").strip()
+    if not stripped:
+        return DEFAULT_NAME_TEMPLATE, [], True
+    errors = validate_template(stripped)
+    if errors:
+        return DEFAULT_NAME_TEMPLATE, errors, True
+    return stripped, [], False
+
+
+def template_problem_summary(errors: List[str]) -> str:
+    """One-line, user-facing rendering of resolve_template's errors.
+
+    Shared so the apply toast and show_status word it identically; a user who
+    sees two different phrasings for the same problem reasonably assumes they
+    are two different problems.
+    """
+    if not errors:
+        return ""
+    return (
+        f"name_template invalid ({'; '.join(errors)}); "
+        f"used the DEFAULT template instead. Fix it under Channel Naming, or "
+        f"run 'Test naming convention' to preview."
+    )
+
+
 def _fmt_rank(rank: Optional[int], is_poll: bool) -> str:
     # Poll ranks (AP / Coaches Top 25) are meaningful absolute numbers; a
     # standings "rank" is just a league-table position every team has, so it

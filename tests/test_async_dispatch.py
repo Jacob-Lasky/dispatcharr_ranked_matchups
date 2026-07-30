@@ -337,6 +337,74 @@ class TestShowStatusSurfacesInflight:
         assert any(line.startswith("Refreshed:") for line in lines[2:])
 
 
+class TestTemplateProblemIsSurfaced:
+    """#126: an invalid name_template used to be a logger.warning nobody sees.
+
+    The user-visible symptom was that channels kept the DEFAULT name (score
+    included) while the saved template had no score token, with no explanation
+    anywhere. show_status is where a confused user looks first, so it has to
+    answer the question; apply's toast scrolls away.
+    """
+
+    BROKEN = (
+        "{league_short} {favorite_star} \u00b7 {away_team}{ (rank_away)} at "
+        "{home_team}{ (rank_home)} | {game_date}, {start_time}} { | tagline}"
+    )
+
+    def test_show_status_warns_on_a_broken_template(self, plugin_mod):
+        with patch.object(plugin_mod, "_read_cache", return_value={"games": []}):
+            with patch.object(plugin_mod.tasks, "read_inflight", return_value=None):
+                result = plugin_mod._action_show_status({"name_template": self.BROKEN})
+        assert "WARNING" in result["message"]
+        assert "name_template invalid" in result["message"]
+        assert "Unbalanced { } braces." in result["message"]
+
+    def test_show_status_is_silent_on_a_valid_template(self, plugin_mod):
+        with patch.object(plugin_mod, "_read_cache", return_value={"games": []}):
+            with patch.object(plugin_mod.tasks, "read_inflight", return_value=None):
+                result = plugin_mod._action_show_status(
+                    {"name_template": "{away_team} at {home_team}"})
+        assert "name_template invalid" not in result["message"]
+
+    def test_show_status_is_silent_when_no_template_is_set(self, plugin_mod):
+        # The overwhelmingly common case. A warning banner here would train
+        # users to ignore the banner.
+        with patch.object(plugin_mod, "_read_cache", return_value={"games": []}):
+            with patch.object(plugin_mod.tasks, "read_inflight", return_value=None):
+                result = plugin_mod._action_show_status({})
+        assert "name_template invalid" not in result["message"]
+
+    def test_show_status_still_reports_inflight_alongside_the_warning(self, plugin_mod):
+        # The two banners are independent; adding one must not swallow the other.
+        inflight = {"kind": "auto_pipeline", "task_id": "0123456789abcdef",
+                    "phase": "apply", "started_at": "2026-07-30T00:00:00+00:00", "pid": 1}
+        with patch.object(plugin_mod, "_read_cache", return_value={"games": []}):
+            with patch.object(plugin_mod.tasks, "read_inflight", return_value=inflight):
+                result = plugin_mod._action_show_status({"name_template": self.BROKEN})
+        assert "name_template invalid" in result["message"]
+        assert "in flight" in result["message"]
+
+    def test_apply_prepends_the_warning_to_its_summary(self):
+        # plugin.py needs Django to import a real apply, so pin the wiring at
+        # the source level: a unit test would pass with the warning unwired.
+        import os
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        assert "tmpl_problem = naming.template_problem_summary(tmpl_errors)" in src
+        assert 'msg = f"WARNING: {tmpl_problem}' in src
+
+    def test_all_three_paths_use_the_shared_resolver(self):
+        # apply, preview and show_status each used to decide the fallback for
+        # themselves, which is how they came to disagree. Exactly three callers.
+        import os
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        assert src.count("naming.resolve_template(") == 3
+        assert "naming.validate_template(" not in src, (
+            "a caller is re-deriving the fallback instead of using resolve_template"
+        )
+
+
 class TestSchedulerLockOwnership:
     """The lock is what keeps two destructive applies off the same rows.
 

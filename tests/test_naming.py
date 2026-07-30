@@ -242,3 +242,59 @@ class TestTaglinePrettify:
         assert tournament_stage_label("last_16") == "Round of 16"
         assert tournament_stage_label(None) == ""
         assert tournament_stage_label("NONSENSE") == ""
+
+
+class TestResolveTemplate:
+    """#126: apply and preview each decided the fallback independently and
+    disagreed about how loud to be. resolve_template is the single decision.
+
+    The repro from the issue: a stray '}' after {start_time} makes brace counts
+    9-vs-10, validate_template rejects it, and every channel silently got the
+    DEFAULT name (score included) even though the saved template has no score
+    token. Nothing in apply, the guide, or show_status said so.
+    """
+
+    BROKEN = (
+        "{league_short} {favorite_star} · {away_team}{ (rank_away)} at "
+        "{home_team}{ (rank_home)} | {game_date}, {start_time}} { | tagline}"
+    )
+
+    def test_the_reported_template_is_rejected(self):
+        assert naming.validate_template(self.BROKEN) == ["Unbalanced { } braces."]
+
+    def test_broken_template_falls_back_to_default_and_reports(self):
+        tmpl, errors, is_default = naming.resolve_template(self.BROKEN)
+        assert tmpl == naming.DEFAULT_NAME_TEMPLATE
+        assert errors == ["Unbalanced { } braces."]
+        assert is_default is True
+
+    def test_valid_template_is_used_verbatim_with_no_errors(self):
+        good = "{league_short} · {away_team} at {home_team}"
+        assert naming.resolve_template(good) == (good, [], False)
+
+    @pytest.mark.parametrize("raw", [None, "", "   "])
+    def test_empty_means_default_and_is_NOT_an_error(self, raw):
+        # An unset template is the normal case, not a misconfiguration; it must
+        # not produce a warning banner on every apply.
+        tmpl, errors, is_default = naming.resolve_template(raw)
+        assert (tmpl, errors, is_default) == (naming.DEFAULT_NAME_TEMPLATE, [], True)
+
+    def test_whitespace_is_stripped_before_use(self):
+        tmpl, errors, is_default = naming.resolve_template("  {away_team} at {home_team}  ")
+        assert tmpl == "{away_team} at {home_team}"
+        assert (errors, is_default) == ([], False)
+
+    def test_summary_is_empty_when_there_is_nothing_to_say(self):
+        assert naming.template_problem_summary([]) == ""
+
+    def test_summary_names_the_problem_and_the_fix(self):
+        s = naming.template_problem_summary(["Unbalanced { } braces."])
+        assert "Unbalanced { } braces." in s
+        assert "DEFAULT" in s
+        assert "Channel Naming" in s, "must tell the user WHERE to fix it"
+
+    def test_unknown_variable_group_also_reports(self):
+        tmpl, errors, is_default = naming.resolve_template("{away_team}{ nonsense}")
+        assert tmpl == naming.DEFAULT_NAME_TEMPLATE
+        assert is_default is True
+        assert any("nonsense" in e for e in errors)

@@ -1,17 +1,21 @@
 """Tests for matcher.py: pure-logic helpers (no Anthropic, no Django)."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
 from dispatcharr_ranked_matchups.matcher import (
     ChannelCandidate,
     _extract_json,
+    _is_non_main_card,
     _is_preview_title,
+    _main_card_first,
     _kw_hit,
     _regex_filter,
     _regex_filter_channel_name,
     _strip_preview_titles,
+    parse_stream_date,
+    stream_is_stale_for_game,
     _strong_team_keywords,
     _team_keywords,
     both_teams_in_one_segment,
@@ -962,6 +966,284 @@ class _FieldGame:
         self.sport_label = "UFC"
         self.start_time = datetime(2026, 4, 27, tzinfo=timezone.utc)
         self.extra = {"is_field_event": True}
+
+
+class TestEuropeanBroadcasterMatching:
+    """#143: ORF/ARD/ZDF/SRF title the programme with the COMPETITION and put
+    the fixture in the sub-title, in German.
+
+    Real EPG row from the issue:
+      channel   'AT: ORF 1 HD'
+      title     'FIFA Fussball WM 2026'          <- names no team
+      sub-title 'Gruppe F: Schweden - Tunesien'  <- the fixture lives here
+    Reading only the title produced ZERO candidates, so the game never matched.
+    """
+
+    def _cand(self, title, extra="", channel="AT: ORF 1 HD"):
+        from datetime import datetime, timezone
+        t = datetime(2026, 6, 20, tzinfo=timezone.utc)
+        return ChannelCandidate(channel_id=1, channel_name=channel,
+                                program_title=title, program_extra=extra,
+                                program_start=t, program_end=t)
+
+    def test_fixture_in_the_subtitle_wins_tier_2(self):
+        cands = [self._cand("FIFA Fussball WM 2026", "Gruppe F: Schweden - Tunesien")]
+        assert len(_regex_filter(cands, "Sweden", "Tunisia")) == 1
+
+    def test_same_row_without_the_subtitle_does_not_match(self):
+        # The control: it is genuinely the sub-title doing the work.
+        cands = [self._cand("FIFA Fussball WM 2026")]
+        assert _regex_filter(cands, "Sweden", "Tunisia") == []
+
+    def test_fixture_in_the_description_wins_tier_2(self):
+        cands = [self._cand(
+            "FIFA Fussball WM 2026",
+            "Frankreich und Senegal treffen aufeinander. Bei Frankreich steht "
+            "Kapitan Kylian Mbappe ... Senegal kontert mit Sadio Mane ...")]
+        assert len(_regex_filter(cands, "France", "Senegal")) == 1
+
+    def test_a_description_naming_only_one_side_still_does_not_match(self):
+        # Prose name-drops other teams constantly; the both-teams gate is what
+        # keeps reading descriptions from becoming a wildcard.
+        cands = [self._cand("FIFA Fussball WM 2026",
+                            "Frankreich schlug Brasilien in der Vorrunde.")]
+        assert _regex_filter(cands, "France", "Senegal") == []
+
+    def test_field_event_gate_still_reads_the_title_only(self):
+        # Single-sided admission on free prose would be a wildcard, so the
+        # one-keyword branch deliberately does NOT widen.
+        cands = [self._cand("Motorsport heute", "Heute im Programm: The Masters")]
+        assert _regex_filter(cands, "The Masters", None) == []
+
+    @pytest.mark.parametrize("english,german", [
+        ("France", "Frankreich"), ("Sweden", "Schweden"), ("Tunisia", "Tunesien"),
+        ("Switzerland", "Schweiz"), ("Spain", "Spanien"), ("Croatia", "Kroatien"),
+        ("Netherlands", "Niederlande"), ("Turkey", "Tuerkei"), ("Greece", "Griechenland"),
+        ("Ivory Coast", "Elfenbeinkueste"), ("South Korea", "Suedkorea"),
+    ])
+    def test_german_exonyms_are_keywords(self, english, german):
+        kws = [k.lower() for k in _team_keywords(english)]
+        assert german.lower() in kws, f"{german!r} missing from {english!r} aliases"
+
+    def test_umlaut_and_ascii_forms_both_present(self):
+        # EPG sources are inconsistent about umlauts, and _kw_hit is a plain
+        # case-insensitive match with no unicode folding, so both spellings
+        # have to be listed or one of them silently never matches.
+        kws = [k.lower() for k in _team_keywords("Turkey")]
+        assert "türkei" in kws and "tuerkei" in kws
+
+    def test_path_b_and_c_candidates_have_no_extra_text(self):
+        # program_extra defaults empty; a channel-name or stream-name candidate
+        # has no programme behind it, and inventing text would let the Tier-2
+        # gate fire on something that was never in the guide.
+        c = ChannelCandidate(channel_id=1, channel_name="x", program_title="y",
+                             program_start=None, program_end=None)
+        assert c.program_extra == ""
+
+
+class TestStreamDateParsing:
+    """#164: Path C has no time-window filter (streams carry no schedule), so
+    a series stacks every night's dedicated feed. The date, when present, is in
+    the NAME. Every format below was counted in a live 16415-stream corpus.
+    """
+
+    REF = date(2026, 7, 29)
+
+    @pytest.mark.parametrize("name,expected", [
+        # ISO, 6480 streams in the corpus
+        ("(Apple) (MLS) 006 |  Cincinnati vs. San Jose  (2026-08-01 19:25:00)", date(2026, 8, 1)),
+        # DD Mon, 1032
+        ("MLB 14 | New York Yankees at Chicago White Sox AWAY 27 Jul 07:40 PM ET", date(2026, 7, 27)),
+        # Mon DD, 1950
+        ("Sportsnet+ 07: New York Yankees @ Chicago White Sox Jul 28 7:30PM ET", date(2026, 7, 28)),
+        # M.DD suffix
+        ("MLB 08: White Sox vs. Yankees (7.27 7:40 PM ET)", date(2026, 7, 27)),
+        # MM.DD suffix
+        ("ESPN UNLTD 028: New York Yankees at Chicago White Sox (07.27)", date(2026, 7, 27)),
+        # M.DD.YY
+        ("Dirtvision 02: 7.29.26 | BAPS Motor Speedway", date(2026, 7, 29)),
+        # M/D
+        ("ESPN+ 04: Wed, 7/29 - The Rich Eisen Show", date(2026, 7, 29)),
+    ])
+    def test_real_provider_formats(self, name, expected):
+        assert parse_stream_date(name, self.REF) == expected
+
+    def test_clock_after_a_month_is_not_read_as_the_day(self):
+        # '@ 29 Jul 10:00 PM ET' must be the 29th, not July 10th. Day-first is
+        # tried before month-first precisely for this.
+        assert parse_stream_date(
+            "TSN+ 08: NSL on TSN+: Vancouver vs. Montreal @ 29 Jul 10:00 PM ET",
+            self.REF) == date(2026, 7, 29)
+
+    def test_day_is_not_backtracked_to_one_digit(self):
+        # A single combined lookahead let the regex backtrack 'Jul 28 7:30PM'
+        # to July 2nd across ~1950 live streams. Caught by the corpus, not by
+        # reasoning, which is why the two lookaheads are separate.
+        assert parse_stream_date(
+            "Sportsnet+ 07: Yankees @ White Sox Jul 28 7:30PM ET",
+            self.REF) == date(2026, 7, 28)
+
+    def test_doubleheader_game_number_is_not_the_day(self):
+        # 'Game 2 Jul 22' is the 22nd. The game number sits exactly where a
+        # day-first date would.
+        assert parse_stream_date(
+            "Sportsnet+ 06: Baltimore @ Boston - Game 2 Jul 22 7:00PM ET",
+            self.REF) == date(2026, 7, 22)
+
+    @pytest.mark.parametrize("name", [
+        "Moto3 Junior | Race: MotoJunior | France",   # 'Jun' inside 'Junior'
+        "NCAAB 04: March Madness Bracket Show",       # 'March' with no day
+        "MLB Network HD",
+        "YES Network FHD",
+        "",
+    ])
+    def test_undated_names_parse_to_nothing(self, name):
+        assert parse_stream_date(name, self.REF) is None
+
+    def test_sentinel_far_future_date_reads_as_undated(self):
+        # Providers park scheduleless feeds on a sentinel timestamp; the live
+        # corpus has '(PDC 50) | (2098-12-31 08:00:17)'. Reading that as "not
+        # this game's date" would DROP a usable feed.
+        assert parse_stream_date("(PDC 50) |  (2098-12-31 08:00:17)", self.REF) is None
+
+    def test_yearless_date_straddles_the_new_year(self):
+        # A 29 Dec game and a '29 Dec' feed must agree on the year even though
+        # the reference is in the next calendar year.
+        assert parse_stream_date("NHL 03: Bruins at Rangers 29 Dec 07:00 PM ET",
+                                 date(2027, 1, 2)) == date(2026, 12, 29)
+
+
+class TestStreamStaleness:
+    """The one-sided drop rule (#164)."""
+
+    GAME = date(2026, 7, 29)
+
+    @pytest.mark.parametrize("name", [
+        "MLB 14 | New York Yankees at Chicago White Sox AWAY 27 Jul 07:40 PM ET",
+        "MLB 19 | New York Yankees at Chicago White Sox AWAY 28 Jul 07:40 PM ET",
+        "Sportsnet+ 08: New York Yankees @ Chicago White Sox Jul 27 7:30PM ET",
+        "MLB 08: White Sox vs. Yankees (7.27 7:40 PM ET)",
+        "ESPN UNLTD 028: New York Yankees at Chicago White Sox (07.28)",
+    ])
+    def test_previous_nights_of_the_series_are_dropped(self, name):
+        # Verbatim from the stack the issue recorded on a live instance.
+        assert stream_is_stale_for_game(name, self.GAME) is True
+
+    @pytest.mark.parametrize("name", [
+        "MLB 21 | New York Yankees at Chicago White Sox AWAY 29 Jul 07:40 PM ET",
+        "MLB 12: White Sox vs. Yankees (7.29 7:40 PM ET)",
+    ])
+    def test_tonights_feeds_survive(self, name):
+        assert stream_is_stale_for_game(name, self.GAME) is False
+
+    def test_undated_feeds_always_survive(self):
+        # THE non-regression that matters: dedicated feeds with no date at all
+        # must keep matching, which is why the rule is "reject a date that IS
+        # present and earlier", not "require a matching date".
+        assert stream_is_stale_for_game("YES Network HD", self.GAME) is False
+        assert stream_is_stale_for_game("MLB Network FHD", self.GAME) is False
+
+    def test_future_dated_feeds_survive(self):
+        # A provider publishing tomorrow's feed early is not evidence against
+        # this game, and pre-published feeds are how a viewer gets a stream at
+        # all when the guide runs ahead.
+        assert stream_is_stale_for_game(
+            "MLB 30 | Yankees at White Sox 31 Jul 07:40 PM ET", self.GAME) is False
+
+    def test_same_day_survives_at_the_boundary(self):
+        assert stream_is_stale_for_game(
+            "MLB 21 | Yankees at White Sox 29 Jul 07:40 PM ET", self.GAME) is False
+
+
+class TestMainCardFirst:
+    """#135: Tier-1 stacks every channel naming the event, so a UFC card's
+    pre-show / prelims / press-conference / multiview feeds ride along with the
+    main card, and the primary was whichever was seen first.
+
+    Channel names below are verbatim from the live run recorded in the issue
+    (UFC Freedom 250: Topuria vs. Gaethje, method regex_strict, 16 stacked).
+    """
+
+    REAL_STACK = [
+        "EVENT 01: PRE SHOW UFC Freedom 250 (6.14 6:00 PM ET)",
+        "LIVE EVENT 01 - 6pm UFC Freedom 250 Prelims",
+        "LIVE EVENT 02 - 8pm UFC Freedom 250",
+        "EVENT 05: UFC Freedom 250 Multiview",
+        "EVENT 06: Post Fight Press Conference UFC Freedom 250 (6.15 1:00 AM ET)",
+    ]
+
+    def _cands(self, names):
+        from datetime import datetime, timezone
+        t = datetime(2026, 6, 14, tzinfo=timezone.utc)
+        return [ChannelCandidate(channel_id=i, channel_name=n, program_title="",
+                                 program_start=t, program_end=t)
+                for i, n in enumerate(names)]
+
+    def test_pre_show_no_longer_wins_primary(self):
+        # The reported ordering: the pre-show is discovered FIRST.
+        ordered = _main_card_first(self._cands(self.REAL_STACK))
+        assert ordered[0].channel_name == "LIVE EVENT 02 - 8pm UFC Freedom 250"
+
+    def test_every_ancillary_feed_is_still_stacked(self):
+        # DEMOTE, not drop: the fallback stack is the point of Tier-1 stacking.
+        ordered = _main_card_first(self._cands(self.REAL_STACK))
+        assert len(ordered) == len(self.REAL_STACK)
+        assert {c.channel_name for c in ordered} == set(self.REAL_STACK)
+
+    def test_ancillary_order_among_themselves_is_preserved(self):
+        # Stable sort: only the main-card/ancillary split moves anything.
+        ordered = [c.channel_name for c in _main_card_first(self._cands(self.REAL_STACK))]
+        anc = [n for n in ordered if n != "LIVE EVENT 02 - 8pm UFC Freedom 250"]
+        assert anc == [n for n in self.REAL_STACK if n != "LIVE EVENT 02 - 8pm UFC Freedom 250"]
+
+    def test_all_ancillary_still_yields_a_primary(self):
+        # A provider that labels everything 'Prelims' must not lose the event.
+        names = ["EVENT 01: PRE SHOW X", "LIVE EVENT 01 Prelims X"]
+        ordered = _main_card_first(self._cands(names))
+        assert [c.channel_name for c in ordered] == names
+
+    @pytest.mark.parametrize("name", [
+        "EVENT 01: PRE SHOW UFC Freedom 250",
+        "LIVE EVENT 01 - 6pm UFC Freedom 250 Prelims",
+        "EVENT 05: UFC Freedom 250 Multiview",
+        "EVENT 06: Post Fight Press Conference UFC Freedom 250",
+        "UFC 300 Countdown",
+        "PPV 02: UFC 300 Weigh-In",
+        "Pre-Game: Lakers at Celtics",
+    ])
+    def test_marked_as_ancillary(self, name):
+        assert _is_non_main_card(name)
+
+    @pytest.mark.parametrize("name", [
+        "LIVE EVENT 02 - 8pm UFC Freedom 250",
+        "PPV 01: UFC Freedom 250 Main Card",
+        "EPL01: Manchester United 20:00 Brentford",
+        "ESPN UNLTD 028: Yankees at White Sox",
+    ])
+    def test_not_marked_as_ancillary(self, name):
+        assert not _is_non_main_card(name)
+
+    def test_two_team_path_gets_the_same_ordering(self):
+        # #135 observed this on a field event, but a pre-show winning primary
+        # over the real match feed is the same defect for a two-team game.
+        cands = self._cands([
+            "PRE SHOW: Manchester United vs Brentford",
+            "EPL01: Manchester United 20:00 Brentford",
+        ])
+        out = _regex_filter_channel_name(cands, "Manchester United FC", "Brentford FC")
+        assert len(out) == 2, "both must survive; this reorders, it does not filter"
+        assert _main_card_first(out)[0].channel_name == "EPL01: Manchester United 20:00 Brentford"
+
+    def test_tier1_end_to_end_picks_the_main_card(self):
+        games = [(_FieldGame("UFC Freedom 250: Topuria vs. Gaethje"), None, None)]
+        cands = [_cand(i, n, "Live") for i, n in enumerate([
+            "EVENT 01: PRE SHOW UFC Freedom 250: Topuria vs. Gaethje",
+            "LIVE EVENT 02 - 8pm UFC Freedom 250: Topuria vs. Gaethje",
+        ])]
+        results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
+        assert results[0].method == "regex_strict"
+        assert results[0].channel_name == "LIVE EVENT 02 - 8pm UFC Freedom 250: Topuria vs. Gaethje"
+        assert len(results[0].channel_ids) == 2, "the pre-show still stacks behind"
 
 
 class TestFieldEventMatching:

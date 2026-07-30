@@ -5,6 +5,50 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.16.0] - 2026-07-30
+
+### Added
+
+- **European public broadcasters now match (#143).** ORF, ARD, ZDF and SRF put
+  the competition in the programme title and the actual fixture in the
+  sub-title, in the local language: title `FIFA Fußball WM 2026`, sub-title
+  `Gruppe F: Schweden - Tunesien`. The matcher read only the title, so those
+  broadcasts produced no candidates and the games never matched at all. The
+  candidate pre-filter now also reads the sub-title and the description, and the
+  both-teams regex tier reads them too, so an ORF programme matches on the regex
+  tier instead of falling through to the LLM for a fixture its sub-title states
+  outright. The three fields are gated differently on purpose: a title or
+  sub-title admits on one team name, but a description is free prose that
+  name-drops other teams in passing, so it requires both sides.
+- **German team names** in `team_aliases.json` (`Frankreich`, `Schweden`,
+  `Tunesien`, `Kroatien`, `Elfenbeinküste`, …), without which the above changes
+  nothing, since `Frankreich` never matched `France`. Both umlaut and ASCII
+  spellings are listed because matching does no unicode folding.
+
+### Fixed
+
+- **Stale feeds from previous nights no longer stack behind a game (#164).**
+  Streams carry no schedule, so stream-name matching had no time filter at all,
+  and the team-pair gate that was supposed to keep it tight is blind to dates.
+  Baseball plays the same opponent three nights running, so every night's
+  dedicated feed names the same two teams: roughly half the 22 streams attached
+  to one Yankees game were the previous two nights' finished broadcasts. The
+  date, where a provider puts one in the name, is now read and a feed dated
+  before its game is dropped. Undated feeds are unaffected, and a future-dated
+  feed is kept.
+- **The main card, not the pre-show, is now the primary feed for an event
+  (#135).** Matching stacked every channel naming a UFC card, which mixes the
+  main card with the pre-show, the prelims, the post-fight press conference and
+  the multiview, and picked whichever it saw first. Ancillary feeds now sort
+  behind a plain feed. They are still stacked as fallbacks, never dropped.
+- **An invalid channel-name template now says so (#126).** A stray brace made
+  apply silently fall back to the default template, so channels kept showing the
+  score even though the saved template had no score token, with nothing in the
+  UI explaining why. Apply and **Show current state** now both report it and
+  point at where to fix it. Note the plugin cannot reject a bad template at the
+  moment you save it: Dispatcharr writes plugin settings with no validation hook
+  available to the plugin.
+
 ## [1.15.0] - 2026-07-30
 
 ### Changed

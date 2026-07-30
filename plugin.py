@@ -1795,7 +1795,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # 4. EPG match each game to a Dispatcharr channel.
     # _build_epg_lookup excludes ALL our virtual channels by tvg_id prefix:
     # covers both the current target group and any orphans from a renamed group.
-    epg_lookup = _build_epg_lookup()
+    epg_lookup = _build_epg_lookup(local_tz=_resolve_tz(settings.get("local_timezone", "UTC")))
     api_key = _resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH)
     model = settings.get("model", "claude-haiku-4-5")
     # #108: off-by-default. When on, the matcher stacks same-fixture provider
@@ -1803,6 +1803,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # the matchup channel.
     widen = bool(settings.get(_WIDEN_STREAM_POOL_SETTING, False))
     matches = match_games_to_channels(scored, epg_lookup, api_key, model, widen=widen)
+    stale_dropped = epg_lookup.stats.get("stale_dated_streams_dropped", 0)
+    if stale_dropped:
+        logger.info(
+            "[ranked_matchups] refresh: skipped %d stream(s) whose name dated "
+            "them before their game (previous nights of the same series)",
+            stale_dropped,
+        )
 
     # 5. Build cache payload (transparent: every signal + breakdown stored)
     games_payload = []
@@ -1861,8 +1868,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- EPG lookup (closure over Django ORM) ----------
 
-def _build_epg_lookup():
+def _build_epg_lookup(local_tz=timezone.utc):
     """Return a callable: GameRow -> List[ChannelCandidate]. Closure over ORM.
+
+    `local_tz` is the user's configured timezone. It is used ONLY to widen the
+    date window Path C rejects stale streams against (#164); nothing else in
+    here is timezone-sensitive, so the UTC default is safe for callers (the
+    diagnose action) that have no reason to thread a setting through.
 
     Excludes any channel that is one of OUR virtual channels (see
     _owned_tvg_id_q): covers the configured target group AND any old groups
@@ -1883,10 +1895,15 @@ def _build_epg_lookup():
         _strong_team_keywords,
         _team_keywords,
         both_teams_in_one_segment,
+        stream_is_stale_for_game,
     )
     from apps.channels.models import Channel, Stream
     from apps.epg.models import ProgramData
     from django.db.models import Q
+
+    # Counters the caller reports after the whole slate is matched. A dict
+    # rather than a nonlocal int so the accessor below is a plain attribute.
+    stats = {"stale_dated_streams_dropped": 0}
 
     def lookup(game) -> List[ChannelCandidate]:
         # Per-sport match window: soccer needs a tighter window to avoid
@@ -1895,6 +1912,18 @@ def _build_epg_lookup():
         pre_min, post_hours = _epg_match_window(game.sport_prefix)
         window_start = game.start_time - timedelta(minutes=pre_min)
         window_end = game.start_time + timedelta(hours=post_hours)
+
+        # EARLIEST plausible calendar date for this game, used to reject stream
+        # names advertising a previous night (#164). Provider names are stamped
+        # in the broadcaster's local zone (almost always ET), which can sit a day
+        # either side of both UTC and the user's zone, so take the earlier of the
+        # two rather than picking one and being wrong for half the slate. Erring
+        # early costs at most one extra stale feed; erring late drops the LIVE
+        # feed for any night game whose UTC date has already rolled over.
+        earliest_game_date = min(
+            game.start_time.astimezone(timezone.utc).date(),
+            game.start_time.astimezone(local_tz).date(),
+        )
 
         # Field events (#127) have no opponent: the away side is the "Field"
         # sentinel. Match on the event name (home) alone, both for the Path A
@@ -1940,13 +1969,37 @@ def _build_epg_lookup():
                 q |= Q(**{f"{dbfield}__icontains": kw})
             return q
 
-        # Path A: programs in window whose TITLE mentions any team keyword.
-        title_q = _or_icontains("title", all_kws)
+        # Path A: programs in window whose TITLE mentions any team keyword,
+        # OR whose SUB-TITLE does, OR whose DESCRIPTION names BOTH sides (#143).
+        #
+        # European public broadcasters (ORF, ARD, ZDF, SRF) put the competition
+        # in the title and the fixture underneath it: title 'FIFA Fussball WM
+        # 2026', sub-title 'Gruppe F: Schweden - Tunesien', description naming
+        # both squads in prose. Reading only the title produced ZERO candidates
+        # for those broadcasts, so the games never matched at all.
+        #
+        # The three fields get DIFFERENT gates on purpose. Title and sub-title
+        # are short, curated, and about this programme, so a single keyword is
+        # enough. A description is long free prose that routinely name-drops
+        # other teams ('... beat Brazil last week'), so admitting on one keyword
+        # there would drag half the guide into the Tier-3 candidate pool. It
+        # requires BOTH sides, which is the same reasoning that makes the Path B
+        # channel-name gate two-sided.
+        title_q = _or_icontains("title", all_kws) | _or_icontains("sub_title", all_kws)
+        if field:
+            # Single-sided: there is no opponent to require.
+            title_q |= _or_icontains("description", strong_home)
+        elif strong_home and strong_away:
+            title_q |= (
+                _or_icontains("description", strong_home)
+                & _or_icontains("description", strong_away)
+            )
         title_progs = list(
             ProgramData.objects
             .filter(start_time__lt=window_end, end_time__gt=window_start)
             .filter(title_q)
-            .only("id", "title", "start_time", "end_time", "epg_id")
+            .only("id", "title", "sub_title", "description",
+                  "start_time", "end_time", "epg_id")
         )
 
         # Path B: channels whose NAME mentions BOTH teams. Include them even
@@ -2001,6 +2054,20 @@ def _build_epg_lookup():
                         program_title=p.title or "",
                         program_start=p.start_time,
                         program_end=p.end_time,
+                        # Carried so Tier 2 can win on a fixture that lives
+                        # BELOW the title (#143). Without it an ORF programme
+                        # titled 'FIFA Fussball WM 2026' becomes a candidate and
+                        # then loses every regex tier, falling through to the
+                        # LLM for a match the sub-title states outright.
+                        # getattr, not attribute access: the offline replay
+                        # harness and the test fake-ORM build lightweight row
+                        # stubs, and a snapshot taken before these columns were
+                        # exported has neither. Missing == no extra text, which
+                        # is exactly the pre-#143 behaviour.
+                        program_extra=" ".join(
+                            x for x in (getattr(p, "sub_title", "") or "",
+                                        getattr(p, "description", "") or "") if x
+                        ),
                     ))
 
         for c in name_match_chans:
@@ -2047,6 +2114,15 @@ def _build_epg_lookup():
                 s.name or "", home_kws, away_kws
             ):
                 continue
+            # Drop a feed whose NAME advertises an earlier date (#164). The
+            # team-pair gate above is tight on teams and blind to dates, and
+            # baseball plays the same opponent three nights running, so every
+            # night's dedicated feed names the same two teams and all of them
+            # pass. Roughly half the 22 streams attached to one Yankees game
+            # were the two previous nights' finished broadcasts.
+            if stream_is_stale_for_game(s.name or "", earliest_game_date):
+                stats["stale_dated_streams_dropped"] += 1
+                continue
             out.append(ChannelCandidate(
                 channel_id=-s.id,            # sentinel: not a real channel PK
                 channel_name=s.name or "",   # stream name → Tier-1 sees both teams
@@ -2057,6 +2133,7 @@ def _build_epg_lookup():
             ))
         return out
 
+    lookup.stats = stats
     return lookup
 
 
@@ -2659,19 +2736,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     # Channel-name template (issue #100). Empty/unset -> the built-in default.
     # A malformed custom template must never crash an apply or poison live
-    # channel names: validate, and on any problem fall back to the default and
-    # log loudly (the "test naming convention" action is where users catch this
-    # before it ships).
+    # channel names: fall back to the default.
+    #
+    # The fallback is REPORTED, not just logged (#126). It used to emit only a
+    # logger.warning, so a user whose template had a stray brace saw every
+    # channel keep the default name (score included) with nothing in the UI
+    # saying why, while the preview action -- which most users never run --
+    # returned a loud `status: error` for the same template. tmpl_problem is
+    # appended to this action's result message below so the divergence is gone.
     from . import naming
-    name_template = str(settings.get("name_template") or "").strip() or None
-    if name_template is not None:
-        tmpl_errors = naming.validate_template(name_template)
-        if tmpl_errors:
-            logger.warning(
-                "[ranked_matchups] invalid name_template (%s); using default",
-                "; ".join(tmpl_errors),
-            )
-            name_template = None
+    resolved_template, tmpl_errors, _tmpl_is_default = naming.resolve_template(
+        settings.get("name_template")
+    )
+    tmpl_problem = naming.template_problem_summary(tmpl_errors)
+    if tmpl_errors:
+        logger.warning(
+            "[ranked_matchups] invalid name_template (%s); using default",
+            "; ".join(tmpl_errors),
+        )
+    # Downstream still signals "use the default" with None, so preserve that
+    # rather than threading the resolved string through every call site.
+    name_template = None if _tmpl_is_default else resolved_template
     apply_tz = _resolve_tz(settings.get("local_timezone", "UTC"))
 
     # 1. Ensure target ChannelGroup. Also detect any old groups/sources we own
@@ -3503,6 +3588,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         f"unmatched_skipped={skipped_unmatched}.{rename_msg}{rec_msg}{llm_msg}{logo_msg}{foreign_msg} "
         f"WHY descriptions written to EPG source."
     )
+    if tmpl_problem:
+        # Lead with it: the channel names the user is about to look at are NOT
+        # the ones they configured, and that is the most important thing in
+        # this message (#126).
+        msg = f"WARNING: {tmpl_problem}\n\n{msg}"
     return {"status": "ok", "message": msg}
 
 
@@ -3632,15 +3722,12 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
     """
     from . import naming
 
-    raw = str(settings.get("name_template") or "").strip()
     tz = _resolve_tz(settings.get("local_timezone", "UTC"))
-
-    using_default = not raw
-    template = raw or naming.DEFAULT_NAME_TEMPLATE
-    errors = naming.validate_template(template)
-    if errors and not using_default:
-        template = naming.DEFAULT_NAME_TEMPLATE
-        using_default = True
+    # Shared resolver (#126), so this action and apply can never disagree about
+    # whether a template is usable.
+    template, errors, using_default = naming.resolve_template(
+        settings.get("name_template")
+    )
 
     _, rendered = naming.preview_lines(template, tz=tz)
 
@@ -3666,7 +3753,15 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
 # ---------- show status ----------
 
 def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
-    del settings  # interface-required (Plugin.run dispatch), not read here
+    # Reads settings ONLY to report a broken name_template (#126). This action
+    # is where a confused user looks first ("why are my channels named that?"),
+    # so it has to be able to answer that question; apply's toast scrolls away,
+    # this one is on demand. Same resolver as apply and preview.
+    from . import naming
+    _tmpl, tmpl_errors, _is_default = naming.resolve_template(
+        (settings or {}).get("name_template")
+    )
+    tmpl_problem = naming.template_problem_summary(tmpl_errors)
     cache = _read_cache()
     inflight = tasks.read_inflight()
     inflight_line: Optional[str] = None
@@ -3687,8 +3782,13 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
         msg = "Cache empty. Run refresh."
         if inflight_line:
             msg = inflight_line + "\n" + msg
+        if tmpl_problem:
+            msg = f"WARNING: {tmpl_problem}\n\n{msg}"
         return {"status": "ok", "message": msg}
     lines = []
+    if tmpl_problem:
+        lines.append(f"WARNING: {tmpl_problem}")
+        lines.append("")
     if inflight_line:
         lines.append(inflight_line)
         lines.append("")
@@ -4385,7 +4485,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.15.0"
+    version = "1.16.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
