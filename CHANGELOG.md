@@ -5,6 +5,36 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.14.2] - 2026-07-30
+
+Matching precision, part two. Two long-standing loose-match defects that
+attached channels and streams carrying a different fixture (#129).
+
+### Fixed
+
+- **A team abbreviation in a provider's feed label no longer pairs with an
+  opponent named in the matchup body.** Tier-1's channel-name both-teams check
+  accepted the two sides anywhere in the name, so `USA Soccer07: Australia vs
+  Turkey` — the Australia-vs-**Turkey** feed — matched the Australia vs United
+  States game, with `USA` supplied by the network label. Channel names are now
+  gated on `both_teams_in_one_segment`, the same rule stream names have had
+  since 1.8.0; the two paths were built for the same class of text and now
+  agree. Programme titles (Tier 2) are deliberately NOT gated: feed labels are
+  a channel/stream naming convention and XMLTV titles do not carry them.
+- **Short team aliases must now match as whole tokens.** `team_aliases.json`
+  carries broadcast abbreviations, and up to four characters they were matched
+  as bare substrings, which made them near-wildcards: `NE` (New England) hit
+  `Sportsnet` and `Tennessee`, `OM` hit `Roma`, `BOS` hit `Bosnia`, `GB` hit
+  `GBN`, `PIT` hit `Jupiter`, `CLE` hit `Clearwater`, and `Real` hit
+  `Montreal`. On Path A's single-keyword title pre-filter this handed the LLM
+  tier an arbitrary candidate pool for every game involving such a team.
+  Longer keywords keep substring semantics, so `Yankees' bullpen` still hits.
+
+  Measured cost: a differential over a live 6588-channel / 16415-stream corpus
+  across 33 fixtures dropped exactly two Tier-1 matches, both false positives
+  (a WTA tennis card matched to Cowboys-Eagles via `Dalibor`, a MiLB game
+  matched to Steelers-Browns via `Jupiter` and `Clearwater`), and gained none.
+
 ## [1.14.1] - 2026-07-29
 
 Matching precision. Two defects that composed to attach a different sport's

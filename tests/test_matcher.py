@@ -8,11 +8,13 @@ from dispatcharr_ranked_matchups.matcher import (
     ChannelCandidate,
     _extract_json,
     _is_preview_title,
+    _kw_hit,
     _regex_filter,
     _regex_filter_channel_name,
     _strip_preview_titles,
     _strong_team_keywords,
     _team_keywords,
+    both_teams_in_one_segment,
     match_games_to_channels,
     select_streams_for_game,
 )
@@ -229,6 +231,137 @@ class TestWeakKeywordsStillMatchBothTeamsGates:
         # Single-sided (field-event) mode is a single-keyword admission, so it is
         # gated on strong keywords and must also refuse.
         assert _regex_filter_channel_name(cands, "New York Yankees", None) == []
+
+
+class TestChannelNameSegmentGate:
+    """#129 mode 2: a team alias sitting in a channel's FEED LABEL must not pair
+    with an opponent named in the matchup body to fake a Tier-1 match.
+
+    The reported false positive: the 'Australia at United States' game matched
+    'USA Soccer07: Australia vs Turkey ( TSN1 Feed )', where 'USA' is the
+    provider's feed label and the real fixture on that channel is
+    Australia vs TURKEY. 1.8.0 built both_teams_in_one_segment for exactly this
+    shape but wired it only into Path C (stream names), leaving the older
+    channel-name path (Path B) ungated. This class pins the gate on BOTH.
+    """
+
+    def _chan(self, name, cid=1):
+        return ChannelCandidate(
+            channel_id=cid, channel_name=name, program_title="",
+            program_start=datetime(2026, 6, 13, tzinfo=timezone.utc),
+            program_end=datetime(2026, 6, 13, tzinfo=timezone.utc),
+        )
+
+    def test_feed_label_alias_does_not_pair_with_body_opponent(self):
+        cands = [self._chan("USA Soccer07: Australia vs Turkey ( TSN1 Feed )")]
+        assert _regex_filter_channel_name(cands, "United States", "Australia") == []
+
+    def test_the_real_fixture_on_that_same_channel_still_matches(self):
+        # The recall control for the test above: the channel is a legitimate
+        # Australia vs Turkey feed and must keep matching THAT game.
+        cands = [self._chan("USA Soccer07: Australia vs Turkey ( TSN1 Feed )")]
+        assert len(_regex_filter_channel_name(cands, "Turkey", "Australia")) == 1
+
+    def test_kickoff_time_is_not_a_segment_boundary(self):
+        # The ':' in '02:00' must not split the matchup across segments.
+        cands = [self._chan("FIFA World Cup 2026 06: USA 02:00 Paraguay")]
+        assert len(_regex_filter_channel_name(cands, "United States", "Paraguay")) == 1
+
+    def test_pipe_label_prefix_still_matches(self):
+        cands = [self._chan("AU (STAN 01) | Manchester United v Brentford PL 2025/26")]
+        out = _regex_filter_channel_name(cands, "Manchester United FC", "Brentford FC")
+        assert len(out) == 1
+
+    def test_channel_name_gate_agrees_with_path_c_gate(self):
+        # Path B and Path C must not disagree about the same text. This is the
+        # contract that was violated: the helper existed and one caller used it.
+        name = "USA Soccer07: Australia vs Turkey ( TSN1 Feed )"
+        home, away = _team_keywords("United States"), _team_keywords("Australia")
+        assert both_teams_in_one_segment(name, home, away) is False
+        assert _regex_filter_channel_name([self._chan(name)], "United States", "Australia") == []
+
+
+class TestShortKeywordWordBoundaries:
+    """#129 mode 1: short aliases are substring-matched into unrelated words.
+
+    team_aliases.json carries 2-4 character abbreviations ('NE', 'OM', 'GB',
+    'BOS', 'PIT', 'Real'), and _is_weak_last_word only screens the LAST-WORD
+    fallback, so aliases reach _kw_hit unfiltered. As bare substrings they are
+    close to wildcards: 'NE' is inside 'Sportsnet', 'Tennessee', and 'Network'.
+    On Path A's single-keyword title pre-filter that hands Tier 3 an arbitrary
+    candidate pool for every Patriots game, which is the shape that produced
+    the reported 'SportsGrid' match.
+    """
+
+    @pytest.mark.parametrize("team,text,alias", [
+        ("New England Patriots", "Sportsnet 1 HD", "NE"),
+        ("New England Patriots", "Tennessee Titans at Buffalo", "NE"),
+        ("Olympique de Marseille", "Roma vs Lazio", "OM"),
+        ("Boston Celtics", "WC 12: Bosnia vs Morocco", "BOS"),
+        ("Green Bay Packers", "GBN News HD", "GB"),
+        ("Pittsburgh Steelers", "Capital Sports 4", "PIT"),
+        ("Real Madrid", "CF Montreal vs Toronto", "Real"),
+    ])
+    def test_short_alias_does_not_match_inside_a_word(self, team, text, alias):
+        assert alias in [k for k in _strong_team_keywords(team)], (
+            f"fixture drift: {alias!r} is no longer an alias of {team!r}"
+        )
+        assert not _kw_hit(text, _strong_team_keywords(team))
+
+    @pytest.mark.parametrize("team,text", [
+        ("New England Patriots", "NFL 04 | NE at BUF"),
+        ("Green Bay Packers", "NFL 11: GB vs CHI"),
+        ("Boston Celtics", "NBA 03 - BOS @ LAL"),
+        ("Olympique de Marseille", "Ligue 1: OM - PSG"),
+        ("Real Madrid", "LaLiga: Real Madrid vs Sevilla"),
+        ("Pittsburgh Steelers", "PIT/CLE Sunday Night"),
+    ])
+    def test_short_alias_still_matches_as_a_standalone_token(self, team, text):
+        # The recall control: abbreviations are in the alias file because real
+        # providers use them, so the boundary must admit them when they stand
+        # alone, including against '/', '-', '@' and end-of-string.
+        assert _kw_hit(text, _strong_team_keywords(team))
+
+    @pytest.mark.parametrize("name,home,away,collides", [
+        # Both names are verbatim from a 6588-channel / 16415-stream corpus, and
+        # both were real Tier-1 matches before this fix. They are the whole
+        # measured cost of the change: a differential over that corpus across 33
+        # fixtures dropped exactly these and gained nothing.
+        ("Tennis 35: WTA Memphis & ATP Los Cabos: Svrcina, Dalibor - Darderi, Luciano @ 30 Jul 12:00 AM ET",
+         "Dallas Cowboys", "Philadelphia Eagles", "DAL inside 'Dalibor'"),
+        ("MiLB 25: MiLB A 08: Clearwater Threshers at Jupiter Hammerheads 29 @ Jul 06:30 PM ET",
+         "Pittsburgh Steelers", "Cleveland Browns", "PIT inside 'Jupiter', CLE inside 'Clearwater'"),
+    ])
+    def test_real_corpus_false_positives_are_gone(self, name, home, away, collides):
+        cands = [ChannelCandidate(
+            channel_id=1, channel_name=name, program_title="",
+            program_start=datetime(2026, 7, 29, tzinfo=timezone.utc),
+            program_end=datetime(2026, 7, 29, tzinfo=timezone.utc),
+        )]
+        assert _regex_filter_channel_name(cands, home, away) == [], collides
+
+    def test_long_keywords_keep_substring_semantics(self):
+        # Only SHORT keywords get the boundary. Long ones stay substrings so a
+        # suffix-stripped or possessive form still hits.
+        assert _kw_hit("Manchester Uniteds title race", _team_keywords("Manchester United FC"))
+        assert _kw_hit("Yankees' bullpen", _strong_team_keywords("New York Yankees"))
+
+    def test_boundary_applies_through_the_shared_gates(self):
+        # _kw_hit is the single source of truth, so the fix must reach every
+        # caller. If a gate ever grows its own matcher these break.
+        # 'NE' is inside 'Tennessee', so before the fix this Titans-at-Bills feed
+        # read as a Patriots-at-Bills feed. The away side genuinely hits here, so
+        # the alias collision is the only thing deciding the verdict.
+        assert both_teams_in_one_segment(
+            "Sportsnet: Tennessee Titans at Buffalo Bills",
+            _team_keywords("New England Patriots"),
+            _team_keywords("Buffalo Bills"),
+        ) is False
+        assert select_streams_for_game(
+            ["Sportsnet 1 HD", "NFL 04 | NE at BUF"],
+            _strong_team_keywords("New England Patriots"),
+            _strong_team_keywords("Buffalo Bills"),
+        ) == [False, True]
 
 
 class TestSelectStreamsForGame:

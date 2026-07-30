@@ -2038,6 +2038,11 @@ def _build_epg_lookup():
             # in ONE ':'/'|'-delimited segment of the name. Field events are
             # single-sided (just the event name), so the segment gate does not
             # apply.
+            # KEEP THIS even though Tier 1 now applies the same gate to every
+            # candidate's channel_name (#129). Tiers 2 and 3 read program_title,
+            # which for a stream candidate is also the stream name, and they are
+            # NOT segment-gated. Dropping this would let a label-collision stream
+            # bypass Tier 1 and be picked by the LLM instead.
             if not field and not both_teams_in_one_segment(
                 s.name or "", home_kws, away_kws
             ):
@@ -3737,6 +3742,46 @@ def _named_sides(text: str, home_kws: List[str], away_kws: List[str]) -> Tuple[b
     return _kw_hit(text, home_kws), _kw_hit(text, away_kws)
 
 
+#: Row annotation for a channel name that names both sides in DIFFERENT label
+#: segments. Distinct from [BOTH TEAMS] on purpose (#129): Tier 1 requires one
+#: segment, so this row is a CORRECT non-match, and the ranking below must not
+#: let it reach the "names BOTH teams but wasn't auto-picked ... we'll fix it"
+#: verdict, which would invite a bug report for working-as-designed behaviour.
+_ANN_SPLIT_SEGMENTS = " [both teams, split across label segments - not a match]"
+
+
+def _diagnose_annotation(channel_name, title, home, away, home_kws, away_kws,
+                         field=False):
+    """(annotation, rank) for one diagnose row. Pure: no ORM, no I/O.
+
+    Extracted from the row loop so the ranking rules are testable without a
+    database. Rank 0 sorts first and is the "this is your game" signal the
+    verdict keys on; 1 is a partial name hit; 2 is neither side named.
+
+    Mirrors the matcher tiers, and drifting from them is the failure mode this
+    whole action exists to avoid: Tier 1 segment-gates the CHANNEL NAME, Tier 2
+    reads the programme TITLE and does not, so only the name side is gated here.
+    """
+    from .matcher import both_teams_in_one_segment
+    nh, na = _named_sides(channel_name, home_kws, away_kws)
+    th, ta = _named_sides(title, home_kws, away_kws)
+    h, a = (nh or th), (na or ta)
+    if field:
+        # Single-sided: there is only the event name to find.
+        return (" [event]", 1) if h else ("", 2)
+    name_both = nh and na and both_teams_in_one_segment(
+        channel_name or "", home_kws, away_kws)
+    if name_both or (th and ta):
+        return " [BOTH TEAMS]", 0
+    if nh and na:
+        return _ANN_SPLIT_SEGMENTS, 1
+    if h:
+        return f" [{home}]", 1
+    if a:
+        return f" [{away}]", 1
+    return "", 2
+
+
 def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_kws,
                             field=False):
     """Return rows of candidate programming airing in the chosen game's window,
@@ -3798,20 +3843,8 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
             if c.id in seen_chan:
                 continue
             seen_chan.add(c.id)
-            nh, na = _named_sides(c.name, home_kws, away_kws)
-            th, ta = _named_sides(title, home_kws, away_kws)
-            h, a = (nh or th), (na or ta)
-            if field:
-                # Single-sided: there is only the event name to find.
-                ann, rank = (" [event]", 1) if h else ("", 2)
-            elif h and a:
-                ann, rank = " [BOTH TEAMS]", 0
-            elif h:
-                ann, rank = f" [{home}]", 1
-            elif a:
-                ann, rank = f" [{away}]", 1
-            else:
-                ann, rank = "", 2
+            ann, rank = _diagnose_annotation(
+                c.name, title, home, away, home_kws, away_kws, field)
             rows.append((rank, c.name, title, ann))
     # Team-naming channels first (the actionable ones), then the rest in the
     # order found (already chronological from the query).
@@ -4336,7 +4369,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.14.1"
+    version = "1.14.2"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
