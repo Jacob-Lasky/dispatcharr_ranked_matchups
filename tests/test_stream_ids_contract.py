@@ -79,3 +79,48 @@ def test_apply_gates_whole_channel_streams_on_this_game(plugin_src):
     assert "_strong_team_keywords" in body, (
         "the stream gate must be fed _strong_team_keywords, not _team_keywords"
     )
+
+
+class TestPathCRejectsStaleDatedStreams:
+    """#164: the wiring, not the predicate.
+
+    matcher-level tests can all pass with the filter never called from the
+    lookup, which is exactly how the stale feeds shipped: the predicate is
+    useless unless Path C consults it.
+    """
+
+    def _lookup_src(self):
+        import os
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        start = src.index("def _build_epg_lookup(")
+        return src[start:src.index("\ndef ", start + 10)]
+
+    def test_path_c_consults_the_staleness_filter(self):
+        assert "stream_is_stale_for_game(s.name or \"\", earliest_game_date)" in self._lookup_src()
+
+    def test_the_reference_date_is_the_EARLIER_of_utc_and_local(self):
+        # Taking min() is what absorbs the provider's timezone (names are
+        # stamped ET) without a fixed fudge factor. Picking one zone would drop
+        # the LIVE feed for any night game whose UTC date has rolled over.
+        body = self._lookup_src()
+        assert "earliest_game_date = min(" in body
+        assert "astimezone(timezone.utc).date()" in body
+        assert "astimezone(local_tz).date()" in body
+
+    def test_drops_are_counted_and_reported(self):
+        import os
+        body = self._lookup_src()
+        assert 'stats["stale_dated_streams_dropped"] += 1' in body
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        assert "stale_dated_streams_dropped" in src.split("def _build_epg_lookup(")[0], (
+            "refresh must read the counter back and log it, or silent truncation "
+            "reads as 'nothing was dropped'"
+        )
+
+    def test_refresh_threads_the_users_timezone_in(self):
+        import os
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        assert '_build_epg_lookup(local_tz=_resolve_tz(settings.get("local_timezone", "UTC")))' in src

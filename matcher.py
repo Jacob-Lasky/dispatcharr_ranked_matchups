@@ -32,7 +32,7 @@ import re
 import time
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -609,6 +609,156 @@ def _main_card_first(cands: List[ChannelCandidate]) -> List[ChannelCandidate]:
     no recall cost to covering both.
     """
     return sorted(cands, key=lambda c: _is_non_main_card(c.channel_name))
+
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun",
+     "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+
+# Full names FIRST so 'june' wins over 'jun', and every branch is a complete
+# month token. The naive "jan|feb|..." + "[a-z]*" form matched 'Jun' inside
+# 'Junior' ('Moto3 Junior' parsed as 3 June), and 'Mar' inside 'March Madness';
+# a trailing \b on this alternation is what stops that.
+_MONTH_RE = (
+    "january|february|march|april|june|july|august|september|october|november|december"
+    "|jan|feb|mar|apr|may|jun|jul|aug|sept|sep|oct|nov|dec"
+)
+
+# Ordered most-specific-first. Every one of these shapes was counted in a live
+# 16415-stream corpus; the counts are why the list is this long rather than
+# just ISO (#164).
+_STREAM_DATE_PATTERNS = (
+    # 2026-08-01 19:25:00   (6480 streams)
+    ("ymd", re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")),
+    # 7.29.26 | ...         (Dirtvision-style, m.d.yy)
+    ("mdy", re.compile(r"(?<!\d)(\d{1,2})[./](\d{1,2})[./](\d{2,4})(?!\d)")),
+    # 29 Jul 10:00 PM ET    (1032 streams). MUST be tried before the month-first
+    # shape below: in '@ 29 Jul 10:00 PM ET' a month-first pattern reads the
+    # CLOCK as the day and returns July 10th.
+    # The optional `q` group captures a preceding word so a SEQUENCE number can
+    # be told apart from a day: 'Baltimore @ Boston - Game 2 Jul 22 7:00PM ET'
+    # is the 22nd, not the 2nd, and without this the doubleheader's game number
+    # wins because it sits immediately before the month. Found in the corpus,
+    # not predicted.
+    ("dm", re.compile(
+        r"(?:\b(?P<q>[A-Za-z#]{1,6})\s+)?(?<!\d)(?P<d>\d{1,2})\s+"
+        r"(?P<mon>" + _MONTH_RE + r")\b", re.I)),
+    # Jul 29 8:00PM ET      (1950 streams).
+    # The two lookaheads are BOTH load-bearing and neither is optional:
+    #   (?!\d)   the day must be the whole number, so 'Jul 28' cannot backtrack
+    #            to a 1-digit '2' when the 2-digit form is rejected below.
+    #   (?!\s*:) the number must not be a clock, so '@ 29 Jul 10:00 PM' does not
+    #            read the HOUR as the day and return July 10th.
+    # A single combined lookahead was tried first and silently returned July 2nd
+    # for 'Jul 28 7:30PM ET' across ~1950 live streams, because the regex
+    # backtracked the day to one digit to satisfy it. Verified against the
+    # corpus, not reasoned about.
+    ("md", re.compile(r"(?<!\w)(" + _MONTH_RE + r")\b\.?\s+(\d{1,2})(?!\d)(?!\s*:)", re.I)),
+    # (07.27) / 7/29        (ESPN UNLTD and MLB feed suffixes)
+    ("mdn", re.compile(r"(?<!\d)(\d{1,2})[./](\d{1,2})(?!\s*:)(?!\d)")),
+)
+
+# A parsed date further than this from the game is treated as NO date rather
+# than as a mismatch. Providers park undated feeds on a sentinel far-future
+# timestamp -- '(PDC 50) | (2098-12-31 08:00:17)' is in the live corpus -- and
+# reading that as "not this game's date" would drop a perfectly good feed.
+_STREAM_DATE_SANITY_DAYS = 180
+
+# Words that mark the number after them as a SEQUENCE, not a day of the month.
+# Guards the day-first pattern against 'Game 2 Jul 22' / 'Leg 1 Aug 05'.
+_DATE_SEQUENCE_WORDS = frozenset({
+    "game", "gm", "g", "leg", "round", "rd", "part", "pt", "day", "week", "wk",
+    "race", "heat", "set", "match", "series", "#", "no", "num", "session",
+})
+
+
+def parse_stream_date(name: str, reference: "date") -> "Optional[date]":
+    """Best-effort broadcast date from a STREAM NAME, or None if it has none.
+
+    Streams carry no schedule column, which is why Path C has no time-window
+    filter at all; the date, when there is one, is in the name (#164). Most
+    formats omit the year, so `reference` (the game's date) supplies it: the
+    year chosen is whichever puts the result closest to the reference, which is
+    what makes a 29 Dec game match a '29 Dec' feed across a New Year boundary.
+
+    Returns None when nothing parses AND when what parses is implausible, so
+    both cases flow into the same "no date, keep the stream" branch upstream.
+    """
+    text = name or ""
+    for kind, rx in _STREAM_DATE_PATTERNS:
+        m = rx.search(text)
+        if not m:
+            continue
+        try:
+            if kind == "ymd":
+                y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            elif kind == "mdy":
+                mo, d, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                if y < 100:
+                    y += 2000
+            elif kind == "dm":
+                q = (m.group("q") or "").strip().lower()
+                if q in _DATE_SEQUENCE_WORDS:
+                    # 'Game 2 Jul 22': the 2 is a game number. Fall through to
+                    # the month-first pattern, which reads the real day.
+                    continue
+                d, mo, y = int(m.group("d")), _MONTHS[m.group("mon")[:3].lower()], None
+            elif kind == "md":
+                mo, d, y = _MONTHS[m.group(1)[:3].lower()], int(m.group(2)), None
+            else:  # mdn
+                mo, d, y = int(m.group(1)), int(m.group(2)), None
+            if not (1 <= mo <= 12 and 1 <= d <= 31):
+                continue
+            if y is None:
+                # Yearless: try the reference year and its neighbours, keep the
+                # nearest. Straddles the New Year without special-casing it.
+                best = None
+                for cand_y in (reference.year - 1, reference.year, reference.year + 1):
+                    try:
+                        c = date(cand_y, mo, d)
+                    except ValueError:
+                        continue
+                    if best is None or abs((c - reference).days) < abs((best - reference).days):
+                        best = c
+                parsed = best
+            else:
+                parsed = date(y, mo, d)
+        except (ValueError, KeyError):
+            continue
+        if parsed is None:
+            continue
+        if abs((parsed - reference).days) > _STREAM_DATE_SANITY_DAYS:
+            # Sentinel/garbage date. Treat as undated, NOT as a mismatch.
+            return None
+        return parsed
+    return None
+
+
+def stream_is_stale_for_game(name: str, earliest_game_date: "date") -> bool:
+    """Whether a stream NAME advertises a date BEFORE this game's.
+
+    Deliberately one-sided. Baseball plays the same opponent three nights
+    running, so every night's dedicated feed names the same two teams and the
+    team-pair gate -- which is tight on teams and blind to dates -- passes all
+    of them. Roughly half of the 22 streams attached to one Yankees game were
+    the previous two nights' finished broadcasts (#164).
+
+    DO NOT tighten this to "date must equal the game's date". The caller passes
+    the EARLIEST plausible date for the game (its date in UTC and in the user's
+    configured timezone, whichever is earlier), because provider names are
+    stamped in the broadcaster's local zone -- almost always ET -- which can sit
+    a day behind or ahead of both. Requiring equality would drop the CORRECT
+    feed for any late-evening game whose UTC date has already rolled over, and
+    losing the live feed is far worse than keeping one finished one.
+
+    A future-dated feed is kept: a provider publishing tomorrow's feed early is
+    not evidence against this game, and pre-published feeds are how a viewer
+    gets a stream at all when the guide runs ahead.
+    """
+    parsed = parse_stream_date(name, earliest_game_date)
+    if parsed is None:
+        return False
+    return parsed < earliest_game_date
 
 
 def _partition_attach_targets(

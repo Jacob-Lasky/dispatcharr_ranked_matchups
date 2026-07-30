@@ -1795,7 +1795,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # 4. EPG match each game to a Dispatcharr channel.
     # _build_epg_lookup excludes ALL our virtual channels by tvg_id prefix:
     # covers both the current target group and any orphans from a renamed group.
-    epg_lookup = _build_epg_lookup()
+    epg_lookup = _build_epg_lookup(local_tz=_resolve_tz(settings.get("local_timezone", "UTC")))
     api_key = _resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH)
     model = settings.get("model", "claude-haiku-4-5")
     # #108: off-by-default. When on, the matcher stacks same-fixture provider
@@ -1803,6 +1803,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # the matchup channel.
     widen = bool(settings.get(_WIDEN_STREAM_POOL_SETTING, False))
     matches = match_games_to_channels(scored, epg_lookup, api_key, model, widen=widen)
+    stale_dropped = epg_lookup.stats.get("stale_dated_streams_dropped", 0)
+    if stale_dropped:
+        logger.info(
+            "[ranked_matchups] refresh: skipped %d stream(s) whose name dated "
+            "them before their game (previous nights of the same series)",
+            stale_dropped,
+        )
 
     # 5. Build cache payload (transparent: every signal + breakdown stored)
     games_payload = []
@@ -1861,8 +1868,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- EPG lookup (closure over Django ORM) ----------
 
-def _build_epg_lookup():
+def _build_epg_lookup(local_tz=timezone.utc):
     """Return a callable: GameRow -> List[ChannelCandidate]. Closure over ORM.
+
+    `local_tz` is the user's configured timezone. It is used ONLY to widen the
+    date window Path C rejects stale streams against (#164); nothing else in
+    here is timezone-sensitive, so the UTC default is safe for callers (the
+    diagnose action) that have no reason to thread a setting through.
 
     Excludes any channel that is one of OUR virtual channels (see
     _owned_tvg_id_q): covers the configured target group AND any old groups
@@ -1883,10 +1895,15 @@ def _build_epg_lookup():
         _strong_team_keywords,
         _team_keywords,
         both_teams_in_one_segment,
+        stream_is_stale_for_game,
     )
     from apps.channels.models import Channel, Stream
     from apps.epg.models import ProgramData
     from django.db.models import Q
+
+    # Counters the caller reports after the whole slate is matched. A dict
+    # rather than a nonlocal int so the accessor below is a plain attribute.
+    stats = {"stale_dated_streams_dropped": 0}
 
     def lookup(game) -> List[ChannelCandidate]:
         # Per-sport match window: soccer needs a tighter window to avoid
@@ -1895,6 +1912,18 @@ def _build_epg_lookup():
         pre_min, post_hours = _epg_match_window(game.sport_prefix)
         window_start = game.start_time - timedelta(minutes=pre_min)
         window_end = game.start_time + timedelta(hours=post_hours)
+
+        # EARLIEST plausible calendar date for this game, used to reject stream
+        # names advertising a previous night (#164). Provider names are stamped
+        # in the broadcaster's local zone (almost always ET), which can sit a day
+        # either side of both UTC and the user's zone, so take the earlier of the
+        # two rather than picking one and being wrong for half the slate. Erring
+        # early costs at most one extra stale feed; erring late drops the LIVE
+        # feed for any night game whose UTC date has already rolled over.
+        earliest_game_date = min(
+            game.start_time.astimezone(timezone.utc).date(),
+            game.start_time.astimezone(local_tz).date(),
+        )
 
         # Field events (#127) have no opponent: the away side is the "Field"
         # sentinel. Match on the event name (home) alone, both for the Path A
@@ -2047,6 +2076,15 @@ def _build_epg_lookup():
                 s.name or "", home_kws, away_kws
             ):
                 continue
+            # Drop a feed whose NAME advertises an earlier date (#164). The
+            # team-pair gate above is tight on teams and blind to dates, and
+            # baseball plays the same opponent three nights running, so every
+            # night's dedicated feed names the same two teams and all of them
+            # pass. Roughly half the 22 streams attached to one Yankees game
+            # were the two previous nights' finished broadcasts.
+            if stream_is_stale_for_game(s.name or "", earliest_game_date):
+                stats["stale_dated_streams_dropped"] += 1
+                continue
             out.append(ChannelCandidate(
                 channel_id=-s.id,            # sentinel: not a real channel PK
                 channel_name=s.name or "",   # stream name → Tier-1 sees both teams
@@ -2057,6 +2095,7 @@ def _build_epg_lookup():
             ))
         return out
 
+    lookup.stats = stats
     return lookup
 
 

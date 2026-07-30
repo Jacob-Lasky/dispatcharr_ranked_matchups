@@ -1,6 +1,6 @@
 """Tests for matcher.py: pure-logic helpers (no Anthropic, no Django)."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -14,6 +14,8 @@ from dispatcharr_ranked_matchups.matcher import (
     _regex_filter,
     _regex_filter_channel_name,
     _strip_preview_titles,
+    parse_stream_date,
+    stream_is_stale_for_game,
     _strong_team_keywords,
     _team_keywords,
     both_teams_in_one_segment,
@@ -964,6 +966,120 @@ class _FieldGame:
         self.sport_label = "UFC"
         self.start_time = datetime(2026, 4, 27, tzinfo=timezone.utc)
         self.extra = {"is_field_event": True}
+
+
+class TestStreamDateParsing:
+    """#164: Path C has no time-window filter (streams carry no schedule), so
+    a series stacks every night's dedicated feed. The date, when present, is in
+    the NAME. Every format below was counted in a live 16415-stream corpus.
+    """
+
+    REF = date(2026, 7, 29)
+
+    @pytest.mark.parametrize("name,expected", [
+        # ISO, 6480 streams in the corpus
+        ("(Apple) (MLS) 006 |  Cincinnati vs. San Jose  (2026-08-01 19:25:00)", date(2026, 8, 1)),
+        # DD Mon, 1032
+        ("MLB 14 | New York Yankees at Chicago White Sox AWAY 27 Jul 07:40 PM ET", date(2026, 7, 27)),
+        # Mon DD, 1950
+        ("Sportsnet+ 07: New York Yankees @ Chicago White Sox Jul 28 7:30PM ET", date(2026, 7, 28)),
+        # M.DD suffix
+        ("MLB 08: White Sox vs. Yankees (7.27 7:40 PM ET)", date(2026, 7, 27)),
+        # MM.DD suffix
+        ("ESPN UNLTD 028: New York Yankees at Chicago White Sox (07.27)", date(2026, 7, 27)),
+        # M.DD.YY
+        ("Dirtvision 02: 7.29.26 | BAPS Motor Speedway", date(2026, 7, 29)),
+        # M/D
+        ("ESPN+ 04: Wed, 7/29 - The Rich Eisen Show", date(2026, 7, 29)),
+    ])
+    def test_real_provider_formats(self, name, expected):
+        assert parse_stream_date(name, self.REF) == expected
+
+    def test_clock_after_a_month_is_not_read_as_the_day(self):
+        # '@ 29 Jul 10:00 PM ET' must be the 29th, not July 10th. Day-first is
+        # tried before month-first precisely for this.
+        assert parse_stream_date(
+            "TSN+ 08: NSL on TSN+: Vancouver vs. Montreal @ 29 Jul 10:00 PM ET",
+            self.REF) == date(2026, 7, 29)
+
+    def test_day_is_not_backtracked_to_one_digit(self):
+        # A single combined lookahead let the regex backtrack 'Jul 28 7:30PM'
+        # to July 2nd across ~1950 live streams. Caught by the corpus, not by
+        # reasoning, which is why the two lookaheads are separate.
+        assert parse_stream_date(
+            "Sportsnet+ 07: Yankees @ White Sox Jul 28 7:30PM ET",
+            self.REF) == date(2026, 7, 28)
+
+    def test_doubleheader_game_number_is_not_the_day(self):
+        # 'Game 2 Jul 22' is the 22nd. The game number sits exactly where a
+        # day-first date would.
+        assert parse_stream_date(
+            "Sportsnet+ 06: Baltimore @ Boston - Game 2 Jul 22 7:00PM ET",
+            self.REF) == date(2026, 7, 22)
+
+    @pytest.mark.parametrize("name", [
+        "Moto3 Junior | Race: MotoJunior | France",   # 'Jun' inside 'Junior'
+        "NCAAB 04: March Madness Bracket Show",       # 'March' with no day
+        "MLB Network HD",
+        "YES Network FHD",
+        "",
+    ])
+    def test_undated_names_parse_to_nothing(self, name):
+        assert parse_stream_date(name, self.REF) is None
+
+    def test_sentinel_far_future_date_reads_as_undated(self):
+        # Providers park scheduleless feeds on a sentinel timestamp; the live
+        # corpus has '(PDC 50) | (2098-12-31 08:00:17)'. Reading that as "not
+        # this game's date" would DROP a usable feed.
+        assert parse_stream_date("(PDC 50) |  (2098-12-31 08:00:17)", self.REF) is None
+
+    def test_yearless_date_straddles_the_new_year(self):
+        # A 29 Dec game and a '29 Dec' feed must agree on the year even though
+        # the reference is in the next calendar year.
+        assert parse_stream_date("NHL 03: Bruins at Rangers 29 Dec 07:00 PM ET",
+                                 date(2027, 1, 2)) == date(2026, 12, 29)
+
+
+class TestStreamStaleness:
+    """The one-sided drop rule (#164)."""
+
+    GAME = date(2026, 7, 29)
+
+    @pytest.mark.parametrize("name", [
+        "MLB 14 | New York Yankees at Chicago White Sox AWAY 27 Jul 07:40 PM ET",
+        "MLB 19 | New York Yankees at Chicago White Sox AWAY 28 Jul 07:40 PM ET",
+        "Sportsnet+ 08: New York Yankees @ Chicago White Sox Jul 27 7:30PM ET",
+        "MLB 08: White Sox vs. Yankees (7.27 7:40 PM ET)",
+        "ESPN UNLTD 028: New York Yankees at Chicago White Sox (07.28)",
+    ])
+    def test_previous_nights_of_the_series_are_dropped(self, name):
+        # Verbatim from the stack the issue recorded on a live instance.
+        assert stream_is_stale_for_game(name, self.GAME) is True
+
+    @pytest.mark.parametrize("name", [
+        "MLB 21 | New York Yankees at Chicago White Sox AWAY 29 Jul 07:40 PM ET",
+        "MLB 12: White Sox vs. Yankees (7.29 7:40 PM ET)",
+    ])
+    def test_tonights_feeds_survive(self, name):
+        assert stream_is_stale_for_game(name, self.GAME) is False
+
+    def test_undated_feeds_always_survive(self):
+        # THE non-regression that matters: dedicated feeds with no date at all
+        # must keep matching, which is why the rule is "reject a date that IS
+        # present and earlier", not "require a matching date".
+        assert stream_is_stale_for_game("YES Network HD", self.GAME) is False
+        assert stream_is_stale_for_game("MLB Network FHD", self.GAME) is False
+
+    def test_future_dated_feeds_survive(self):
+        # A provider publishing tomorrow's feed early is not evidence against
+        # this game, and pre-published feeds are how a viewer gets a stream at
+        # all when the guide runs ahead.
+        assert stream_is_stale_for_game(
+            "MLB 30 | Yankees at White Sox 31 Jul 07:40 PM ET", self.GAME) is False
+
+    def test_same_day_survives_at_the_boundary(self):
+        assert stream_is_stale_for_game(
+            "MLB 21 | Yankees at White Sox 29 Jul 07:40 PM ET", self.GAME) is False
 
 
 class TestMainCardFirst:
