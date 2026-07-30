@@ -490,33 +490,63 @@ class TestApplyActionTakesTheLock:
         assert plugin_mod._ACTION_HANDLERS["apply"] is plugin_mod._action_apply_locked
         assert plugin_mod._ACTION_HANDLERS["apply"] is not plugin_mod._action_apply
 
+    @staticmethod
+    def _stub_subprocess(plugin_mod, monkeypatch, result):
+        """Stand in for the pipeline subprocess. As of #142 the locked wrapper
+        no longer calls _action_apply in this process, it forks a child; without
+        this stub these tests really fork one and assert on its failure."""
+        calls = []
+
+        def fake(action, settings):
+            calls.append((action, settings))
+            return result(settings) if callable(result) else result
+
+        monkeypatch.setattr(plugin_mod.tasks, "run_pipeline_subprocess", fake)
+        return calls
+
     def test_returns_busy_without_applying_when_lock_is_held(self, plugin_mod, monkeypatch):
         monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda **k: None)
-        called = {"n": 0}
-        monkeypatch.setattr(plugin_mod, "_action_apply",
-                            lambda s: called.__setitem__("n", called["n"] + 1))
+        calls = self._stub_subprocess(plugin_mod, monkeypatch, {"status": "ok"})
         out = plugin_mod._action_apply_locked({})
         assert out["status"] == "busy"
-        assert called["n"] == 0, "apply ran anyway despite not holding the lock"
+        assert calls == [], "apply ran anyway despite not holding the lock"
 
     def test_releases_the_lock_on_the_success_path(self, plugin_mod, monkeypatch):
         released = []
         monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda **k: "tok-1")
         monkeypatch.setattr(plugin_mod, "_release_scheduler_lock", released.append)
-        monkeypatch.setattr(plugin_mod, "_action_apply", lambda s: {"status": "ok"})
-        out = plugin_mod._action_apply_locked({})
+        calls = self._stub_subprocess(plugin_mod, monkeypatch, {"status": "ok"})
+        out = plugin_mod._action_apply_locked({"max_games": 4})
         assert out == {"status": "ok"}
+        assert calls == [(plugin_mod.tasks.ACTION_APPLY, {"max_games": 4})]
         assert released == ["tok-1"], "must release ITS OWN token, exactly once"
 
-    def test_releases_the_lock_even_when_apply_raises(self, plugin_mod, monkeypatch):
+    def test_releases_the_lock_when_the_child_fails(self, plugin_mod, monkeypatch):
+        # #142 changed the failure SHAPE, not the requirement. The work no
+        # longer raises into this frame: run_pipeline_subprocess is documented
+        # to never raise (its caller can be a daemon thread whose escape kills a
+        # worker) and reports failure as an error dict. The lock must still come
+        # back, or every later run is refused with "busy" until the TTL expires.
+        released = []
+        monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda **k: "tok-1")
+        monkeypatch.setattr(plugin_mod, "_release_scheduler_lock", released.append)
+        self._stub_subprocess(plugin_mod, monkeypatch,
+                              {"status": "error", "message": "pipeline subprocess failed (rc=1)"})
+        out = plugin_mod._action_apply_locked({})
+        assert out["status"] == "error"
+        assert released == ["tok-1"], "lock leaked; every later run would be refused"
+
+    def test_releases_the_lock_even_if_the_call_raises(self, plugin_mod, monkeypatch):
+        # Defence in depth: run_pipeline_subprocess promises not to raise, but
+        # the finally must hold regardless of whether that promise is kept.
         released = []
         monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda **k: "tok-1")
         monkeypatch.setattr(plugin_mod, "_release_scheduler_lock", released.append)
 
         def boom(_settings):
-            raise RuntimeError("apply blew up")
+            raise RuntimeError("subprocess launcher blew up")
 
-        monkeypatch.setattr(plugin_mod, "_action_apply", boom)
+        self._stub_subprocess(plugin_mod, monkeypatch, boom)
         with pytest.raises(RuntimeError):
             plugin_mod._action_apply_locked({})
         assert released == ["tok-1"], "lock leaked; every later run would be refused"

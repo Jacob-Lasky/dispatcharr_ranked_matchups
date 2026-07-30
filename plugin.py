@@ -3574,7 +3574,7 @@ def _action_refresh_async(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _action_apply_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
-    """HTTP-facing apply: takes the cross-worker lock, then applies.
+    """HTTP-facing apply: takes the cross-worker lock, then applies OUT OF PROCESS.
 
     Apply is the DESTRUCTIVE half of the plugin (it deletes Channels and
     ProgramData and renumbers the guide), and unlike refresh/auto_pipeline it
@@ -3583,11 +3583,27 @@ def _action_apply_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
     needed: two runs deleting and recreating the same channels can drop rows the
     other just wrote. See #155.
 
+    The body runs in the pipeline subprocess (#142). Standalone apply was the
+    last plugin action doing heavy DB work inside the gevent uwsgi worker, and
+    a warm-container refresh-then-apply still wedged a worker after the
+    transaction-shape fix (#137) and the scheduler connection leak (#140) were
+    both in: a 0.55s apply produced a 20s login timeout. Rather than keep
+    hunting the exact non-yielding call with tools that cannot see greenlets,
+    the surface is gone.
+
+    This stays SYNCHRONOUS on purpose, unlike refresh / auto_pipeline, which
+    return a queued envelope. `run_pipeline_subprocess` blocks the calling
+    greenlet on `subprocess.run`, and under the gevent monkey-patch that wait is
+    cooperative, so the hub keeps serving requests while the child works. Apply
+    is seconds, not minutes, so it stays inside the browser fetch timeout that
+    forced refresh async (#84) and the user keeps getting the real apply summary
+    in the toast instead of "queued".
+
     DO NOT point the manifest "apply" action back at _action_apply. The bare
-    function stays lock-free ON PURPOSE so _action_auto_pipeline_sync can call it
-    while the parent process already holds the lock; that call runs in the forked
-    subprocess, where the token global is empty, so acquiring again would fail and
-    silently skip the apply half of every scheduled run.
+    function stays lock-free ON PURPOSE so both _action_auto_pipeline_sync and
+    the ACTION_APPLY child can call it while the PARENT holds the lock; the
+    token is a parent-process global, so acquiring again in the child would fail
+    and silently skip the work.
     """
     token = _try_acquire_scheduler_lock(destructive=True)
     if not token:
@@ -3599,7 +3615,7 @@ def _action_apply_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
             ),
         }
     try:
-        return _action_apply(settings)
+        return tasks.run_pipeline_subprocess(tasks.ACTION_APPLY, settings)
     finally:
         _release_scheduler_lock(token)
 
@@ -4369,7 +4385,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.14.2"
+    version = "1.15.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

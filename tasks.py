@@ -98,11 +98,24 @@ _SUBPROCESS_TIMEOUT_SECONDS = 25 * 60
 # run_pipeline_subprocess callers and _pipeline_runner.py's dispatch map.
 # Defined once here and imported by the runner so a rename can't silently
 # drift into an "unknown action" at runtime. Values match the manifest action
-# ids. apply is NOT here: plugin.run("apply") and the auto_pipeline body call
-# _action_apply directly, and apply is I/O-bound DB work that yields to the
-# gevent hub (only the Monte Carlo scoring in refresh holds the GIL), so it
-# does not need a subprocess.
+# ids.
+#
+# ACTION_APPLY is here as of #142, and it did NOT used to be. The old comment
+# in this spot asserted that apply "is I/O-bound DB work that yields to the
+# gevent hub, so it does not need a subprocess." That assertion was the
+# unproven part of the architecture, and it is the one that kept producing
+# login timeouts: a UI refresh-then-apply on a WARM container still wedged a
+# worker after #137 shrank the transaction to 0.55s and #140 closed the
+# scheduler connection leak. Standalone apply was the only plugin action left
+# doing heavy DB work inside the gevent worker. We stopped trying to name the
+# exact non-yielding call (py-spy cannot enumerate greenlets, which is where
+# the diagnosis stalled) and removed the surface instead: EVERY action that
+# touches the DB in bulk now runs in the child. DO NOT move apply back inline
+# to save the ~1-2s django.setup() -- that cost buys a worker that cannot
+# freeze, and the freeze presents to the user as "I can't log in", not as a
+# slow plugin.
 ACTION_REFRESH = "refresh"
+ACTION_APPLY = "apply"
 ACTION_AUTO_PIPELINE = "auto_pipeline"
 
 
