@@ -60,6 +60,13 @@ def ChannelCandidate():
     return _load("matcher").ChannelCandidate
 
 
+@pytest.fixture(scope="module")
+def kws():
+    """(home_kws, away_kws) for United States vs Australia, the #129 fixture."""
+    m = _load("matcher")
+    return m._team_keywords("United States"), m._team_keywords("Australia")
+
+
 def _game(away, home, *, prefix="WC", score=5.0, matched=None,
           start="2099-06-15T20:00:00Z", label="FIFA World Cup"):
     # Default start is FAR-FUTURE so the diagnose "soonest upcoming" selection
@@ -240,6 +247,64 @@ class TestDeepDive:
         assert "Egypt" not in toast                # ...but NOT in the toast
         assert "Unrelated vs Game" in v            # full window listings in the log
         assert "Unrelated vs Game" not in toast    # ...not in the toast (names neither)
+
+
+class TestDiagnoseAnnotation:
+    """#129: the diagnose row ranking must mirror the matcher tiers.
+
+    Tier 1 segment-gates the CHANNEL NAME, so a name naming both sides across
+    different feed-label segments is a CORRECT non-match. Reporting it as
+    [BOTH TEAMS] pushes it to rank 0, which drives the verdict "names BOTH teams
+    but wasn't auto-picked - reply and we'll fix it": an invitation to file a bug
+    against working-as-designed behaviour. Tier 2 reads the programme TITLE and
+    is not segment-gated, so titles keep the plain both-teams rule.
+    """
+
+    def test_split_across_label_segments_is_not_both_teams(self, plugin, kws):
+        home_kws, away_kws = kws
+        ann, rank = plugin._diagnose_annotation(
+            "USA Soccer07: Australia vs Turkey ( TSN1 Feed )", "",
+            "United States", "Australia", home_kws, away_kws)
+        assert ann == plugin._ANN_SPLIT_SEGMENTS
+        assert rank == 1, "must not reach the rank-0 'we'll fix it' verdict"
+
+    def test_both_teams_in_one_segment_is_both_teams(self, plugin, kws):
+        home_kws, away_kws = kws
+        ann, rank = plugin._diagnose_annotation(
+            "FIFA World Cup 2026 06: USA 02:00 Australia", "",
+            "United States", "Australia", home_kws, away_kws)
+        assert (ann, rank) == (" [BOTH TEAMS]", 0)
+
+    def test_title_naming_both_is_still_both_teams(self, plugin, kws):
+        # Tier 2 is deliberately ungated, so a split-looking TITLE still counts.
+        home_kws, away_kws = kws
+        ann, rank = plugin._diagnose_annotation(
+            "Fox Sports 1", "Soccer: USA | Australia",
+            "United States", "Australia", home_kws, away_kws)
+        assert (ann, rank) == (" [BOTH TEAMS]", 0)
+
+    def test_one_side_named(self, plugin, kws):
+        home_kws, away_kws = kws
+        ann, rank = plugin._diagnose_annotation(
+            "USA Network", "", "United States", "Australia", home_kws, away_kws)
+        assert (ann, rank) == (" [United States]", 1)
+
+    def test_neither_side_named(self, plugin, kws):
+        home_kws, away_kws = kws
+        assert plugin._diagnose_annotation(
+            "Discovery HD", "Shark Week", "United States", "Australia",
+            home_kws, away_kws) == ("", 2)
+
+    def test_field_event_is_single_sided(self, plugin):
+        m = _load("matcher")
+        event_kws = m._strong_team_keywords("UFC 329: McGregor vs. Holloway")
+        assert plugin._diagnose_annotation(
+            "PPV 04: UFC 329: McGregor vs. Holloway", "",
+            "UFC 329: McGregor vs. Holloway", "Field", event_kws, [],
+            field=True) == (" [event]", 1)
+        assert plugin._diagnose_annotation(
+            "Discovery HD", "Shark Week", "UFC 329: McGregor vs. Holloway",
+            "Field", event_kws, [], field=True) == ("", 2)
 
 
 class TestActionContract:

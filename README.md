@@ -195,6 +195,39 @@ form will collect everything needed to scope it.
 | `show_status` | Print the current curated list with per-game score breakdown. No writes. | — |
 | `preview_names` | Render the channel-name template against sample games so you can check the layout before applying. Reports template errors and lists every variable. No writes. | — |
 
+## How games are matched to your lineup
+
+A scored game is matched against three independent sources, all of which can
+contribute (results are merged and stacked as fallback streams):
+
+| Path | Keys on | Typical shape |
+|---|---|---|
+| A | EPG **programme title**, inside the game's broadcast window | `FOX Sports 1` airing "MLB: Yankees at White Sox" |
+| B | **Channel name** | `EPL01: Manchester United 20:00 Brentford` |
+| C | **Stream name**, whether or not the stream is on a channel | `USA Soccer10: Iran vs New Zealand` on a generic parent channel |
+
+Path C is why you do not have to curate a stream into a channel first: streams
+are queried directly, and only the matched stream is attached, not its parent
+channel's unrelated feeds.
+
+Two rules keep this from over-matching, both worth knowing if a channel you
+expected does not appear:
+
+- **Both teams must appear in one segment of the name.** Names are split on `:`
+  and `|` (a `:` inside a clock time does not split), and a channel or stream
+  only matches when a single segment names both sides. Providers put a network
+  label in front of the matchup, and without this rule the label supplies a
+  bogus hit: `USA Soccer07: Australia vs Turkey` is the Australia-vs-*Turkey*
+  feed, but the `USA` in its label made it match Australia vs United States.
+- **Short abbreviations match as whole words.** `team_aliases.json` carries
+  broadcast abbreviations, and up to four characters they must stand alone as a
+  token. As loose substrings they behave like wildcards: `NE` is inside
+  Sportsnet and Tennessee, `PIT` is inside Jupiter, `CLE` is inside Clearwater.
+  Longer names still match as substrings.
+
+Games with no match above the placeholder threshold still get a channel; see
+[Placeholder channels](#placeholder-channels).
+
 ## How channels are created
 
 The plugin keeps your source channels untouched. Instead it creates **virtual

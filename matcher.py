@@ -33,6 +33,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
 from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS, is_field_event
@@ -104,6 +105,14 @@ def _is_weak_last_word(token: str) -> bool:
     protected, not just the ones that remembered to sanitise their own title.
     The full-name and first-two-words keywords remain the real discriminators,
     so dropping this bonus token only removes false positives, never the match.
+
+    DO NOT retire this in favour of the short-keyword word-boundary rule
+    (_SHORT_KEYWORD_MAX_CHARS): they solve different problems. Boundaries stop a
+    short token matching INSIDE a word; they do nothing about a token that is a
+    legitimate standalone word everywhere, which is what a bare digit is
+    ('\\b2\\b' still hits 'UFC 2', 'Round 2', 'Group 2'). This rule drops such a
+    token from the keyword set entirely; the boundary rule tightens the ones
+    that survive.
     """
     t = token.strip().strip(".:,-")
     return t.isdigit() or len(t) < 3
@@ -251,15 +260,56 @@ def _team_keywords(team_name: str) -> List[str]:
     return strong + weak
 
 
-def _kw_hit(text: str, keywords: List[str]) -> bool:
-    """Whether any keyword (case-insensitive substring) appears in `text`.
+# Keywords at or below this many alphanumeric characters must match as a whole
+# token, not as a bare substring. Team aliases are abbreviations ('NE', 'OM',
+# 'GB', 'BOS', 'PIT', 'Real'), and as substrings they are close to wildcards:
+# 'NE' is inside Sportsnet / Tennessee / Network, 'BOS' is inside Bosnia, 'PIT'
+# is inside Capital, 'Real' is inside Montreal (#129). Longer keywords are
+# discriminating on their own and keep substring semantics deliberately, so a
+# possessive or run-on form ("Yankees' bullpen", "Manchester Uniteds") still
+# hits. DO NOT raise this bound to cover all keywords without re-running the
+# snapshot replay: a boundary on long keywords costs real matches (it would
+# stop 'Inter' hitting 'Internazionale').
+_SHORT_KEYWORD_MAX_CHARS = 4
 
-    Single source of truth for the substring-hit test every matcher tier uses
-    (and the diagnose action reuses), so the matched-vs-explained logic can
-    never drift apart. Tolerates None/empty text.
+
+@lru_cache(maxsize=4096)
+def _keyword_pattern(keyword: str) -> Optional[re.Pattern]:
+    """Compiled whole-token matcher for a short keyword, or None if it is long.
+
+    Uses lookarounds rather than \\b so it behaves for keywords that begin or
+    end in punctuation: \\b is defined relative to the adjacent character, so
+    '\\bOM\\b' and '\\bUFC 329:\\b' disagree about what a boundary even is.
+    Alphanumeric neighbours are the real signal, which is what these assert.
+    """
+    if len(re.sub(r"[^0-9A-Za-z]", "", keyword)) > _SHORT_KEYWORD_MAX_CHARS:
+        return None
+    return re.compile(
+        r"(?<![0-9A-Za-z])" + re.escape(keyword.lower()) + r"(?![0-9A-Za-z])"
+    )
+
+
+def _kw_hit(text: str, keywords: List[str]) -> bool:
+    """Whether any keyword appears in `text`, case-insensitively.
+
+    Single source of truth for the hit test every matcher tier uses (and the
+    diagnose action reuses), so the matched-vs-explained logic can never drift
+    apart. Tolerates None/empty text.
+
+    Long keywords match as substrings; short ones must match as whole tokens
+    (see _SHORT_KEYWORD_MAX_CHARS). Keep new gates routed through here rather
+    than writing their own `in` test, or the short-keyword rule silently stops
+    applying to them.
     """
     t = (text or "").lower()
-    return any(kw.lower() in t for kw in keywords)
+    for kw in keywords:
+        pattern = _keyword_pattern(kw)
+        if pattern is None:
+            if kw.lower() in t:
+                return True
+        elif pattern.search(t):
+            return True
+    return False
 
 
 def both_teams_in_one_segment(
@@ -378,6 +428,20 @@ def _regex_filter_channel_name(
 
     `team_b=None` is the single-sided mode for field events (#127): the event
     name (`team_a`) alone identifies the broadcast, since there is no opponent.
+
+    The both-teams check requires the two sides in ONE segment of the name, not
+    merely somewhere in it (#129). Providers prefix a feed/network label onto
+    channel names, and a team alias sitting in that LABEL must not pair with an
+    opponent named in the matchup body: 'USA Soccer07: Australia vs Turkey'
+    carried the Australia-vs-TURKEY fixture and was matched to
+    Australia-vs-United States, with 'USA' supplied by the feed label. Path C
+    (stream names) has gated on this since 1.8.0; this is the same helper on the
+    same class of text, so the two paths agree.
+
+    DO NOT push the same gate onto `_regex_filter` (Tier 2, programme titles).
+    Feed labels are a channel/stream naming convention; XMLTV programme titles
+    do not carry them, so there is no failure of this shape to defend against
+    there, and gating an unaffected path only costs recall.
     """
     if team_b is None:
         # Single-sided: see the matching note in _regex_filter.
@@ -386,7 +450,7 @@ def _regex_filter_channel_name(
     a_kws = _team_keywords(team_a)
     b_kws = _team_keywords(team_b)
     return [c for c in candidates
-            if _kw_hit(c.channel_name, a_kws) and _kw_hit(c.channel_name, b_kws)]
+            if both_teams_in_one_segment(c.channel_name, a_kws, b_kws)]
 
 
 # Keywords that mark a program as a preview/highlight wrapper rather than the

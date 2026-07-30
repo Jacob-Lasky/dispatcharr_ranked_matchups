@@ -322,6 +322,24 @@ class TestShortKeywordWordBoundaries:
         # alone, including against '/', '-', '@' and end-of-string.
         assert _kw_hit(text, _strong_team_keywords(team))
 
+    @pytest.mark.parametrize("name,home,away,collides", [
+        # Both names are verbatim from a 6588-channel / 16415-stream corpus, and
+        # both were real Tier-1 matches before this fix. They are the whole
+        # measured cost of the change: a differential over that corpus across 33
+        # fixtures dropped exactly these and gained nothing.
+        ("Tennis 35: WTA Memphis & ATP Los Cabos: Svrcina, Dalibor - Darderi, Luciano @ 30 Jul 12:00 AM ET",
+         "Dallas Cowboys", "Philadelphia Eagles", "DAL inside 'Dalibor'"),
+        ("MiLB 25: MiLB A 08: Clearwater Threshers at Jupiter Hammerheads 29 @ Jul 06:30 PM ET",
+         "Pittsburgh Steelers", "Cleveland Browns", "PIT inside 'Jupiter', CLE inside 'Clearwater'"),
+    ])
+    def test_real_corpus_false_positives_are_gone(self, name, home, away, collides):
+        cands = [ChannelCandidate(
+            channel_id=1, channel_name=name, program_title="",
+            program_start=datetime(2026, 7, 29, tzinfo=timezone.utc),
+            program_end=datetime(2026, 7, 29, tzinfo=timezone.utc),
+        )]
+        assert _regex_filter_channel_name(cands, home, away) == [], collides
+
     def test_long_keywords_keep_substring_semantics(self):
         # Only SHORT keywords get the boundary. Long ones stay substrings so a
         # suffix-stripped or possessive form still hits.
