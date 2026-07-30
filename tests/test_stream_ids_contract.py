@@ -124,3 +124,48 @@ class TestPathCRejectsStaleDatedStreams:
         with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
             src = fh.read()
         assert '_build_epg_lookup(local_tz=_resolve_tz(settings.get("local_timezone", "UTC")))' in src
+
+
+class TestPathAReadsSubtitleAndDescription:
+    """#143: the wiring. Every matcher-level test for the European-broadcaster
+    path passes with the lookup never populating program_extra and the DB query
+    never selecting the columns, which would ship the exact bug it fixes.
+    """
+
+    def _lookup_src(self):
+        import os
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        start = src.index("def _build_epg_lookup(")
+        return src[start:src.index("\ndef ", start + 10)]
+
+    def test_query_admits_on_title_or_subtitle(self):
+        body = self._lookup_src()
+        assert '_or_icontains("title", all_kws) | _or_icontains("sub_title", all_kws)' in body
+
+    def test_description_requires_BOTH_sides(self):
+        # One keyword over free prose would drag half the guide into the Tier-3
+        # pool: match reports name other teams in passing.
+        body = self._lookup_src()
+        assert '_or_icontains("description", strong_home)' in body
+        assert '& _or_icontains("description", strong_away)' in body
+
+    def test_the_columns_are_actually_selected(self):
+        # .only() without them makes every access a deferred-field query at
+        # best, and the fields are silently empty in the fake-ORM path.
+        assert '.only("id", "title", "sub_title", "description",' in self._lookup_src()
+
+    def test_candidates_carry_the_extra_text(self):
+        body = self._lookup_src()
+        assert "program_extra=" in body
+        assert 'getattr(p, "sub_title", "")' in body, (
+            "must tolerate row stubs from the replay harness and fake ORM"
+        )
+
+    def test_snapshot_exporter_carries_the_columns(self):
+        # A snapshot without them replays as if no programme had text below the
+        # headline, silently exercising the pre-fix path.
+        import os
+        with open(os.path.join(REPO_ROOT, "tools", "export_snapshot.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        assert '"sub_title": p.sub_title, "description": p.description,' in src

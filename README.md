@@ -203,7 +203,7 @@ contribute (results are merged and stacked as fallback streams):
 
 | Path | Keys on | Typical shape |
 |---|---|---|
-| A | EPG **programme title**, inside the game's broadcast window | `FOX Sports 1` airing "MLB: Yankees at White Sox" |
+| A | EPG **programme title, sub-title or description**, inside the game's broadcast window | `FOX Sports 1` airing "MLB: Yankees at White Sox"; or ORF's `FIFA Fußball WM 2026` whose sub-title reads `Gruppe F: Schweden - Tunesien` |
 | B | **Channel name** | `EPL01: Manchester United 20:00 Brentford` |
 | C | **Stream name**, whether or not the stream is on a channel | `USA Soccer10: Iran vs New Zealand` on a generic parent channel |
 
@@ -211,7 +211,14 @@ Path C is why you do not have to curate a stream into a channel first: streams
 are queried directly, and only the matched stream is attached, not its parent
 channel's unrelated feeds.
 
-Two rules keep this from over-matching, both worth knowing if a channel you
+Path A reads the sub-title and description as well as the title because
+European public broadcasters (ORF, ARD, ZDF, SRF) title the programme with the
+competition and put the fixture underneath it. Team names are matched in German
+and Spanish as well as English, so `Frankreich` and `Francia` both find
+`France`. A **description** must name *both* sides to count, since match reports
+name other teams in passing; a title or sub-title only needs one.
+
+Three rules keep this from over-matching, all worth knowing if a channel you
 expected does not appear:
 
 - **Both teams must appear in one segment of the name.** Names are split on `:`
@@ -225,6 +232,15 @@ expected does not appear:
   token. As loose substrings they behave like wildcards: `NE` is inside
   Sportsnet and Tennessee, `PIT` is inside Jupiter, `CLE` is inside Clearwater.
   Longer names still match as substrings.
+- **A stream whose name is dated before the game is skipped.** Providers spin up
+  a dedicated feed per night, and a three-game series has every night's feed
+  naming the same two teams, so without this the channel stacks finished games
+  behind the live one. Feeds with no date in the name are unaffected, and a
+  feed dated later than the game is kept.
+
+When several feeds carry the same event, a plain feed is preferred over one that
+labels itself as the pre-show, the prelims, a press conference or a multiview.
+Those still attach as fallbacks; they just do not become the primary stream.
 
 Games with no match above the placeholder threshold still get a channel; see
 [Placeholder channels](#placeholder-channels).
