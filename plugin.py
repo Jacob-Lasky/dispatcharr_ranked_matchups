@@ -2659,19 +2659,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     # Channel-name template (issue #100). Empty/unset -> the built-in default.
     # A malformed custom template must never crash an apply or poison live
-    # channel names: validate, and on any problem fall back to the default and
-    # log loudly (the "test naming convention" action is where users catch this
-    # before it ships).
+    # channel names: fall back to the default.
+    #
+    # The fallback is REPORTED, not just logged (#126). It used to emit only a
+    # logger.warning, so a user whose template had a stray brace saw every
+    # channel keep the default name (score included) with nothing in the UI
+    # saying why, while the preview action -- which most users never run --
+    # returned a loud `status: error` for the same template. tmpl_problem is
+    # appended to this action's result message below so the divergence is gone.
     from . import naming
-    name_template = str(settings.get("name_template") or "").strip() or None
-    if name_template is not None:
-        tmpl_errors = naming.validate_template(name_template)
-        if tmpl_errors:
-            logger.warning(
-                "[ranked_matchups] invalid name_template (%s); using default",
-                "; ".join(tmpl_errors),
-            )
-            name_template = None
+    resolved_template, tmpl_errors, _tmpl_is_default = naming.resolve_template(
+        settings.get("name_template")
+    )
+    tmpl_problem = naming.template_problem_summary(tmpl_errors)
+    if tmpl_errors:
+        logger.warning(
+            "[ranked_matchups] invalid name_template (%s); using default",
+            "; ".join(tmpl_errors),
+        )
+    # Downstream still signals "use the default" with None, so preserve that
+    # rather than threading the resolved string through every call site.
+    name_template = None if _tmpl_is_default else resolved_template
     apply_tz = _resolve_tz(settings.get("local_timezone", "UTC"))
 
     # 1. Ensure target ChannelGroup. Also detect any old groups/sources we own
@@ -3503,6 +3511,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         f"unmatched_skipped={skipped_unmatched}.{rename_msg}{rec_msg}{llm_msg}{logo_msg}{foreign_msg} "
         f"WHY descriptions written to EPG source."
     )
+    if tmpl_problem:
+        # Lead with it: the channel names the user is about to look at are NOT
+        # the ones they configured, and that is the most important thing in
+        # this message (#126).
+        msg = f"WARNING: {tmpl_problem}\n\n{msg}"
     return {"status": "ok", "message": msg}
 
 
@@ -3632,15 +3645,12 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
     """
     from . import naming
 
-    raw = str(settings.get("name_template") or "").strip()
     tz = _resolve_tz(settings.get("local_timezone", "UTC"))
-
-    using_default = not raw
-    template = raw or naming.DEFAULT_NAME_TEMPLATE
-    errors = naming.validate_template(template)
-    if errors and not using_default:
-        template = naming.DEFAULT_NAME_TEMPLATE
-        using_default = True
+    # Shared resolver (#126), so this action and apply can never disagree about
+    # whether a template is usable.
+    template, errors, using_default = naming.resolve_template(
+        settings.get("name_template")
+    )
 
     _, rendered = naming.preview_lines(template, tz=tz)
 
@@ -3666,7 +3676,15 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
 # ---------- show status ----------
 
 def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
-    del settings  # interface-required (Plugin.run dispatch), not read here
+    # Reads settings ONLY to report a broken name_template (#126). This action
+    # is where a confused user looks first ("why are my channels named that?"),
+    # so it has to be able to answer that question; apply's toast scrolls away,
+    # this one is on demand. Same resolver as apply and preview.
+    from . import naming
+    _tmpl, tmpl_errors, _is_default = naming.resolve_template(
+        (settings or {}).get("name_template")
+    )
+    tmpl_problem = naming.template_problem_summary(tmpl_errors)
     cache = _read_cache()
     inflight = tasks.read_inflight()
     inflight_line: Optional[str] = None
@@ -3687,8 +3705,13 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
         msg = "Cache empty. Run refresh."
         if inflight_line:
             msg = inflight_line + "\n" + msg
+        if tmpl_problem:
+            msg = f"WARNING: {tmpl_problem}\n\n{msg}"
         return {"status": "ok", "message": msg}
     lines = []
+    if tmpl_problem:
+        lines.append(f"WARNING: {tmpl_problem}")
+        lines.append("")
     if inflight_line:
         lines.append(inflight_line)
         lines.append("")
