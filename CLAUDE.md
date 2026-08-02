@@ -23,8 +23,12 @@ plugin.py         ← orchestrator: refresh + apply + show_status + scheduler
   ↓ uses
 sources/          ← per-sport adapters (drop-in extensible)
   base.py         ← GameRow + SportSource interface
-  ncaaf.py        ← NCAA Football via CFBD
-  soccer.py       ← EPL/Championship/UCL/Bundesliga/La Liga/Serie A/Ligue 1 via Football-Data.org + Odds API
+  bracket.py      ← shared knockout/playoff state machine
+  points_based.py ← shared round-robin Monte Carlo
+  <sport>.py      ← one adapter per sport; DO NOT enumerate them here.
+                    The file map below is the single source of truth, and
+                    this diagram drifted to listing 2 of 24 adapters once
+                    already by duplicating it.
   __init__.py
   ↓ produce
 List[GameRow]     ← {sport_prefix, home, away, rank_home, rank_away, start_time, spread, extra}
@@ -97,6 +101,7 @@ differentiation in the typical 4-15 range.
 | `close_game` | Coinflip-ness in [0, 1]: devigged h2h moneyline probabilities for soccer, normalized point spread for NCAAF / NCAAM | 3.0 |
 | **`importance`** | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands. Soccer leagues (PL/ELC): title/UCL/Europa/relegation/promotion (format=`league`). UCL knockouts: round_of_16/QF/SF/F/winner (format=`knockout`). NCAAF/NCAAM: win-count bands (format=`win_count`). NHL regular season: standings-point bands (95+/100+/110+/125+, format=`points_count`). NHL Stanley Cup Playoffs: R2/Conf Final/Cup Final/Champion (format=`knockout`). Locked-in outcomes contribute 0 (mathematical elimination respected). | **3.0** |
 | `tournament_stage` | Knockout cup game flat boost (R16 / QF / SF / FINAL). For UCL the importance signal already encodes round depth via consequence weights, so this is mostly redundant; kept for non-UCL cups not in LEAGUE_CONTEXTS yet. | 1.5 |
+| `rivalry` | Known rivalry game. Populated from the bundled `rivalries.json` via `rivalries.py` (see also `honours.py`); `sources/friendlies.py` and `plugin.py` are the consumers. | 2.0 (flat) |
 | `narrative` | LLM-judged narrative score | 0.0 (off by default) |
 
 The structural Monte Carlo importance signal subsumes the old
@@ -112,11 +117,12 @@ enable narrative without explicit user buy-in.
 
 ## Sport adapter extension contract
 
-To add NCAAM (College Basketball — same author as CFBD, free, same API key),
-you'd:
+Three steps, using NCAAM (College Basketball) as the worked example.
+NOTE: NCAAM already ships as `sources/ncaam.py`, so read that file as the
+reference implementation rather than writing it; the shape below is what
+a NEW sport needs.
 
-1. Create `sources/ncaam.py` with a `NcaamSource` class implementing
-   `SportSource`:
+1. Create `sources/<sport>.py` with a class implementing `SportSource`:
    ```python
    class NcaamSource(SportSource):
        sport_prefix = "CBB"
@@ -129,8 +135,9 @@ you'd:
 
 2. Register in `sources/__init__.py`.
 
-3. Add an `enable_ncaam` toggle to `plugin.json` and wire it in
-   `_build_sources(settings)` in `plugin.py`.
+3. Add an `enable_<sport>` toggle to `plugin.json` and wire it in
+   `_build_sources(settings)` in `plugin.py`. Every toggle must be wired
+   in both places or the setting renders but does nothing.
 
 Shared CFBD key already covers basketball (same Bearer token).
 
@@ -247,28 +254,17 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   per league) -> source-channel logo (last resort). So an offseason /
   no-thumbnail / untracked fixture shows the sport badge, not the provider logo.
 
-**Known limitations & open work:** tracked as GitHub issues so they don't
-drift. Quick map (most user-facing first):
+**Known limitations & open work:** read the
+[open issues](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues?q=is%3Aissue+is%3Aopen).
 
-- [#4 — Matcher v2: team aliases, time-window tightening, non-English
-  titles](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/4)
-- [#7 — Season-aware score normalization (★10 inflation +
-  early-season flatness)](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/7)
-- [#8 — Rivalry signal (`weight_rivalry` is wired but no source populates
-  `is_rivalry`)](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/8)
-- [#9 — Curation presets (high-curation / high-coverage instead of 9
-  weight knobs)](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/9)
-- [#10 — Standings deltas in EPG description (data is in
-  `cache.json`, just not surfaced)](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/10)
-- [#3 — Label catch-up matchdays (40-of-46 rendering on a backlog
-  fixture)](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/3)
-
-Sport adapters not yet implemented:
-
-- [#5 — NCAA Baseball
-  adapter](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/5)
-- [#6 — NCAA Soccer
-  adapter](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/6)
+**DO NOT paste a summary of them back into this file.** A previous
+revision kept an inline "quick map" here, prefaced with the claim that
+issues were used "so they don't drift" — and then every single entry
+drifted. All eight (#3, #4, #5, #6, #7, #8, #9, #10) had shipped and
+closed while this file still described them as open, including two
+adapters listed as "not yet implemented" that exist as
+`sources/ncaa_baseball.py` and `sources/ncaa_soccer.py`. An inline list
+cannot be kept honest; the tracker is the only source of truth.
 
 ## Design principles worth respecting
 

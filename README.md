@@ -1,9 +1,12 @@
 # Dispatcharr Ranked Matchups
 
-A [Dispatcharr](https://github.com/dispatcharr/dispatcharr) plugin that curates
-upcoming sports games into a single "Top Matchups" group based on
-**interestingness**, with the WHY shown directly in each channel's EPG
-description.
+**Never miss a good game.**
+
+A [Dispatcharr](https://github.com/dispatcharr/dispatcharr) plugin that watches
+37 leagues, tours and competitions (20 of them soccer, plus NFL, NBA, MLB, NHL,
+NCAA, UFC, boxing, tennis, golf and motorsport), scores every upcoming game on
+**interestingness**, and curates the best of them into a single "Top Matchups"
+group, with the WHY shown directly in each channel's EPG description.
 
 What "interesting" means is computed transparently from a handful of signals
 you can tune:
@@ -15,7 +18,7 @@ you can tune:
 | `close_game` | Coinflip-ness in [0, 1] — soccer uses devigged h2h moneylines, NCAAF/NCAAM normalize point spread | 3.0 |
 | `importance` | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands. Soccer leagues: title / UCL / Europa / relegation / promotion. UCL knockouts: round_of_16 → quarterfinal → semifinal → final → winner. NCAAF / NCAAM: win-count bands (bowl_eligible / 10+ / 11+; 15+ / 20+ / 25+). NHL: standings-point bands (95+ bubble / 100+ secured / 110+ division / 125+ Presidents'); Stanley Cup Playoffs: R2 → Conf Final → Cup Final → Champion. Locked outcomes contribute 0; uncertainty drives leverage. | 3.0 |
 | `tournament_stage` | Knockout cup game (R16, QF, SF, F) | 1.5 |
-| `rivalry` | Known rivalry game (rivalry DB pending) | 2.0 (flat) |
+| `rivalry` | Known rivalry game, from the bundled `rivalries.json` | 2.0 (flat) |
 | `narrative` | LLM-judged narrative bonus (off by default) | 0.0 |
 
 Raw signal contributions are summed and compressed to a 0-10 ★ score using a
@@ -112,19 +115,12 @@ descriptions) is sport-agnostic.
 
 ## Roadmap
 
-Open work is tracked in [GitHub issues](../../issues). Notable themes:
-
-- **Rivalry signal** — the `weight_rivalry` weight is wired but no
-  source populates `is_rivalry`. See [#8](../../issues/8).
-- **Matcher v2** — soccer EPG match rate is low because UK providers
-  publish broadcast EPG only 24-48h ahead and team-name variants
-  ("Wrexham" / "Wrexham AFC" / "AFC Wrexham") trip the regex
-  pre-filter. See [#4](../../issues/4).
-- **NCAA Baseball / Softball postseason brackets** — Regional
-  double-elim and the 8-team MCWS/WCWS brackets need chronological
-  bracket inference. See [#43](../../issues/43).
-- **WC 2026 group stage importance** — group-stage games currently
-  read importance=0. See [#20](../../issues/20).
+Open work is tracked in
+[GitHub issues](../../issues?q=is%3Aissue+is%3Aopen), which is the single
+source of truth. DO NOT restate the current roadmap here: an inline list
+of issue numbers goes stale silently and every item in the previous one
+(#4, #8, #20, #43) had shipped and closed while the README still
+advertised it as pending.
 
 PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for a step-by-step
 guide. For requests, [open an issue](../../issues/new/choose) and the
