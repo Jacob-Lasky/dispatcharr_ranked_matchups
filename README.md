@@ -1,9 +1,12 @@
 # Dispatcharr Ranked Matchups
 
-A [Dispatcharr](https://github.com/dispatcharr/dispatcharr) plugin that curates
-upcoming sports games into a single "Top Matchups" group based on
-**interestingness**, with the WHY shown directly in each channel's EPG
-description.
+**Never miss a good game.**
+
+A [Dispatcharr](https://github.com/dispatcharr/dispatcharr) plugin that watches
+37 leagues and competitions (20 of them soccer, plus NFL, NBA, MLB, NHL, NCAA,
+UFC, boxing, tennis, golf and motorsport), scores every upcoming game on
+**interestingness**, and curates the best of them into a single "Top Matchups"
+group, with the WHY shown directly in each channel's EPG description.
 
 What "interesting" means is computed transparently from a handful of signals
 you can tune:
