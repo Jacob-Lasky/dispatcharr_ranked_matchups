@@ -219,9 +219,17 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
     try:
         _set_inflight(kind, task_id, "refresh")
         result = target(settings)
+        # LOG THE MESSAGE, not just the status (#170). Every caller of this
+        # function dispatches in the background, so the result dict is thrown
+        # away: the HTTP actions already returned a `queued` envelope to the
+        # browser and the scheduler has no caller at all. That made the log the
+        # ONLY surface for what the run actually did, and it was printing
+        # `status=ok` for a dry_run apply that created nothing, which reads as
+        # a silent success. DO NOT trim this back to the status alone.
         logger.info(
-            "[ranked_matchups.tasks] %s task %s complete: status=%s",
+            "[ranked_matchups.tasks] %s task %s complete: status=%s | %s",
             kind, task_id, result.get("status"),
+            result.get("message") or "(no message)",
         )
     except Exception:
         logger.exception(

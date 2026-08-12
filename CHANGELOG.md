@@ -5,6 +5,31 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.16.1] - 2026-08-12
+
+### Fixed
+
+- **A dry-run apply no longer looks like a silent success (#170).** Reported by
+  a user whose group and channels never appeared: his log ended with
+  `auto_pipeline task <id> complete: status=ok` and nothing else, because
+  `dry_run` defaults to true and three things conspired to hide that. On an
+  install with no group yet, apply returns from its dry-run branch before
+  logging anything; "Refresh + apply now" runs in the background, so the
+  "[dry] Would create..." message it returns is discarded and never reaches a
+  toast; and the thread body logged only `status=`, not the message. All three
+  are closed. The background runner now logs the result message alongside the
+  status, both of apply's dry-run exits state the consequence and the remedy
+  ("Apply writes nothing. Untick it in this plugin's settings...") in the
+  message AND in the log, and **Show current state** reports when dry run is on.
+
+### Changed
+
+- **Show current state prints its warnings at the BOTTOM.** An action result
+  renders as a toast anchored bottom-right that grows upward and cannot be
+  scrolled, so a 30-line status dump pushed its own opening lines off the top of
+  the screen: a banner at the top was a banner nobody could read. The broken
+  name-template warning (#126) moves down there with the new dry-run notice.
+
 ## [1.16.0] - 2026-07-30
 
 ### Added
