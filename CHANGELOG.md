@@ -5,6 +5,40 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-08-12
+
+### Added
+
+- **Curated channels now land in your Channel Profiles (#172).** Reported by a
+  user: "the visibility for the created channels is disabled for all my profiles
+  except for All". Dispatcharr creates `ChannelProfileMembership` rows in its API
+  view layer, for channels made through its own UI, so channels a plugin creates
+  through the ORM get none, and the m3u/XC output filters a named profile on
+  `channelprofilemembership__enabled=True`. The result is a channel that is
+  present under `All` (which applies no membership filter at all, and is not a
+  profile) and switched off in every named profile. Measured on a live instance
+  before the fix: 24 plugin channels, 19 profiles, 0 membership rows.
+
+  Apply now sets that membership. **Blank, the default, means every profile**,
+  matching what Dispatcharr itself does for a hand-created channel. The new
+  "Channel Profiles to enable" setting takes a comma-separated list of profile
+  names to narrow it, matched case-insensitively against the names shown in the
+  UI. The setting converges: profiles listed are turned on and profiles left out
+  are turned off, so removing a name removes the channels from that profile on
+  the next apply. A name matching no profile is reported in the Apply result and
+  logged next to the list of names that do exist, rather than being guessed at
+  or silently ignored.
+
+  Every channel the plugin owns is covered, not just the ones a given run
+  creates, so an existing install heals on its first apply after upgrading.
+
+### Changed
+
+- **`channel_profile_name`'s help text now says it is a channel GROUP**, not a
+  Channel Profile. The id is a long-standing misnomer that cannot be renamed
+  without dropping every existing install's saved value, and it became actively
+  confusing the moment a real Channel Profile setting landed beside it.
+
 ## [1.16.0] - 2026-07-30
 
 ### Added

@@ -112,6 +112,78 @@ _FAVORITES_ONLY_SETTING = "favorites_only"
 _FAVORITES_ONLY_OFF = "off"                # default: no filtering
 _FAVORITES_ONLY_STRICT = "strict"          # favorite-involved games only
 _FAVORITES_ONLY_POSTSEASON = "postseason"  # favorites + any postseason game
+
+# Which Dispatcharr Channel Profiles our virtual channels are visible in (#172).
+#
+# NOT to be confused with `channel_profile_name`, which despite its id is the
+# ChannelGroup name (a legacy misnomer we cannot rename without dropping every
+# existing install's saved value). THIS setting is the ChannelProfile one.
+#
+# Why the plugin has to do this at all: Dispatcharr creates
+# ChannelProfileMembership rows in the API VIEW layer
+# (apps/channels/api_views.py, ChannelViewSet.create), NOT in a model signal.
+# A channel created straight through the ORM -- which is what a plugin does --
+# gets no membership rows whatsoever, and the m3u/XC output filters a named
+# profile on `channelprofilemembership__enabled=True`
+# (apps/output/views.py:173), so our channels are invisible in EVERY named
+# profile. They only show up under the unfiltered "All" view, which takes the
+# `profile_name is None` branch and applies no membership filter at all.
+# Verified against 0.27.1 and against a live instance: 24 plugin channels, 19
+# profiles, 0 membership rows.
+#
+# Blank means ALL profiles, which mirrors what core itself does when a channel
+# is created with `channel_profile_ids` omitted (bulk_create over every profile
+# with enabled=True). So the out-of-the-box behavior matches a hand-created
+# channel, and the setting exists to NARROW that.
+_ENABLED_PROFILES_SETTING = "enabled_channel_profiles"
+
+
+def _parse_profile_names(raw: Any) -> List[str]:
+    """Split the comma-separated profile setting into clean names.
+
+    Order-preserving and case-insensitively deduped, because the value is
+    reported back to the user and a list echoing their typo twice reads as a
+    bug. Blank/None yields [], which callers read as "all profiles".
+    """
+    if not raw or not isinstance(raw, str):
+        return []
+    out: List[str] = []
+    seen = set()
+    for part in raw.split(","):
+        name = part.strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        out.append(name)
+    return out
+
+
+def _select_profiles(available: List[str], requested: List[str]) -> Tuple[List[str], List[str]]:
+    """Resolve requested profile names against the ones that exist.
+
+    Returns (selected, unknown), both in the caller's order and spelled the way
+    the DB spells them, so the caller can write memberships and report typos in
+    the same pass. Matching is case-insensitive: the user is copying a name out
+    of the UI by eye, and "sports" vs "Sports" is not a decision worth failing.
+
+    An EMPTY `requested` means all profiles. That is the documented default and
+    is deliberately different from "requested names that all turned out to be
+    unknown", which selects nothing and reports every name -- silently falling
+    back to all-profiles on a typo would push channels into profiles the user
+    was actively trying to exclude.
+    """
+    if not requested:
+        return list(available), []
+    by_fold = {name.casefold(): name for name in available}
+    selected: List[str] = []
+    unknown: List[str] = []
+    for name in requested:
+        actual = by_fold.get(name.casefold())
+        if actual is None:
+            unknown.append(name)
+        elif actual not in selected:
+            selected.append(actual)
+    return selected, unknown
 # The modes that actually filter (everything except OFF / unrecognized).
 _FAVORITES_ONLY_ACTIVE_MODES = frozenset({
     _FAVORITES_ONLY_STRICT, _FAVORITES_ONLY_POSTSEASON,
@@ -415,6 +487,161 @@ def _ensure_archive_channel(recordings_group_name):
             arch.id, number,
         )
     return arch
+
+
+# How many bad profile names the toast echoes back before collapsing the rest
+# into a count. The toast clips from the top, so a long list of typos costs the
+# lines the user actually needs.
+_MAX_NAMED_UNKNOWN = 3
+
+
+def _profile_summary(stats: Optional[Dict[str, Any]]) -> str:
+    """The Channel Profile line for apply's toast, or "" when there is nothing
+    worth saying.
+
+    Pure so the wording is testable without a DB. Silent on the default (blank
+    setting, every profile selected, no typos) because a line on every apply
+    saying "all profiles" is noise in a message that already clips. An unknown
+    name is ALWAYS reported: it is the one case where the user asked for
+    something and did not get it.
+    """
+    if not stats:
+        return ""
+    out = ""
+    unknown = stats.get("unknown") or []
+    selected = stats.get("selected") or []
+    if unknown:
+        shown = ", ".join(repr(u) for u in unknown[:_MAX_NAMED_UNKNOWN])
+        more = (
+            f" +{len(unknown) - _MAX_NAMED_UNKNOWN} more"
+            if len(unknown) > _MAX_NAMED_UNKNOWN else ""
+        )
+        out += f" No Channel Profile named {shown}{more}."
+    if stats.get("enabled") or stats.get("disabled"):
+        out += (
+            f" Channel Profiles: {stats.get('enabled', 0)} enabled, "
+            f"{stats.get('disabled', 0)} disabled across "
+            f"{stats.get('channels', 0)} channel(s)."
+        )
+    elif unknown and not selected:
+        # Every name was a typo, so the sync bailed out without touching a
+        # single row. Say that explicitly: the user needs to know their
+        # channels are sitting in whatever profiles the LAST good run left
+        # them in, not in the ones they just tried to name.
+        out += " Nothing matched, so profile membership was left unchanged."
+    return out
+
+
+def _sync_profile_memberships(settings: Dict[str, Any], dry_run: bool = False) -> Dict[str, Any]:
+    """Make our channels visible in the configured Dispatcharr Channel Profiles.
+
+    Operates on EVERY channel we own (`_owned_tvg_id_q`), not just the ones this
+    run created, so an install upgrading from a version without this feature
+    heals on its first apply instead of only fixing channels that happen to
+    churn. Ownership is the whole authorization story here: we created the
+    channel, so its membership rows are ours to set.
+
+    `dry_run` computes the same numbers and writes nothing, so a rehearsal
+    reports what it WOULD change instead of staying quiet about profiles while
+    every other line of the summary has something to say (#170's lesson: a
+    silent dry run reads as a successful one).
+
+    Convergent, which is what makes the setting mean anything: desired state is
+    `enabled == (profile is selected)` for every profile, so narrowing the
+    setting from "Sports, Soccer" to "Soccer" actually removes the channels from
+    Sports on the next run rather than leaving them there forever. Rows are only
+    CREATED for selected profiles -- core represents "not in this profile" as an
+    absent row (it never bulk-creates disabled ones), and manufacturing a
+    disabled row per channel per profile would write thousands of rows to say
+    nothing.
+
+    DO NOT swap the queryset .update() for per-row .save(): `Channel` carries a
+    destructive post_save (see the epg_data write in _action_apply), and while
+    ChannelProfileMembership itself has no receiver today, the bulk paths in
+    core use bulk_create/bulk_update for the same rows and this stays consistent
+    with them.
+    """
+    from apps.channels.models import Channel, ChannelProfile, ChannelProfileMembership
+
+    requested = _parse_profile_names(settings.get(_ENABLED_PROFILES_SETTING, ""))
+    profiles = list(ChannelProfile.objects.all())
+    available = [p.name for p in profiles]
+    selected_names, unknown = _select_profiles(available, requested)
+    selected_ids = {p.id for p in profiles if p.name in set(selected_names)}
+
+    # Warn BEFORE any early return below. A typo is exactly the case that exits
+    # early, so emitting this at the bottom means the one run that needed the
+    # warning is the one run that does not print it.
+    if unknown:
+        logger.warning(
+            "[ranked_matchups] %s names %d profile(s) that do not exist: %s. "
+            "Existing profiles: %s",
+            _ENABLED_PROFILES_SETTING, len(unknown),
+            ", ".join(repr(u) for u in unknown),
+            ", ".join(repr(a) for a in available) or "(none)",
+        )
+
+    owned_ids = list(
+        Channel.objects.filter(_owned_tvg_id_q()).values_list("id", flat=True)
+    )
+    stats = {
+        "selected": selected_names,
+        "unknown": unknown,
+        "channels": len(owned_ids),
+        "enabled": 0,
+        "disabled": 0,
+        "created": 0,
+    }
+    if not owned_ids or not profiles:
+        return stats
+    # EVERY name was a typo. Do nothing at all. Applying the empty selection
+    # here would read as "the user asked for no profiles" and switch the
+    # channels off everywhere, which is the most destructive reading of a
+    # misspelling: caught on a live instance, where a single typo'd name
+    # disabled all 24 channels across all 19 profiles. A partial match is
+    # different and IS applied -- "Sports, Sprots" states a legible intent, so
+    # Sports goes on, the rest go off, and the typo is still reported.
+    if requested and not selected_names:
+        return stats
+
+    existing = {
+        (m.channel_profile_id, m.channel_id): m
+        for m in ChannelProfileMembership.objects.filter(channel_id__in=owned_ids)
+    }
+    to_create = []
+    flip_on, flip_off = [], []
+    for profile in profiles:
+        want = profile.id in selected_ids
+        for chan_id in owned_ids:
+            row = existing.get((profile.id, chan_id))
+            if row is None:
+                # Absent row already means "not visible here"; only materialize
+                # the ones that need to be visible.
+                if want:
+                    to_create.append(ChannelProfileMembership(
+                        channel_profile_id=profile.id, channel_id=chan_id, enabled=True,
+                    ))
+                continue
+            if row.enabled != want:
+                (flip_on if want else flip_off).append(row.id)
+
+    if to_create and not dry_run:
+        # ignore_conflicts: a concurrent apply (or a user toggling the same
+        # channel in the UI) can insert the same unique (profile, channel) pair
+        # between our read and this write. Losing that race must not abort the
+        # whole apply transaction.
+        ChannelProfileMembership.objects.bulk_create(to_create, ignore_conflicts=True)
+    if flip_on and not dry_run:
+        ChannelProfileMembership.objects.filter(id__in=flip_on).update(enabled=True)
+    if flip_off and not dry_run:
+        ChannelProfileMembership.objects.filter(id__in=flip_off).update(enabled=False)
+    # Counted from the PLAN, not from what was written, so the dry-run summary
+    # states the real numbers rather than three zeroes.
+    stats["created"] = len(to_create)
+    stats["enabled"] = len(to_create) + len(flip_on)
+    stats["disabled"] = len(flip_off)
+
+    return stats
 
 
 def _cleanup_empty_archive(recordings_group_name) -> bool:
@@ -3262,6 +3489,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             start_dt=start_dt,
         )
 
+    # Set by step 8 inside the transaction; stays None on a dry run so the
+    # summary can tell "no profiles touched" apart from "nothing to say".
+    profile_stats: Optional[Dict[str, Any]] = None
+
     with transaction.atomic():
         # Phase 0: park existing virtual channels in a high temporary number
         # range so we can renumber based on cache order without colliding with
@@ -3522,6 +3753,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         if not dry_run and archive_enabled:
             _cleanup_empty_archive(recordings_group_name)
 
+        # 8. Channel Profile membership (#172). LAST inside the transaction, and
+        # deliberately so: it reads the set of channels we own, which is only
+        # final after the creates in step 5 and the reaps in step 5b. Pure DB
+        # work, so it does not violate the no-network-in-transaction rule (#136).
+        # Runs on a dry run TOO (reads only, writes nothing) so the rehearsal
+        # reports the profile change it would make.
+        profile_stats = _sync_profile_memberships(settings, dry_run=dry_run)
+
     # Persist the LLM-description cache (prune entries whose marker is no
     # longer in this refresh; keep file bounded to live games). Save outside
     # the atomic block: sidecar JSON file is independent of the DB.
@@ -3555,6 +3794,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     llm_msg = ""
     if llm_enabled:
         llm_msg = f" LLM descriptions: {llm_used} written, {llm_failed} fell back to deterministic."
+    # Only worth a line when the user narrowed the setting or fat-fingered a
+    # name; the default (all profiles, nothing to choose) says nothing. The
+    # toast clips, so an unknown name reports the count and the first few names
+    # rather than echoing a long list back.
+    profile_msg = _profile_summary(profile_stats)
     logo_msg = ""
     if matchup_logos_enabled and not dry_run:
         logo_msg = (
@@ -3585,7 +3829,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         f"(placeholders={placeholder_channels_created} included), "
         f"stale_deleted={deleted_stale}, "
         f"orphan_epg_deleted={orphan_epg_deleted if 'orphan_epg_deleted' in locals() else 0}, "
-        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{rec_msg}{llm_msg}{logo_msg}{foreign_msg} "
+        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{rec_msg}{llm_msg}{logo_msg}{foreign_msg}"
+        f"{profile_msg} "
         f"WHY descriptions written to EPG source."
     )
     if tmpl_problem:
@@ -4485,7 +4730,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.16.0"
+    version = "1.17.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

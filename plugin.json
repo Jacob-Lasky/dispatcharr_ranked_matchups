@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.16.0",
+  "version": "1.17.0",
   "description": "Never miss a good game. Scores every upcoming game across 37 leagues, tours and competitions (20 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -541,7 +541,15 @@
       "type": "string",
       "label": "Target group name",
       "default": "Top Matchups",
-      "help_text": "Apply creates virtual channels in this ChannelGroup, cloning streams from the matched source channels (source channels untouched). A matching dummy EPGSource is created with the same name; each virtual channel gets a ProgramData entry whose description explains WHY the game made the cut. Tip: prefix with '!' (e.g. '!Top Matchups') so it sorts to the top of your group list. If you rename the group, the next apply will detect the old group/source by tvg_id markers and clean them up automatically."
+      "help_text": "Apply creates virtual channels in this ChannelGroup, cloning streams from the matched source channels (source channels untouched). A matching dummy EPGSource is created with the same name; each virtual channel gets a ProgramData entry whose description explains WHY the game made the cut. Tip: prefix with '!' (e.g. '!Top Matchups') so it sorts to the top of your group list. If you rename the group, the next apply will detect the old group/source by tvg_id markers and clean them up automatically. NOTE: despite this setting's internal name, it is a channel GROUP, not a Dispatcharr Channel Profile. Profiles are set by 'Channel Profiles to enable' below."
+    },
+    {
+      "id": "enabled_channel_profiles",
+      "type": "string",
+      "label": "Channel Profiles to enable",
+      "default": "",
+      "placeholder": "Sports, Soccer",
+      "help_text": "Comma-separated Dispatcharr Channel Profile names the curated channels should be visible in, spelled as they appear under Channel Profiles. LEAVE BLANK for all profiles, which is what a hand-created channel does. Dispatcharr only creates profile memberships for channels made through its own UI/API, so plugin-created channels are otherwise hidden in every named profile and show up only under 'All'. This setting is the source of truth: profiles you list are turned on for these channels and profiles you leave out are turned off, so a name removed here is removed from the profile on the next apply. Names that match no profile are reported in the Apply result and nothing is guessed."
     },
     {
       "id": "recordings_group_name",
