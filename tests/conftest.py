@@ -52,3 +52,14 @@ def _no_real_sleeps(monkeypatch):
         # Django-less contexts where soccer isn't importable: nothing to patch.
         return
     monkeypatch.setattr(soccer, "_fd_sleep", lambda _seconds: None)
+
+
+def pytest_configure(config):
+    """Register custom markers so `-W error` / `--strict-markers` runs stay
+    clean and a typo'd marker name fails loudly instead of silently doing
+    nothing."""
+    config.addinivalue_line(
+        "markers",
+        "orm_state(profiles=..., channels=..., rows=...): seed the fake "
+        "ChannelProfile ORM used by tests/test_channel_profiles.py",
+    )

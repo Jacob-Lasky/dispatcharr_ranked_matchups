@@ -263,9 +263,39 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   Jellyfin all surface this natively
 - Channel number: `9000 + cache_index`, so today's games occupy the lowest
   numbers and appear first in any IPTV client's default sort
+- Channel Profiles: the channels are enabled in every Channel Profile by
+  default. Narrow that with "Channel Profiles to enable" (see below)
 
 If you rename the target group, the next apply detects the old group + its
 virtual channels (by tvg_id marker `ranked_matchups:`) and migrates them.
+
+### Channel Profiles
+
+Dispatcharr creates profile memberships in its API layer, for channels made
+through its own UI. A plugin creates channels through the ORM, so it gets none,
+and a channel with no membership row is filtered out of every **named** profile
+— it shows up only under `All`, which applies no membership filter at all. That
+is why the curated channels used to appear switched off in each of your
+profiles.
+
+Apply now sets that membership itself:
+
+- **Blank (the default): every profile**, which is what a hand-created channel
+  gets in Dispatcharr.
+- **A comma-separated list** (`Sports, Soccer`) restricts them to those
+  profiles. Names are matched case-insensitively against the names shown under
+  Channel Profiles.
+
+The setting is the source of truth and it converges: profiles you list are
+turned on and profiles you leave out are turned off, so removing a name here
+removes the channels from that profile on the next apply. If you toggle one of
+these channels by hand in the profile editor, the next apply will set it back.
+A name matching no profile is reported in the Apply result rather than guessed
+at, and nothing else is changed.
+
+Only channels the plugin owns (tvg_id marker `ranked_matchups:`) are touched,
+including ones created by earlier versions, so an existing install fixes itself
+on the first apply after upgrading.
 
 ## Placeholder channels
 
