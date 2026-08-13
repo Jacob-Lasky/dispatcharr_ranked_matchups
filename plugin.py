@@ -235,6 +235,53 @@ DEFAULT_RECORDINGS_GROUP = "Matchups Recordings"
 # A literal so the rename-cleanup allowlist and the settings default cannot drift.
 DEFAULT_GROUP_NAME = "Top Matchups"
 
+# What every surface says when dry_run swallowed an apply (#170).
+#
+# dry_run DEFAULTS TO TRUE, so this is the state every fresh install starts in,
+# and the failure it produces is silent: apply's no-group branch returns before
+# it logs anything, and "Refresh + apply now" is async, so the "[dry] Would
+# create..." message is discarded by the daemon thread and never reaches a
+# toast. A new user sees a clean log ending in `complete: status=ok` and no
+# group. DO NOT drop this from any of its three call sites (apply's early
+# return, apply's summary, show_status) without leaving the user another way to
+# learn why nothing was written. Tense-neutral on purpose so one string works
+# for "would have done" and "will do" alike.
+DRY_RUN_NOTICE = (
+    "'Dry run on Apply' is ON, so Apply writes nothing. Untick it in this "
+    "plugin's settings to create the group and channels."
+)
+
+
+def _dry_run_enabled(settings: Optional[Dict[str, Any]]) -> bool:
+    """Whether the next apply is a no-op rehearsal.
+
+    ONE reader for this setting. apply decides whether to write from it and
+    show_status tells the user what apply will do, so a private copy of the
+    `.get("dry_run", True)` default in either place is a copy that can drift
+    into show_status reporting the opposite of what apply is about to do. The
+    default is True and MUST match the manifest field default; that pairing is
+    pinned by tests/test_dry_run_visibility.py.
+    """
+    return bool((settings or {}).get("dry_run", True))
+
+
+def _dry_run_report(message: str, dry_run: bool) -> str:
+    """Apply's outgoing message, with the dry-run notice appended AND logged
+    when dry_run is on.
+
+    Both apply exits (the no-group early return and the end-of-run summary)
+    need the same pair of side effects, so they share one helper rather than
+    each open-coding "append the constant, then log the constant" and drifting.
+
+    The log is not redundant with the return value: under auto_pipeline the
+    return value is discarded by the background thread, so for the user who
+    clicked "Refresh + apply now" the log line is the only place this appears.
+    """
+    if not dry_run:
+        return message
+    logger.info("[ranked_matchups] apply: %s", DRY_RUN_NOTICE)
+    return f"{message} {DRY_RUN_NOTICE}"
+
 # Group names the rename-cleanup sweep is allowed to DELETE once empty, beyond
 # the currently-configured names (which the caller adds).
 #
@@ -2724,7 +2771,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             "Channels with recordings will be kept rather than reaped.",
             recordings_group_name,
         )
-    dry_run = bool(settings.get("dry_run", True))
+    dry_run = _dry_run_enabled(settings)
     # #111: when the widen pool is on, order each channel's pooled streams
     # English+quality first, then non-English. Same toggle as the matcher-side
     # widening (widen_stream_pool); language only matters once a channel has
@@ -2789,13 +2836,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     if not target_group:
         if dry_run:
+            # This branch IS the reported failure (#170): a fresh install has no
+            # group and dry_run defaults on, so apply returns here having
+            # written nothing and logged nothing, and the caller discards the
+            # message. _dry_run_report puts it in the log too.
             return {
                 "status": "ok",
-                "message": (
+                "message": _dry_run_report(
                     f"[dry] Would create ChannelGroup {group_name!r} + EPGSource and clone "
                     f"{sum(1 for g in games if g.get('channel_id'))} matched games into it. "
                     f"Would also clean up {len(foreign_owned_groups)} stale group(s) and "
-                    f"{len(foreign_epg_sources)} stale EPGSource(s) from prior target names."
+                    f"{len(foreign_epg_sources)} stale EPGSource(s) from prior target names.",
+                    dry_run,
                 ),
             }
         target_group = ChannelGroup.objects.create(name=group_name)
@@ -3588,6 +3640,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         f"unmatched_skipped={skipped_unmatched}.{rename_msg}{rec_msg}{llm_msg}{logo_msg}{foreign_msg} "
         f"WHY descriptions written to EPG source."
     )
+    # The "[dry] " prefix alone reads as a label, not as "and therefore your
+    # channels do not exist"; state the consequence and the fix (#170).
+    msg = _dry_run_report(msg, dry_run)
     if tmpl_problem:
         # Lead with it: the channel names the user is about to look at are NOT
         # the ones they configured, and that is the most important thing in
@@ -3753,15 +3808,18 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
 # ---------- show status ----------
 
 def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
-    # Reads settings ONLY to report a broken name_template (#126). This action
-    # is where a confused user looks first ("why are my channels named that?"),
-    # so it has to be able to answer that question; apply's toast scrolls away,
-    # this one is on demand. Same resolver as apply and preview.
+    # Reads settings to report the two configuration states that make the
+    # plugin look broken when it is working: a rejected name_template (#126,
+    # "why are my channels named that?") and dry_run still on (#170, "why is
+    # there no group at all?"). This action is where a confused user is sent,
+    # so it has to be able to answer both; apply's toast scrolls away, this one
+    # is on demand. Same template resolver as apply and preview.
     from . import naming
     _tmpl, tmpl_errors, _is_default = naming.resolve_template(
         (settings or {}).get("name_template")
     )
     tmpl_problem = naming.template_problem_summary(tmpl_errors)
+    dry_run = _dry_run_enabled(settings)
     cache = _read_cache()
     inflight = tasks.read_inflight()
     inflight_line: Optional[str] = None
@@ -3777,18 +3835,29 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
             f"cache.json below reflects the LAST completed run; mtime "
             f"advances when refresh completes."
         )
+    # Both notices go at the BOTTOM of this message, and that placement is
+    # load-bearing. An action result renders as a Mantine toast anchored
+    # bottom-right that grows UPWARD, with no way to scroll back up: a 30-line
+    # status dump pushes its own opening lines off the top of the screen. A
+    # banner at the TOP of this message is therefore a banner the user never
+    # sees, which is how a broken template stayed invisible in the first place.
+    # DO NOT move these back up to "lead with it": here the last line is the
+    # most visible line, not the least.
+    notices: List[str] = []
+    if tmpl_problem:
+        notices.append(f"WARNING: {tmpl_problem}")
+    if dry_run:
+        notices.append(f"NOTE: {DRY_RUN_NOTICE}")
+
     games = cache.get("games", [])
     if not games:
         msg = "Cache empty. Run refresh."
         if inflight_line:
             msg = inflight_line + "\n" + msg
-        if tmpl_problem:
-            msg = f"WARNING: {tmpl_problem}\n\n{msg}"
+        if notices:
+            msg = msg + "\n\n" + "\n".join(notices)
         return {"status": "ok", "message": msg}
     lines = []
-    if tmpl_problem:
-        lines.append(f"WARNING: {tmpl_problem}")
-        lines.append("")
     if inflight_line:
         lines.append(inflight_line)
         lines.append("")
@@ -3819,6 +3888,9 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
             f"  {i:2d}. {g['sport_prefix']} {rank_str} ★{score_disp:.1f}{today_marker}  "
             f"{g['away']} at {g['home']}  ({kickoff})  [{bd_str}]  {chan_str}"
         )
+    if notices:
+        lines.append("")
+        lines += notices
     return {"status": "ok", "message": "\n".join(lines)}
 
 
@@ -4485,7 +4557,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.16.0"
+    version = "1.16.1"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
