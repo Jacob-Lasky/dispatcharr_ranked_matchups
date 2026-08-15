@@ -257,10 +257,20 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   streams naming *this* game are attached. A plain broadcaster channel whose
   streams name no team at all (`MLB Network HD`, `MLB Network FHD`) contributes
   every stream, unchanged
-- EPG: a dummy `EPGSource` (auto-created with the same name as the group)
-  holds one `EPGData` row per virtual channel, with a `ProgramData` entry
+- EPG: an inactive `xmltv` `EPGSource` (auto-created with the same name as the
+  group) holds one `EPGData` row per virtual channel, with a `ProgramData` entry
   whose `description` shows the full WHY breakdown — TiviMate, Plex, and
-  Jellyfin all surface this natively
+  Jellyfin all surface this natively. It is deliberately not a `dummy` source:
+  Dispatcharr overlays generated filler programming on every channel attached to
+  one of those, which would bury the real descriptions
+- Logo: a real per-game matchup image rather than the provider's channel logo,
+  resolved in four tiers and downloaded once to `/data/logos/`. TheSportsDB's
+  pre-rendered event thumbnail first; then a
+  [game-thumbs](https://github.com/sethwv/game-thumbs) composite of the two
+  teams' crests, which covers the leagues SportsDB never indexed (MLS, Brazilian
+  Serie A, NCAA soccer); then the league or tournament badge; then, last, the
+  matched source channel's logo. Field-event sports (F1, golf, UFC, tennis,
+  boxing) have no opponent pair, so they start at the badge tier
 - Channel number: `9000 + cache_index`, so today's games occupy the lowest
   numbers and appear first in any IPTV client's default sort
 - Channel Profiles: the channels are enabled in every Channel Profile by

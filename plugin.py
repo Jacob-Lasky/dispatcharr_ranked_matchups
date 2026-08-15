@@ -199,6 +199,10 @@ LLM_DESCRIPTIONS_CACHE_PATH = os.path.join(PLUGIN_DIR, "llm_descriptions_cache.j
 # across runs so apply only HTTP-probes each marker once per _POSITIVE_TTL /
 # _NEGATIVE_TTL window. Safe to delete to force re-resolution.
 SPORTSDB_THUMB_CACHE_PATH = os.path.join(PLUGIN_DIR, "sportsdb_thumb_cache.json")
+# Same shape for the game-thumbs tier (#174). A SEPARATE file, not a shared one
+# with a key prefix: ThumbCache.prune() drops every key that isn't a live marker,
+# so two providers sharing a file would each prune the other's entries away.
+GAMETHUMBS_CACHE_PATH = os.path.join(PLUGIN_DIR, "gamethumbs_cache.json")
 CFBD_KEY_PATH = os.path.join(PLUGIN_DIR, "cfbd_api_key")
 FD_KEY_PATH = os.path.join(PLUGIN_DIR, "football_data_api_key")
 ODDS_KEY_PATH = os.path.join(PLUGIN_DIR, "odds_api_key")
@@ -3240,18 +3244,29 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         else:
             llm_cache = llm_descriptions.read_cache(LLM_DESCRIPTIONS_CACHE_PATH)
 
-    # Per-matchup logo: TheSportsDB pre-renders a 960x540 graphic for every
-    # event (both crests + league wordmark + region backdrop). Look up by
-    # team-name pair, download to /data/logos/ranked_matchups_<hash>.jpg, and
-    # point Channel.logo at it. On any miss (no event indexed, network failure,
-    # field-event source, dry_run) we fall through to the source channel's
-    # logo: preserving the v0 behavior for the long tail. Per-marker thumb
-    # URLs cached on disk to keep API hits to once per fixture per ~14 days.
+    # Per-matchup logo, resolved in four tiers (see _resolve_matchup_logo_id):
+    # TheSportsDB's pre-rendered 960x540 event graphic, then a game-thumbs
+    # composite of the two crests, then the league/tournament badge, then the
+    # matched source channel's logo. Whichever tier answers, the image is
+    # downloaded to /data/logos/ranked_matchups_<hash>.<ext> and Channel.logo
+    # points at the local file, so no tier depends on a remote host staying up
+    # after apply. Dry_run and feature-disabled short-circuit to the channel
+    # logo before any HTTP. Per-marker results are cached on disk so a fixture
+    # costs at most one probe per provider per TTL window.
+    from . import gamethumbs as matchup_gamethumbs
     from . import logos as matchup_logos
     matchup_logos_enabled = bool(settings.get("enable_matchup_logos", True))
     sportsdb_api_key = SPORTSDB_DEFAULT_KEY
     thumb_cache: Optional[matchup_logos.ThumbCache] = None
+    # Second logo tier (#174): game-thumbs composites two ESPN crests on demand,
+    # so it covers the leagues SportsDB never indexed a thumb for. Blank base URL
+    # disables the tier entirely and costs no HTTP.
+    gamethumbs_base_url = str(
+        settings.get("gamethumbs_base_url", matchup_gamethumbs.DEFAULT_BASE_URL) or ""
+    ).strip()
+    gamethumbs_cache: Optional[matchup_logos.ThumbCache] = None
     matchup_logos_used = 0
+    matchup_logos_gamethumbs = 0
     matchup_logos_badge = 0
     matchup_logos_fallback = 0
     # Streams dropped by the different-matchup gate (#162). Counted so the drop
@@ -3264,6 +3279,34 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             or SPORTSDB_DEFAULT_KEY
         )
         thumb_cache = matchup_logos.ThumbCache(SPORTSDB_THUMB_CACHE_PATH)
+        if gamethumbs_base_url:
+            # Separate cache FILE, same class. Keyed by the same marker, so it
+            # must not share the SportsDB file: prune() drops any key not in
+            # live_markers, and one shared file would make each provider's
+            # entries look stale to the other's prune.
+            gamethumbs_cache = matchup_logos.ThumbCache(GAMETHUMBS_CACHE_PATH)
+
+    def _logo_id_for_file(local_path: str, name: str) -> int:
+        """Get-or-create the Logo row pointing at a local logo file.
+
+        ONE home for this because all three image tiers (SportsDB thumb,
+        game-thumbs composite, league badge) end the same way, and they drifted
+        apart the moment there were two: the row is keyed on `url`, so a
+        divergent `name` per tier is invisible until someone reads the Logo list
+        in the UI and finds three naming conventions.
+        """
+        from apps.channels.models import Logo
+        logo_obj, _ = Logo.objects.get_or_create(
+            url=local_path, defaults={"name": name},
+        )
+        return logo_obj.id
+
+    def _matchup_logo_name(game: Dict[str, Any]) -> str:
+        """Display name for a per-game logo row. Away-at-home, matching the
+        channel-name convention rather than SportsDB's home-vs-away."""
+        return (
+            f"Top Matchup: {game.get('away', '?')} at {game.get('home', '?')}"
+        )
 
     def _resolve_league_badge_id(game: Dict[str, Any]) -> Optional[int]:
         """Resolve a cached league/tournament badge Logo id for this game, or
@@ -3294,23 +3337,66 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 return None
             if not matchup_logos.download_thumb(badge_url, badge_path):
                 return None
-        from apps.channels.models import Logo
-        logo_obj, _ = Logo.objects.get_or_create(
-            url=badge_path,
-            defaults={"name": f"League badge: {game.get('sport_prefix','?')}"},
+        return _logo_id_for_file(
+            badge_path, f"League badge: {game.get('sport_prefix', '?')}",
         )
-        return logo_obj.id
+
+    def _resolve_gamethumbs_logo_id(
+        game: Dict[str, Any], marker: str,
+    ) -> Optional[int]:
+        """Resolve a game-thumbs composite Logo id for this game, or None.
+
+        Only reached on a SportsDB matchup-thumb miss, which already requires
+        logos-enabled + not dry_run, so the HTTP here is appropriately gated.
+        """
+        if gamethumbs_cache is None or not gamethumbs_base_url:
+            return None
+        local_path = os.path.join(
+            matchup_logos.LOGO_DIR,
+            matchup_logos.marker_to_filename(marker, matchup_gamethumbs.FILE_EXT),
+        )
+        if not os.path.exists(local_path):
+            fresh, cached_url = gamethumbs_cache.get(marker)
+            if fresh and cached_url is None:
+                # Cached definitive miss: this league/team pair does not resolve.
+                return None
+            try:
+                os.makedirs(matchup_logos.LOGO_DIR, exist_ok=True)
+            except OSError as e:
+                logger.warning(
+                    "[ranked_matchups] cannot mkdir %s: %s", matchup_logos.LOGO_DIR, e,
+                )
+                return None
+            url, definitive_miss = matchup_gamethumbs.fetch_matchup_composite(
+                base_url=gamethumbs_base_url,
+                sport_prefix=game.get("sport_prefix"),
+                away=game.get("away", ""),
+                home=game.get("home", ""),
+                dest_path=local_path,
+            )
+            if url is None:
+                # Only a DEFINITIVE miss is cached. A transient failure (429,
+                # timeout) writes nothing, so the next apply retries it rather
+                # than showing a league badge for the whole negative TTL.
+                if definitive_miss:
+                    gamethumbs_cache.put(marker, None)
+                return None
+            gamethumbs_cache.put(marker, url)
+        return _logo_id_for_file(local_path, _matchup_logo_name(game))
 
     def _resolve_matchup_logo_id(
         game: Dict[str, Any], marker: str, source,
     ) -> Tuple[Optional[int], str]:
-        """Returns (logo_id, outcome) where outcome is one of "matchup", "badge",
-        or "channel" so the caller can tally each per apply.
+        """Returns (logo_id, outcome) where outcome is one of "matchup",
+        "gamethumbs", "badge", or "channel" so the caller can tally each.
 
-        Resolution order (issue #102): team-vs-team matchup thumbnail → league /
-        tournament badge → source-channel logo. The provider channel logo is the
-        last resort, not the first fallback. Dry_run and feature-disabled paths
-        short-circuit to the channel logo before any HTTP.
+        Resolution order (#102, extended by #174): SportsDB team-vs-team event
+        thumbnail → game-thumbs crest composite → league / tournament badge →
+        source-channel logo. The two matchup tiers come first because they are
+        the only ones specific to THIS game; the badge is identical for every
+        game in a league, and the provider channel logo ("ESPN") says nothing at
+        all. Dry_run and feature-disabled paths short-circuit to the channel
+        logo before any HTTP.
         """
         channel_logo = source.logo_id if source else None
         if not matchup_logos_enabled or dry_run or thumb_cache is None:
@@ -3322,12 +3408,21 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 return badge_id, "badge"
             return channel_logo, "channel"
 
+        def _gamethumbs_or_badge() -> Tuple[Optional[int], str]:
+            gt_id = _resolve_gamethumbs_logo_id(game, marker)
+            if gt_id is not None:
+                return gt_id, "gamethumbs"
+            return _badge_or_channel()
+
         fresh, cached_url = thumb_cache.get(marker)
         thumb_url = cached_url
         if not fresh:
             start_dt = parse_iso_utc(game.get("start_time_utc"))
             if start_dt is None:
-                return _badge_or_channel()
+                # SportsDB needs a kickoff to disambiguate its event search;
+                # game-thumbs resolves purely from the team pair, so an
+                # unparseable start time still gets a real matchup image.
+                return _gamethumbs_or_badge()
             thumb_url = matchup_logos.resolve_thumb_url(
                 home=game.get("home", ""),
                 away=game.get("away", ""),
@@ -3337,7 +3432,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             )
             thumb_cache.put(marker, thumb_url)
         if not thumb_url:
-            return _badge_or_channel()
+            return _gamethumbs_or_badge()
         # Ensure /data/logos/ exists (Dispatcharr creates it lazily on first
         # upload via the UI; we might race a fresh install).
         try:
@@ -3350,13 +3445,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         )
         if not os.path.exists(local_path):
             if not matchup_logos.download_thumb(thumb_url, local_path):
-                return _badge_or_channel()
-        from apps.channels.models import Logo
-        logo_obj, _ = Logo.objects.get_or_create(
-            url=local_path,
-            defaults={"name": f"Top Matchup: {game.get('home','?')} vs {game.get('away','?')}"},
-        )
-        return logo_obj.id, "matchup"
+                return _gamethumbs_or_badge()
+        return _logo_id_for_file(local_path, _matchup_logo_name(game)), "matchup"
 
     # Resolve ALL network-backed values BEFORE opening the transaction (#136).
     # The apply transaction below must hold only fast DB writes. LLM-description
@@ -3527,6 +3617,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         if matchup_logos_enabled and not dry_run:
             if logo_outcome == "matchup":
                 matchup_logos_used += 1
+            elif logo_outcome == "gamethumbs":
+                matchup_logos_gamethumbs += 1
             elif logo_outcome == "badge":
                 matchup_logos_badge += 1
             else:
@@ -3829,6 +3921,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     if matchup_logos_enabled and not dry_run and thumb_cache is not None:
         thumb_cache.prune(seen_markers)
         thumb_cache.save()
+        if gamethumbs_cache is not None:
+            gamethumbs_cache.prune(seen_markers)
+            gamethumbs_cache.save()
+        # Sweeps BOTH providers' files: sweep_stale_logo_files derives its live
+        # set from every extension marker_to_filename can write.
         stale_logo_files_swept = matchup_logos.sweep_stale_logo_files(seen_markers)
 
     prefix = "[dry] " if dry_run else ""
@@ -3853,11 +3950,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     profile_msg = _profile_summary(profile_stats)
     logo_msg = ""
     if matchup_logos_enabled and not dry_run:
+        # Kept to one line and shortened when the game-thumbs tier added a
+        # fourth number: this lands in a toast that clips, so the per-tier
+        # counts are abbreviated rather than spelled out.
         logo_msg = (
-            f" Matchup logos: {matchup_logos_used} matchup thumbnails, "
-            f"{matchup_logos_badge} league/tournament badges, "
-            f"{matchup_logos_fallback} fell back to source-channel logo, "
-            f"{stale_logo_files_swept} stale file(s) swept."
+            f" Matchup logos: {matchup_logos_used} SportsDB"
+            f" + {matchup_logos_gamethumbs} game-thumbs, "
+            f"{matchup_logos_badge} league badge, "
+            f"{matchup_logos_fallback} source-channel, "
+            f"{stale_logo_files_swept} stale swept."
         )
     # Never let the different-matchup gate (#162) drop streams silently: a gate
     # that starts eating real feeds has to be visible somewhere. Logged always,
@@ -4802,7 +4903,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.17.0"
+    version = "1.18.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
