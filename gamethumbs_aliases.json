@@ -1,0 +1,13 @@
+{
+  "_comment": "OUR source's team name -> the name game-thumbs' ESPN vocabulary for that league uses (#175). Consumed by gamethumbs.alias_for() and tried ONCE after the raw name has already produced a definitive miss, so an entry can only ever add a logo, never take one away. NOT the same thing as team_aliases.json, which is the MATCHER's file and maps a canonical name to broadcaster abbreviations that become strong EPG-matching keywords; do not merge the two. Keyed by sport_prefix, the same keys as gamethumbs.GAMETHUMBS_LEAGUE_SLUGS. Per-league because a bare club name is not unique worldwide, so the same club needs its own entry in each competition it plays in.",
+  "_method": "DO NOT add an entry by eye. game-thumbs answers an unknown team with a 400 whose body enumerates the league's entire team list, which makes it an oracle: GET /<slug>/zzqqnotateam/zzqqnotateam2/logo, diff that list against the names our source emits, and confirm both halves of a proposed pair with real requests. Every entry below was measured on 2026-08-15 against https://game-thumbs.tickarr.com: the left side returned 400 Team not found and the right side returned 200 image/png. Pace requests >= 2.1s apart; the public instance allows 30/minute.",
+  "BSA": {
+    "CA Paranaense": "Athletico-PR",
+    "CA Mineiro": "Atlético-MG",
+    "SC Corinthians Paulista": "Corinthians"
+  },
+  "BL1": {
+    "1. FC Köln": "Cologne",
+    "FC Bayern München": "Bayern"
+  }
+}

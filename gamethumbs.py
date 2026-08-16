@@ -27,11 +27,13 @@ which is the way to escape the rate limit documented below.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.parse
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from ._util import is_field_event
 from .logos import download_to_file
@@ -127,6 +129,75 @@ GAMETHUMBS_LEAGUE_SLUGS: dict[str, str] = {
 _DEFINITIVE_MISS_CODES = frozenset({400, 404, 444})
 
 
+# Vocabulary bridges: OUR source's team name -> the name this league's ESPN
+# vocabulary uses (#175). Keyed by sport_prefix, the same key space as
+# GAMETHUMBS_LEAGUE_SLUGS, so the two data structures stay aligned and a test
+# can assert every alias league is a mapped league.
+#
+# DO NOT put these in team_aliases.json. That file is the MATCHER's, and it
+# means something different: canonical name -> broadcaster abbreviations, every
+# one of which becomes a STRONG keyword that can admit an EPG candidate on its
+# own (matcher._team_keywords_split). Adding "Spurs" there to fix a logo would
+# silently widen 184 teams' matching surface. It is also flat, while this is
+# per-league by necessity: FD.org's "Tottenham Hotspur FC" is "Spurs" in both
+# eng.1 and uefa.champions, but nothing guarantees two leagues agree, and a bare
+# club name is not unique across the world's leagues.
+_ALIASES_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "gamethumbs_aliases.json"
+)
+
+
+def _load_aliases() -> Dict[str, Dict[str, str]]:
+    """Load gamethumbs_aliases.json as {sport_prefix: {casefolded_ours: theirs}}.
+
+    Missing or malformed file logs a warning and returns {}: the tier still
+    works, it just misses the handful of pairs the aliases were bridging.
+    Keys are casefolded here so lookup is a dict hit rather than a scan.
+    """
+    try:
+        with open(_ALIASES_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except FileNotFoundError:
+        logger.warning(
+            "[gamethumbs] gamethumbs_aliases.json missing at %s; aliases disabled",
+            _ALIASES_PATH,
+        )
+        return {}
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(
+            "[gamethumbs] gamethumbs_aliases.json load failed (%s); aliases disabled", e
+        )
+        return {}
+    out: Dict[str, Dict[str, str]] = {}
+    for prefix, mapping in raw.items():
+        if prefix.startswith("_") or not isinstance(mapping, dict):
+            continue
+        league: Dict[str, str] = {}
+        for ours, theirs in mapping.items():
+            if isinstance(ours, str) and isinstance(theirs, str) and ours.strip() and theirs.strip():
+                league[ours.strip().casefold()] = theirs.strip()
+        if league:
+            out[prefix] = league
+    return out
+
+
+_TEAM_ALIASES: Dict[str, Dict[str, str]] = _load_aliases()
+
+
+def alias_for(sport_prefix: Optional[str], team: Optional[str]) -> Optional[str]:
+    """The game-thumbs name for one of our team names, or None if unmapped.
+
+    None means "nothing to retry with", which is the common case: aliases exist
+    only for pairs measured to fail, never as a speculative rewrite layer.
+    """
+    if not sport_prefix or not team:
+        return None
+    league = _TEAM_ALIASES.get(sport_prefix)
+    if not league:
+        return None
+    return league.get(team.strip().casefold())
+
+
 def league_slug_for(sport_prefix: Optional[str]) -> Optional[str]:
     """Return the game-thumbs league slug for a sport prefix, or None.
 
@@ -191,6 +262,13 @@ def fetch_matchup_composite(
                        logos for the whole negative-cache TTL, turning a
                        one-minute throttle into a day of league badges.
 
+    A definitive miss is retried ONCE with aliased team names when
+    gamethumbs_aliases.json has a bridge for either side (#175), because a miss
+    can mean "our source calls this club something else" rather than "this
+    fixture does not exist here". The alias goes SECOND on purpose: the raw name
+    is what upstream's own partial matching gets to try first, so an alias that
+    goes stale can never break a pair that currently resolves.
+
     No HTTP is issued for a field event, an unmapped league, or a blank base URL.
     """
     if is_field_event(away) or not away or not home:
@@ -202,28 +280,63 @@ def fetch_matchup_composite(
         return None, True
 
     url = build_url(base_url, league_slug, away, home)
+    status = _attempt(url, dest_path)
+    if status == 200:
+        return url, False
+    if status not in _DEFINITIVE_MISS_CODES:
+        return None, False
+
+    alias_away = alias_for(sport_prefix, away)
+    alias_home = alias_for(sport_prefix, home)
+    if alias_away is None and alias_home is None:
+        logger.debug(
+            "game-thumbs has no composite for %s %s @ %s (HTTP %s)",
+            sport_prefix, away, home, status,
+        )
+        return None, True
+
+    aliased_away = alias_away or away
+    aliased_home = alias_home or home
+    url = build_url(base_url, league_slug, aliased_away, aliased_home)
+    status = _attempt(url, dest_path)
+    if status == 200:
+        logger.debug(
+            "game-thumbs resolved %s %s @ %s via aliases %s @ %s",
+            sport_prefix, away, home, aliased_away, aliased_home,
+        )
+        return url, False
+    if status in _DEFINITIVE_MISS_CODES:
+        logger.debug(
+            "game-thumbs has no composite for %s %s @ %s, aliased %s @ %s (HTTP %s)",
+            sport_prefix, away, home, aliased_away, aliased_home, status,
+        )
+        return None, True
+    return None, False
+
+
+def _attempt(url: str, dest_path: str) -> Optional[int]:
+    """Issue one paced request, retrying ONCE on a 429 that carries a usable
+    Retry-After. Returns the HTTP status of the last response, or None for a
+    network-level failure.
+
+    A 429 is deliberately NOT translated into a miss here: it comes back as 429,
+    which the caller classifies as transient because it is absent from
+    _DEFINITIVE_MISS_CODES. Never add it to that set.
+    """
+    status: Optional[int] = None
     for attempt in (1, 2):
         _pace()
         status, err = download_to_file(
             url, dest_path, timeout=_DOWNLOAD_TIMEOUT_S, user_agent=_USER_AGENT,
         )
-        if status == 200:
-            return url, False
         if status == 429 and attempt == 1:
             retry_after = _parse_retry_after(err)
             if retry_after is not None:
                 logger.debug("game-thumbs rate limited; retrying in %.1fs", retry_after)
                 time.sleep(retry_after)
                 continue
-            return None, False
-        if status in _DEFINITIVE_MISS_CODES:
-            logger.debug(
-                "game-thumbs has no composite for %s %s @ %s (HTTP %s)",
-                sport_prefix, away, home, status,
-            )
-            return None, True
-        return None, False
-    return None, False
+        return status
+    return status
 
 
 def _parse_retry_after(err: Optional[BaseException]) -> Optional[float]:
