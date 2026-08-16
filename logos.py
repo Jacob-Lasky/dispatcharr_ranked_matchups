@@ -106,6 +106,7 @@ _SPORT_HINT: dict[str, str] = {
     "UFC": "UFC",
     "ATP": "ATP",
     "WTA": "WTA",
+    "BOX": "Boxing",
 }
 
 # Plugin sport_prefix -> TheSportsDB league id, used to fetch a league/sport
@@ -125,8 +126,8 @@ _SPORT_HINT: dict[str, str] = {
 #
 # Cup prefixes (UCL/WC/EURO) map to the competition itself, so their badge IS
 # the tournament badge. Prefixes deliberately left unmapped (the NCAA
-# sub-sports and BOX, whose SportsDB league could not be confirmed) fall
-# through to the source-channel logo rather than risk a wrong-sport badge.
+# sub-sports and the friendlies, whose SportsDB league could not be confirmed)
+# fall through to the source-channel logo rather than risk a wrong-sport badge.
 SPORTSDB_LEAGUE_IDS: dict[str, int] = {
     "CFB": 4479,            # NCAA Division 1 (American Football)
     "CBB": 4607,            # NCAA Division I Basketball Mens
@@ -145,6 +146,11 @@ SPORTSDB_LEAGUE_IDS: dict[str, int] = {
     "UFC": 4443,            # UFC
     "ATP": 4464,            # ATP World Tour
     "WTA": 4517,            # WTA Tour
+    # DO NOT swap this for a specific promotion (Top Rank, Matchroom, Bellator,
+    # ...). 4445 is SportsDB's GENERIC, promoter-neutral "Boxing" league, and
+    # sources/boxing.py is a cross-promoter feed: any single promotion's badge
+    # would be wrong on every card the other promoters put on.
+    "BOX": 4445,            # Boxing (generic)
 }
 
 # Optional tournament-specific override, consulted FIRST when a game carries a

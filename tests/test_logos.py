@@ -421,11 +421,11 @@ class TestLeagueIdFor:
 
     def test_unmapped_prefix_is_none(self):
         # Niche NCAA sub-sports are intentionally unmapped -> channel-logo
-        # fallback. NCAAWSOC and BOX are real, live prefixes (sources/
-        # ncaa_soccer.py, sources/boxing.py) whose SportsDB league could not be
-        # confirmed; leaving them out is the deliberate choice, not an oversight.
+        # fallback. NCAAWSOC and CLUBFRIENDLY are real, live prefixes (sources/
+        # ncaa_soccer.py, sources/friendlies.py) whose SportsDB league could not
+        # be confirmed; leaving them out is deliberate, not an oversight.
         assert logos.league_id_for("NCAAWSOC") is None
-        assert logos.league_id_for("BOX") is None
+        assert logos.league_id_for("CLUBFRIENDLY") is None
         assert logos.league_id_for("MADEUP") is None
         assert logos.league_id_for(None) is None
 
@@ -439,6 +439,9 @@ class TestLeagueIdFor:
         assert logos.league_id_for("UFC") == 4443       # UFC
         assert logos.league_id_for("ATP") == 4464       # ATP World Tour
         assert logos.league_id_for("WTA") == 4517       # WTA Tour
+        # Generic, promoter-neutral. sources/boxing.py is cross-promoter, so a
+        # specific promotion's id here would be wrong on most cards.
+        assert logos.league_id_for("BOX") == 4445       # Boxing
 
     def test_tournament_override_when_stage_set(self, monkeypatch):
         monkeypatch.setitem(logos.SPORTSDB_TOURNAMENT_LEAGUE_IDS, "CBB", 9999)
