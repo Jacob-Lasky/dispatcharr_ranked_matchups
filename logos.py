@@ -124,6 +124,19 @@ _SPORT_HINT: dict[str, str] = {
 # re-run a known-good control (4328 = English Premier League) in the same batch
 # before believing any negative.
 #
+# DO NOT trust a bulk id sweep's ABSENCES, no matter how paced. One measured
+# sweep of 4380-4900 reported only three Fighting leagues in that range; paced
+# per-id lookups with a passing control found at least sixteen, including the
+# 4445 mapped below. It missed roughly 80% and said nothing was wrong. To
+# DISCOVER an id, do not scan: ids are not clustered by sport (4607, NCAA
+# basketball, sits inside a block of unrelated fight promotions). Use
+# `search_all_leagues.php?c=<country>&s=<sport>` -- it works on the free key,
+# unlike `searchleagues.php`, which 404s on every query. Its one limit is a
+# hard 5-row cap ordered alphabetically by league name, with `page` and
+# `offset` silently ignored, so a league sorting past the fifth name is simply
+# unreachable on this tier. That cap, not the rate limit, is why the NCAA
+# sub-sports are still unmapped.
+#
 # Cup prefixes (UCL/WC/EURO) map to the competition itself, so their badge IS
 # the tournament badge. Prefixes deliberately left unmapped (the NCAA
 # sub-sports and the friendlies, whose SportsDB league could not be confirmed)

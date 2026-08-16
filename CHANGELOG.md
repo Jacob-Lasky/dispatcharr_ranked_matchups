@@ -34,6 +34,15 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   with HTTP 429 or an empty body, and both are indistinguishable from "no such
   league" unless you check.
 
+  `BOX` (4445) survived a challenge worth recording: an independent bulk sweep
+  of ids 4380-4900 reported that no generic boxing league existed in that range,
+  which would have meant 4445 was wrong. Re-checking found the opposite — that
+  sweep reported only 3 Fighting leagues where paced per-id lookups with a
+  passing control found at least 16, so it was missing ~80% of the range and
+  reporting the gaps as absences. 4445 was confirmed three separate times, and
+  its badge downloads as a real 474KB PNG. The `DO NOT trust a bulk sweep's
+  absences` note now sits above the map.
+
   `BOX` maps to SportsDB's **generic** `Boxing` league, not to a promotion.
   The source is cross-promoter, so a Top Rank or Matchroom badge would be wrong
   on every card the other promoters put on — the id carries a `DO NOT` comment
