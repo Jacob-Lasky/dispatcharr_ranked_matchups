@@ -5,6 +5,29 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.17.3] - 2026-08-15
+
+### Fixed
+
+- **The target match could be simulated twice, silently corrupting its
+  importance score (#65).** `PointsBasedSportSource.apply_result` records
+  `extra["game_id"]` into the applied set that `remaining_matches` filters on,
+  but the MLS conference sources stamped their emitted rows with
+  `espn_event_id` only. A target row carrying neither `game_id` nor `fd_id` is
+  invisible to that dedup, leaving `simulation._same_match`'s
+  `(home, away, start_time)` fallback as the only guard. That fallback holds
+  only while the fixture pool and the emitted row agree on a kickoff time; a
+  pool fixture with no published date gets the 2099-01-01 sentinel
+  `points_based.remaining_matches` substitutes, the two dates disagree, and the
+  simulator plays the target a second time as a "remaining" match. The
+  contingency table is then built from a season that the recorded W/D/L row
+  does not describe. Nothing raised: the importance number was just wrong.
+
+  `_same_match` now resolves identity from `game_id` as well as `fd_id`
+  (consulting a key only when both rows carry it, so ids from different
+  namespaces cannot collide), and the MLS sources emit `game_id` alongside the
+  `espn_event_id` that cache.json consumers already read.
+
 ## [1.17.0] - 2026-08-12
 
 ### Added

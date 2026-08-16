@@ -366,6 +366,18 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
                     ),
                     extra={
                         "espn_event_id": eid,
+                        # Same ESPN event id under the key the importance
+                        # simulator uses for match identity. DO NOT drop
+                        # this in favour of `espn_event_id` alone:
+                        # `PointsBasedSportSource.apply_result` records
+                        # `extra["game_id"]` into `_applied` and
+                        # `remaining_matches` filters on it, so a target
+                        # row without `game_id` is invisible to the
+                        # target-match dedup and gets simulated TWICE per
+                        # season the moment the fixture pool holds a
+                        # date-less row (#65). `espn_event_id` stays for
+                        # the cache.json consumers already reading it.
+                        "game_id": eid,
                         "fd_competition_code": self.league_context_code,
                         "season_slug": rec.get("season_slug"),
                     },

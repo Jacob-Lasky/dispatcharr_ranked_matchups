@@ -6155,6 +6155,89 @@ class TestMlsStandingsConferenceFilter:
             f"expected playoff_bubble in thresholds hit, got {hits}"
         )
 
+    def test_target_match_applied_exactly_once_when_pool_date_missing(self, monkeypatch):
+        """#65 regression: the GameRow the scorer hands the simulator MUST
+        carry the fixture pool's identity key (`game_id`), not just
+        `espn_event_id`.
+
+        `PointsBasedSportSource.apply_result` records `extra["game_id"]`
+        into `_applied`, and `remaining_matches` filters on `_applied`. A
+        target row that only carries `espn_event_id` is invisible to both,
+        so the ONLY thing keeping the simulator from replaying the target
+        as a "remaining" match is `_same_match`'s
+        (home, away, start_time) fallback. That fallback holds today only
+        because the pool row and the emitted row share a real kickoff. The
+        moment the pool holds a fixture with no published date -- which
+        `points_based.remaining_matches` stamps with its 2099-01-01
+        sentinel -- the dates disagree, the target is played TWICE per
+        simulated season, and the contingency table is built from a season
+        the recorded W/D/L row does not describe. No error is raised: the
+        importance number is just wrong.
+        """
+        import random
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        from dispatcharr_ranked_matchups.simulation import (
+            monte_carlo_importance,
+        )
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map",
+            lambda: {"A": "East", "B": "East", "C": "East"},
+        )
+        target_date = (
+            datetime.now(timezone.utc) + timedelta(days=2)
+        ).replace(microsecond=0)
+        monkeypatch.setattr(mod, "_http_get", lambda *_a, **_k: {"events": [
+            {"id": "E1", "date": target_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "season": {"slug": "regular-season"},
+             "competitions": [{
+                 "status": {"type": {"completed": False, "state": "pre"}},
+                 "competitors": [
+                     {"homeAway": "home", "team": {"displayName": "A"}},
+                     {"homeAway": "away", "team": {"displayName": "B"}},
+                 ],
+             }]},
+        ]})
+        src = MlsEastSource()
+        emitted = src.fetch_upcoming(days_ahead=3)
+        assert len(emitted) == 1, f"expected one emitted game, got {emitted}"
+        target = emitted[0]
+
+        # Fixture pool as it looks once date-less fixtures are in play:
+        # some finished games to seed strengths, plus the target fixture
+        # WITHOUT a start_time. Seeded directly so the test pins the
+        # identity contract, not the ESPN sweep.
+        src._all_games_cache = [
+            {"id": "F1", "home": "A", "away": "C", "home_points": 2,
+             "away_points": 1, "status": "FINISHED",
+             "start_time": datetime(2026, 4, 1, tzinfo=timezone.utc)},
+            {"id": "F2", "home": "B", "away": "C", "home_points": 1,
+             "away_points": 1, "status": "FINISHED",
+             "start_time": datetime(2026, 4, 8, tzinfo=timezone.utc)},
+            {"id": "E1", "home": "A", "away": "B", "home_points": None,
+             "away_points": None, "status": "SCHEDULED", "start_time": None},
+            {"id": "E2", "home": "C", "away": "A", "home_points": None,
+             "away_points": None, "status": "SCHEDULED", "start_time": None},
+        ]
+
+        applied: list = []
+        real_apply = src.apply_result
+        def recording_apply(state, match, result):
+            applied.append((match.home, match.away))
+            return real_apply(state, match, result)
+        monkeypatch.setattr(src, "apply_result", recording_apply)
+
+        monte_carlo_importance(
+            src, target, "A", "playoff_bubble",
+            n_sims=1, rng=random.Random(3),
+        )
+        assert applied.count(("A", "B")) == 1, (
+            f"target match A vs B applied {applied.count(('A', 'B'))} times "
+            "in one simulated season; expected exactly 1 (see #65)"
+        )
+
     def test_conference_map_parses_espn_standings_shape(self, monkeypatch):
         """Pin the parser against ESPN's actual /standings response
         shape so a schema drift (e.g., abbreviation renamed,
