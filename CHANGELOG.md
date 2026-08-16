@@ -9,6 +9,35 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ### Fixed
 
+- **MLS importance read ~0 for the whole season (#65).** The conference
+  standings sources swept the season fixture list only as far as `now + 7
+  days`, then handed that to the Monte Carlo simulator, which projects each
+  simulated season to its END. With a week of fixtures left to play no
+  simulated season separates a bubble team's final standing from any other,
+  so Kendall tau-c collapsed to 0 on every threshold band and MLS games
+  scored no importance points.
+
+  The sweep now covers the whole Feb-Nov season window. Measured live
+  mid-season (2026-08-15), Eastern Conference: remaining fixtures went from
+  13 to 95, games scoring nonzero importance from 9/18 to 18/18, and mean
+  importance points from 0.37 to 0.87. 16 of 18 emitted Eastern games and 15
+  of 16 Western games now register `playoff_bubble` leverage.
+
+  This was diagnosed in #65 as ESPN publishing only 1-2 weeks of future MLS
+  fixtures. That was wrong: the thin endpoint is `/teams/{id}/schedule`,
+  while the scoreboard endpoint the plugin actually uses had all 241
+  remaining fixtures published. No fixture synthesis was needed; the code was
+  simply asking for one week of a season it needed all of.
+
+- **The MLS season fetch is one HTTP call instead of ~300.** ESPN's
+  scoreboard accepts a `dates=YYYYMMDD-YYYYMMDD` range but paginates it,
+  silently returning only the first 100 events unless an explicit `limit` is
+  passed. With the limit, the whole season arrives at once: verified live
+  that the range response and the 303-call per-day sweep it replaces produce
+  identical event-ID sets with identical kickoff times. A response that comes
+  back at the limit is now logged as possibly truncated. Whole-season fetch
+  time measured at ~1.0s per conference.
+
 - **The target match could be simulated twice, silently corrupting its
   importance score (#65).** `PointsBasedSportSource.apply_result` records
   `extra["game_id"]` into the applied set that `remaining_matches` filters on,
