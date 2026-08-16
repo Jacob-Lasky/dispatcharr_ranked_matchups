@@ -75,11 +75,6 @@ _TRAILING_QUALIFIER_RE = re.compile(
 _SPORT_HINT: dict[str, str] = {
     "CFB": "NCAA",
     "CBB": "NCAA",
-    "CWBB": "NCAA",
-    "NCAAB": "NCAA",
-    "NCAAS": "NCAA",
-    "NCAAMS": "NCAA",
-    "NCAAWS": "NCAA",
     "NFL": "NFL",
     "NHL": "NHL",
     "MLB": "MLB",
@@ -100,6 +95,17 @@ _SPORT_HINT: dict[str, str] = {
     "Eredivisie": "Eredivisie",
     "PrimeiraLiga": "Portuguese",
     "BSA": "Brazilian",
+    # Field events (#104). These never resolve a matchup thumb at all -- their
+    # `away` is the "Field" sentinel, so the "<home> vs Field" search finds
+    # nothing -- but a badge-mapped prefix must carry a hint (enforced by
+    # tests/test_logos.py), and each string below is a verified substring of
+    # the strLeague that the mapped id returns.
+    "F1": "Formula 1",
+    "NASCAR": "NASCAR",
+    "PGA": "PGA",
+    "UFC": "UFC",
+    "ATP": "ATP",
+    "WTA": "WTA",
 }
 
 # Plugin sport_prefix -> TheSportsDB league id, used to fetch a league/sport
@@ -107,12 +113,20 @@ _SPORT_HINT: dict[str, str] = {
 # exists (issue #102). A provider channel's own logo ("ESPN") is the least
 # useful image for a curated matchup, so we prefer the league badge first.
 #
-# Every id below was verified against lookupleague.php at build time (the
-# endpoint returns strBadge). Cup prefixes (UCL/WC/EURO) map to the competition
-# itself, so their badge IS the tournament badge. Prefixes deliberately left
-# unmapped (e.g. niche NCAA sub-sports whose SportsDB league could not be
-# confirmed) fall through to the source-channel logo rather than risk showing
-# a wrong-sport badge.
+# DO NOT add an id here that you have not personally resolved through
+# lookupleague.php and seen return BOTH the expected strLeague AND a non-empty
+# strBadge. An unverified id is worse than a missing one: a missing prefix
+# falls through to the source-channel logo, while a wrong id silently paints a
+# wrong-sport badge on every game of that sport. The free key ("3") is rate
+# limited and answers a burst with HTTP 429 or an EMPTY body, both of which
+# look exactly like "this id does not exist" -- pace lookups seconds apart and
+# re-run a known-good control (4328 = English Premier League) in the same batch
+# before believing any negative.
+#
+# Cup prefixes (UCL/WC/EURO) map to the competition itself, so their badge IS
+# the tournament badge. Prefixes deliberately left unmapped (the NCAA
+# sub-sports and BOX, whose SportsDB league could not be confirmed) fall
+# through to the source-channel logo rather than risk a wrong-sport badge.
 SPORTSDB_LEAGUE_IDS: dict[str, int] = {
     "CFB": 4479,            # NCAA Division 1 (American Football)
     "CBB": 4607,            # NCAA Division I Basketball Mens
@@ -122,6 +136,15 @@ SPORTSDB_LEAGUE_IDS: dict[str, int] = {
     "LaLiga": 4335, "SerieA": 4332, "Ligue1": 4334,
     "WC": 4429, "EURO": 4502,
     "Eredivisie": 4337, "PrimeiraLiga": 4344, "BSA": 4351,
+    # Field events (#104). These sports have no head-to-head opponent pair, so
+    # they can NEVER earn a matchup composite -- the league badge is the best
+    # logo they will ever get, which is why they were mapped first.
+    "F1": 4370,             # Formula 1
+    "NASCAR": 4393,         # NASCAR Cup Series
+    "PGA": 4425,            # PGA Tour
+    "UFC": 4443,            # UFC
+    "ATP": 4464,            # ATP World Tour
+    "WTA": 4517,            # WTA Tour
 }
 
 # Optional tournament-specific override, consulted FIRST when a game carries a

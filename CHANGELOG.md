@@ -5,6 +5,49 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.17.2] - 2026-08-15
+
+### Added
+
+- **Field-event sports now get a league badge instead of the channel logo
+  (#104).** Formula 1, NASCAR, PGA, UFC, ATP and WTA have no head-to-head
+  opponent pair, so the matchup-thumbnail path can never produce anything for
+  them: their `away` is the "Field" sentinel and the `"<home> vs Field"` search
+  matches no SportsDB event. That left every one of these games falling all the
+  way through to the provider's channel logo ("ESPN"), which is the least
+  useful image a curated matchup can carry. The league badge is the best logo
+  these sports will ever get, so they are now mapped:
+
+  | Prefix | SportsDB id | `strLeague` |
+  | --- | --- | --- |
+  | `F1` | 4370 | Formula 1 |
+  | `NASCAR` | 4393 | NASCAR Cup Series |
+  | `PGA` | 4425 | PGA Tour |
+  | `UFC` | 4443 | UFC |
+  | `ATP` | 4464 | ATP World Tour |
+  | `WTA` | 4517 | WTA Tour |
+
+  Every id was resolved live through `lookupleague.php` and confirmed to return
+  both the expected `strLeague` and a non-empty `strBadge`, with a known-good
+  control (4328) re-run in the same batch — the free API key answers a burst
+  with HTTP 429 or an empty body, and both are indistinguishable from "no such
+  league" unless you check.
+
+- **`BOX` is deliberately still unmapped.** Boxing is not a SportsDB sport at
+  all (it sits under `Fighting`), and the free tier caps every league listing
+  at five rows with no way to page, so no generic boxing league could be
+  confirmed. Mapping it to a specific promotion would paint that promoter's
+  badge on every other promoter's card, which is worse than the channel logo.
+  The NCAA sub-sport prefixes (`NCAAW`, `NCAAMSOC`, `NCAAWSOC`, `NCAABSB`,
+  `NCAASBL`) and the friendlies prefixes remain unmapped for the same reason.
+
+### Fixed
+
+- **Dropped five dead `_SPORT_HINT` entries.** `CWBB`, `NCAAB`, `NCAAS`,
+  `NCAAMS` and `NCAAWS` are prefixes no source has emitted for some time; they
+  matched nothing and only made the hint map look like a registry of live
+  prefixes when it is not.
+
 ## [1.17.0] - 2026-08-12
 
 ### Added
