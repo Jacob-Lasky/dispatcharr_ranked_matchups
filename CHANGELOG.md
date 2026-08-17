@@ -5,6 +5,63 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.17.2] - 2026-08-15
+
+### Added
+
+- **Field-event sports now get a league badge instead of the channel logo
+  (#104).** Formula 1, NASCAR, PGA, UFC, ATP, WTA and boxing have no head-to-head
+  opponent pair, so the matchup-thumbnail path can never produce anything for
+  them: their `away` is the "Field" sentinel and the `"<home> vs Field"` search
+  matches no SportsDB event. That left every one of these games falling all the
+  way through to the provider's channel logo ("ESPN"), which is the least
+  useful image a curated matchup can carry. The league badge is the best logo
+  these sports will ever get, so they are now mapped:
+
+  | Prefix | SportsDB id | `strLeague` |
+  | --- | --- | --- |
+  | `F1` | 4370 | Formula 1 |
+  | `NASCAR` | 4393 | NASCAR Cup Series |
+  | `PGA` | 4425 | PGA Tour |
+  | `UFC` | 4443 | UFC |
+  | `ATP` | 4464 | ATP World Tour |
+  | `WTA` | 4517 | WTA Tour |
+  | `BOX` | 4445 | Boxing |
+
+  Every id was resolved live through `lookupleague.php` and confirmed to return
+  both the expected `strLeague` and a non-empty `strBadge`, with a known-good
+  control (4328) re-run in the same batch — the free API key answers a burst
+  with HTTP 429 or an empty body, and both are indistinguishable from "no such
+  league" unless you check.
+
+  `BOX` (4445) survived a challenge worth recording: an independent bulk sweep
+  of ids 4380-4900 reported that no generic boxing league existed in that range,
+  which would have meant 4445 was wrong. Re-checking found the opposite — that
+  sweep reported only 3 Fighting leagues where paced per-id lookups with a
+  passing control found at least 16, so it was missing ~80% of the range and
+  reporting the gaps as absences. 4445 was confirmed three separate times, and
+  its badge downloads as a real 474KB PNG. The `DO NOT trust a bulk sweep's
+  absences` note now sits above the map.
+
+  `BOX` maps to SportsDB's **generic** `Boxing` league, not to a promotion.
+  The source is cross-promoter, so a Top Rank or Matchroom badge would be wrong
+  on every card the other promoters put on — the id carries a `DO NOT` comment
+  saying so.
+
+  Still unmapped, deliberately: the NCAA sub-sport prefixes (`NCAAW`,
+  `NCAAMSOC`, `NCAAWSOC`, `NCAABSB`, `NCAASBL`) and the friendlies prefixes
+  (`FRIENDLY`, `FRIENDLYW`, `CLUBFRIENDLY`). The free tier caps every league
+  listing at five rows with no way to page past them, so their leagues could
+  not be confirmed, and an unverified id is worse than a missing one: a missing
+  prefix falls through to the channel logo, a wrong one silently paints a
+  wrong-sport badge on every game of that sport.
+
+### Fixed
+
+- **Dropped five dead `_SPORT_HINT` entries.** `CWBB`, `NCAAB`, `NCAAS`,
+  `NCAAMS` and `NCAAWS` are prefixes no source has emitted for some time; they
+  matched nothing and only made the hint map look like a registry of live
+  prefixes when it is not.
 ## [1.17.1] - 2026-08-15
 
 ### Fixed
