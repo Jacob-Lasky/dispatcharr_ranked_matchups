@@ -264,13 +264,19 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   Dispatcharr overlays generated filler programming on every channel attached to
   one of those, which would bury the real descriptions
 - Logo: a real per-game matchup image rather than the provider's channel logo,
-  resolved in four tiers and downloaded once to `/data/logos/`. TheSportsDB's
-  pre-rendered event thumbnail first; then a
-  [game-thumbs](https://github.com/sethwv/game-thumbs) composite of the two
-  teams' crests, which covers the leagues SportsDB never indexed (MLS, Brazilian
-  Serie A, NCAA soccer); then the league or tournament badge; then, last, the
-  matched source channel's logo. Field-event sports (F1, golf, UFC, tennis,
-  boxing) have no opponent pair, so they start at the badge tier
+  downloaded once to `/data/logos/`. TheSportsDB's pre-rendered event thumbnail
+  first, then the league or tournament badge, then, last, the matched source
+  channel's logo. Field-event sports (F1, golf, UFC, tennis, boxing) have no
+  opponent pair, so they start at the badge tier.
+
+  **Optionally** a fourth tier slots in between the thumbnail and the badge:
+  [game-thumbs](https://github.com/sethwv/game-thumbs) composites the two teams'
+  crests on demand, covering the leagues SportsDB never indexed a graphic for
+  (MLS, Brazilian Serie A, NCAA soccer). On one live 23-game slate it took the
+  list from 6 real matchup images to 23. It is **off by default** and enabling it
+  points your instance at a third-party service, so the recommended way in is to
+  self-host `ghcr.io/sethwv/game-thumbs` and set "game-thumbs base URL" to your
+  own instance. Leave the field blank and no request is made to anyone
 - Channel number: `9000 + cache_index`, so today's games occupy the lowest
   numbers and appear first in any IPTV client's default sort
 - Channel Profiles: the channels are enabled in every Channel Profile by

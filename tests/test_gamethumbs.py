@@ -503,3 +503,45 @@ class TestAliasDataFile:
         # The measured case from #175: CA Paranaense and Athletico-PR share no
         # substring, so upstream's partial matching cannot bridge it.
         assert gamethumbs.alias_for("BSA", "CA Paranaense") == "Athletico-PR"
+
+
+class TestTierIsOptInAndOffByDefault:
+    """No installation may call a third party unless its owner asked for it.
+
+    The shipped default was briefly the vendor's public instance, which opted
+    every install into a service that sees which fixtures the user curates and
+    whose uptime their logos depend on. These assert the default cannot drift
+    back without a test going red.
+    """
+
+    def test_default_base_url_is_empty(self):
+        assert gamethumbs.DEFAULT_BASE_URL == ""
+
+    def test_public_instance_is_recorded_but_not_the_default(self):
+        # Kept for the help text and for deliberate opt-in; must not be wired up.
+        assert gamethumbs.PUBLIC_INSTANCE_URL.startswith("https://")
+        assert gamethumbs.DEFAULT_BASE_URL != gamethumbs.PUBLIC_INSTANCE_URL
+
+    def test_manifest_default_is_also_empty(self):
+        # plugin.json is what the UI actually renders, so it is the binding one.
+        import json
+        fields = json.load(
+            open(os.path.join(REPO_ROOT, "plugin.json"), encoding="utf-8")
+        )["fields"]
+        f = next(x for x in fields if x.get("id") == "gamethumbs_base_url")
+        assert f["default"] == ""
+
+    def test_default_issues_no_http_whatsoever(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(gamethumbs, "_pace", lambda: None)
+        monkeypatch.setattr(
+            gamethumbs, "download_to_file",
+            lambda *a, **k: (calls.append(a), (200, None))[1],
+        )
+        out = gamethumbs.fetch_matchup_composite(
+            gamethumbs.DEFAULT_BASE_URL, "MLS",
+            "Columbus Crew", "Charlotte FC", "/tmp/x.png",
+        )
+        # Definitive miss, so the caller drops to the badge tier and caches it.
+        assert out == (None, True)
+        assert calls == [], "the default must not reach the network"

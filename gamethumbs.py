@@ -21,9 +21,16 @@ DO NOT point Channel.logo at a game-thumbs URL directly. The same constraint
 that logos.py documents applies here: Dispatcharr serves /data paths off disk
 and proxies remote URLs through an in-memory cache that dies with the container.
 
-Upstream: https://github.com/sethwv/game-thumbs (MIT). Public instance
-https://game-thumbs.tickarr.com; self-hostable as ghcr.io/sethwv/game-thumbs,
-which is the way to escape the rate limit documented below.
+THIS TIER IS OPT-IN AND OFF BY DEFAULT. `DEFAULT_BASE_URL` is empty, so unless
+the user sets a base URL this module issues no HTTP at all and every lookup
+short-circuits to "definitive miss" before touching the network. Everything
+below only runs for someone who has deliberately pointed the plugin at an
+instance, ideally their own.
+
+Upstream: https://github.com/sethwv/game-thumbs (MIT). Self-hostable as
+ghcr.io/sethwv/game-thumbs, which is both the recommended deployment and the
+way to escape the rate limit documented below; the vendor's public instance is
+recorded as PUBLIC_INSTANCE_URL for anyone who opts into it instead.
 """
 from __future__ import annotations
 
@@ -42,7 +49,22 @@ logger = logging.getLogger(__name__)
 
 _USER_AGENT = "dispatcharr_ranked_matchups"
 
-DEFAULT_BASE_URL = "https://game-thumbs.tickarr.com"
+# OFF BY DEFAULT, deliberately. An empty base URL disables the whole tier and
+# the plugin issues NO request to any third party; a game with no SportsDB
+# thumbnail falls straight through to the league badge.
+#
+# DO NOT set this to a live URL as a shipped default. Doing so would opt every
+# installation into a third-party service that then sees which fixtures the user
+# curates and whose uptime their guide's logos depend on, without the user ever
+# choosing it. That is the reason this default was changed from the public
+# instance to blank; a capability worth having is not a dependency worth
+# imposing. Enabling it is one field, and self-hosting is the recommended way.
+DEFAULT_BASE_URL = ""
+
+# The vendor's public instance, kept here as documentation for the settings help
+# text and for anyone who deliberately opts in rather than self-hosting. It is
+# NOT wired to the default above on purpose.
+PUBLIC_INSTANCE_URL = "https://game-thumbs.tickarr.com"
 
 # /logo?style=1 renders a colour-split banner carrying both crests and the
 # league mark, at a FIXED 995x346 across every league. The fixed part is the
