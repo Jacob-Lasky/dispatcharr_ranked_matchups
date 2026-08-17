@@ -178,20 +178,44 @@ def monte_carlo_importance(
     return abs(kendall_tau_c(table))
 
 
+# Identity keys `_same_match` will honour, in priority order. `fd_id` is
+# football-data.org's match id (SoccerSource); `game_id` is the key every
+# PointsBasedSportSource and BracketSource stamps on the rows it returns
+# from `remaining_matches`.
+#
+# DO NOT drop `game_id` and DO NOT reorder this to put the date tuple
+# first. Without an id match, identity falls through to
+# (home, away, start_time), and any source that emits a fixture whose
+# upstream feed has not published a date -- `points_based.remaining_matches`
+# substitutes a 2099-01-01 sentinel for a missing `start_time` -- fails to
+# recognise the target match. The target then gets sampled a second time as
+# a "remaining" match, and the contingency table is built from a season the
+# recorded W/D/L row does not describe. Nothing raises; the importance
+# number is simply wrong. See #65.
+_MATCH_ID_KEYS = ("fd_id", "game_id")
+
+
 def _same_match(a: "GameRow", b: "GameRow") -> bool:
     """Match-identity check for the simulator's "skip target on second pass"
-    deduplication. Compares the (home, away, start_time, fd_id) tuple: using
-    `is` would only catch reference identity, which breaks once
-    `remaining_matches` materializes fresh GameRow instances every call.
+    deduplication. Prefers a shared id from `_MATCH_ID_KEYS`, falling back
+    to the (home, away, start_time) tuple only when the two rows share no
+    id key: using `is` would only catch reference identity, which breaks
+    once `remaining_matches` materializes fresh GameRow instances every
+    call.
+
+    An id is consulted only when BOTH rows carry the SAME key, so ids from
+    different namespaces (an fd_id that happens to equal some other
+    source's game_id) can never collide.
     """
     if a is b:
         return True
     a_extra = a.extra if isinstance(a.extra, dict) else {}
     b_extra = b.extra if isinstance(b.extra, dict) else {}
-    a_id = a_extra.get("fd_id") if a_extra else None
-    b_id = b_extra.get("fd_id") if b_extra else None
-    if a_id is not None and b_id is not None:
-        return a_id == b_id
+    for key in _MATCH_ID_KEYS:
+        a_id = a_extra.get(key)
+        b_id = b_extra.get(key)
+        if a_id is not None and b_id is not None:
+            return a_id == b_id
     return (
         a.home == b.home
         and a.away == b.away

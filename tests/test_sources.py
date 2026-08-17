@@ -3,7 +3,7 @@ class-level constants and the shape-handling logic so a typo or refactor
 doesn't ship silently."""
 
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -6155,6 +6155,89 @@ class TestMlsStandingsConferenceFilter:
             f"expected playoff_bubble in thresholds hit, got {hits}"
         )
 
+    def test_target_match_applied_exactly_once_when_pool_date_missing(self, monkeypatch):
+        """#65 regression: the GameRow the scorer hands the simulator MUST
+        carry the fixture pool's identity key (`game_id`), not just
+        `espn_event_id`.
+
+        `PointsBasedSportSource.apply_result` records `extra["game_id"]`
+        into `_applied`, and `remaining_matches` filters on `_applied`. A
+        target row that only carries `espn_event_id` is invisible to both,
+        so the ONLY thing keeping the simulator from replaying the target
+        as a "remaining" match is `_same_match`'s
+        (home, away, start_time) fallback. That fallback holds today only
+        because the pool row and the emitted row share a real kickoff. The
+        moment the pool holds a fixture with no published date -- which
+        `points_based.remaining_matches` stamps with its 2099-01-01
+        sentinel -- the dates disagree, the target is played TWICE per
+        simulated season, and the contingency table is built from a season
+        the recorded W/D/L row does not describe. No error is raised: the
+        importance number is just wrong.
+        """
+        import random
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        from dispatcharr_ranked_matchups.simulation import (
+            monte_carlo_importance,
+        )
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map",
+            lambda: {"A": "East", "B": "East", "C": "East"},
+        )
+        target_date = (
+            datetime.now(timezone.utc) + timedelta(days=2)
+        ).replace(microsecond=0)
+        monkeypatch.setattr(mod, "_http_get", lambda *_a, **_k: {"events": [
+            {"id": "E1", "date": target_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+             "season": {"slug": "regular-season"},
+             "competitions": [{
+                 "status": {"type": {"completed": False, "state": "pre"}},
+                 "competitors": [
+                     {"homeAway": "home", "team": {"displayName": "A"}},
+                     {"homeAway": "away", "team": {"displayName": "B"}},
+                 ],
+             }]},
+        ]})
+        src = MlsEastSource()
+        emitted = src.fetch_upcoming(days_ahead=3)
+        assert len(emitted) == 1, f"expected one emitted game, got {emitted}"
+        target = emitted[0]
+
+        # Fixture pool as it looks once date-less fixtures are in play:
+        # some finished games to seed strengths, plus the target fixture
+        # WITHOUT a start_time. Seeded directly so the test pins the
+        # identity contract, not the ESPN sweep.
+        src._all_games_cache = [
+            {"id": "F1", "home": "A", "away": "C", "home_points": 2,
+             "away_points": 1, "status": "FINISHED",
+             "start_time": datetime(2026, 4, 1, tzinfo=timezone.utc)},
+            {"id": "F2", "home": "B", "away": "C", "home_points": 1,
+             "away_points": 1, "status": "FINISHED",
+             "start_time": datetime(2026, 4, 8, tzinfo=timezone.utc)},
+            {"id": "E1", "home": "A", "away": "B", "home_points": None,
+             "away_points": None, "status": "SCHEDULED", "start_time": None},
+            {"id": "E2", "home": "C", "away": "A", "home_points": None,
+             "away_points": None, "status": "SCHEDULED", "start_time": None},
+        ]
+
+        applied: list = []
+        real_apply = src.apply_result
+        def recording_apply(state, match, result):
+            applied.append((match.home, match.away))
+            return real_apply(state, match, result)
+        monkeypatch.setattr(src, "apply_result", recording_apply)
+
+        monte_carlo_importance(
+            src, target, "A", "playoff_bubble",
+            n_sims=1, rng=random.Random(3),
+        )
+        assert applied.count(("A", "B")) == 1, (
+            f"target match A vs B applied {applied.count(('A', 'B'))} times "
+            "in one simulated season; expected exactly 1 (see #65)"
+        )
+
     def test_conference_map_parses_espn_standings_shape(self, monkeypatch):
         """Pin the parser against ESPN's actual /standings response
         shape so a schema drift (e.g., abbreviation renamed,
@@ -6249,6 +6332,142 @@ class TestMlsStandingsConferenceFilter:
         src = MlsEastSource(season_year=2025)
         games = src._fetch_full_season_games()
         assert games == [], "playoff-slug games must be filtered from season fetch"
+
+
+# =====================================================================
+# Issue #65: remaining-fixtures window for MLS conference importance
+# =====================================================================
+
+class TestMlsStandingsFixtureWindow:
+    """The importance path needs the WHOLE remaining season, not the
+    next few days.
+
+    `_fetch_full_season_games` used to clamp its sweep to `now + 7 days`,
+    which starved the Monte Carlo simulator: with a week of fixtures left
+    to play, no simulated season separates a bubble team's final standing
+    from any other, so tau-c collapsed to 0 on every band and live MLS
+    importance read ~0 all season. Measured live 2026-08-15 mid-season,
+    Eastern Conference: 13 remaining fixtures under the clamp against 95
+    ESPN had published; 9 of 18 emitted games scored nonzero importance,
+    against 18 of 18 without it.
+    """
+
+    @staticmethod
+    def _capture_calls(monkeypatch, mod, events):
+        """Record every _http_get call and serve `events` to all of them."""
+        calls = []
+        def fake_get(url, *_a, **params):
+            calls.append((url, params))
+            return {"events": events}
+        monkeypatch.setattr(mod, "_http_get", fake_get)
+        return calls
+
+    def test_season_fetch_requests_the_whole_season_window(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map", lambda: {"A": "East", "B": "East"},
+        )
+        calls = self._capture_calls(monkeypatch, mod, [])
+        # season_year in the past so "now" cannot influence the window.
+        MlsEastSource(season_year=2025)._fetch_full_season_games()
+        assert len(calls) == 1, (
+            f"expected ONE range call for the whole season, got {len(calls)}"
+        )
+        _, params = calls[0]
+        assert params["dates"] == "20250201-20251130", (
+            "importance sweep must span the full Feb-Nov season window, "
+            f"got dates={params['dates']!r}"
+        )
+
+    def test_season_fetch_passes_the_paging_limit(self, monkeypatch):
+        """Without `limit` ESPN silently returns only the first page of a
+        date range, which would truncate the season back to a partial
+        fixture list -- the same starvation, harder to spot."""
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map", lambda: {"A": "East", "B": "East"},
+        )
+        calls = self._capture_calls(monkeypatch, mod, [])
+        MlsEastSource(season_year=2025)._fetch_full_season_games()
+        _, params = calls[0]
+        assert params.get("limit") == mod.SCOREBOARD_EVENT_LIMIT, (
+            f"scoreboard range call must pass limit, got params={params!r}"
+        )
+
+    def test_far_future_fixture_reaches_remaining_matches(self, monkeypatch):
+        """End-to-end pin on the behaviour #65 is about: a fixture months
+        past the emit lookahead must still be a remaining match for the
+        simulator."""
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map", lambda: {"A": "East", "B": "East"},
+        )
+        self._capture_calls(monkeypatch, mod, [
+            # Played in April.
+            {"id": "F1", "date": "2025-04-01T19:00:00Z",
+             "season": {"slug": "regular-season"},
+             "competitions": [{
+                 "status": {"type": {"completed": True, "state": "post"}},
+                 "competitors": [
+                     {"homeAway": "home", "team": {"displayName": "A"}, "score": "2"},
+                     {"homeAway": "away", "team": {"displayName": "B"}, "score": "1"},
+                 ],
+             }]},
+            # Scheduled for late October: ~6 months past any lookahead.
+            {"id": "S1", "date": "2025-10-25T19:00:00Z",
+             "season": {"slug": "regular-season"},
+             "competitions": [{
+                 "status": {"type": {"completed": False, "state": "pre"}},
+                 "competitors": [
+                     {"homeAway": "home", "team": {"displayName": "B"}},
+                     {"homeAway": "away", "team": {"displayName": "A"}},
+                 ],
+             }]},
+        ])
+        src = MlsEastSource(season_year=2025)
+        remaining = src.remaining_matches(src.initial_state())
+        ids = {(m.extra or {}).get("game_id") for m in remaining}
+        assert ids == {"S1"}, (
+            f"far-future fixture must survive into remaining_matches, got {ids}"
+        )
+
+    def test_range_helper_warns_when_response_hits_the_limit(
+        self, monkeypatch, caplog,
+    ):
+        """A response exactly at the limit is the only symptom ESPN gives
+        for a truncated page: it must not pass silently."""
+        import logging
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(mod, "SCOREBOARD_EVENT_LIMIT", 3)
+        monkeypatch.setattr(
+            mod, "_http_get",
+            lambda *_a, **_k: {"events": [{"id": 1}, {"id": 2}, {"id": 3}]},
+        )
+        with caplog.at_level(logging.WARNING, logger=mod.logger.name):
+            events = mod._fetch_scoreboard_range(
+                date(2025, 2, 1), date(2025, 11, 30),
+            )
+        assert len(events) == 3
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("truncated" in m for m in messages), (
+            f"expected a truncation warning, got {messages}"
+        )
+
+    def test_range_helper_returns_empty_for_inverted_window(self):
+        """Guard the degenerate window rather than asking ESPN for it."""
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        assert mod._fetch_scoreboard_range(
+            date(2025, 11, 30), date(2025, 2, 1),
+        ) == []
 
 
 # =====================================================================

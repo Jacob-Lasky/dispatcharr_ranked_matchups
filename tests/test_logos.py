@@ -502,10 +502,28 @@ class TestLeagueIdFor:
         assert logos.league_id_for("CBB") == 4607      # NCAA men's basketball
 
     def test_unmapped_prefix_is_none(self):
-        # Niche NCAA sub-sports are intentionally unmapped -> channel-logo fallback.
-        assert logos.league_id_for("NCAAWS") is None
+        # Niche NCAA sub-sports are intentionally unmapped -> channel-logo
+        # fallback. NCAAWSOC and CLUBFRIENDLY are real, live prefixes (sources/
+        # ncaa_soccer.py, sources/friendlies.py) whose SportsDB league could not
+        # be confirmed; leaving them out is deliberate, not an oversight.
+        assert logos.league_id_for("NCAAWSOC") is None
+        assert logos.league_id_for("CLUBFRIENDLY") is None
         assert logos.league_id_for("MADEUP") is None
         assert logos.league_id_for(None) is None
+
+    def test_field_event_prefixes_are_mapped(self):
+        # #104: field events can never earn a matchup composite, so the league
+        # badge is the only real logo they get. Every id verified live against
+        # lookupleague.php (expected strLeague + non-empty strBadge).
+        assert logos.league_id_for("F1") == 4370        # Formula 1
+        assert logos.league_id_for("NASCAR") == 4393    # NASCAR Cup Series
+        assert logos.league_id_for("PGA") == 4425       # PGA Tour
+        assert logos.league_id_for("UFC") == 4443       # UFC
+        assert logos.league_id_for("ATP") == 4464       # ATP World Tour
+        assert logos.league_id_for("WTA") == 4517       # WTA Tour
+        # Generic, promoter-neutral. sources/boxing.py is cross-promoter, so a
+        # specific promotion's id here would be wrong on most cards.
+        assert logos.league_id_for("BOX") == 4445       # Boxing
 
     def test_tournament_override_when_stage_set(self, monkeypatch):
         monkeypatch.setitem(logos.SPORTSDB_TOURNAMENT_LEAGUE_IDS, "CBB", 9999)
