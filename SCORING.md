@@ -361,8 +361,15 @@ right direction but possibly wrong magnitude because the simulated
 R16 opponent might not match the canonical one. With the lookup, the
 chain produces leverage that mirrors the real bracket.
 
-The same chain machinery is wired for UEFA EURO 2028 once UEFA
-publishes the bracket structure.
+The same chain machinery is sport-agnostic and could serve UEFA EURO
+2028, but EURO is NOT wired to it today: `plugin.py`'s `euros` block
+creates the group and knockout sources without calling
+`set_paired_knockout_source`, so `cross_source_chain()` returns None and
+EURO group games take the single-source path. Wiring it needs the
+EURO 2028 R16 slot pairings (not published; they follow the 2027 final
+tournament draw) AND the knockout cascade appended to `EC_GS`, which
+today carries only the `advance` threshold — without that second half a
+working chain would attribute leverage to zero bands. Tracked in #78.
 
 
 ## Stage 3: raw sum + compress to 0-10 ★
