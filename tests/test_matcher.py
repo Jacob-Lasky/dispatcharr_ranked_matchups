@@ -1285,3 +1285,89 @@ class TestFieldEventMatching:
         assert results[0].method == "regex_strict"
         assert results[0].channel_id == 40
         assert results[0].channel_ids == [40]
+
+
+class TestTournamentGenericLastWord:
+    """#169: a tournament's final token must not admit a candidate on its own.
+
+    Field-event sources (ATP/WTA/golf/motorsport) put the EVENT name in `home`,
+    and it runs through the same splitter as a team name. The last-word
+    relaxation then hands back the final token of a tournament title, which is
+    a generic competition noun shared across every sport, and the field-event
+    gate admits on ONE keyword. Reported by a user on v1.16.0: 'Cincinnati Open'
+    and 'Warsaw T-Mobile Polish Open' both reduced to 'Open' and matched a PDC
+    darts channel.
+
+    Corpus measurement over the 22137 real channel+stream names in a live
+    snapshot: 'Championship' hit 383, 'Open' 157, 'Prix' 93, 'Masters' 87.
+    """
+
+    DARTS = (
+        "(PDC 31) | European Tour 12 _ Czech Darts Open | Day 3 _ Evening "
+        "Session: European Tour  _ Main Feed (2026-09-06 13:00:00)"
+    )
+
+    @pytest.mark.parametrize("event", [
+        "Cincinnati Open",
+        "Warsaw T-Mobile Polish Open",
+        "US Open",
+        "Australian Open",
+    ])
+    def test_open_does_not_admit_a_darts_channel(self, event):
+        assert not _kw_hit(self.DARTS, _strong_team_keywords(event))
+
+    @pytest.mark.parametrize("event,generic", [
+        ("Cincinnati Open", "Open"),
+        ("BMW Championship", "Championship"),
+        ("The Masters", "Masters"),
+        ("Monaco Grand Prix", "Prix"),
+        ("Genesis Invitational", "Invitational"),
+        ("Memorial Tournament", "Tournament"),
+    ])
+    def test_generic_event_noun_is_never_a_standalone_keyword(self, event, generic):
+        assert generic not in _strong_team_keywords(event)
+
+    @pytest.mark.parametrize("event", [
+        "Cincinnati Open",
+        "BMW Championship",
+        "New Zealand Darts Masters",
+        "Monaco Grand Prix",
+    ])
+    def test_full_event_name_survives_as_the_discriminator(self, event):
+        # Only the bonus token is dropped; the event is still matchable.
+        assert event in _strong_team_keywords(event)
+
+    def test_real_event_broadcast_still_matches_on_the_full_name(self):
+        # The genuine feed names the whole event, so precision costs no recall.
+        assert _kw_hit(
+            "DAZN CA 26: Cincinnati Open - Day 2 - Session 2 @ 14 Aug 06:00 PM ET",
+            _strong_team_keywords("Cincinnati Open"),
+        )
+        assert _kw_hit(
+            "(PDC 01) | World Series of Darts _ NZ Darts Masters | Day 2: "
+            "New Zealand Darts Masters _ Main Feed",
+            _strong_team_keywords("New Zealand Darts Masters"),
+        )
+
+    def test_event_prefix_is_not_promoted_to_strong(self):
+        # Suppressing the last word must not trade one wildcard for another: for
+        # 'New Zealand Darts Masters' the promoted prefix would be the bare
+        # country 'New Zealand', which went 87 -> 121 corpus hits, WORSE than
+        # the 'Masters' token it replaced.
+        assert "New Zealand" not in _strong_team_keywords("New Zealand Darts Masters")
+
+    def test_team_prefix_promotion_is_unaffected(self):
+        # The promotion still fires for a TEAM whose last word is a generic
+        # club/qualifier word, which is what it exists for.
+        assert "North Carolina" in _strong_team_keywords("North Carolina State")
+
+    @pytest.mark.parametrize("team", [
+        "Manchester United", "New York Yankees", "Real Salt Lake",
+        "Inter Miami CF", "SE Palmeiras", "Columbus Crew",
+    ])
+    def test_no_team_name_loses_a_keyword(self, team):
+        # Measured over 184 real team names from team_aliases.json plus the live
+        # cache: zero keyword sets changed. No competition noun ends a team name.
+        for kw in _strong_team_keywords(team):
+            assert kw
+        assert team in _strong_team_keywords(team)
