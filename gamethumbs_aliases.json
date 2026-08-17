@@ -1,0 +1,46 @@
+{
+  "_comment": "OUR source's team name -> the name game-thumbs' ESPN vocabulary uses for that league (#175). Consumed by gamethumbs.alias_for() and tried ONCE only after the raw name has already produced a definitive miss, so an entry can add a logo but can never take one away. NOT the same thing as team_aliases.json, which belongs to the MATCHER and maps a canonical name to broadcaster abbreviations that become strong EPG-matching keywords; DO NOT merge the two files. Keyed by sport_prefix, the same keys as gamethumbs.GAMETHUMBS_LEAGUE_SLUGS. Per-league because a bare club name is not unique worldwide, which is why clubs that play two competitions appear twice below.",
+  "_method": "DO NOT add an entry by eye. game-thumbs answers an unknown team with a 400 whose body enumerates the whole league, which makes it an oracle: GET /<slug>/zzqqnotateam/zzqqnotateam2/logo, diff that list against every name our source emits, and confirm BOTH halves with real requests. Every entry below was measured on 2026-08-15 against https://game-thumbs.tickarr.com by sweeping all 346 names our sources emit across these leagues plus MLB and NHL: the left side returned 400 'Team not found' and the right side returned 200 image/png. Pace requests >= 2.1s apart; the public instance allows 30/minute and a 429 is NOT a miss.",
+  "_not_needed": "Leagues swept with zero misses, so they deliberately have no entries: EPL, EFL, Eredivisie, WC, EURO, MLB, NHL. Upstream's own partial matching already bridges those ('Tottenham Hotspur FC' resolves even though the ESPN name is 'Spurs'). Do not add speculative entries to them; measure first.",
+  "BL1": {
+    "1. FC Köln": "Cologne",
+    "FC Bayern München": "Bayern"
+  },
+  "BSA": {
+    "CA Mineiro": "Atlético-MG",
+    "CA Paranaense": "Athletico-PR",
+    "SC Corinthians Paulista": "Corinthians"
+  },
+  "LaLiga": {
+    "Club Atlético de Madrid": "Atlético",
+    "RC Celta de Vigo": "Celta Vigo",
+    "RC Deportivo La Coruña": "Deportivo",
+    "Real Racing Club de Santander": "Racing"
+  },
+  "Ligue1": {
+    "Olympique Lyonnais": "Lyon",
+    "RC Strasbourg Alsace": "Strasbourg",
+    "Stade Brestois 29": "Brest"
+  },
+  "PrimeiraLiga": {
+    "CF Estrela da Amadora": "Estrela",
+    "GD Estoril Praia": "Estoril",
+    "Sporting Clube de Portugal": "Sporting"
+  },
+  "SerieA": {
+    "US Sassuolo Calcio": "Sassuolo"
+  },
+  "UCL": {
+    "Club Atlético de Madrid": "Atlético",
+    "FC Bayern München": "Bayern",
+    "FC Internazionale Milano": "Inter Milan",
+    "FK Bodø/Glimt": "Bodo/Glimt",
+    "FK Kairat": "Kairat Almaty",
+    "PAE Olympiakos SFP": "Olympiacos",
+    "Paphos FC": "Pafos",
+    "Qarabağ Ağdam FK": "FK Qarabag",
+    "Royale Union Saint-Gilloise": "Union SG",
+    "SK Slavia Praha": "Slavia Prague",
+    "Sporting Clube de Portugal": "Sporting"
+  }
+}

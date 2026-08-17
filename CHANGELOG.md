@@ -5,6 +5,39 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.19.0] - 2026-08-15
+
+### Added
+
+- **game-thumbs bridges team-name vocabulary gaps (#175).** The tier added in
+  #174 resolves a matchup from the team pair, so a league whose team names
+  differ from ESPN's vocabulary degraded to the league badge even though
+  game-thumbs carries the fixture. `CA Paranaense` and `Athletico-PR` share no
+  substring, so upstream's own partial matching cannot bridge them.
+  - New `gamethumbs_aliases.json` maps our source's name to the league's ESPN
+    name, per league. A definitive miss is now retried **once** with the aliased
+    name before being negative-cached.
+  - The alias goes **second**, after the raw name has already missed. That
+    ordering means an entry can only ever add a logo: an alias that goes stale
+    cannot break a pair that currently resolves, and an unaliased miss still
+    costs exactly one request.
+  - A 429 is still never a miss and never spends the alias retry. Rate limiting
+    says nothing about vocabulary, and treating it as a miss would blank a whole
+    slate of logos for the negative-cache TTL.
+  - 27 aliases across 6 leagues, none of them guessed. game-thumbs answers an
+    unknown team with a 400 whose body enumerates the entire league, which makes
+    it an oracle: all 30 league lists were pulled that way and diffed against
+    every one of the 346 team names our sources actually emit, then both halves
+    of each pair were confirmed with real requests (left side `400 Team not
+    found`, right side `200 image/png`). Brazilian Serie A, La Liga, Ligue 1,
+    Bundesliga, Primeira Liga, Serie A and the Champions League needed entries;
+    the Premier League, Championship, Eredivisie, World Cup, Euros, MLB and NHL
+    swept clean and deliberately have none.
+  - Kept out of `team_aliases.json` on purpose. That file belongs to the
+    matcher, its values become **strong** EPG-matching keywords, and it is flat
+    where this has to be per-league — a bare club name is not unique worldwide,
+    and the same club needs its own entry in each competition it plays in.
+
 ## [1.18.0] - 2026-08-15
 
 ### Added

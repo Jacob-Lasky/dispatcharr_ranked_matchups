@@ -7,6 +7,7 @@ backwards is silent and expensive (see TestMissClassification).
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import types
@@ -300,3 +301,205 @@ class TestLeagueMap:
             "WC", "EURO", "FRIENDLY", "FRIENDLYW", "CLUBFRIENDLY",
         }
         assert expected <= set(gamethumbs.GAMETHUMBS_LEAGUE_SLUGS)
+
+
+# ---------- team-name aliases (#175) ----------
+
+def _with_aliases(monkeypatch, mapping):
+    """Install a synthetic alias table, casefolded the way _load_aliases does."""
+    monkeypatch.setattr(
+        gamethumbs, "_TEAM_ALIASES",
+        {p: {k.casefold(): v for k, v in m.items()} for p, m in mapping.items()},
+    )
+
+
+class TestAliasLookup:
+    def test_known_alias(self, monkeypatch):
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        assert gamethumbs.alias_for("BSA", "CA Paranaense") == "Athletico-PR"
+
+    def test_lookup_is_case_and_whitespace_insensitive(self, monkeypatch):
+        # Sources hand us whatever the upstream API emits; a stray space or a
+        # different case must not silently disable a curated bridge.
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        assert gamethumbs.alias_for("BSA", "  ca paranaense ") == "Athletico-PR"
+
+    def test_aliases_are_scoped_to_their_league(self, monkeypatch):
+        # A bare club name is not unique worldwide, so an alias must not leak
+        # into a league it was never measured against.
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        assert gamethumbs.alias_for("EPL", "CA Paranaense") is None
+
+    def test_unknown_team_and_league(self, monkeypatch):
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        assert gamethumbs.alias_for("BSA", "Flamengo") is None
+        assert gamethumbs.alias_for("QUIDDITCH", "Flamengo") is None
+
+    def test_none_and_empty_safe(self, monkeypatch):
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        assert gamethumbs.alias_for(None, "CA Paranaense") is None
+        assert gamethumbs.alias_for("BSA", None) is None
+        assert gamethumbs.alias_for("BSA", "") is None
+
+
+class TestAliasRetry:
+    """A definitive miss may mean 'our source calls it something else' (#175).
+
+    The retry is bounded to one extra request and only fires when a curated
+    bridge exists, so an unmapped miss still costs exactly one request.
+    """
+
+    def _run(self, monkeypatch, statuses, away="CA Paranaense", home="Flamengo"):
+        _no_pacing(monkeypatch)
+        monkeypatch.setattr(gamethumbs.time, "sleep", lambda s: None)
+        urls = []
+        seq = list(statuses)
+
+        def _dl(url, dest, **kwargs):
+            urls.append(url)
+            return seq.pop(0)
+
+        monkeypatch.setattr(gamethumbs, "download_to_file", _dl)
+        out = gamethumbs.fetch_matchup_composite(
+            "https://x.test", "BSA", away, home, "/tmp/x.png")
+        return out, urls
+
+    def test_definitive_miss_retries_with_the_alias_and_resolves(self, monkeypatch):
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        (url, definitive), urls = self._run(monkeypatch, [(400, None), (200, None)])
+        assert definitive is False
+        assert len(urls) == 2
+        assert "CA%20Paranaense" in urls[0]
+        assert "Athletico-PR" in urls[1]
+        assert url == urls[1]  # the URL cached must be the one that worked
+
+    def test_unaliased_side_is_left_alone(self, monkeypatch):
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        (_, _), urls = self._run(monkeypatch, [(400, None), (200, None)])
+        assert "Flamengo" in urls[1]
+
+    def test_home_side_alias_also_fires(self, monkeypatch):
+        _with_aliases(monkeypatch, {"BSA": {"CA Mineiro": "Atlético-MG"}})
+        (_, definitive), urls = self._run(
+            monkeypatch, [(400, None), (200, None)], away="Flamengo", home="CA Mineiro")
+        assert definitive is False and len(urls) == 2
+
+    def test_no_alias_costs_exactly_one_request(self, monkeypatch):
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        (out, urls) = self._run(monkeypatch, [(400, None)], away="Flamengo", home="Santos")
+        assert out == (None, True)
+        assert len(urls) == 1
+
+    def test_alias_that_also_misses_is_still_definitive(self, monkeypatch):
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Nonsense"}})
+        out, urls = self._run(monkeypatch, [(400, None), (400, None)])
+        assert out == (None, True)
+        assert len(urls) == 2
+
+    def test_transient_failure_on_the_alias_retry_is_not_cached(self, monkeypatch):
+        # The bridge may be right and the server merely unwell. Caching this
+        # would blank the logo for the whole negative-cache TTL.
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        out, urls = self._run(monkeypatch, [(400, None), (500, None)])
+        assert out == (None, False)
+        assert len(urls) == 2
+
+    def test_429_is_never_alias_retried_and_never_definitive(self, monkeypatch):
+        # THE load-bearing invariant. A 429 says nothing about vocabulary, so
+        # burning the retry on an alias would waste the one request we have
+        # left in the window AND risk classifying a throttle as a miss.
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        out, urls = self._run(monkeypatch, [(429, None)])
+        assert out == (None, False)
+        assert len(urls) == 1
+
+    def test_429_after_its_own_retry_is_still_transient(self, monkeypatch):
+        _with_aliases(monkeypatch, {"BSA": {"CA Paranaense": "Athletico-PR"}})
+        out, urls = self._run(
+            monkeypatch,
+            [(429, _FakeHTTPError({"Retry-After": "1"})), (429, None)],
+        )
+        assert out == (None, False)
+        assert len(urls) == 2  # the 429 retry, NOT an alias retry
+
+    def test_429_is_not_a_definitive_miss_code(self):
+        # Belt and braces: the classification above is only correct while 429
+        # stays out of this set. DO NOT add it.
+        assert 429 not in gamethumbs._DEFINITIVE_MISS_CODES
+
+    def test_field_event_never_reaches_the_alias_path(self, monkeypatch):
+        _with_aliases(monkeypatch, {"UFC": {"whatever": "whatever"}})
+        calls = []
+        _no_pacing(monkeypatch)
+        monkeypatch.setattr(
+            gamethumbs, "download_to_file",
+            lambda *a, **k: (calls.append(a), (200, None))[1],
+        )
+        from dispatcharr_ranked_matchups._util import FIELD_AWAY_SENTINEL
+        assert gamethumbs.fetch_matchup_composite(
+            "https://x.test", "UFC", FIELD_AWAY_SENTINEL, "UFC 330", "/tmp/x.png",
+        ) == (None, True)
+        assert calls == []
+
+
+class TestAliasDataFile:
+    """Shape guards on gamethumbs_aliases.json.
+
+    Every entry is a claim measured against the league's own team list (the 400
+    body enumerates it). These tests cannot re-measure, but they can stop the
+    file from silently going inert: a stray league key or a self-alias is a
+    no-op that would otherwise look like coverage.
+    """
+
+    def _raw(self):
+        with open(os.path.join(REPO_ROOT, "gamethumbs_aliases.json"), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_file_parses_and_is_a_dict(self):
+        assert isinstance(self._raw(), dict)
+
+    def test_every_league_key_is_a_mapped_league(self):
+        for prefix in self._raw():
+            if prefix.startswith("_"):
+                continue
+            assert prefix in gamethumbs.GAMETHUMBS_LEAGUE_SLUGS, prefix
+
+    def test_values_are_non_empty_strings(self):
+        for prefix, mapping in self._raw().items():
+            if prefix.startswith("_"):
+                continue
+            for ours, theirs in mapping.items():
+                assert isinstance(theirs, str) and theirs.strip(), f"{prefix}/{ours}"
+                assert ours.strip(), prefix
+
+    def test_no_self_aliases(self):
+        # Aliasing a name to itself costs a second HTTP request that is
+        # guaranteed to fail exactly like the first.
+        for prefix, mapping in self._raw().items():
+            if prefix.startswith("_"):
+                continue
+            for ours, theirs in mapping.items():
+                assert ours.strip().casefold() != theirs.strip().casefold(), f"{prefix}/{ours}"
+
+    def test_no_keys_collide_after_casefolding(self):
+        # Lookup casefolds, so two keys differing only in case would make one
+        # of them silently unreachable.
+        for prefix, mapping in self._raw().items():
+            if prefix.startswith("_"):
+                continue
+            folded = [k.strip().casefold() for k in mapping]
+            assert len(folded) == len(set(folded)), prefix
+
+    def test_the_shipped_file_actually_loads(self):
+        # Guards the real loader against the real file, not a fixture: a schema
+        # the loader rejects would leave _TEAM_ALIASES empty and the tier would
+        # go back to missing every aliased pair with no error anywhere.
+        loaded = gamethumbs._load_aliases()
+        raw_leagues = {k for k in self._raw() if not k.startswith("_")}
+        assert set(loaded) == raw_leagues
+        assert gamethumbs._TEAM_ALIASES  # module-level load succeeded at import
+
+    def test_paranaense_is_bridged(self):
+        # The measured case from #175: CA Paranaense and Athletico-PR share no
+        # substring, so upstream's partial matching cannot bridge it.
+        assert gamethumbs.alias_for("BSA", "CA Paranaense") == "Athletico-PR"
