@@ -38,9 +38,17 @@ logger = logging.getLogger(__name__)
 # field: masking the form input does nothing for the logs, and Dispatcharr logs
 # go to container stdout.
 #
-# DO NOT pass a composed SportsDB URL to the logger. Route it through
-# _util.redact_secrets() instead, which is shared with the Odds-API query-param
-# leak of the same class so there is ONE redactor to keep correct. See #156.
+# DO NOT pass a composed SportsDB URL to the logger AT ALL. Redacting it is not
+# good enough here: a key-bearing string reaching a log call is safe only while
+# the redactor stays correct, and neither a reader nor a static analyser can
+# confirm that from the call site. CodeQL's py/clear-text-logging-sensitive-data
+# flagged exactly this shape and blocked a release. Log a STATIC endpoint label
+# instead (see _http_get_json) so the key has no path to the log.
+#
+# An EXCEPTION object still goes through _util.redact_secrets(), because
+# urllib's HTTPError stringifies the request URL and we cannot restructure that
+# away. That redactor is shared with the Odds-API query-param leak of the same
+# class, so there is ONE redactor to keep correct. See #156.
 _SEARCH_URL = "https://www.thesportsdb.com/api/v1/json/{key}/searchevents.php?e={q}"
 
 _HTTP_TIMEOUT_S = 10.0
@@ -257,7 +265,7 @@ def resolve_league_badge_url(league_id: int, api_key: str = "3") -> Optional[str
     url = _LEAGUE_URL.format(
         key=urllib.parse.quote(api_key or "3"), id=int(league_id),
     )
-    payload = _http_get_json(url)
+    payload = _http_get_json(url, "lookupleague")
     if not payload:
         return None
     leagues = payload.get("leagues") or []
@@ -297,8 +305,21 @@ def _hint_matches(event: dict, sport_prefix: Optional[str]) -> bool:
     return hint.lower() in haystack
 
 
-def _http_get_json(url: str) -> Optional[dict]:
-    """Single-shot JSON GET. Returns None on any failure (network, parse, HTTP)."""
+def _http_get_json(url: str, endpoint: str) -> Optional[dict]:
+    """Single-shot JSON GET. Returns None on any failure (network, parse, HTTP).
+
+    `endpoint` is a STATIC label naming which SportsDB endpoint this was
+    ("searchevents", "lookupleague"), and it is what gets logged.
+
+    DO NOT log `url`, redacted or otherwise. SportsDB carries the API key as a
+    PATH SEGMENT, so the URL is key-bearing by construction, and routing it
+    through redact_secrets() only makes the log safe if the redactor is correct
+    forever. Passing a caller-supplied constant instead means the key has no
+    path to the log at all, which is a property a reader (and a static analyser)
+    can check by looking at this function alone. CodeQL's
+    py/clear-text-logging-sensitive-data flagged the redacted version, and it
+    was right to: a sanitiser it cannot see is indistinguishable from none.
+    """
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
@@ -306,8 +327,9 @@ def _http_get_json(url: str) -> Optional[dict]:
                 return None
             return json.load(resp)
     except Exception as e:
-        # _redact_key, NOT url: the key is a path segment. See #156.
-        logger.debug("sportsdb GET %s failed: %s", redact_secrets(url), redact_secrets(e))
+        # The exception can embed the request URL (HTTPError stringifies it), so
+        # it still goes through the redactor. See #156.
+        logger.debug("sportsdb GET %s failed: %s", endpoint, redact_secrets(e))
         return None
 
 
@@ -339,7 +361,7 @@ def resolve_thumb_url(
         key=urllib.parse.quote(api_key or "3"),
         q=urllib.parse.quote(q),
     )
-    payload = _http_get_json(url)
+    payload = _http_get_json(url, "searchevents")
     if not payload:
         return None
 
