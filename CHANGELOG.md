@@ -62,6 +62,39 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   `NCAAMS` and `NCAAWS` are prefixes no source has emitted for some time; they
   matched nothing and only made the hint map look like a registry of live
   prefixes when it is not.
+## [1.17.1] - 2026-08-15
+
+### Fixed
+
+- **Tennis and golf events no longer match unrelated sports' channels (#169).**
+  Reported by a user on v1.16.0: `WTA Warsaw T-Mobile Polish Open` and
+  `ATP Cincinnati Open` were both matching a PDC darts channel
+  (`European Tour 12 _ Czech Darts Open`) as `regex_strict`.
+
+  Field-event sources put the EVENT name in `home`, and it runs through the
+  same splitter as a team name. The last-word relaxation therefore emitted a
+  tournament title's final token as a STRONG keyword, one that admits a
+  candidate on its own, but that token is a generic competition noun shared
+  across every sport. Measured over the 22137 real channel and stream names in
+  a live snapshot: `Championship` matched 383 of them, `Open` 157, `Prix` 93,
+  `Masters` 87. Same family as the numeric case `_is_weak_last_word` already
+  blocks (`UFC 329: ... Holloway 2` -> `2`), which only covers short and
+  numeric last words.
+
+  Replayed through the real lookup against a 6708-channel snapshot, the two
+  reported events had been attaching **14 channels and ~140 streams** of darts
+  coverage each. After the fix `Cincinnati Open` matches its genuine broadcast
+  (`DAZN CA 26: Cincinnati Open - Day 2 - Session 2`) and
+  `New Zealand Darts Masters` matches the real PDC feed, so removing the
+  wildcard recovered correct matches rather than only deleting wrong ones.
+
+  Suppressing the last word also must not promote the two-word prefix, which
+  would trade one wildcard for another: `New Zealand Darts Masters` would have
+  promoted the bare country `New Zealand`, going from 87 corpus hits to 121.
+
+  Corpus diff over both populations: 26 event names narrowed, 0 widened, and
+  **0 of 184 real team names changed**, so the two-team leagues are untouched.
+
 
 ## [1.17.0] - 2026-08-12
 
