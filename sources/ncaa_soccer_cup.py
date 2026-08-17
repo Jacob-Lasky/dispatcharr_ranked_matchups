@@ -311,6 +311,8 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
                     start_time=start,
                     extra={
                         "espn_event_id": eid,
+                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                        "game_id": eid,
                         "fd_competition_code": self._league_context_code(),
                         "stage": rec.get("stage"),
                     },

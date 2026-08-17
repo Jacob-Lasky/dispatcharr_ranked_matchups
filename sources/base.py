@@ -80,7 +80,35 @@ class GameRow:
     # "closeness wins if present, fall back to spread otherwise" honest.
     closeness: Optional[float] = None
     is_rivalry: bool = False             # known rivalry
-    extra: dict = field(default_factory=dict)  # source-specific metadata
+    # Source-specific metadata. One key in here is NOT source-specific:
+    #
+    #   `game_id` is the identity key the importance simulator compares on.
+    #   `PointsBasedSportSource.apply_result` records `extra["game_id"]` into
+    #   `_applied` and `remaining_matches` filters on it, `BracketSportSource`
+    #   does the same, and `simulation._same_match` consults an id only when
+    #   BOTH rows carry the SAME key (so `fd_id` can never be matched against
+    #   another namespace's id). A row that omits `game_id` therefore shares no
+    #   key with the fixture pool, and identity silently degrades to the
+    #   (home, away, start_time) fallback.
+    #
+    # That fallback is not equivalent. `points_based.remaining_matches`
+    # substitutes a 2099-01-01 sentinel for a fixture with no published
+    # start_time, and a RESCHEDULED game (routine in MLB and NFL) simply has a
+    # different kickoff in the two separate fetches. Either way the target
+    # fails to match itself, is sampled a second time as a "remaining" match,
+    # and the contingency table describes a season the recorded W/D/L row does
+    # not. Nothing raises: the importance number is just wrong. MLS shipped
+    # this live (#65); #181 is the generalised fix.
+    #
+    # So ANY source that simulates must stamp `game_id`, alongside whatever
+    # sport-specific id it also wants to expose. This is deliberately NOT
+    # auto-mirrored from a `<sport>_game_id` key in __post_init__: the mirror is
+    # only correct where that id really is per-GAME identity, and only the
+    # source's author knows whether theirs is (an event id covering several
+    # games would map wrongly, and silently). Enforced by
+    # tests/test_match_identity_contract.py, which also records the two sources
+    # legitimately exempt because they never reach the simulator.
+    extra: dict = field(default_factory=dict)  # see note above re: `game_id`
 
 
 @dataclass(frozen=True)

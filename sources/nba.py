@@ -308,6 +308,8 @@ class NbaRegularSource(PointsBasedSportSource):
                     start_time=start,
                     extra={
                         "nba_game_id": eid,
+                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                        "game_id": eid,
                         "fd_competition_code": self.league_context_code,
                     },
                 ))
@@ -446,6 +448,7 @@ class NbaPlayoffSource(BestOfNSeriesSource):
                     start_time=start,
                     extra={
                         "nba_game_id": eid,
+                        "game_id": eid,
                         "fd_competition_code": self._league_context_code(),
                     },
                 ))

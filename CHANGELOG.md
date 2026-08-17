@@ -5,6 +5,48 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.20.1] - 2026-08-17
+
+### Fixed
+
+- **Match identity for eleven sources no longer depends on kickoff time (#181).**
+  `simulation._same_match` consults an id only when BOTH rows carry the same key,
+  and the fixture pool from `remaining_matches` stamps `game_id`. Eleven sources'
+  `fetch_upcoming` stamped only their own `<sport>_game_id` / `espn_event_id`, so
+  the target row shared no key with the pool and identity silently degraded to the
+  `(home, away, start_time)` fallback.
+
+  That fallback is not equivalent. `points_based.remaining_matches` substitutes a
+  2099-01-01 sentinel for a fixture with no published start time, and a
+  **rescheduled** game (routine in MLB and NFL) simply has a different kickoff in
+  the two separate fetches. Either way the target fails to match itself, is
+  sampled a second time as a "remaining" match, and the contingency table
+  describes a season the recorded W/D/L row does not. Nothing raises; the
+  importance number is just wrong. MLS shipped this live and it was fixed in #65;
+  this is the same defect everywhere else.
+
+  Fixed by stamping `game_id` alongside the existing sport-specific id in:
+  `mlb`, `mls_cup`, `nba`, `ncaa_baseball`, `ncaa_soccer`, `ncaa_soccer_cup`,
+  `ncaa_softball`, `ncaaw_basketball`, `nfl`, `nhl`, `wnba`.
+
+  **Scope correction:** the issue named four sources; the real population is
+  eleven, found by generalising the check across `sources/` instead of
+  enumerating. `mls.py` and `friendlies.py` also stamp a sport-specific id and are
+  deliberately NOT changed: both inherit `SportSource` directly, whose
+  `remaining_matches` raises `NotImplementedError`, so they never reach the
+  simulator and the key would be inert. That exemption is itself pinned by a test.
+
+  Deliberately not auto-mirrored in `GameRow.__post_init__`: the mirror is only
+  correct where the sport-specific id really is per-GAME identity, and an event id
+  covering several games would map wrongly and silently. The justification now
+  lives once on `GameRow.extra`, with a one-line pointer at each site.
+
+  Guarded by `tests/test_match_identity_contract.py`, an AST rule over the whole
+  `sources/` tree, so a source written later cannot reintroduce it. Verified by
+  reverting `sources/` to pre-fix with the tests kept: exactly 11 assertion
+  failures, one per affected file, and nothing else moved.
+
+
 ## [1.20.0] - 2026-08-17
 
 ### Changed
