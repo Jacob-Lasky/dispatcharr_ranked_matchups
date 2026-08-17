@@ -84,8 +84,35 @@ _TEAM_ALIASES = _load_team_aliases()
 # prefix instead. Extended here rather than in _util's
 # GENERIC_TEAM_SECOND_WORDS because that tuple is the shared soccer
 # second-word list, and this is a matcher-only keyword concern.
+
+# Competition nouns that end a TOURNAMENT name (#169). Field-event sources
+# (ATP/WTA/golf/motorsport) put the event name in `home`, and it runs through
+# the same team-name splitter, so the last-word relaxation hands back the final
+# token of a tournament title. That token is almost always a generic
+# competition noun, and the field-event gate admits on ONE keyword, so it acts
+# as a near-wildcard across every sport at once: 'Cincinnati Open' and 'Warsaw
+# T-Mobile Polish Open' both reduced to 'Open' and matched a PDC darts channel
+# ('European Tour 12 _ Czech Darts Open'), reported by a user on v1.16.0.
+#
+# Same family as the numeric case _is_weak_last_word already blocks ('UFC 329:
+# ... Holloway 2' -> '2' -> 10593 tier-1 matches); that guard covers SHORT and
+# NUMERIC last words, and these are long alphabetic ones it cannot see.
+#
+# No team is named for one of these, so suppressing the bonus token costs no
+# recall: the full event name stays STRONG, and where the last word is dropped
+# the two-word prefix is promoted to STRONG in its place ('Warsaw T-Mobile'),
+# which is the genuinely discriminating part. DO NOT add a word here that could
+# END A TEAM NAME, because that would suppress a real discriminator.
+_GENERIC_EVENT_LAST_WORDS = frozenset({
+    "open", "championship", "championships", "classic", "masters",
+    "invitational", "cup", "trophy", "tour", "series", "prix", "bowl",
+    "games", "final", "finals", "challenge", "tournament", "international",
+})
+
 _GENERIC_LAST_WORDS = frozenset(
-    {"state", "college", "university", "york"} | set(GENERIC_TEAM_SECOND_WORDS)
+    {"state", "college", "university", "york"}
+    | set(GENERIC_TEAM_SECOND_WORDS)
+    | _GENERIC_EVENT_LAST_WORDS
 )
 
 
@@ -202,6 +229,11 @@ def _team_keywords_split(team_name: str) -> Tuple[List[str], List[str]]:
         # Re-derive parts so subsequent rules see the canonical form.
         parts = stripped.split()
 
+    # Why the last word was suppressed decides whether the two-word prefix gets
+    # promoted below, so the two reasons are tracked apart (#169).
+    suppressed_as_event_noun = (
+        len(parts) > 1 and parts[-1].lower() in _GENERIC_EVENT_LAST_WORDS
+    )
     emitted_last_word = (
         len(parts) > 1
         and parts[-1].lower() not in _GENERIC_LAST_WORDS
@@ -219,8 +251,16 @@ def _team_keywords_split(team_name: str) -> Tuple[List[str], List[str]]:
         # 'UFC 329:'. Otherwise a stronger relaxation already exists (the
         # nickname, or the suffix-stripped name) and this prefix is the bare
         # metro, so it is WEAK.
+        #
+        # A prefix left over from an EVENT noun is NOT promoted (#169). A team
+        # name's leading words are its identity ('North Carolina' State), but a
+        # tournament's are frequently just a place, so promoting there trades one
+        # wildcard for another: suppressing 'Masters' in 'New Zealand Darts
+        # Masters' promoted 'New Zealand', which went from 87 corpus hits to 121,
+        # worse than the token it replaced. The full event name stays STRONG and
+        # remains the discriminator.
         prefix = " ".join(parts[:2])
-        if not emitted_last_word and stripped is None:
+        if not emitted_last_word and stripped is None and not suppressed_as_event_noun:
             strong.append(prefix)
         else:
             weak.append(prefix)
