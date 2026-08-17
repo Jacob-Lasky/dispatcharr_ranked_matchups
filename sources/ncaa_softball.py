@@ -233,6 +233,8 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
                     start_time=start,
                     extra={
                         "ncaasbl_game_id": eid,
+                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                        "game_id": eid,
                         "fd_competition_code": self.league_context_code,
                     },
                 ))
@@ -497,6 +499,7 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
             start_time=start,
             extra={
                 "ncaasbl_game_id": event.get("id"),
+                "game_id": event.get("id"),
                 "fd_competition_code": self._league_context_code(),
                 "stage": stage,
                 "matchday": game_num,
@@ -866,6 +869,7 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
             start_time=start,
             extra={
                 "ncaasbl_game_id": event.get("id"),
+                "game_id": event.get("id"),
                 "fd_competition_code": self._league_context_code(),
                 "stage": stage,
                 "grouping_key": grouping_key,

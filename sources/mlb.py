@@ -206,6 +206,8 @@ class MlbRegularSource(PointsBasedSportSource):
                     start_time=start,
                     extra={
                         "mlb_game_id": gid,
+                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                        "game_id": gid,
                         "fd_competition_code": self.league_context_code,
                     },
                 ))
@@ -356,6 +358,7 @@ class MlbPlayoffSource(BestOfNSeriesSource):
                     start_time=start,
                     extra={
                         "mlb_game_id": gid,
+                        "game_id": gid,
                         "fd_competition_code": self._league_context_code(),
                     },
                 ))
