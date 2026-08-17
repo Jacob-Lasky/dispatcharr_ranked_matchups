@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
@@ -201,16 +202,29 @@ def _build_search_query(home: str, away: str) -> str:
     return f"{_strip_trailing_qualifier(home)} vs {_strip_trailing_qualifier(away)}"
 
 
-def marker_to_filename(marker: str) -> str:
+def marker_to_filename(marker: str, ext: str = "jpg") -> str:
     """Map a game marker (e.g. 'ranked_matchups:EPL:fd_535345') to a stable,
     filesystem-safe filename inside LOGO_DIR.
 
     SHA1 keeps the path short and avoids worrying about marker characters that
     aren't filesystem-safe (the marker contains ':' which works on Linux but
     is hostile on Windows-mounted /data shares).
+
+    `ext` exists because the two providers emit different formats: SportsDB
+    thumbs are JPG, game-thumbs composites are PNG, and Dispatcharr serves these
+    off disk so the extension has to match the real bytes. Any extension added
+    here MUST also be added to _SWEEPABLE_EXTS below, or the sweep will treat a
+    live game's file as stale and delete the logo out from under it on the very
+    next apply.
     """
     digest = hashlib.sha1(marker.encode("utf-8")).hexdigest()[:16]
-    return f"{LOGO_FILENAME_PREFIX}{digest}.jpg"
+    return f"{LOGO_FILENAME_PREFIX}{digest}.{ext.lstrip('.')}"
+
+
+# Every extension marker_to_filename can produce. The sweep builds its live-file
+# set from the cross-product of live markers and these, so a marker that is live
+# keeps its file whichever provider wrote it.
+_SWEEPABLE_EXTS = ("jpg", "png")
 
 
 def badge_filename(league_id: int) -> str:
@@ -341,35 +355,104 @@ def resolve_thumb_url(
     return None
 
 
-def download_thumb(thumb_url: str, dest_path: str) -> bool:
-    """Download a thumb URL to dest_path atomically. Returns True on success.
+# Magic-byte prefixes for the formats these providers actually serve: SportsDB
+# returns JPEG, game-thumbs PNG, and league badges are PNG. GIF and WebP are
+# included because a badge URL occasionally redirects to one.
+_IMAGE_MAGIC = (
+    b"\xff\xd8\xff",      # JPEG
+    b"\x89PNG\r\n\x1a\n",  # PNG
+    b"GIF87a",
+    b"GIF89a",
+)
+
+
+def _looks_like_image(head: bytes) -> bool:
+    """Whether `head` (the first bytes of a response body) starts with a known
+    image signature. WebP is RIFF....WEBP, so it needs the offset check."""
+    if not head:
+        return False
+    if head.startswith(_IMAGE_MAGIC):
+        return True
+    return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+
+
+def download_to_file(
+    url: str,
+    dest_path: str,
+    timeout: float = _DOWNLOAD_TIMEOUT_S,
+    user_agent: str = _USER_AGENT,
+) -> tuple[Optional[int], Optional[BaseException]]:
+    """Download `url` to dest_path atomically. Returns (status_code, error).
+
+    status_code is the HTTP status when the server answered at all (including
+    error codes), or None when the request never got that far (DNS, connect,
+    timeout, or a failed write). The error object is returned alongside so a
+    caller can read response headers off an HTTPError, which is how
+    gamethumbs.py honours Retry-After on a 429.
+
+    DO NOT collapse this back into a bool. gamethumbs.py has to tell a 400
+    ("this team does not exist", cache the negative forever) apart from a 429
+    ("try again in a minute", caching it would blank a whole slate of logos for
+    a day). Both are falsey; only the status distinguishes them.
 
     Atomic via tmp-file + os.replace so a partial download never leaves a
-    half-written JPG that Dispatcharr's logo cache would serve as broken.
+    half-written image that Dispatcharr's logo cache would serve as broken.
     """
-    if not thumb_url:
-        return False
-    req = urllib.request.Request(thumb_url, headers={"User-Agent": _USER_AGENT})
+    if not url:
+        return None, None
+    req = urllib.request.Request(url, headers={"User-Agent": user_agent})
     tmp_path = f"{dest_path}.tmp.{os.getpid()}"
     try:
-        with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT_S) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status != 200:
-                return False
+                return resp.status, None
+            first = b""
             with open(tmp_path, "wb") as f:
                 while True:
                     chunk = resp.read(64 * 1024)
                     if not chunk:
                         break
+                    if not first:
+                        first = chunk[:16]
                     f.write(chunk)
+        if not _looks_like_image(first):
+            # A 200 carrying non-image bytes (captive portal, proxy error page,
+            # HTML 200 from a misconfigured reverse proxy) must NOT be written:
+            # callers treat the file's existence as the cache, so a corrupt file
+            # would be served as a broken logo forever and never re-fetched.
+            # Reported as a transient failure, so the next apply retries.
+            logger.warning(
+                "download %s returned 200 but not an image (%r); discarding",
+                redact_secrets(url), first[:8],
+            )
+            _unlink_quietly(tmp_path)
+            return None, None
         os.replace(tmp_path, dest_path)
-        return True
+        return 200, None
+    except urllib.error.HTTPError as e:
+        _unlink_quietly(tmp_path)
+        return e.code, e
     except Exception as e:
-        logger.warning("sportsdb download %s failed: %s", thumb_url, e)
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        return False
+        logger.warning("download %s failed: %s", redact_secrets(url), redact_secrets(e))
+        _unlink_quietly(tmp_path)
+        return None, e
+
+
+def _unlink_quietly(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def download_thumb(thumb_url: str, dest_path: str) -> bool:
+    """Download a thumb URL to dest_path atomically. Returns True on success.
+
+    Thin wrapper over download_to_file for the SportsDB callers, which only
+    ever need "did it land".
+    """
+    status, _ = download_to_file(thumb_url, dest_path)
+    return status == 200
 
 
 class ThumbCache:
@@ -444,11 +527,18 @@ def sweep_stale_logo_files(live_markers: set[str], logo_dir: str = LOGO_DIR) -> 
 
     Called at the end of each apply pass. Returns number of files removed.
     Stale-detection is by filename hash: a file is live iff its name equals
-    marker_to_filename(m) for some m in live_markers.
+    marker_to_filename(m, ext) for some m in live_markers and some ext this
+    module can write. Both extensions are checked because a live game's logo may
+    have come from either provider, and checking only .jpg would sweep every
+    game-thumbs .png on the first apply after it was written.
     """
     if not os.path.isdir(logo_dir):
         return 0
-    live_filenames = {marker_to_filename(m) for m in live_markers}
+    live_filenames = {
+        marker_to_filename(m, ext)
+        for m in live_markers
+        for ext in _SWEEPABLE_EXTS
+    }
     removed = 0
     try:
         entries = os.listdir(logo_dir)

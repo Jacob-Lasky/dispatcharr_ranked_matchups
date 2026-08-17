@@ -5,6 +5,48 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-08-15
+
+### Added
+
+- **game-thumbs as a second matchup-logo tier (#174).** TheSportsDB only has a
+  thumbnail if it pre-rendered one for that specific indexed event, so its
+  coverage tracks how well it indexes a league. Measured on a live instance:
+  9 hits and 9 misses across 18 fixtures, with every MLS, Brazilian Serie A and
+  NCAA soccer game missing and falling through to a league badge that looks
+  identical for every game in that league.
+  [game-thumbs](https://github.com/sethwv/game-thumbs) composites two ESPN
+  crests on request, so it resolves from the team pair alone whether or not the
+  fixture is indexed anywhere. It slots in between the SportsDB thumb and the
+  badge, leaving the rest of the #102 order intact, and the composite is
+  downloaded to `/data/logos/` exactly like a SportsDB thumb so an outage cannot
+  break already-applied channels.
+  - New setting **game-thumbs base URL**, defaulting to the public instance.
+    Blank disables the tier. Self-host `ghcr.io/sethwv/game-thumbs` to escape
+    the public instance's 30 requests/minute cap.
+  - 30 leagues mapped, every slug confirmed live by rendering a real fixture and
+    getting back a `200 image/png`. The slugs are ESPN-style and not guessable
+    (men's college basketball is `mens-college-basketball`; `ncaa/basketball/mens`
+    404s).
+  - Rate limiting is paced under rather than discovered: requests are spaced to
+    stay below 30/min and a 429 is retried once honouring `Retry-After`. A 429 is
+    never negative-cached, because doing so would turn a one-minute throttle into
+    a day of league badges for every game caught in it.
+  - The apply summary now reports both tiers, e.g.
+    `Matchup logos: 9 SportsDB + 8 game-thumbs, 3 league badge, 1 source-channel`.
+
+### Fixed
+
+- **Sweep no longer depends on the logo file being a JPG.** `marker_to_filename`
+  gained an extension parameter for the PNGs game-thumbs returns, and
+  `sweep_stale_logo_files` now builds its live set across every extension the
+  module can write. Without that pairing the first apply after a composite was
+  written would have treated the live game's own PNG as stale and deleted it.
+- Documentation rot: the README described the plugin's `EPGSource` as `dummy`,
+  which contradicts the `DO NOT use source_type="dummy"` constraint in
+  `plugin.py` (a dummy source makes Dispatcharr overlay generated filler on top
+  of the real programming). Two settings help texts still named the
+  source-channel logo as the only fallback, predating the #102 badge tier.
 ## [1.17.3] - 2026-08-15
 
 ### Fixed

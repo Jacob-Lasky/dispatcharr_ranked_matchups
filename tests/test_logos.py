@@ -93,6 +93,22 @@ class TestMarkerToFilename:
         b = logos.marker_to_filename("ranked_matchups:EPL:fd_2")
         assert a != b
 
+    def test_ext_override(self):
+        m = "ranked_matchups:MLS:1"
+        assert logos.marker_to_filename(m, "png").endswith(".png")
+        # Same hash either way: the two providers' files for one game differ
+        # only by extension, which is what lets the sweep pair them up.
+        assert (logos.marker_to_filename(m).rsplit(".", 1)[0]
+                == logos.marker_to_filename(m, "png").rsplit(".", 1)[0])
+
+    def test_leading_dot_on_ext_tolerated(self):
+        assert logos.marker_to_filename("m", ".png").endswith(".png")
+        assert not logos.marker_to_filename("m", ".png").endswith("..png")
+
+    def test_every_sweepable_ext_is_producible(self):
+        for ext in logos._SWEEPABLE_EXTS:
+            assert logos.marker_to_filename("m", ext).endswith(f".{ext}")
+
 
 # ---------- _date_in_tolerance ----------
 
@@ -378,7 +394,10 @@ class TestSweepStaleLogoFiles:
 
 class TestDownloadThumb:
     def test_writes_atomically(self, tmp_path, monkeypatch):
-        body = b"FAKE JPEG BYTES"
+        # Real JPEG magic: download_to_file rejects a 200 whose body is not an
+        # image, so the old b"FAKE JPEG BYTES" placeholder no longer stands in
+        # for one. Contract update, not a regression.
+        body = b"\xff\xd8\xff\xe0" + b"FAKE JPEG BYTES"
         monkeypatch.setattr(logos.urllib.request, "urlopen",
                             lambda req, timeout=None: _FakeHttpResponse(body))
         dest = str(tmp_path / "out.jpg")
@@ -409,6 +428,69 @@ class TestDownloadThumb:
 
     def test_empty_url_returns_false(self, tmp_path):
         assert logos.download_thumb("", str(tmp_path / "out.jpg")) is False
+
+
+class TestRejectsNonImage200:
+    """A 200 carrying non-image bytes must never reach dest_path.
+
+    Callers treat the file's existence as the cache and never re-fetch, so one
+    captive-portal HTML page written here would be served as a broken channel
+    logo permanently, recoverable only by deleting the file by hand.
+    """
+
+    def _download(self, tmp_path, monkeypatch, body):
+        monkeypatch.setattr(logos.urllib.request, "urlopen",
+                            lambda req, timeout=None: _FakeHttpResponse(body))
+        dest = str(tmp_path / "out.png")
+        return logos.download_to_file("https://example.com/x.png", dest), dest
+
+    def test_html_error_page_discarded(self, tmp_path, monkeypatch):
+        (status, _), dest = self._download(
+            tmp_path, monkeypatch, b"<!DOCTYPE html><html>nope</html>")
+        # Transient, not a status: the next apply should try again.
+        assert status is None
+        assert not os.path.exists(dest)
+        assert os.listdir(tmp_path) == []  # no .tmp left behind
+
+    def test_json_error_body_discarded(self, tmp_path, monkeypatch):
+        (status, _), dest = self._download(
+            tmp_path, monkeypatch, b'{"error":"Team not found"}')
+        assert status is None
+        assert not os.path.exists(dest)
+
+    def test_empty_body_discarded(self, tmp_path, monkeypatch):
+        (status, _), dest = self._download(tmp_path, monkeypatch, b"")
+        assert status is None
+        assert not os.path.exists(dest)
+
+    def test_png_accepted(self, tmp_path, monkeypatch):
+        (status, _), dest = self._download(
+            tmp_path, monkeypatch, b"\x89PNG\r\n\x1a\n" + b"rest")
+        assert status == 200
+        assert os.path.exists(dest)
+
+    def test_jpeg_accepted(self, tmp_path, monkeypatch):
+        (status, _), dest = self._download(
+            tmp_path, monkeypatch, b"\xff\xd8\xff\xe0" + b"rest")
+        assert status == 200
+        assert os.path.exists(dest)
+
+
+class TestLooksLikeImage:
+    def test_known_formats(self):
+        assert logos._looks_like_image(b"\x89PNG\r\n\x1a\n")
+        assert logos._looks_like_image(b"\xff\xd8\xff\xe0")
+        assert logos._looks_like_image(b"GIF89a....")
+        assert logos._looks_like_image(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+
+    def test_rejects_text_and_empty(self):
+        assert not logos._looks_like_image(b"")
+        assert not logos._looks_like_image(b"<!DOCTYPE html>")
+        assert not logos._looks_like_image(b'{"error":"x"}')
+
+    def test_riff_that_is_not_webp_rejected(self):
+        # A RIFF container that is a WAV, not an image.
+        assert not logos._looks_like_image(b"RIFF\x00\x00\x00\x00WAVEfmt ")
 
 
 # ---------- league/tournament badge fallback (issue #102) ----------
@@ -499,3 +581,40 @@ class TestSweepKeepsBadges:
         assert live_file.exists()
         assert badge_file.exists()        # badge is never swept
         assert not stale_file.exists()
+
+
+class TestSweepAcrossProviderExtensions:
+    """A live game's logo survives the sweep whichever provider wrote it.
+
+    Regression for #174: game-thumbs writes PNG where SportsDB writes JPG. When
+    the sweep built its live set from .jpg names alone, a freshly written .png
+    for a LIVE game matched no live filename and was deleted on the very next
+    apply, so the channel lost the logo it had just been given.
+    """
+
+    def test_live_png_is_not_swept(self, tmp_path):
+        live = "ranked_matchups:MLS:live"
+        png = tmp_path / logos.marker_to_filename(live, "png")
+        png.write_bytes(b"x")
+        removed = logos.sweep_stale_logo_files({live}, logo_dir=str(tmp_path))
+        assert removed == 0
+        assert png.exists()
+
+    def test_stale_png_is_swept(self, tmp_path):
+        stale = tmp_path / logos.marker_to_filename("ranked_matchups:MLS:gone", "png")
+        stale.write_bytes(b"x")
+        removed = logos.sweep_stale_logo_files({"ranked_matchups:MLS:live"},
+                                               logo_dir=str(tmp_path))
+        assert removed == 1
+        assert not stale.exists()
+
+    def test_both_extensions_for_one_live_marker_survive(self, tmp_path):
+        # A game can carry both if SportsDB indexed it after game-thumbs had
+        # already supplied a composite. Neither file is stale.
+        live = "ranked_matchups:EPL:both"
+        jpg = tmp_path / logos.marker_to_filename(live, "jpg")
+        png = tmp_path / logos.marker_to_filename(live, "png")
+        for f in (jpg, png):
+            f.write_bytes(b"x")
+        assert logos.sweep_stale_logo_files({live}, logo_dir=str(tmp_path)) == 0
+        assert jpg.exists() and png.exists()

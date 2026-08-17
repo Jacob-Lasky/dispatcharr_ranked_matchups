@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.17.3",
+  "version": "1.18.0",
   "description": "Never miss a good game. Scores every upcoming game across 37 leagues, tours and competitions (20 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -337,7 +337,7 @@
       "input_type": "password",
       "label": "TheSportsDB API key (optional)",
       "default": "",
-      "help_text": "Powers the per-matchup channel logo: TheSportsDB pre-renders a 960x540 graphic (both crests + league wordmark + region backdrop) for every event in its database. Blank means use the free public test tier ('3'), which is rate-limited but works for typical refresh cadence. Patreon keys unlock higher limits — see https://www.thesportsdb.com/api.php. When no matchup graphic is found (offseason, untracked league, field-event sport like F1/golf/UFC/tennis), the virtual channel falls back to the matched source channel's logo."
+      "help_text": "Powers the per-matchup channel logo: TheSportsDB pre-renders a 960x540 graphic (both crests + league wordmark + region backdrop) for every event in its database. Blank means use the free public test tier ('3'), which is rate-limited but works for typical refresh cadence. Patreon keys unlock higher limits — see https://www.thesportsdb.com/api.php. When no matchup graphic is found (offseason, untracked league, field-event sport like F1/golf/UFC/tennis), the virtual channel falls back through game-thumbs, then the league/tournament badge, then the matched source channel's logo."
     },
     {
       "id": "model",
@@ -584,7 +584,15 @@
       "type": "boolean",
       "label": "Per-matchup channel logos (TheSportsDB)",
       "default": true,
-      "help_text": "Replace each virtual channel's logo with TheSportsDB's pre-rendered 960x540 matchup graphic (both team crests + league wordmark + region backdrop). Resolved by team-name pair + date; cached per fixture for 14 days. Falls back to the matched source channel's logo when SportsDB has no thumbnail (offseason, untracked sport, field events like F1/golf/UFC/tennis). Configure key under 'API Keys'."
+      "help_text": "Replace each virtual channel's logo with TheSportsDB's pre-rendered 960x540 matchup graphic (both team crests + league wordmark + region backdrop). Resolved by team-name pair + date; cached per fixture for 14 days. When SportsDB has no thumbnail (offseason, untracked sport, field events like F1/golf/UFC/tennis) the logo falls back through game-thumbs, then the league/tournament badge, then the matched source channel's logo. Configure key under 'API Keys'."
+    },
+    {
+      "id": "gamethumbs_base_url",
+      "type": "string",
+      "label": "game-thumbs base URL",
+      "default": "https://game-thumbs.tickarr.com",
+      "placeholder": "https://game-thumbs.tickarr.com",
+      "help_text": "Second source for per-matchup logos, used only when TheSportsDB has no thumbnail for a game. game-thumbs (https://github.com/sethwv/game-thumbs) composites the two teams' crests on demand, so it covers leagues SportsDB never indexed a graphic for (MLS, Brazilian Serie A, NCAA soccer and more). Leave blank to disable this tier and go straight to the league badge. The public instance above is rate-limited to 30 requests/minute, which the plugin paces under and retries once on; self-host ghcr.io/sethwv/game-thumbs and point this at it to remove that limit. Requires 'Per-matchup channel logos' to be on."
     },
     {
       "id": "widen_stream_pool",
