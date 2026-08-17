@@ -4802,7 +4802,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.17.2"
+    version = "1.17.3"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

@@ -40,29 +40,38 @@ ESPN endpoints used:
   - `/apis/v2/sports/soccer/usa.1/standings`: conference rosters +
     current standings points (3 W / 1 D / 0 L). Fetched once per
     refresh; the team→conference map is cached on the source instance.
-  - `/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=YYYYMMDD`:
-    per-day schedule sweep across the Feb-Nov regular season.
+  - `/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=<range>&limit=`:
+    the Feb-Nov regular season, whole window in one call. See
+    SCOREBOARD_EVENT_LIMIT for why `limit` is not optional.
 
-Known limitation: ESPN MLS future-fixtures coverage. The day-by-day
-scoreboard sweep finds the season's FINISHED games but very few
-SCHEDULED ones: ESPN's MLS scoreboard endpoint publishes only ~1-2
-weeks of future fixtures, while pro leagues like MLB / NCAA Baseball
-publish months ahead. Effect on the importance signal: with a thin
-remaining_matches list, the simulator can't propagate the season
-forward enough to differentiate end-of-season outcomes, so mid-season
-importance reads close to 0 for marginal games. Signal sharpens as
-the season approaches its end (fewer remaining games means the
-published-fixture window covers more of the rest). The structural
-code is correct; the gap is external. A future improvement could
-hit `/teams/{id}/schedule` per-team or synthesize a round-robin
-pairing matrix to backfill the remaining-fixtures list. DO NOT
-remove this comment without resolving the underlying data gap.
+Remaining-fixtures coverage (#65, resolved 2026-08-15). This module used
+to carry a "known limitation" claiming ESPN publishes only ~1-2 weeks of
+future MLS fixtures, and that live mid-season importance therefore read
+~0 through no fault of the code. That diagnosis was WRONG, and the two
+halves of it failed differently:
+
+  - ESPN publishes the full remaining season on the SCOREBOARD endpoint.
+    Measured live mid-season 2026-08-15 against `soccer/usa.1`: 241
+    future events through the Nov 8 regular-season finale, 195 of them
+    intra-conference (95 East / 100 West), 11-15 remaining per team.
+    What IS thin is `/teams/{id}/schedule`, which returned 0 future
+    events for the same teams on the same day. The original probe read
+    the thin endpoint and generalized to the wrong one.
+  - `_fetch_full_season_games` clamped its own sweep to `now + 7 days`.
+    THAT is what starved the simulator. Importance read ~0 because the
+    code asked for one week of the season it needed all of.
+
+So the fix was to stop truncating, not to synthesize fixtures. DO NOT
+re-clamp the importance sweep to a near-term window, and DO NOT add a
+round-robin pairing synthesizer on the theory that the fixtures are
+missing: they are not, and synthesized pairings would duplicate real
+ones that the pool already holds.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
@@ -83,11 +92,27 @@ ESPN_SCOREBOARD_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/usa
 ESPN_STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/soccer/usa.1/standings"
 
 # MLS regular season runs late February through late October in the
-# modern era. The day-sweep loop walks Feb 1 through Nov 30 to be safe
-# either side of the bookend weekends. Each day call returns 0-7 events;
-# 300 days × ~120ms = ~36s, acceptable on a 6-hour refresh budget.
+# modern era. The season window spans Feb 1 through Nov 30 to be safe
+# either side of the bookend weekends.
 SEASON_START_MONTH = 2
 SEASON_END_MONTH = 11
+
+# ESPN's scoreboard accepts `dates=YYYYMMDD-YYYYMMDD`, but it PAGINATES
+# and truncates silently: without an explicit `limit` a range returns
+# only its first 100 events and says nothing about the rest. Passing
+# `limit` lifts the page size and the whole window arrives in one call.
+#
+# DO NOT drop this param and DO NOT go back to a per-day sweep to work
+# around a short result. Measured live 2026-08-15 against
+# `soccer/usa.1`, full 2026 season window (Feb 1 - Nov 30):
+#   dates=<range>                -> 100 events (silently truncated)
+#   dates=<range>&limit=1000     -> 511 events
+#   303 individual per-day calls -> 511 events
+# The range-with-limit and per-day event-ID sets were IDENTICAL, with
+# identical kickoff timestamps on every shared id. One call replaces
+# 303. `_fetch_scoreboard_range` warns if a response ever comes back at
+# the limit, which is the only symptom truncation would show.
+SCOREBOARD_EVENT_LIMIT = 1000
 
 # Per-team goal averages cluster around 1.4 goals/game in modern MLS
 # (slightly higher than NCAA soccer's 1.5/game prior because pro-level
@@ -115,6 +140,39 @@ def _http_get(url: str, timeout: float = 15.0, **params: Any) -> Optional[Any]:
         # message even though `url` here is the bare base. See #156.
         logger.warning("[mls_standings] %s failed: %s", redact_secrets(url), redact_secrets(exc))
         return None
+
+
+def _fetch_scoreboard_range(start: date, end: date) -> List[Dict[str, Any]]:
+    """Every ESPN MLS scoreboard event with a kickoff in [start, end].
+
+    One HTTP call for the whole window (see SCOREBOARD_EVENT_LIMIT for
+    why the `limit` param is mandatory). Returns [] on any failure, which
+    the callers treat as "no games" rather than an error: a refresh that
+    can't reach ESPN emits nothing instead of a wrong signal.
+    """
+    if end < start:
+        return []
+    window = f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
+    data = _http_get(
+        f"{ESPN_SCOREBOARD_BASE}/scoreboard",
+        timeout=30.0,
+        dates=window,
+        limit=SCOREBOARD_EVENT_LIMIT,
+    )
+    if not isinstance(data, dict):
+        return []
+    events = data.get("events") or []
+    if len(events) >= SCOREBOARD_EVENT_LIMIT:
+        # Only symptom ESPN gives for a truncated page. A full MLS season
+        # is ~511 events, so hitting the limit means either the window grew
+        # or ESPN changed its paging: say so rather than silently modeling
+        # a partial season.
+        logger.warning(
+            "[mls_standings] scoreboard dates=%s returned %d events, at the "
+            "requested limit of %d: the result may be truncated",
+            window, len(events), SCOREBOARD_EVENT_LIMIT,
+        )
+    return events
 
 
 # `_team_canonical_name` is imported from mls.py: both modules need
@@ -185,7 +243,7 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
     """Shared logic for MlsEastSource / MlsWestSource. Subclasses set
     `_conference` ("East" | "West") and the matching
     `league_context_code` ("MLS_EAST" | "MLS_WEST"). Everything else:
-    the standings fetch, the per-day scoreboard sweep, the 3 / 1 / 0
+    the standings fetch, the scoreboard range sweep, the 3 / 1 / 0
     `_record_result_into_state` override: is shared here.
     """
 
@@ -313,9 +371,7 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Emit upcoming games where the HOME team is in this conference.
         Cross-conf away games surface via the home team's source so the
-        UI emit doesn't double-count. Per-day sweep mirrors ncaa_soccer
-        / ncaa_baseball patterns (ESPN's date-range syntax silently
-        caps at 25 events).
+        UI emit doesn't double-count.
         """
         own_conf = self._own_conf_teams()
         if not own_conf:
@@ -324,58 +380,66 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: Set[Any] = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(
-                f"{ESPN_SCOREBOARD_BASE}/scoreboard",
-                dates=day.strftime("%Y%m%d"),
-            )
-            if not isinstance(data, dict):
+        for event in _fetch_scoreboard_range(
+            today, today + timedelta(days=days_ahead),
+        ):
+            rec = _extract_game_record(event)
+            if rec is None:
                 continue
-            for event in data.get("events") or []:
-                rec = _extract_game_record(event)
-                if rec is None:
-                    continue
-                eid = rec.get("id")
-                if eid in seen_ids:
-                    continue
-                home = rec["home"]
-                if home not in own_conf:
-                    continue
-                # Skip non-regular-season games for V1. MLS Cup playoff
-                # bracket is filed under issue #30 part B; until it lands,
-                # postseason MLS games should not be emitted here: they
-                # would get importance computed against regular-season
-                # bands, inflating their score.
-                if rec.get("season_slug") != REGULAR_SEASON_SLUG:
-                    continue
-                seen_ids.add(eid)
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=home,
-                    away=rec["away"],
-                    rank_home=None,
-                    rank_away=None,
-                    start_time=start,
-                    closeness=self._lookup_closeness(
-                        closeness_map, home, rec["away"],
-                    ),
-                    extra={
-                        "espn_event_id": eid,
-                        "fd_competition_code": self.league_context_code,
-                        "season_slug": rec.get("season_slug"),
-                    },
-                ))
+            eid = rec.get("id")
+            if eid in seen_ids:
+                continue
+            home = rec["home"]
+            if home not in own_conf:
+                continue
+            # Skip non-regular-season games for V1. MLS Cup playoff
+            # bracket is filed under issue #30 part B; until it lands,
+            # postseason MLS games should not be emitted here: they
+            # would get importance computed against regular-season
+            # bands, inflating their score.
+            if rec.get("season_slug") != REGULAR_SEASON_SLUG:
+                continue
+            seen_ids.add(eid)
+            start = rec.get("start_time")
+            if start is None:
+                continue
+            out.append(GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=home,
+                away=rec["away"],
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                closeness=self._lookup_closeness(
+                    closeness_map, home, rec["away"],
+                ),
+                extra={
+                    "espn_event_id": eid,
+                    # Same ESPN event id under the key the importance
+                    # simulator uses for match identity. DO NOT drop
+                    # this in favour of `espn_event_id` alone:
+                    # `PointsBasedSportSource.apply_result` records
+                    # `extra["game_id"]` into `_applied` and
+                    # `remaining_matches` filters on it, so a target
+                    # row without `game_id` is invisible to the
+                    # target-match dedup and gets simulated TWICE per
+                    # season the moment the fixture pool holds a
+                    # date-less row (#65). `espn_event_id` stays for
+                    # the cache.json consumers already reading it.
+                    "game_id": eid,
+                    "fd_competition_code": self.league_context_code,
+                    "season_slug": rec.get("season_slug"),
+                },
+            ))
         return out
 
     # ---------- _fetch_full_season_games (importance side) ----------
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
-        """Day-by-day sweep across Feb 1 - Nov 30 of `season_year`.
+        """The WHOLE season, Feb 1 - Nov 30 of `season_year`: finished
+        games AND every published future fixture.
+
         Filters to INTRA-CONFERENCE regular-season games only: the
         simulator's `_teams` dict then never picks up out-of-conference
         teams (which would get the wrong threshold bands applied in
@@ -385,6 +449,18 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         team per season vs ~34 total games per team). The accuracy hit
         on Poisson lambda estimates is small; the alternative of
         pollution of terminal_outcomes is structurally wrong.
+
+        DO NOT clamp the window to the near future the way `fetch_upcoming`
+        does. This is the importance path, not the emit path: the
+        simulator projects each season to its END, so it needs every
+        remaining fixture, not the ones about to kick off. An earlier
+        version stopped at `now + 7 days` and was the direct cause of
+        MLS importance reading ~0 all season (#65) -- with one week of
+        fixtures left to play, no Monte Carlo run can separate a bubble
+        team's final standing from any other, so tau-c collapsed to 0 on
+        every band. Measured live 2026-08-15 mid-season: the 7-day clamp
+        yielded 15 remaining Eastern-Conference fixtures against the 95
+        ESPN had actually published.
         """
         own_conf = self._own_conf_teams()
         if not own_conf:
@@ -397,32 +473,20 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         season_end = (datetime(
             self.season_year, SEASON_END_MONTH + 1, 1, tzinfo=timezone.utc
         ).date()) - timedelta(days=1)
-        now = datetime.now(timezone.utc).date()
-        end = min(now + timedelta(days=7), season_end)
-        if end < season_start:
-            return []
-        day = season_start
-        while day <= end:
-            data = _http_get(
-                f"{ESPN_SCOREBOARD_BASE}/scoreboard",
-                dates=day.strftime("%Y%m%d"),
-            )
-            if isinstance(data, dict):
-                for event in data.get("events") or []:
-                    rec = _extract_game_record(event)
-                    if rec is None or rec["id"] is None:
-                        continue
-                    if rec["id"] in seen:
-                        continue
-                    # Intra-conference regular season only.
-                    if rec.get("season_slug") != REGULAR_SEASON_SLUG:
-                        continue
-                    if rec["home"] not in own_conf:
-                        continue
-                    if rec["away"] not in own_conf:
-                        continue
-                    seen[rec["id"]] = rec
-            day += timedelta(days=1)
+        for event in _fetch_scoreboard_range(season_start, season_end):
+            rec = _extract_game_record(event)
+            if rec is None or rec["id"] is None:
+                continue
+            if rec["id"] in seen:
+                continue
+            # Intra-conference regular season only.
+            if rec.get("season_slug") != REGULAR_SEASON_SLUG:
+                continue
+            if rec["home"] not in own_conf:
+                continue
+            if rec["away"] not in own_conf:
+                continue
+            seen[rec["id"]] = rec
         return list(seen.values())
 
     # ---------- sample_result (allows draws: soccer rules) ----------
