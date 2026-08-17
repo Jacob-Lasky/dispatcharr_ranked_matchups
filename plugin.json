@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.19.1",
+  "version": "1.20.0",
   "description": "Never miss a good game. Scores every upcoming game across 37 leagues, tours and competitions (20 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -590,9 +590,9 @@
       "id": "gamethumbs_base_url",
       "type": "string",
       "label": "game-thumbs base URL",
-      "default": "https://game-thumbs.tickarr.com",
+      "default": "",
       "placeholder": "https://game-thumbs.tickarr.com",
-      "help_text": "Second source for per-matchup logos, used only when TheSportsDB has no thumbnail for a game. game-thumbs (https://github.com/sethwv/game-thumbs) composites the two teams' crests on demand, so it covers leagues SportsDB never indexed a graphic for (MLS, Brazilian Serie A, NCAA soccer and more). Leave blank to disable this tier and go straight to the league badge. The public instance above is rate-limited to 30 requests/minute, which the plugin paces under and retries once on; self-host ghcr.io/sethwv/game-thumbs and point this at it to remove that limit. Requires 'Per-matchup channel logos' to be on."
+      "help_text": "OPTIONAL second source for per-matchup logos, used only when TheSportsDB has no thumbnail for a game. Blank (the default) means this tier is OFF and the plugin makes NO request to any third party: a game with no SportsDB thumbnail falls straight through to the league/tournament badge. Turning it on points your instance at a third-party service, which then sees which fixtures you curate and whose uptime your logos depend on — so the recommended way to use this is to self-host: `docker run -d -p 3000:3000 ghcr.io/sethwv/game-thumbs:latest` and put your own URL here. The public instance https://game-thumbs.tickarr.com also works and is rate-limited to 30 requests/minute, which the plugin paces under and retries once on. What you gain: game-thumbs composites the two teams' crests on demand, so it covers leagues SportsDB never indexed a graphic for (MLS, Brazilian Serie A, NCAA soccer). Measured on a live slate, it took a curated list from 6 real matchup images out of 23 to 23 out of 23. Requires 'Per-matchup channel logos' to be on."
     },
     {
       "id": "widen_stream_pool",

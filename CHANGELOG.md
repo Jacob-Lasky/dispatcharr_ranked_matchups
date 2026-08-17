@@ -5,6 +5,36 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-08-17
+
+### Changed
+
+- **The game-thumbs logo tier is now OPT-IN and off by default.** 1.19.0 shipped
+  `game-thumbs base URL` defaulting to the vendor's public instance, which opted
+  every installation into a third-party service that then sees which fixtures the
+  user curates and whose uptime their guide's logos depend on. Nobody chose that;
+  it was a default. A capability worth having is not a dependency worth imposing.
+
+  The default is now blank, which disables the tier outright: no HTTP is issued
+  to anyone, and a game with no SportsDB thumbnail falls straight through to the
+  league/tournament badge exactly as it did before 1.19.0.
+
+  Nothing is removed. The 30 verified league slugs, the 27 alias mappings, the
+  rate-limit pacing and the ~80 tests all remain, and the tier works the moment a
+  base URL is set. **Self-hosting is the recommended way in**
+  (`ghcr.io/sethwv/game-thumbs`), since it also escapes the public instance's
+  30 requests/minute cap. The public URL is still recorded in the help text and
+  as `gamethumbs.PUBLIC_INSTANCE_URL` for anyone who deliberately opts into it.
+
+  What it costs when off, measured on a live 23-game slate: 6 channels keep a
+  real SportsDB matchup thumbnail and the other 17 show a league badge, instead
+  of all 23 showing a real per-game image. That trade is the user's to make, not
+  the plugin's.
+
+  Four new tests assert the default cannot drift back on, including one that
+  fails if the default base URL ever reaches the network.
+
+
 ## [1.19.1] - 2026-08-17
 
 ### Fixed

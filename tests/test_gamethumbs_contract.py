@@ -89,10 +89,14 @@ class TestSettingsSurface:
             f for f in fields if f.get("id") == "gamethumbs_base_url"
         )["default"]
         src = open(os.path.join(REPO_ROOT, "gamethumbs.py"), encoding="utf-8").read()
-        module_default = re.search(
-            r'^DEFAULT_BASE_URL\s*=\s*"([^"]+)"', src, re.M,
-        ).group(1)
-        assert declared == module_default
+        # `*` not `+`: the shipped default is deliberately the EMPTY string (the
+        # tier is opt-in), and a `+` here made this test fail on the very change
+        # that turned it off. The regex must be able to express the real value.
+        m = re.search(r'^DEFAULT_BASE_URL\s*=\s*"([^"]*)"', src, re.M)
+        assert m is not None, "DEFAULT_BASE_URL not found as a plain string literal"
+        assert declared == m.group(1)
+        # And pin the intent, so a future edit has to change this line knowingly.
+        assert declared == "", "the shipped default must keep the tier off"
 
     def test_setting_is_read_by_apply(self, apply_src):
         assert 'settings.get("gamethumbs_base_url"' in apply_src
