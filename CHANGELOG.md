@@ -5,6 +5,29 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.19.1] - 2026-08-17
+
+### Fixed
+
+- **The SportsDB API key no longer reaches a log call at all.** `_http_get_json`
+  logged `redact_secrets(url)`, and SportsDB carries the key as a PATH SEGMENT,
+  so the URL is key-bearing by construction. The redaction was working, so this
+  was not a live leak — but the safety depended on the redactor staying correct,
+  and neither a reader nor a static analyser can confirm that from the call site.
+  CodeQL's `py/clear-text-logging-sensitive-data` flagged exactly this shape and
+  blocked the 1.19.0 listing in `Dispatcharr/Plugins`.
+
+  `_http_get_json` now takes a STATIC endpoint label (`"searchevents"` /
+  `"lookupleague"`) and logs that instead, so the key has no path to the log.
+  An exception object still goes through the redactor, because urllib's
+  `HTTPError` stringifies the request URL and that cannot be restructured away.
+
+  This is a preventive/structural change: 0 tests witness a defect (there was
+  none), 3 guard the property, and the one that fails under the structural
+  mutation is `test_call_sites_pass_a_static_label`, which asserts both call
+  sites pass a literal.
+
+
 ## [1.19.0] - 2026-08-15
 
 ### Added

@@ -618,3 +618,65 @@ class TestSweepAcrossProviderExtensions:
             f.write_bytes(b"x")
         assert logos.sweep_stale_logo_files({live}, logo_dir=str(tmp_path)) == 0
         assert jpg.exists() and png.exists()
+
+
+class TestApiKeyNeverReachesTheLog:
+    """The SportsDB key is a PATH SEGMENT, so a composed URL is key-bearing.
+
+    Regression guard for the CodeQL finding that blocked v1.19.0's listing
+    (py/clear-text-logging-sensitive-data). The previous code logged
+    redact_secrets(url); this asserts the URL never reaches the log call at all,
+    which is the property a reader and an analyser can both verify locally.
+    """
+
+    SECRET = "SUPERSECRETKEY123"
+
+    def _capture(self, monkeypatch, exc):
+        """Run _http_get_json against a failing request, return everything logged."""
+        records = []
+
+        def _fake_debug(msg, *args, **kwargs):
+            try:
+                records.append(msg % args)
+            except Exception:
+                records.append(" ".join(str(a) for a in (msg,) + args))
+
+        monkeypatch.setattr(logos.logger, "debug", _fake_debug)
+        monkeypatch.setattr(logos.logger, "warning", _fake_debug)
+
+        def _boom(req, timeout=None):
+            raise exc
+
+        monkeypatch.setattr(logos.urllib.request, "urlopen", _boom)
+        url = f"https://www.thesportsdb.com/api/v1/json/{self.SECRET}/searchevents.php?e=x"
+        assert logos._http_get_json(url, "searchevents") is None
+        return "\n".join(records)
+
+    def test_key_absent_from_log_on_network_error(self, monkeypatch):
+        out = self._capture(monkeypatch, OSError("connection reset"))
+        assert self.SECRET not in out, out
+        assert "searchevents" in out  # the static label IS logged
+
+    def test_key_absent_from_log_when_exception_embeds_the_url(self, monkeypatch):
+        # urllib's HTTPError stringifies the request URL, which is the case the
+        # redactor still has to handle.
+        exc = logos.urllib.error.HTTPError(
+            f"https://www.thesportsdb.com/api/v1/json/{self.SECRET}/searchevents.php",
+            500, "Server Error", None, None,
+        )
+        out = self._capture(monkeypatch, exc)
+        assert self.SECRET not in out, out
+
+    def test_call_sites_pass_a_static_label(self):
+        # A label built from the url would defeat the whole point, so assert the
+        # arguments at both call sites are literal strings.
+        import ast
+        src = open(os.path.join(REPO_ROOT, "logos.py"), encoding="utf-8").read()
+        labels = []
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "_http_get_json"):
+                assert len(node.args) == 2, ast.dump(node)
+                assert isinstance(node.args[1], ast.Constant), ast.dump(node.args[1])
+                labels.append(node.args[1].value)
+        assert sorted(labels) == ["lookupleague", "searchevents"], labels
