@@ -178,12 +178,21 @@ class MlsSource(SportSource):
         all upcoming matches for this league; ESPN gives the schedule,
         Odds API gives the moneyline market.
 
-        ESPN's scoreboard range syntax (`dates=YYYYMMDD-YYYYMMDD`)
-        silently caps at 25 events. MLS has fewer games per day than
-        NBA, so daily iteration is overkill (a single range call
-        would usually return everything), but per-day matches the
-        pattern from ncaa_baseball.py / nba.py and stays safe across
-        playoff-week clusters.
+        The per-day loop is here because ESPN's scoreboard range syntax
+        (`dates=YYYYMMDD-YYYYMMDD`) truncates silently. The cap is NOT
+        25, though, and it is not fixed: it is an unstated page size,
+        and passing an explicit `limit` lifts it. Measured live
+        2026-08-15 on `soccer/usa.1` over the whole 2026 season window:
+        the bare range returned 100 events, `&limit=1000` returned 511,
+        and 303 per-day calls returned the same 511 with identical ids
+        and kickoff times (see mls_standings.SCOREBOARD_EVENT_LIMIT).
+
+        This lookahead is at most 8 days of MLS fixtures (~30 events),
+        so the per-day loop is not WRONG here, just ~8x the calls it
+        needs. Left as-is deliberately: this class is the base for
+        NwslSource / LigaMxSource, whose event volumes have not been
+        measured, and #65 only needed the fix on the importance path.
+        The same stale 25-event claim is repeated across ~11 sources.
         """
         closeness_by_pair = self._fetch_closeness()
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple
 
@@ -562,3 +562,141 @@ class TestSameMatch:
         b = GameRow(sport_prefix="X", sport_label="X", home="A", away="C",
                     rank_home=None, rank_away=None, start_time=base, extra={"fd_id": 2})
         assert simulation._same_match(a, b) is False
+
+    def test_same_game_id_beats_differing_start_time(self):
+        """`game_id` is the identity key every PointsBasedSportSource and
+        BracketSource writes on the rows it returns from
+        `remaining_matches`. Two rows carrying the SAME game_id are the
+        same fixture even when their start_time disagrees, which happens
+        the moment a source emits a fixture whose date the upstream feed
+        hasn't published (see points_based.remaining_matches' 2099-01-01
+        sentinel). Identity must not fall through to the date tuple here.
+        """
+        real = datetime(2026, 9, 30, tzinfo=timezone.utc)
+        sentinel = datetime(2099, 1, 1, tzinfo=timezone.utc)
+        a = GameRow(sport_prefix="X", sport_label="X", home="A", away="B",
+                    rank_home=None, rank_away=None, start_time=real,
+                    extra={"game_id": "g1"})
+        b = GameRow(sport_prefix="X", sport_label="X", home="A", away="B",
+                    rank_home=None, rank_away=None, start_time=sentinel,
+                    extra={"game_id": "g1"})
+        assert simulation._same_match(a, b) is True
+
+    def test_different_game_id_same_pairing_not_same(self):
+        """Distinct game_ids are distinct fixtures even for an identical
+        (home, away, start_time) tuple: a double-header or a rescheduled
+        replay must still be simulated twice."""
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        a = GameRow(sport_prefix="X", sport_label="X", home="A", away="B",
+                    rank_home=None, rank_away=None, start_time=base,
+                    extra={"game_id": "g1"})
+        b = GameRow(sport_prefix="X", sport_label="X", home="A", away="B",
+                    rank_home=None, rank_away=None, start_time=base,
+                    extra={"game_id": "g2"})
+        assert simulation._same_match(a, b) is False
+
+
+# ---------- target-match double-simulation regression (#65) ----------
+
+@dataclass
+class _GameIdSentinelSource(FakeSource):
+    """FakeSource variant shaped like a PointsBasedSportSource whose
+    upstream feed has not published every fixture date.
+
+    Two differences from FakeSource, both taken from
+    `sources/points_based.py`:
+      - rows are keyed by `game_id`, not `fd_id`;
+      - `remaining_matches` hands back rows stamped with the far-future
+        2099-01-01 sentinel that `points_based.remaining_matches`
+        substitutes for a missing `start_time`.
+
+    The target match arrives from `fetch_upcoming` carrying its REAL
+    kickoff, so the (home, away, start_time) tuple no longer identifies
+    it. Every application is recorded in `applied_ids` so a test can
+    count how many times the simulator played the target.
+    """
+    applied_ids: List[Any] = field(default_factory=list)
+
+    _SENTINEL = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+    def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
+        applied = state.get("_applied", frozenset())
+        return [
+            replace(m, start_time=self._SENTINEL)
+            for m in self.all_matches
+            if m.extra.get("game_id") not in applied
+        ]
+
+    def apply_result(self, state, match, result):
+        gid = match.extra.get("game_id")
+        # Record BEFORE the _applied guard so a second application of an
+        # already-applied game is visible to the test rather than silently
+        # collapsing into the frozenset.
+        self.applied_ids.append(gid)
+        new_state = FakeSource.apply_result(self, state, match, result)
+        if gid is not None:
+            new_state["_applied"] = state.get("_applied", frozenset()) | {gid}
+        return new_state
+
+
+def _make_sentinel_round_robin() -> Tuple[_GameIdSentinelSource, GameRow]:
+    """Same 4-team round-robin as `_make_round_robin`, re-keyed onto
+    `game_id`, plus a target match that carries its real kickoff."""
+    source, fd_target = _make_round_robin()
+    matches = [
+        replace(m, extra={"game_id": m.extra["fd_id"]})
+        for m in source.all_matches
+    ]
+    sentinel_source = _GameIdSentinelSource(
+        all_matches=matches,
+        strengths_map=source.strengths_map,
+        teams=source.teams,
+    )
+    # The target as the scorer sees it: real kickoff, same game_id.
+    target = replace(
+        matches[2], start_time=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    assert target.start_time != fd_target.start_time
+    return sentinel_source, target
+
+
+class TestTargetMatchNotSimulatedTwice:
+    """#65: a source that emits date-less (sentinel-dated) fixtures must
+    not cause the target match to be simulated twice.
+
+    `monte_carlo_importance` samples the target FIRST, applies it, then
+    drains `remaining_matches` minus the target. If `_same_match` can't
+    recognise the target in that list, the target is played a second time
+    with an independently sampled result, and the contingency table is
+    built from a season the recorded W/D/L row does not describe. That
+    silently corrupts the importance number rather than failing loudly.
+    """
+
+    def test_single_sim_applies_target_exactly_once(self):
+        source, target = _make_sentinel_round_robin()
+        simulation.monte_carlo_importance(
+            source, target, "Alpha", "champion",
+            n_sims=1, rng=random.Random(7),
+        )
+        target_id = target.extra["game_id"]
+        assert source.applied_ids.count(target_id) == 1, (
+            "target match applied "
+            f"{source.applied_ids.count(target_id)} times in one sim; "
+            "expected exactly 1 (see #65: sentinel-dated remaining "
+            "fixtures break (home, away, start_time) identity)"
+        )
+        # Sanity: the rest of the season still drained exactly once each.
+        assert sorted(source.applied_ids) == [1, 2, 3, 4, 5, 6]
+
+    def test_batch_single_sim_applies_target_exactly_once(self):
+        source, target = _make_sentinel_round_robin()
+        simulation.monte_carlo_importance_batch(
+            source, target, queries=[("Alpha", "champion")],
+            n_sims=1, rng=random.Random(7),
+        )
+        target_id = target.extra["game_id"]
+        assert source.applied_ids.count(target_id) == 1, (
+            "target match applied "
+            f"{source.applied_ids.count(target_id)} times in one sim; "
+            "expected exactly 1"
+        )
