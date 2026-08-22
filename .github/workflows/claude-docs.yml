@@ -1,0 +1,126 @@
+name: Auto-Document PR
+
+# Keeps README/CLAUDE.md/docs/skills markdown in sync with code changes.
+#
+# Architecture: PREVENTION, not detection. Claude gets read tools plus
+# Edit/Write scoped to **/*.md only — no shell, no git. After it finishes,
+# a trusted step asserts HEAD did not move, validates every worktree change
+# (unstaged, staged, untracked; NUL-delimited so odd filenames can't hide),
+# and only then commits and pushes. A non-markdown change aborts the job
+# before anything is pushed. Claude never holds push credentials, so the
+# forgeable-author / force-push / --output=file escape hatches a git-capable
+# agent would have are structurally absent.
+#
+# The push uses the job's GITHUB_TOKEN, and GITHUB_TOKEN pushes do not
+# trigger workflows: no self-retrigger loop, and no CI re-run on the
+# markdown-only docs commit.
+#
+# Runs once per PR lifecycle event (opened / ready_for_review / reopened),
+# not on every push. To refresh docs after later pushes, use "Re-run jobs":
+# checkout is by branch name, so a re-run diffs the CURRENT branch tip.
+#
+# Actions are pinned to reviewed commit SHAs (claude-code-action v1.0.199,
+# checkout v6) because a moving tag is incompatible with a hard boundary.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, reopened]
+
+jobs:
+  docs:
+    # Skip drafts (the pass lands at ready_for_review), bot-opened PRs, and
+    # fork PRs (no secret access, and the base token cannot push to a fork).
+    if: >-
+      ${{ !endsWith(github.actor, '[bot]') &&
+          github.event.pull_request.draft == false &&
+          github.event.pull_request.head.repo.full_name == github.repository }}
+    concurrency:
+      group: claude-docs-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Prepare PR diff and record starting SHA
+        id: prep
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch origin "$BASE_REF"
+          echo "start_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git diff "origin/$BASE_REF...HEAD" > "$RUNNER_TEMP/pr.diff"
+          wc -c "$RUNNER_TEMP/pr.diff"
+
+      - name: Update documentation with Claude
+        uses: anthropics/claude-code-action@dcb57747bfceeaa1fa72638cae52295d1d853d4a # v1.0.199
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            You are updating documentation for a pull request. The full diff of
+            this PR (branch vs base) is in the file ${{ runner.temp }}/pr.diff —
+            Read that file first.
+
+            Determine whether any documentation in this repository is now stale
+            or missing given those changes: README.md, CLAUDE.md, anything under
+            docs/, and skill files (skills/**, SKILL.md).
+
+            - Edit ONLY markdown (.md) files. You have no shell and no git in
+              this session: do not attempt to run commands, stage, commit, or
+              push. The workflow validates and commits your file edits after
+              you finish.
+            - Keep edits surgical: update what the diff made stale, add what it
+              made necessary. Do not rewrite unrelated sections or restructure
+              documents.
+            - If the documentation is already accurate, change nothing and say so.
+          claude_args: >-
+            --model claude-opus-5
+            --allowedTools "Read,Glob,Grep,Edit(**/*.md),Write(**/*.md)"
+            --disallowedTools "Bash"
+
+      - name: Validate markdown-only changes, then commit and push
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          START_SHA: ${{ steps.prep.outputs.start_sha }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" != "$START_SHA" ]; then
+            echo "::error::HEAD moved during the Claude step; refusing to continue."
+            exit 1
+          fi
+          validate() {
+            local f bad=0
+            while IFS= read -r -d '' f; do
+              case "$f" in
+                *.md) ;;
+                *) echo "::error::Non-markdown change blocked: $f"; bad=1 ;;
+              esac
+            done
+            return "$bad"
+          }
+          { git diff --name-only -z
+            git diff --cached --name-only -z
+            git ls-files --others --exclude-standard -z
+          } | validate
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Documentation already accurate; nothing to commit."
+            exit 0
+          fi
+          git add -A
+          git diff --cached --name-only -z | validate
+          git config user.name "claude-docs"
+          git config user.email "claude-docs@noreply.github.com"
+          git commit \
+            -m "docs: sync documentation with PR #$PR_NUM changes" \
+            -m "Generated by the Auto-Document PR workflow (claude-docs.yml)."
+          git push origin "HEAD:refs/heads/$BRANCH"
