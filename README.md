@@ -3,7 +3,7 @@
 **Never miss a good game.**
 
 A [Dispatcharr](https://github.com/dispatcharr/dispatcharr) plugin that watches
-37 leagues, tours and competitions (20 of them soccer, plus NFL, NBA, MLB, NHL,
+39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL,
 NCAA, UFC, boxing, tennis, golf and motorsport), scores every upcoming game on
 **interestingness**, and curates the best of them into a single "Top Matchups"
 group, with the WHY shown directly in each channel's EPG description.
@@ -17,7 +17,7 @@ you can tune:
 | `favorite` | One of YOUR favorite teams is playing | 6.0 (flat) |
 | `close_game` | Coinflip-ness in [0, 1] — soccer uses devigged h2h moneylines, NCAAF/NCAAM normalize point spread | 3.0 |
 | `importance` | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands. Soccer leagues: title / UCL / Europa / relegation / promotion. UCL knockouts: round_of_16 → quarterfinal → semifinal → final → winner. NCAAF / NCAAM: win-count bands (bowl_eligible / 10+ / 11+; 15+ / 20+ / 25+). NHL: standings-point bands (95+ bubble / 100+ secured / 110+ division / 125+ Presidents'); Stanley Cup Playoffs: R2 → Conf Final → Cup Final → Champion. Locked outcomes contribute 0; uncertainty drives leverage. | 3.0 |
-| `tournament_stage` | Knockout cup game (R16, QF, SF, F) | 1.5 |
+| `tournament_stage` | Knockout cup game (R16, QF, SF, F). Domestic-cup early rounds (EFL Cup, FA Cup) have their own lower band ramping to just under the quarterfinal, so a second-round tie sorts below a marquee league game | 1.5 |
 | `rivalry` | Known rivalry game, from the bundled `rivalries.json` | 2.0 (flat) |
 | `narrative` | LLM-judged narrative bonus (off by default) | 0.0 |
 
