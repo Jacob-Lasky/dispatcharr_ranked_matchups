@@ -9,6 +9,8 @@ import pytest
 
 from dispatcharr_ranked_matchups.sources import (
     ClubFriendliesSource,
+    EflCupSource,
+    FaCupSource,
     InternationalFriendliesSource,
     KnockoutSoccerSource,
     NcaafSource,
@@ -10243,7 +10245,7 @@ def _friendly_event(eid, home, away, *, hours_from_now=2.0, completed=False):
     """One ESPN scoreboard event, shaped exactly like the live API returns.
 
     `hours_from_now` is RELATIVE, never a hardcoded calendar date. The sweep
-    drops fixtures that kicked off more than `_MAX_AGE_AFTER_KICKOFF` ago, so a
+    drops fixtures that kicked off more than `_espn.MAX_AGE_AFTER_KICKOFF` ago, so a
     hardcoded date is a time bomb: these fixtures originally carried literal
     2026-05-31 / 2026-06-09 timestamps, which silently aged into "8 weeks in
     the past" and would now be filtered out. Keep every fixture relative.
@@ -10517,7 +10519,7 @@ class TestFriendliesSweepWindow:
 
     Reaching backwards has a cost the sweep must pay for: ESPN's status lag
     leaves finished matches tagged SCHEDULED, so the window also needs a floor
-    (_MAX_AGE_AFTER_KICKOFF). Both halves are pinned here.
+    (`_espn.MAX_AGE_AFTER_KICKOFF`). Both halves are pinned here.
     """
 
     def test_sweep_starts_one_day_before_today_utc(self, monkeypatch):
@@ -10566,7 +10568,7 @@ class TestFriendliesSweepWindow:
 
     def test_drops_a_stale_game_espn_never_marked_finished(self, monkeypatch):
         # The cost of reaching backwards. A match that kicked off well past
-        # _MAX_AGE_AFTER_KICKOFF cannot still be running, so a SCHEDULED tag on
+        # _espn.MAX_AGE_AFTER_KICKOFF cannot still be running, so a SCHEDULED tag on
         # it is ESPN lag, not a live game. Keeping it would seat a finished
         # match in the guide as "upcoming", and because channels are numbered
         # by kickoff time it would sort to the very top.
@@ -10584,3 +10586,461 @@ class TestFriendliesSweepWindow:
         rows = InternationalFriendliesSource(gender="m").fetch_upcoming(
             days_ahead=0)
         assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# English domestic cups (EFL Cup / FA Cup). ESPN-backed, non-simulating.
+# See sources/english_cup.py and #190.
+# ---------------------------------------------------------------------------
+
+def _cup_event(eid, home, away, season_slug, *, hours_from_now=2.0,
+               completed=False):
+    """One ESPN cup scoreboard event, shaped from the REAL payload.
+
+    Captured live from
+    `soccer/eng.league_cup/scoreboard?dates=20260826` on 2026-08-26, which
+    returned Charlton Athletic at Tottenham Hotspur with
+    `season = {"year": 2026, "type": 14283, "slug": "second-round"}` and
+    `team.location == team.name == team.displayName` on both competitors.
+
+    `hours_from_now` is RELATIVE, never a hardcoded calendar date: the sweep
+    drops fixtures older than `MAX_AGE_AFTER_KICKOFF`, so a literal date is a
+    time bomb that silently ages into "filtered out". Same rule as
+    `_friendly_event` above.
+    """
+    when = datetime.now(timezone.utc) + timedelta(hours=hours_from_now)
+    return {
+        "id": eid,
+        "date": when.strftime("%Y-%m-%dT%H:%MZ"),
+        "name": f"{away} at {home}",
+        "season": {"year": 2026, "type": 14283, "slug": season_slug},
+        "competitions": [{
+            "status": {"type": {"completed": completed,
+                                "state": "post" if completed else "pre"}},
+            "competitors": [
+                {"homeAway": "home", "score": "2" if completed else None,
+                 "team": {"location": home, "name": home,
+                          "displayName": home}},
+                {"homeAway": "away", "score": "1" if completed else None,
+                 "team": {"location": away, "name": away,
+                          "displayName": away}},
+            ],
+        }],
+    }
+
+
+def _patch_cup_http_per_bucket(monkeypatch, buckets):
+    """Stub english_cup's requests.get so each successive `dates=` bucket gets
+    its OWN payload, rather than every bucket receiving the same events.
+
+    Needed because the interesting dedupe defects are about DISAGREEMENT
+    between two buckets carrying the same event, which a stub that serves one
+    identical response to every date cannot express. `buckets` is a list of
+    event-lists, applied in sweep order; requests past the end get [].
+    """
+    from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
+
+    calls = {"n": 0}
+
+    class FakeResp:
+        def __init__(self, events): self._events = events
+        status_code = 200
+        def json(self): return {"events": self._events}
+
+    def _get(url, *a, **kw):
+        i = calls["n"]
+        calls["n"] += 1
+        return FakeResp(buckets[i] if i < len(buckets) else [])
+
+    monkeypatch.setattr(cup_mod.requests, "get", _get)
+    return calls
+
+
+def _patch_cup_http(monkeypatch, events):
+    """Stub english_cup's requests.get to serve `events` for every date bucket.
+    Returns the list of `dates=` values asked for, so a caller can assert on
+    the sweep window as well as on the rows."""
+    from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
+
+    requested_dates = []
+
+    class FakeResp:
+        status_code = 200
+        def json(self): return {"events": events}
+
+    def _get(url, *a, **kw):
+        requested_dates.append(url.split("dates=")[1])
+        return FakeResp()
+
+    monkeypatch.setattr(cup_mod.requests, "get", _get)
+    return requested_dates
+
+
+class TestEnglishCupSourcesShape:
+    def test_implement_interface(self):
+        assert issubclass(EflCupSource, SportSource)
+        assert issubclass(FaCupSource, SportSource)
+
+    def test_do_not_claim_importance_support(self):
+        # A cup has no league table to threshold against, ESPN publishes the
+        # bracket one day at a time, and the EFL Cup semifinal is two legs
+        # while every other round is single-leg. All three would have to be
+        # solved before this could flip. See the module docstring.
+        assert EflCupSource().supports_importance is False
+        assert FaCupSource().supports_importance is False
+
+    def test_prefixes_and_labels(self):
+        assert EflCupSource().sport_prefix == "EFLCUP"
+        assert EflCupSource().sport_label == "EFL Cup"
+        assert FaCupSource().sport_prefix == "FACUP"
+        assert FaCupSource().sport_label == "FA Cup"
+
+    def test_efl_cup_prefix_is_not_the_championship_prefix(self):
+        """Regression guard. "EFL" is already the EFL CHAMPIONSHIP's prefix,
+        and rivalries.json plus logos.SPORTSDB_TOURNAMENT_LEAGUE_IDS are keyed
+        on sport_prefix, so reusing it would cross-wire the league and the cup.
+        """
+        champ = SOCCER_COMPETITIONS["championship"].sport_prefix
+        assert champ == "EFL"
+        assert EflCupSource().sport_prefix != champ
+
+    def test_espn_slugs(self):
+        assert EflCupSource()._espn_slug == "eng.league_cup"
+        assert FaCupSource()._espn_slug == "eng.fa"
+
+
+class TestEnglishCupRoundOrder:
+    """The two cups' round lists overlap by NAME but not by DEPTH, which is the
+    whole reason the map is per-competition."""
+
+    def test_efl_cup_has_a_preliminary_round_and_no_fifth_round(self):
+        slugs = [s for s, _ in EflCupSource()._rounds]
+        assert "preliminary-round" in slugs
+        assert "fifth-round" not in slugs
+
+    def test_fa_cup_has_a_fifth_round_and_no_preliminary_round(self):
+        slugs = [s for s, _ in FaCupSource()._rounds]
+        assert "fifth-round" in slugs
+        assert "preliminary-round" not in slugs
+
+    def test_both_cups_end_at_the_final(self):
+        for src in (EflCupSource(), FaCupSource()):
+            assert src._rounds[-1] == ("final", "FINAL")
+
+    def test_a_shared_slug_sits_at_different_depths(self):
+        """"fourth-round" is the EFL Cup's round of 16 (depth 4) and the FA
+        Cup's round of 32 (depth 3). A single shared slug->stage map would
+        score one of them as the other."""
+        assert EflCupSource()._round_index("fourth-round") == 4
+        assert FaCupSource()._round_index("fourth-round") == 3
+
+    def test_round_index_is_none_for_a_foreign_slug(self):
+        assert EflCupSource()._round_index("fifth-round") is None
+        assert FaCupSource()._round_index("preliminary-round") is None
+        assert EflCupSource()._round_index("group-stage") is None
+
+    def test_round_order_is_strictly_increasing_and_unique(self):
+        for src in (EflCupSource(), FaCupSource()):
+            slugs = [s for s, _ in src._rounds]
+            assert len(slugs) == len(set(slugs)), f"{src.sport_label} dupes"
+            assert [src._round_index(s) for s in slugs] == list(
+                range(len(slugs))
+            )
+
+
+class TestEnglishCupFetch:
+    def test_emits_the_motivating_fixture(self, monkeypatch):
+        """#190's actual case: Charlton Athletic at Tottenham Hotspur, EFL Cup
+        second round. Team names come through in the full form the favorites
+        list and the EPG titles use, NOT ESPN's lossy short form."""
+        _patch_cup_http(monkeypatch, [
+            _cup_event("401908140", "Tottenham Hotspur", "Charlton Athletic",
+                       "second-round"),
+        ])
+        rows = EflCupSource().fetch_upcoming(days_ahead=0)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.home == "Tottenham Hotspur"
+        assert row.away == "Charlton Athletic"
+        assert row.sport_prefix == "EFLCUP"
+        assert row.extra["stage"] == "CUP_R2"
+        assert row.extra["season_slug"] == "second-round"
+        assert row.extra["round_index"] == 2
+        assert row.extra["espn_event_id"] == "401908140"
+
+    def test_ranks_are_none_so_no_rank_gap_signal_fires(self, monkeypatch):
+        """Load-bearing: `scoring.score_game` awards rank points only when a
+        rank is present, so None-ranks are what stop a Premier-League-vs-League-
+        One tie being penalised for being lopsided. A cup's appeal IS the
+        mismatch. See the RANKS paragraph in the module docstring.
+
+        This asserts through the SCORER, not just on the source fields. An
+        earlier cut of this test only checked that the GameRow carried None
+        ranks, which is the premise rather than the claim: a scoring change
+        that started treating a None rank as "unranked opponent" would emit the
+        signal this test says is impossible, and the test would not have
+        noticed.
+        """
+        from dispatcharr_ranked_matchups.scoring import (
+            GameSignals, Weights, score_game,
+        )
+        _patch_cup_http(monkeypatch, [
+            _cup_event("e1", "Manchester City", "Bradford City",
+                       "third-round"),
+        ])
+        row = EflCupSource().fetch_upcoming(days_ahead=0)[0]
+        # The premise.
+        assert row.rank_home is None
+        assert row.rank_away is None
+        assert row.closeness is None
+        assert row.spread is None
+        # The actual claim: no rank-derived contribution reaches the breakdown.
+        res = score_game(GameSignals(
+            team_a=row.home, team_b=row.away,
+            rank_a=row.rank_home, rank_b=row.rank_away,
+            closeness=row.closeness, spread=row.spread,
+            tournament_stage=row.extra["stage"],
+        ), Weights())
+        assert "rank_pair" not in res.breakdown
+        assert "one_ranked" not in res.breakdown
+        assert "close_game" not in res.breakdown
+        # And the tie still earns its slot on the round alone, so a lopsided
+        # cup draw is neither penalised nor silently scoreless.
+        assert res.breakdown.get("tournament_stage", 0) > 0
+
+    def test_drops_finished_games(self, monkeypatch):
+        _patch_cup_http(monkeypatch, [
+            _cup_event("done", "Newcastle United", "West Bromwich Albion",
+                       "second-round", hours_from_now=-3.0, completed=True),
+        ])
+        assert EflCupSource().fetch_upcoming(days_ahead=0) == []
+
+    def test_drops_a_stale_game_espn_never_marked_finished(self, monkeypatch):
+        _patch_cup_http(monkeypatch, [
+            _cup_event("stale", "Preston North End", "Everton",
+                       "second-round", hours_from_now=-9.0),
+        ])
+        assert EflCupSource().fetch_upcoming(days_ahead=0) == []
+
+    def test_keeps_an_in_progress_game(self, monkeypatch):
+        """A tie that kicked off an hour ago and is not yet tagged FINISHED is
+        being played right now, which is exactly what a viewer wants surfaced."""
+        _patch_cup_http(monkeypatch, [
+            _cup_event("live", "Tottenham Hotspur", "Charlton Athletic",
+                       "second-round", hours_from_now=-1.0),
+        ])
+        assert len(EflCupSource().fetch_upcoming(days_ahead=0)) == 1
+
+    def test_drops_a_fixture_whose_round_this_cup_does_not_publish(
+            self, monkeypatch):
+        """A tie whose round can't be identified has no stage to score, so it
+        would land in the guide unlabelled. `fifth-round` is a real FA Cup slug
+        and NOT an EFL Cup one, which is the realistic version of this."""
+        _patch_cup_http(monkeypatch, [
+            _cup_event("foreign", "Arsenal", "Luton Town", "fifth-round"),
+            _cup_event("unknown", "Chelsea", "Wigan Athletic", "wildcard-tie"),
+            _cup_event("good", "Liverpool", "Southampton", "quarterfinals"),
+        ])
+        rows = EflCupSource().fetch_upcoming(days_ahead=0)
+        assert [r.extra["stage"] for r in rows] == ["QUARTER_FINALS"]
+
+    def test_fa_cup_maps_its_own_rounds(self, monkeypatch):
+        _patch_cup_http(monkeypatch, [
+            _cup_event("fa1", "Wrexham", "Yeovil Town", "fifth-round"),
+        ])
+        row = FaCupSource().fetch_upcoming(days_ahead=0)[0]
+        assert row.sport_prefix == "FACUP"
+        assert row.extra["stage"] == "CUP_R5"
+        assert row.extra["round_index"] == 4
+
+    def test_late_rounds_reuse_the_shared_knockout_labels(self, monkeypatch):
+        """QF / SF / Final genuinely ARE the same stage as a UEFA knockout
+        round, so they must emit the labels scoring.py already scores rather
+        than a parallel CUP_* set."""
+        _patch_cup_http(monkeypatch, [
+            _cup_event("qf", "Arsenal", "Brighton & Hove Albion",
+                       "quarterfinals"),
+            _cup_event("sf", "Liverpool", "Aston Villa", "semifinals"),
+            _cup_event("f", "Manchester City", "Tottenham Hotspur", "final"),
+        ])
+        stages = {r.extra["stage"]
+                  for r in EflCupSource().fetch_upcoming(days_ahead=0)}
+        assert stages == {"QUARTER_FINALS", "SEMI_FINALS", "FINAL"}
+
+    def test_sweep_reaches_one_day_back(self, monkeypatch):
+        """ESPN buckets by US Eastern date, so yesterday's bucket still holds
+        tonight's fixtures. Shared with the friendlies sweep; see
+        _espn.SCOREBOARD_LOOKBACK_DAYS."""
+        dates = _patch_cup_http(monkeypatch, [])
+        EflCupSource().fetch_upcoming(days_ahead=0)
+        yesterday = (datetime.now(timezone.utc).date()
+                     - timedelta(days=1)).strftime("%Y%m%d")
+        today = datetime.now(timezone.utc).date().strftime("%Y%m%d")
+        assert dates == [yesterday, today]
+
+    def test_dedupes_an_event_seen_in_two_buckets(self, monkeypatch):
+        """The lookback bucket overlaps the first forward bucket, and the stub
+        serves the same event for every date, so a missing dedupe shows up here
+        as one row per day swept."""
+        _patch_cup_http(monkeypatch, [
+            _cup_event("dupe", "Tottenham Hotspur", "Charlton Athletic",
+                       "second-round"),
+        ])
+        assert len(EflCupSource().fetch_upcoming(days_ahead=3)) == 1
+
+    def test_a_dropped_copy_does_not_suppress_the_good_copy(self, monkeypatch):
+        """The dedupe must claim an id only for an event it actually KEEPS.
+
+        The overlapping lookback bucket and the first forward bucket carry the
+        same event, and ESPN serves those two URLs from separate cache entries,
+        so one can lag the other. When the EARLIER bucket holds a stale
+        FINISHED copy and the later one holds the live SCHEDULED copy, claiming
+        the id before filtering drops the game entirely: the stale copy
+        consumes the key and is then discarded.
+
+        Serving DIFFERENT payloads per bucket is the whole point; an earlier
+        version of this file served one identical event to every bucket, which
+        cannot distinguish a correct dedupe from this defect.
+        """
+        eid = "401908140"
+        stale = _cup_event(eid, "Tottenham Hotspur", "Charlton Athletic",
+                           "second-round", hours_from_now=-3.0, completed=True)
+        live = _cup_event(eid, "Tottenham Hotspur", "Charlton Athletic",
+                          "second-round", hours_from_now=2.0)
+        _patch_cup_http_per_bucket(monkeypatch, [[stale], [live]])
+        rows = EflCupSource().fetch_upcoming(days_ahead=0)
+        assert len(rows) == 1, (
+            "the stale FINISHED copy in the earlier bucket consumed the event "
+            "id and suppressed the live copy"
+        )
+        assert rows[0].home == "Tottenham Hotspur"
+
+    def test_events_without_an_id_do_not_collapse_into_one(self, monkeypatch):
+        """A missing id must not become a dedupe key.
+
+        `extract_espn_scoreboard_event` passes `event.get("id")` straight
+        through, so an id-less event yields `id: None`. `None` is a usable dict
+        key, so using it directly meant the first id-less event claimed the
+        slot for ALL of them and every later one was dropped as a duplicate of
+        an unrelated match. Two distinct id-less ties must both survive.
+        """
+        a = _cup_event(None, "Arsenal", "Port Vale", "second-round")
+        b = _cup_event(None, "Liverpool", "Grimsby Town", "second-round")
+        _patch_cup_http(monkeypatch, [a, b])
+        rows = EflCupSource().fetch_upcoming(days_ahead=0)
+        assert sorted(r.home for r in rows) == ["Arsenal", "Liverpool"], (
+            "id-less events collapsed into one; a missing id is being used as "
+            "a dedupe key"
+        )
+
+    def test_two_identical_id_less_events_still_dedupe(self, monkeypatch):
+        """The other side of the fallback: with no id to key on, the natural
+        identity (teams + kickoff) must still absorb the bucket overlap, or
+        every id-less fixture appears once per day swept."""
+        ev = _cup_event(None, "Arsenal", "Port Vale", "second-round")
+        _patch_cup_http(monkeypatch, [ev])
+        assert len(EflCupSource().fetch_upcoming(days_ahead=3)) == 1
+
+    def test_no_fixtures_returns_empty(self, monkeypatch):
+        _patch_cup_http(monkeypatch, [])
+        assert EflCupSource().fetch_upcoming(days_ahead=7) == []
+        assert FaCupSource().fetch_upcoming(days_ahead=7) == []
+
+    def test_http_failure_returns_empty_rather_than_raising(self, monkeypatch):
+        """A refresh must survive ESPN being down: _build_sources runs every
+        source in one loop and an exception here would be caught, but the cup
+        would report `error (...)` in the summary instead of 0 games."""
+        from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
+        import requests as _rq
+
+        def _boom(url, *a, **kw):
+            raise _rq.RequestException("connection reset")
+
+        monkeypatch.setattr(cup_mod.requests, "get", _boom)
+        assert EflCupSource().fetch_upcoming(days_ahead=1) == []
+
+
+class TestEnglishCupStageLabelsAreScored:
+    """Contract test, not a behavioural one, and it earns its place.
+
+    Every stage label `english_cup.py` emits must be a key scoring.py actually
+    scores. A label the scorer does not know contributes ZERO tournament points
+    and nothing raises: the tie just quietly sorts as if its round did not
+    matter. That is precisely the failure mode a per-round behavioural test
+    would miss, because the source's own tests assert on the label string it
+    produced, not on what the scorer does with it.
+    """
+
+    def _emitted_stages(self):
+        stages = set()
+        for src in (EflCupSource(), FaCupSource()):
+            stages.update(stage for _slug, stage in src._rounds)
+        return stages
+
+    def test_the_check_finds_something(self):
+        """Positive control: an empty population would pass vacuously."""
+        assert len(self._emitted_stages()) >= 8
+
+    def test_every_emitted_stage_scores_above_zero(self):
+        from dispatcharr_ranked_matchups.scoring import (
+            GameSignals, Weights, score_game,
+        )
+        weights = Weights()
+        for stage in sorted(self._emitted_stages()):
+            score = score_game(
+                GameSignals(team_a="A", team_b="B", tournament_stage=stage),
+                weights,
+            )
+            assert score.breakdown.get("tournament_stage", 0) > 0, (
+                f"stage {stage!r} is emitted by a cup source but scoring.py "
+                "gives it no tournament points, so the round silently does "
+                "not matter"
+            )
+
+    def test_every_emitted_stage_has_a_display_label(self):
+        """The {tournament} naming token renders this; an unmapped stage
+        renders as an empty string and the channel name loses its round."""
+        from dispatcharr_ranked_matchups.scoring import tournament_stage_label
+        for stage in sorted(self._emitted_stages()):
+            assert tournament_stage_label(stage), (
+                f"stage {stage!r} has no display label"
+            )
+
+    def test_rounds_score_monotonically_toward_the_final(self):
+        """Later rounds must never score less than earlier ones: the whole
+        point of the band is that stakes rise as the field narrows."""
+        from dispatcharr_ranked_matchups.scoring import (
+            GameSignals, Weights, score_game,
+        )
+        weights = Weights()
+        for src in (EflCupSource(), FaCupSource()):
+            scores = [
+                score_game(
+                    GameSignals(team_a="A", team_b="B", tournament_stage=stage),
+                    weights,
+                ).breakdown.get("tournament_stage", 0.0)
+                for _slug, stage in src._rounds
+            ]
+            assert scores == sorted(scores), (
+                f"{src.sport_label} round scores are not monotonic: {scores}"
+            )
+
+    def test_early_cup_rounds_score_below_the_quarterfinal(self):
+        """The CUP_* band must land under the shared QUARTER_FINALS band, which
+        every knockout competition uses; overlapping them would rate an FA Cup
+        first-round tie at Champions-League-knockout stakes."""
+        from dispatcharr_ranked_matchups.scoring import (
+            _CUP_ROUND_STAGE_SCORES, GameSignals, Weights, score_game,
+        )
+        weights = Weights()
+        qf = score_game(
+            GameSignals(team_a="A", team_b="B", tournament_stage="QUARTER_FINALS"),
+            weights,
+        ).breakdown.get("tournament_stage", 0.0)
+        assert qf > 0, "QUARTER_FINALS itself scores nothing; band is broken"
+        for stage in _CUP_ROUND_STAGE_SCORES:
+            early = score_game(
+                GameSignals(team_a="A", team_b="B", tournament_stage=stage),
+                weights,
+            ).breakdown.get("tournament_stage", 0.0)
+            assert early < qf, f"{stage} scores {early} >= QF {qf}"

@@ -1,7 +1,7 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.20.1",
-  "description": "Never miss a good game. Scores every upcoming game across 37 leagues, tours and competitions (20 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
+  "version": "1.21.0",
+  "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
   "repo_url": "https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups",
@@ -123,6 +123,20 @@
       "label": "Friendlies: favorites only",
       "default": true,
       "help_text": "When on (default), the Friendlies toggles above (international men's, international women's, and club) show ONLY games involving a team in your Favorites. A friendly is an exhibition with no standings or rank, so a game between two teams you don't follow has nothing to earn a guide slot, and an unfiltered slate produces dozens of them (Kenya vs Lesotho, Cambodia vs Hong Kong, Bromley vs Crystal Palace, ...). Match by the name as ESPN spells it (\"United States\", not \"USA\"; \"Leeds United\", not \"Leeds\"). Turn this OFF to see every friendly in the lookahead window. No effect unless a Friendlies toggle above is on."
+    },
+    {
+      "id": "enable_efl_cup",
+      "type": "boolean",
+      "label": "EFL Cup (Carabao Cup)",
+      "default": false,
+      "help_text": "English League Cup: all 92 Premier League and EFL clubs, from ESPN's unofficial API (no key needed). NOT available from Football-Data.org: it gates every domestic cup behind a paid plan, so the free-tier key returns HTTP 403 for it. Knockout competition with no league table, so there is no importance simulation and no ranks; a tie scores on its round (early rounds low, quarterfinal onward high) plus favorite, rivalry, and narrative. Early-round ties DO score low on purpose: a second-round Wednesday is ~25 fixtures and they belong at the bottom of the list, where 'Max curated games' trims them."
+    },
+    {
+      "id": "enable_fa_cup",
+      "type": "boolean",
+      "label": "FA Cup",
+      "default": false,
+      "help_text": "English FA Cup proper rounds (first round through the final) from ESPN's unofficial API (no key needed). The qualifying rounds are a separate competition and are not included. Same situation as the EFL Cup: Football-Data.org gates it behind a paid plan, so it cannot come from the free-tier key. Premier League and Championship clubs enter at the third round, which is when the ties start scoring meaningfully."
     },
     {
       "id": "enable_eredivisie",

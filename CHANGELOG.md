@@ -5,6 +5,84 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-08-26
+
+### Added
+
+- **English domestic cups: EFL Cup (Carabao Cup) and FA Cup (#190).** Two new
+  toggles, both off by default, backed by ESPN's keyless site API.
+
+  Reported as "Tottenham v Charlton is on tonight and it isn't in my Top
+  Matchups". The game was carried on six-plus channels in the guide (beIN Sports
+  AU/FR/Arabic, ESPN Brasil, Nova Sport CZ) and the matcher never went looking
+  for it, because no cup fixture had ever entered the pipeline.
+
+  **Root cause:** the soccer competition catalog is bounded by what
+  Football-Data.org's free tier serves, so every competition FD.org gates behind
+  a paid plan is structurally absent regardless of channel availability. That is
+  all four English domestic cups. Verified against the live API with the
+  plugin's own key on 2026-08-26:
+
+  ```
+  code=FLC  Football League Cup  plan=TIER_THREE   -> HTTP 403
+  code=FAC  FA Cup               plan=TIER_TWO
+  code=PL   Premier League       plan=TIER_ONE     -> 200, 4 matches
+  ```
+
+  Same key for both, so it is plan scope and not a bad key or a rate-limit.
+  FD.org's free tier is exactly 12 competitions and no cup of any country is
+  among them. Hence ESPN, and hence a new source rather than a
+  `soccer.py::COMPETITIONS` entry, which would 403 on every refresh and
+  contribute zero games silently, i.e. reproduce the reported symptom.
+
+  **Rounds** come from ESPN's per-event `season.slug`, the same mechanism
+  `ncaa_soccer_cup` uses. Both cups publish 8 ordered rounds and the maps are
+  deliberately per-competition: the EFL Cup has a preliminary round the FA Cup
+  does not, the FA Cup has a fifth round the EFL Cup does not, and the shared
+  names sit at different depths (the FA Cup's fourth round is its round of 32,
+  the EFL Cup's is its round of 16).
+
+  **No importance simulation and no ranks**, both deliberate. A cup has no
+  league table; simulating the bracket instead would need the whole bracket,
+  which ESPN publishes one day at a time, and the EFL Cup semifinal is two legs
+  while every other round is single-leg. Ranks stay `None` because that is what
+  makes the giant-killing shape score correctly: `score_game` awards rank points
+  only when a rank is present, so a Premier League side drawn against a League
+  One side gets no rank-gap penalty for being lopsided. A tier-derived
+  pseudo-rank would actively hurt.
+
+  Early-round ties score LOW on purpose (a new `CUP_R*` stage band ramping to
+  just under the shared `QUARTER_FINALS` score) and sort to the bottom, where
+  `max_games` trims them. An EFL Cup second-round Wednesday is ~25 fixtures;
+  they are thin-slate filler, which this plugin intends, not noise to floor
+  away.
+
+  **No favorites gate**, unlike the friendlies sources: a friendly is an
+  exhibition whose only claim to a slot is the favorite signal, whereas a cup
+  tie has real elimination stakes and a quarterfinal between two clubs you do
+  not follow is a genuine top matchup.
+
+### Changed
+
+- **The per-day ESPN scoreboard sweep is now shared** between `friendlies.py`
+  and the new `english_cup.py`, as `_espn.sweep_upcoming_scoreboard`. It owns
+  the US-Eastern-bucket lookback, the FINISHED drop, the stale-SCHEDULED age
+  floor, and the event-id dedupe. Both date constants encode the reasoning for a
+  live bug each, and duplicating that reasoning is how it drifts. The
+  bracket-flavoured sources are deliberately NOT routed through it: they sweep a
+  fixed calendar window and KEEP finished games, because a bracket's state is
+  derived from results already played.
+
+### Fixed
+
+- **The tournament-stage note in the EPG description no longer leaks the
+  internal stage enum.** These notes are user-facing (they are the "why did this
+  game rank here" text), and the note was the lower-cased raw label, so
+  `SEMI_FINALS` read as "semi finals" and the new cup labels would have read as
+  "cup r2". It now reuses `tournament_stage_label`, the same prettifier the
+  `{tournament}` naming token uses, so each stage has one spelling across the
+  EPG text and the channel name: "Semifinal", "Round 2".
+
 ## [1.20.1] - 2026-08-17
 
 ### Fixed

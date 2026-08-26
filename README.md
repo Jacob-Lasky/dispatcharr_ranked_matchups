@@ -3,7 +3,7 @@
 **Never miss a good game.**
 
 A [Dispatcharr](https://github.com/dispatcharr/dispatcharr) plugin that watches
-37 leagues, tours and competitions (20 of them soccer, plus NFL, NBA, MLB, NHL,
+39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL,
 NCAA, UFC, boxing, tennis, golf and motorsport), scores every upcoming game on
 **interestingness**, and curates the best of them into a single "Top Matchups"
 group, with the WHY shown directly in each channel's EPG description.
@@ -17,7 +17,7 @@ you can tune:
 | `favorite` | One of YOUR favorite teams is playing | 6.0 (flat) |
 | `close_game` | Coinflip-ness in [0, 1] — soccer uses devigged h2h moneylines, NCAAF/NCAAM normalize point spread | 3.0 |
 | `importance` | Lahvička Monte Carlo: \|Kendall tau-c\| × consequence weight, summed over playing teams AND in-league favorites' outcome bands. Soccer leagues: title / UCL / Europa / relegation / promotion. UCL knockouts: round_of_16 → quarterfinal → semifinal → final → winner. NCAAF / NCAAM: win-count bands (bowl_eligible / 10+ / 11+; 15+ / 20+ / 25+). NHL: standings-point bands (95+ bubble / 100+ secured / 110+ division / 125+ Presidents'); Stanley Cup Playoffs: R2 → Conf Final → Cup Final → Champion. Locked outcomes contribute 0; uncertainty drives leverage. | 3.0 |
-| `tournament_stage` | Knockout cup game (R16, QF, SF, F) | 1.5 |
+| `tournament_stage` | Knockout cup game (R16, QF, SF, F). Domestic-cup early rounds (EFL Cup, FA Cup) have their own lower band ramping to just under the quarterfinal, so a second-round tie sorts below a marquee league game | 1.5 |
 | `rivalry` | Known rivalry game, from the bundled `rivalries.json` | 2.0 (flat) |
 | `narrative` | LLM-judged narrative bonus (off by default) | 0.0 |
 
@@ -98,13 +98,15 @@ the **Test naming convention** action to preview a template before applying it.
 |---|---|---|
 | NCAA Football | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (1k req/day) |
 | NCAA Men's Basketball | [CollegeBasketballData.com](https://collegebasketballdata.com/) (same key as CFBD) | Yes |
-| EPL / EFL Championship / UCL / Bundesliga / La Liga / Serie A / Ligue 1 / FIFA World Cup / UEFA EURO | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, 12 free comps) |
+| EPL / EFL Championship / UCL / Bundesliga / La Liga / Serie A / Ligue 1 / Eredivisie / Primeira Liga / Brazilian Série A / FIFA World Cup / UEFA EURO | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, and those 12 competitions ARE the free tier — every domestic cup is paid-only) |
 | NHL (regular + Stanley Cup Playoffs) | [api-web.nhle.com](https://api-web.nhle.com/) (official, undocumented) | Yes (no key required) |
 | MLB (regular + postseason) | [statsapi.mlb.com](https://statsapi.mlb.com/) (official, undocumented) | Yes (no key required) |
 | NBA (regular + playoffs) | [site.api.espn.com](https://site.api.espn.com/) (unofficial — stats.nba.com WAF-blocks most homelab egress) | Yes (no key required) |
 | MLS (regular + Cup playoffs) | [site.api.espn.com](https://site.api.espn.com/) for schedule + [The Odds API](https://the-odds-api.com/) (`soccer_usa_mls`) for closeness | Yes (Odds API free tier; ESPN no key) |
 | NCAA Baseball (D1 regular season) | [site.api.espn.com](https://site.api.espn.com/) (unofficial) + D1Baseball.com poll | Yes (no key required) |
 | NCAA Soccer — Men's + Women's (D1 regular season) | [site.api.espn.com](https://site.api.espn.com/) (unofficial) + United Soccer Coaches Top 25 | Yes (no key required) |
+| EFL Cup (Carabao Cup) / FA Cup | [site.api.espn.com](https://site.api.espn.com/) (unofficial) — Football-Data.org gates every domestic cup behind a paid plan | Yes (no key required) |
+| Soccer friendlies — international (men's + women's) and club pre-season | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Field events — Formula 1 / NASCAR / PGA Golf / ATP + WTA Tennis / UFC | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Boxing | [Boxing Data API](https://rapidapi.com/bengroves1993/api/boxing-data-api) (RapidAPI — ESPN has no boxing feed) | Yes (free RapidAPI tier; ~7-day lookahead) |
 | Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |

@@ -55,42 +55,28 @@ from __future__ import annotations
 
 import logging
 from abc import abstractmethod
-from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from .base import GameRow, SportSource
-from ._espn import extract_espn_scoreboard_event
+from ._espn import sweep_upcoming_scoreboard
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.friendlies")
 
-ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
-
-# How many extra days BEHIND today-UTC the scoreboard sweep reaches. See the
-# long comment in _EspnFriendliesBase.fetch_upcoming: ESPN buckets by US
-# Eastern date, so yesterday's bucket still holds tonight's fixtures. Used to
-# derive BOTH the sweep's start day and its length; DO NOT hardcode either
-# independently or the window silently shifts when one is edited.
-_LOOKBACK_DAYS = 1
-
-# Upper bound on how long ago a kept fixture may have kicked off. The lookback
-# above deliberately reaches into a past bucket to catch in-progress games, but
-# ESPN sometimes leaves a finished match tagged SCHEDULED (its status lag is
-# how the Wrexham v Leeds kickoff still read SCHEDULED two hours in). Without a
-# floor those stale rows would sail past the FINISHED filter and land in the
-# guide as "upcoming" games that ended hours ago, sorting to the top because
-# channels are numbered by kickoff time. Six hours clears any football match
-# (90 minutes plus halftime, stoppage, and extra time) with wide margin while
-# still discarding yesterday's leftovers.
-_MAX_AGE_AFTER_KICKOFF = timedelta(hours=6)
+# The per-day sweep, its US-Eastern-bucket lookback, and the stale-SCHEDULED
+# age floor all live in `_espn.sweep_upcoming_scoreboard` now: `english_cup.py`
+# needs the IDENTICAL window, and both date constants encode the reasoning for
+# a live bug each, so duplicating them here is how that reasoning drifts. See
+# #190. The favorites gate below stays local; it is the only part of this
+# source's filtering that is not shared.
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
     try:
         r = requests.get(url, timeout=timeout)
         if r.status_code >= 400:
-            logger.warning("[friendlies] %s → %d", url, r.status_code)
+            logger.warning("[friendlies] %s -> %d", url, r.status_code)
             return None
         return r.json()
     except (requests.RequestException, ValueError) as exc:
@@ -154,24 +140,13 @@ class _EspnFriendliesBase(SportSource):
         """ESPN soccer competition slug to sweep."""
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Per-day scoreboard sweep. ESPN's date-RANGE syntax silently caps at
-        25 events, so we walk one day at a time (same trap documented in
-        ncaa_baseball.py / ncaa_soccer.py).
+        """Per-day ESPN sweep (shared with english_cup via
+        `_espn.sweep_upcoming_scoreboard`, which owns the window, the FINISHED
+        drop, the stale-SCHEDULED age floor, and the id dedupe), then the one
+        filter unique to friendlies:
 
-        The window runs from `_LOOKBACK_DAYS` before today-UTC through
-        `days_ahead` after it; see the comment on the loop for why it has to
-        reach backwards at all.
-
-        Three filters, in order:
-          - FINISHED games are dropped: a friendly that already kicked off and
-            ended is not an upcoming Top Matchup. A live (in-progress) game
-            classifies as SCHEDULED in the shared parser and is kept, so a game
-            "playing right now" still surfaces.
-          - Games that kicked off more than `_MAX_AGE_AFTER_KICKOFF` ago are
-            dropped even when still tagged SCHEDULED, which catches ESPN's
-            status lag on yesterday's results.
           - When favorites_only is set, games not involving a favorite are
-            dropped (see the module docstring on the favorites gate)."""
+            dropped. See the module docstring on the favorites gate."""
         # Lazy import to keep the source module's top-level import graph free of
         # scoring (matches the lazy-import idiom used across sources/*.py).
         from ..scoring import match_favorites
@@ -186,83 +161,39 @@ class _EspnFriendliesBase(SportSource):
                 self.sport_label,
             )
 
-        # Start ONE day BEFORE today-UTC. ESPN buckets its scoreboard by US
-        # EASTERN calendar date, not UTC, so the `dates=YYYYMMDD` bucket for
-        # day D holds events with UTC timestamps running through D+1 04:59Z
-        # (23:59 EST). Anchoring the sweep at today-UTC therefore goes blind
-        # to every fixture in the 00:00Z-05:00Z window, which is prime time in
-        # the Americas and the Pacific. Verified live 2026-07-26T01:25Z: the
-        # `dates=20260725` bucket still held "Tottenham Hotspur at Auckland FC"
-        # at 2026-07-26T03:00Z (a favorite, 95 minutes from kickoff) and
-        # "Trinidad and Tobago at Louisville City FC" already in progress,
-        # while the `dates=20260726` bucket held neither.
-        #
-        # DO NOT "optimize" this back to starting at today: the extra bucket is
-        # one HTTP request, the FINISHED filter below drops anything that has
-        # already ended, and `seen_ids` dedupes the overlap, so the day costs
-        # nothing. One day back fully covers the skew (max US Eastern offset is
-        # UTC-5). Reaching backwards does admit stale rows that ESPN has not
-        # yet retagged FINISHED, which is what _MAX_AGE_AFTER_KICKOFF handles.
-        now = datetime.now(timezone.utc)
-        start_day = now.date() - timedelta(days=_LOOKBACK_DAYS)
-        oldest_kickoff = now - _MAX_AGE_AFTER_KICKOFF
         out: List[GameRow] = []
-        seen_ids: set = set()
-        for offset in range(days_ahead + _LOOKBACK_DAYS + 1):
-            day = start_day + timedelta(days=offset)
-            data = _http_get(
-                f"{ESPN_BASE}/{self._espn_slug}/scoreboard"
-                f"?dates={day.strftime('%Y%m%d')}"
-            )
-            if not data:
+        for rec in sweep_upcoming_scoreboard(
+            slug=self._espn_slug,
+            days_ahead=days_ahead,
+            team_namer=_team_canonical_name,
+            http_get=_http_get,
+        ):
+            home = rec["home"]
+            away = rec["away"]
+            if self.favorites_only and not match_favorites(
+                home, away, self.favorites
+            ):
+                # Exhibition between teams the user doesn't follow: no
+                # standings/rank to earn a slot and no favorite to rescue
+                # it. Drop rather than let it pad the guide.
                 continue
-            for event in data.get("events") or []:
-                rec = extract_espn_scoreboard_event(
-                    event, team_namer=_team_canonical_name,
-                )
-                if rec is None:
-                    continue
-                eid = rec.get("id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                if rec.get("status") == "FINISHED":
-                    continue
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                if start < oldest_kickoff:
-                    # Kicked off long enough ago that it cannot still be
-                    # running: ESPN just hasn't retagged it FINISHED. Keeping
-                    # it would put a finished match in the guide as an upcoming
-                    # game. See _MAX_AGE_AFTER_KICKOFF.
-                    continue
-                home = rec["home"]
-                away = rec["away"]
-                if self.favorites_only and not match_favorites(
-                    home, away, self.favorites
-                ):
-                    # Exhibition between teams the user doesn't follow: no
-                    # standings/rank to earn a slot and no favorite to rescue
-                    # it. Drop rather than let it pad the guide.
-                    continue
-                # No rank (friendlies have no poll), no spread, no closeness,
-                # no fd_competition_code: the scoring loop sees no league
-                # context and contributes zero importance, which is correct for
-                # an exhibition. Favorite / rivalry / narrative carry the signal.
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=home,
-                    away=away,
-                    rank_home=None,
-                    rank_away=None,
-                    start_time=start,
-                    extra={
-                        "espn_event_id": eid,
-                        "espn_league_slug": self._espn_slug,
-                    },
-                ))
+            # No rank (friendlies have no poll), no spread, no closeness,
+            # no fd_competition_code: the scoring loop sees no league
+            # context and contributes zero importance, which is correct for
+            # an exhibition. Favorite / rivalry / narrative carry the signal.
+            out.append(GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=home,
+                away=away,
+                rank_home=None,
+                rank_away=None,
+                start_time=rec["start_time"],
+                extra={
+                    "espn_event_id": rec.get("id"),
+                    "espn_league_slug": self._espn_slug,
+                },
+            ))
         return out
 
 

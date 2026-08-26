@@ -1426,6 +1426,8 @@ def _build_sources(settings: Dict[str, Any]):
         BoxingSource,
         ClubFriendliesSource,
         InternationalFriendliesSource,
+        EflCupSource,
+        FaCupSource,
     )
     from .sources.soccer import COMPETITIONS
     from .scoring import LEAGUE_CONTEXTS
@@ -1537,6 +1539,26 @@ def _build_sources(settings: Dict[str, Any]):
             favorites=friendlies_favorites,
             favorites_only=friendlies_favorites_only_setting,
         ))
+
+    # English domestic cups (ESPN, no API key). These CANNOT go through
+    # _make_soccer: Football-Data.org gates every domestic cup behind a paid
+    # plan (FLC is TIER_THREE, FAC is TIER_TWO) and returns HTTP 403 on the
+    # free-tier key this plugin uses, so a COMPETITIONS entry would contribute
+    # zero games on every refresh. sources/english_cup.py carries the verified
+    # 403 and the full reasoning. See #190.
+    #
+    # NO favorites gate here, deliberately, unlike the friendlies sources
+    # above. A friendly is an exhibition whose only claim to a slot is the
+    # favorite signal; a cup tie has real elimination stakes, and a
+    # quarterfinal between two clubs the user doesn't follow is a genuine top
+    # matchup. Early rounds instead score LOW via the CUP_R* stage band in
+    # scoring.py and sort to the bottom, where max_games trims them. That is
+    # the plugin's standing philosophy: thin-slate filler is intended, and
+    # absolute score floors are not a lever this plugin offers.
+    if settings.get("enable_efl_cup", False):
+        sources.append(EflCupSource())
+    if settings.get("enable_fa_cup", False):
+        sources.append(FaCupSource())
 
     # Additional FD.org free-tier leagues. Same _make_soccer
     # router; LEAGUE_CONTEXTS uses format="league" so dispatch goes
@@ -4903,7 +4925,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.20.1"
+    version = "1.21.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

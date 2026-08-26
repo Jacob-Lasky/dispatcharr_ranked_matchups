@@ -43,10 +43,11 @@ IDENTITY_KEY = "game_id"
 # and cannot exhibit the defect.
 #
 # That exemption is load-bearing, not laziness: `sources/mls.py` (MlsSource, the
-# base for MLS / NWSL / Liga MX emit) and `sources/friendlies.py` both stamp a
-# sport-specific id and both inherit SportSource directly. Stamping `game_id`
-# there would be inert. DO NOT "fix" them to silence a broadened version of this
-# test; widen the base list only when such a source really starts simulating.
+# base for MLS / NWSL / Liga MX emit), `sources/friendlies.py`, and
+# `sources/english_cup.py` (EFL Cup / FA Cup, #190) all stamp a sport-specific
+# id and all inherit SportSource directly. Stamping `game_id` there would be
+# inert. DO NOT "fix" them to silence a broadened version of this test; widen
+# the base list only when such a source really starts simulating.
 # Names verified against the real class graph, not guessed: the bracket base is
 # `BracketSportSource`, NOT `BracketSource`. `test_simulating_bases_all_exist`
 # exists because a name that matches nothing empties the population and turns
@@ -170,8 +171,12 @@ class TestTheSimulatorStillHonoursTheKey:
 class TestTheScopeItselfIsRight:
     """The exemption above is a claim about the code, so pin it.
 
-    If `mls.py` or `friendlies.py` ever start simulating, they silently leave
-    the contract's population and the defect can return there unnoticed.
+    If `mls.py`, `friendlies.py`, or `english_cup.py` ever start simulating,
+    they silently leave the contract's population and the defect can return
+    there unnoticed. For the cups specifically that is a live possibility: the
+    module docstring names the three things (no table, day-at-a-time bracket
+    publication, two-legged EFL Cup semifinal) that would have to be solved
+    first, and whoever solves them must stamp game_id at the same time.
     """
 
     def test_simulating_bases_all_exist(self):
@@ -191,7 +196,9 @@ class TestTheScopeItselfIsRight:
         missing = SIMULATING_BASES - seen
         assert not missing, f"base names in SIMULATING_BASES never used: {missing}"
 
-    @pytest.mark.parametrize("name", ["mls.py", "friendlies.py"])
+    @pytest.mark.parametrize(
+        "name", ["mls.py", "friendlies.py", "english_cup.py"],
+    )
     def test_documented_exemptions_still_do_not_simulate(self, name):
         path = os.path.join(SOURCES_DIR, name)
         assert not _defines_a_simulating_source(path), (
@@ -202,3 +209,84 @@ class TestTheScopeItselfIsRight:
 
     def test_population_is_not_empty(self):
         assert _source_files(), "no simulating sources found; the scope filter is broken"
+
+
+class TestSharedSweepDoesNotOwnTheHttpCall:
+    """`_espn.sweep_upcoming_scoreboard` must take its getter INJECTED.
+
+    Every ESPN-backed source's tests stub `<module>.requests.get`. If the
+    shared sweep ever called `requests.get` itself, all of those stubs would
+    become silent no-ops that reach the REAL ESPN API instead of failing, and a
+    test asserting "no fixtures returns empty" would then be asserting against
+    whatever ESPN happens to be serving. That is the worst shape of test
+    regression: the suite stays green and stops testing anything.
+
+    Source-level rather than behavioural, because the defect is the ABSENCE of
+    an indirection and no behavioural test can see it while the indirection is
+    still there. Same rationale as the AST contract above.
+    """
+
+    def _espn_src(self):
+        return open(
+            os.path.join(SOURCES_DIR, "_espn.py"), encoding="utf-8",
+        ).read()
+
+    def test_the_sweep_exists(self):
+        """Positive control: a rule aimed at a function that has been renamed
+        would pass vacuously."""
+        assert "def sweep_upcoming_scoreboard" in self._espn_src()
+
+    def test_the_sweep_takes_an_injected_getter(self):
+        src = self._espn_src()
+        i = src.index("def sweep_upcoming_scoreboard")
+        sig = src[i:src.index(") -> ", i)]
+        assert "http_get" in sig, (
+            "sweep_upcoming_scoreboard no longer takes an injected http_get; "
+            "every source's requests.get stub is now a silent no-op"
+        )
+
+    def test_espn_module_never_imports_or_calls_requests(self):
+        """AST, not substring. A text search for "requests.get" matches the
+        docstring that explains NOT to call it, which is how the first cut of
+        this test failed on the very file it was written to protect. The check
+        has to look at real Import and Call nodes."""
+        tree = ast.parse(self._espn_src(), filename="_espn.py")
+
+        imports = [
+            a.name
+            for n in ast.walk(tree) if isinstance(n, ast.Import)
+            for a in n.names
+        ] + [
+            n.module
+            for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module
+        ]
+        assert "requests" not in imports, (
+            "_espn.py now imports requests. The shared helpers must stay "
+            "transport-free so each source owns its own patchable requests "
+            "symbol; see sweep_upcoming_scoreboard's docstring."
+        )
+
+        calls = [
+            f"{n.func.value.id}.{n.func.attr}"
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name)
+        ]
+        offenders = [c for c in calls if c.startswith("requests.")]
+        assert not offenders, (
+            f"_espn.py now calls {offenders} directly, which turns every "
+            "source's test stub into a silent no-op against the live API"
+        )
+
+    def test_both_callers_pass_their_own_getter(self):
+        """The other half of the pairing: a source that stopped passing its own
+        getter would be relying on a default it does not control."""
+        for name in ("friendlies.py", "english_cup.py"):
+            src = open(
+                os.path.join(SOURCES_DIR, name), encoding="utf-8",
+            ).read()
+            assert "def _http_get" in src, f"{name} lost its own _http_get"
+            assert "http_get=_http_get" in src, (
+                f"{name} no longer passes its own getter to the shared sweep"
+            )

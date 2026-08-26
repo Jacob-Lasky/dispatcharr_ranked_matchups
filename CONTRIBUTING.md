@@ -24,6 +24,14 @@ Football-Data's free tier covers EPL, EFL Championship, UCL, La Liga,
 Bundesliga, Serie A, Ligue 1, Eredivisie, Primeira Liga, and more. Full
 list at https://www.football-data.org/coverage.
 
+**Domestic cups are not on that free tier.** It is exactly 12
+competitions (PL, ELC, CL, EC, FL1, BL1, SA, DED, PPL, PD, BSA, WC) and
+no cup of any country is among them, so adding one as a `COMPETITIONS`
+entry gets HTTP 403 on every refresh and silently contributes zero
+games. A cup needs its own adapter against a keyless feed instead;
+`sources/english_cup.py` (EFL Cup, FA Cup, via ESPN) is the worked
+example, including how round names map to stage labels.
+
 ### Step 1: register the competition (`sources/soccer.py`)
 
 Add an entry to the `COMPETITIONS` dict:
@@ -187,6 +195,25 @@ For the score signals to work fully:
   with `{"name", "position", "points", "played"}`. Needed for the
   impact-on-favorites narrative ("Wrexham sits #6 (70 pts), 1 spot
   and 6 pts behind ...").
+
+### If your source reads ESPN's site API
+
+Don't hand-roll the scoreboard parsing or the sweep window.
+`sources/_espn.py` owns both:
+
+- `extract_espn_scoreboard_event` normalises one scoreboard event into
+  home / away / start_time / status.
+- `sweep_upcoming_scoreboard` is the whole per-day sweep for a source
+  that wants upcoming fixtures only. It walks one day at a time (ESPN's
+  date-range syntax silently caps at 25 events), reaches one day back
+  because ESPN buckets by US Eastern date, drops finished and
+  stale-but-still-SCHEDULED games, and dedupes by event id. Pass your
+  module's own `_http_get` as `http_get`: each source keeps its own
+  `requests` symbol so its tests can stub it.
+
+Bracket-shaped sources deliberately do not use the sweep. They read a
+fixed calendar window and keep finished games, because bracket state is
+derived from results already played.
 
 ### Wire it in
 
