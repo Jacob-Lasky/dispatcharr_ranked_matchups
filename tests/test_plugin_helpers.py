@@ -2878,3 +2878,116 @@ class TestDeletableGroupNames:
         src = inspect.getsource(plugin._action_apply)
         assert 'settings.get("channel_profile_name", DEFAULT_GROUP_NAME)' in src
         assert 'settings.get("channel_profile_name", "Top Matchups")' not in src
+
+
+class TestBuildSourcesEnglishCups:
+    """_build_sources wiring for the EFL Cup / FA Cup toggles (#190).
+
+    Enable ONLY the cups so no API keys are needed and the returned list is
+    just the cup source(s). These sources take no constructor arguments (no
+    key, no favorites gate), so the wiring assertions are about WHICH sources
+    get built, and about the toggles being independent.
+    """
+
+    def _cups(self, plugin, settings):
+        from dispatcharr_ranked_matchups.sources.english_cup import (
+            _EnglishDomesticCupBase,
+        )
+        return [
+            s for s in plugin._build_sources(settings)
+            if isinstance(s, _EnglishDomesticCupBase)
+        ]
+
+    def test_both_off_by_default(self, plugin):
+        # Toggles OMITTED must build nothing: the manifest defaults them off,
+        # and an unrequested 25-fixture cup Wednesday would be a surprise
+        # change for existing installs.
+        assert self._cups(plugin, {"favorites": "Tottenham"}) == []
+
+    def test_efl_cup_toggle_builds_only_the_efl_cup(self, plugin):
+        from dispatcharr_ranked_matchups.sources.english_cup import (
+            EflCupSource, FaCupSource,
+        )
+        srcs = self._cups(plugin, {"enable_efl_cup": True})
+        assert len(srcs) == 1
+        assert isinstance(srcs[0], EflCupSource)
+        assert not isinstance(srcs[0], FaCupSource)
+
+    def test_fa_cup_toggle_builds_only_the_fa_cup(self, plugin):
+        from dispatcharr_ranked_matchups.sources.english_cup import (
+            EflCupSource, FaCupSource,
+        )
+        srcs = self._cups(plugin, {"enable_fa_cup": True})
+        assert len(srcs) == 1
+        assert isinstance(srcs[0], FaCupSource)
+        assert not isinstance(srcs[0], EflCupSource)
+
+    def test_both_toggles_coexist(self, plugin):
+        srcs = self._cups(plugin, {
+            "enable_efl_cup": True, "enable_fa_cup": True,
+        })
+        assert sorted(s.sport_prefix for s in srcs) == ["EFLCUP", "FACUP"]
+
+    def test_cups_need_no_api_key(self, plugin):
+        """ESPN's site API is keyless. A cup source must be built even with
+        every key setting blank, unlike the Football-Data.org competitions,
+        which _build_sources gates on `fd_key`. This is the whole reason the
+        cups do not go through _make_soccer: FD.org would 403 them."""
+        srcs = self._cups(plugin, {
+            "enable_efl_cup": True,
+            "football_data_api_key": "",
+            "odds_api_key": "",
+            "cfbd_api_key": "",
+        })
+        assert len(srcs) == 1
+
+    def test_cups_are_not_gated_by_the_friendlies_favorites_setting(self, plugin):
+        """Deliberate asymmetry with the friendlies sources. A friendly is an
+        exhibition whose only claim to a slot is the favorite signal; a cup tie
+        has real elimination stakes, so a quarterfinal between two clubs the
+        user does not follow is a genuine top matchup. If a favorites gate is
+        ever added here it must be its own setting, not this one."""
+        srcs = self._cups(plugin, {
+            "enable_efl_cup": True,
+            "favorites": "",
+            "friendlies_favorites_only": True,
+        })
+        assert len(srcs) == 1
+        for s in srcs:
+            assert not hasattr(s, "favorites_only")
+
+    def test_manifest_cup_fields_match_code(self, plugin):
+        # plugin.json must declare both toggles with default False, or the
+        # settings _build_sources reads would never appear in the UI and the
+        # sources could not be switched on at all. Mirrors
+        # test_manifest_club_friendlies_field_matches_code.
+        import json
+        import os
+        repo = os.path.dirname(os.path.abspath(plugin.__file__))
+        manifest = json.load(
+            open(os.path.join(repo, "plugin.json"), encoding="utf-8")
+        )
+        for fid in ("enable_efl_cup", "enable_fa_cup"):
+            field = next(
+                (f for f in manifest["fields"] if f["id"] == fid), None,
+            )
+            assert field is not None, f"{fid} missing from plugin.json"
+            assert field["type"] == "boolean"
+            assert field["default"] is False
+            assert field.get("help_text"), f"{fid} has no help_text"
+
+    def test_manifest_help_text_records_why_espn_not_football_data(self, plugin):
+        """The 403 is the whole reason this source exists rather than a
+        COMPETITIONS entry. A future maintainer reading only the settings UI
+        should learn that, so the help text must keep saying it."""
+        import json
+        import os
+        repo = os.path.dirname(os.path.abspath(plugin.__file__))
+        manifest = json.load(
+            open(os.path.join(repo, "plugin.json"), encoding="utf-8")
+        )
+        for fid in ("enable_efl_cup", "enable_fa_cup"):
+            field = next(f for f in manifest["fields"] if f["id"] == fid)
+            help_text = field["help_text"]
+            assert "ESPN" in help_text
+            assert "Football-Data.org" in help_text

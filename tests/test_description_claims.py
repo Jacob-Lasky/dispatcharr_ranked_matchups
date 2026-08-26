@@ -50,6 +50,11 @@ SOCCER_TOGGLES = {
     "enable_liga_mx",
     "enable_ncaa_mens_soccer",
     "enable_ncaa_womens_soccer",
+    # English domestic cups (#190). ESPN-backed rather than
+    # Football-Data.org, which gates every domestic cup behind a paid plan,
+    # but soccer competitions all the same.
+    "enable_efl_cup",
+    "enable_fa_cup",
 }
 
 
@@ -124,3 +129,73 @@ def test_every_toggle_is_wired_in_plugin_py():
         f"plugin.py, so the setting renders and silently does nothing: "
         f"{unwired}"
     )
+
+
+# ---------------------------------------------------------------------------
+# SCORING.md's stage table is a factual claim about scoring.py (#190).
+# ---------------------------------------------------------------------------
+
+def _scoring_py():
+    return _read("scoring.py")
+
+
+def _code_cup_scalars():
+    """The CUP_* scalars as scoring.py actually defines them."""
+    src = _scoring_py()
+    i = src.index("_CUP_ROUND_STAGE_SCORES: Dict[str, float] = {")
+    block = src[i:src.index("}", i) + 1]
+    return {
+        k: float(v)
+        for k, v in re.findall(r'"(CUP_[A-Z0-9_]+)":\s*([0-9.]+)', block)
+    }
+
+
+def _doc_cup_scalars():
+    """The CUP_* scalars as SCORING.md advertises them."""
+    return {
+        k: float(v)
+        for k, v in re.findall(
+            r"\|\s+`(CUP_[A-Z0-9_]+)`[^|]*\|\s*([0-9.]+)\s*\|",
+            _read("SCORING.md"),
+        )
+    }
+
+
+def test_scoring_doc_lists_every_cup_stage_the_code_scores():
+    code, doc = _code_cup_scalars(), _doc_cup_scalars()
+    assert code, "no CUP_* scalars found in scoring.py; the parse is broken"
+    missing = set(code) - set(doc)
+    assert not missing, (
+        f"scoring.py scores {sorted(missing)} but SCORING.md's stage table "
+        f"does not list them, so the documented table understates coverage"
+    )
+
+
+def test_scoring_doc_invents_no_cup_stage():
+    code, doc = _code_cup_scalars(), _doc_cup_scalars()
+    extra = set(doc) - set(code)
+    assert not extra, (
+        f"SCORING.md advertises {sorted(extra)} but scoring.py does not score "
+        f"them, so the doc promises a signal that contributes nothing"
+    )
+
+
+def test_scoring_doc_cup_scalars_match_the_code():
+    code, doc = _code_cup_scalars(), _doc_cup_scalars()
+    drifted = {k: (code[k], doc[k]) for k in code if k in doc and code[k] != doc[k]}
+    assert not drifted, (
+        f"SCORING.md and scoring.py disagree on cup stage scalars "
+        f"(code, doc): {drifted}"
+    )
+
+
+def test_cup_band_stays_below_the_shared_quarterfinal_scalar():
+    """The doc's own claim: the CUP_* ramp lands UNDER QUARTER_FINALS, which
+    every knockout competition shares. Overlapping them would rate an FA Cup
+    first-round tie at Champions-League-knockout stakes."""
+    src = _scoring_py()
+    m = re.search(r'"QUARTER_FINALS":\s*([0-9.]+)', src)
+    assert m, "QUARTER_FINALS scalar not found in scoring.py"
+    qf = float(m.group(1))
+    for stage, scalar in _code_cup_scalars().items():
+        assert scalar < qf, f"{stage}={scalar} is not below QUARTER_FINALS={qf}"

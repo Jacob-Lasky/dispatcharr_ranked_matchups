@@ -1046,3 +1046,64 @@ class TestWorldCupKnockoutPremium:
         ).final
         assert bare < 1.0
         assert self._final("LAST_32") - bare > 4.0
+
+
+class TestTournamentStageNoteIsUserFacing:
+    """The score notes become the EPG description that explains a game's rank,
+    so they must not leak the internal stage enum.
+
+    Before #190 the note was the lower-cased raw label, which reads acceptably
+    for `FINAL` ("final") and poorly for anything with an underscore or an
+    abbreviation: `SEMI_FINALS` rendered as "semi finals" and the new
+    domestic-cup labels would have rendered as "cup r2". The note now reuses
+    `tournament_stage_label`, the same prettifier the {tournament} naming token
+    uses, so a stage has ONE spelling across the EPG text and the channel name.
+    """
+
+    def _note(self, stage):
+        from dispatcharr_ranked_matchups.scoring import (
+            GameSignals, Weights, score_game,
+        )
+        res = score_game(
+            GameSignals(team_a="A", team_b="B", tournament_stage=stage),
+            Weights(),
+        )
+        return next(
+            (n for n in res.notes if n.startswith("tournament stage:")), None,
+        )
+
+    def test_cup_round_renders_as_a_round_name(self):
+        assert self._note("CUP_R2") == "tournament stage: Round 2"
+
+    def test_underscored_stage_renders_prettily(self):
+        assert self._note("SEMI_FINALS") == "tournament stage: Semifinal"
+
+    def test_final_still_renders(self):
+        assert self._note("FINAL") == "tournament stage: Final"
+
+    def test_note_matches_the_naming_token_spelling(self):
+        """One spelling per stage. If these diverge, a channel name and its own
+        EPG description disagree about which round the game is."""
+        from dispatcharr_ranked_matchups.scoring import tournament_stage_label
+        for stage in ("CUP_PRELIM", "CUP_R1", "CUP_R5", "QUARTER_FINALS",
+                      "SEMI_FINALS", "FINAL"):
+            assert self._note(stage) == (
+                f"tournament stage: {tournament_stage_label(stage)}"
+            )
+
+    def test_unlabelled_but_scoring_stage_falls_back_to_the_raw_label(self):
+        """`EVENT` and `MAJOR` do have labels, but the fallback must survive for
+        any stage that scores without one: better a lower-cased enum in the EPG
+        than a note reading "tournament stage: "."""
+        from dispatcharr_ranked_matchups.scoring import (
+            GameSignals, Weights, score_game, _TOURNAMENT_STAGE_LABELS,
+        )
+        stage = "LAST_32"
+        assert stage in _TOURNAMENT_STAGE_LABELS  # guard the premise
+        # Simulate a scoring stage with no label by asking for one directly.
+        res = score_game(
+            GameSignals(team_a="A", team_b="B", tournament_stage="PLAYOFF_ROUND"),
+            Weights(),
+        )
+        note = next(n for n in res.notes if n.startswith("tournament stage:"))
+        assert note.strip() != "tournament stage:"

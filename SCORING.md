@@ -145,6 +145,29 @@ default 1.5):
 | `PLAYOFFS` (entry round) | 1.0 | 1.5 |
 | `MAJOR` (golf majors, F1 Monaco, etc) | 4.5 | 6.75 |
 | `EVENT` (regular-season field events) | 1.5 | 2.25 |
+| `CUP_R5` (domestic cup 5th round) | 1.8 | 2.7 |
+| `CUP_R4` (domestic cup 4th round) | 1.4 | 2.1 |
+| `CUP_R3` (domestic cup 3rd round) | 1.0 | 1.5 |
+| `CUP_R2` (domestic cup 2nd round) | 0.6 | 0.9 |
+| `CUP_R1` (domestic cup 1st round) | 0.4 | 0.6 |
+| `CUP_PRELIM` (domestic cup preliminary round) | 0.2 | 0.3 |
+
+The `CUP_*` band covers the early rounds of the English domestic cups
+(EFL Cup, FA Cup: see `sources/english_cup.py`). Those competitions'
+quarterfinal, semifinal and final reuse the shared knockout rows above,
+because they genuinely ARE the same stage; the band therefore ramps to
+just UNDER `QUARTER_FINALS` rather than overlapping it.
+
+They deliberately get their own rows instead of being mapped onto
+`LAST_16` / `LAST_32`. Cup team counts drift year to year with byes and
+re-entries, so "which round is the round of 32" is not stable enough to
+hardcode, and an FA Cup first-round tie between two League Two clubs is
+not worth what a Champions League round-of-16 leg is worth.
+
+An early-round cup tie scoring LOW is intended, not a bug: an EFL Cup
+second-round Wednesday is ~25 fixtures, and they belong at the bottom
+of the list where `max_games` trims them. There is deliberately NO
+minimum-score threshold that would drop them instead.
 
 ### Signal: rivalry
 

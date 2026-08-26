@@ -1159,11 +1159,26 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             # marquee racing events the source flags as MAJOR.
             "EVENT": 1.5,
             "MAJOR": 4.5,
+            # Domestic-cup early rounds; the QF/SF/Final rounds of those cups
+            # reuse the knockout labels above. See _CUP_ROUND_STAGE_SCORES.
+            **_CUP_ROUND_STAGE_SCORES,
         }.get(ts, 0.0)
         if stage_score > 0:
             tourn_pts = stage_score * weights.tournament
             breakdown["tournament_stage"] = round(tourn_pts, 2)
-            notes.append(f"tournament stage: {ts.lower().replace('_', ' ')}")
+            # Prefer the display label over the raw enum. These notes are
+            # user-facing (they become the EPG description that explains why a
+            # game ranked where it did), and lower-casing the label leaks the
+            # internal shape: "CUP_R2" renders as "cup r2", "SEMI_FINALS" as
+            # "semi finals". _TOURNAMENT_STAGE_LABELS is the prettifier the
+            # {tournament} naming token already uses, so reusing it here keeps
+            # one spelling of each stage across the EPG text and the channel
+            # name. The lower-cased raw label stays as the fallback for a stage
+            # that scores but has no display label.
+            notes.append(
+                f"tournament stage: "
+                f"{tournament_stage_label(ts) or ts.lower().replace('_', ' ')}"
+            )
 
     if signals.is_rivalry:
         breakdown["rivalry"] = round(weights.rivalry, 2)
@@ -1324,6 +1339,31 @@ def strip_team_suffix(name: str) -> str:
     return name
 
 
+# Domestic-cup early rounds (English EFL Cup / FA Cup; see
+# sources/english_cup.py). These get their OWN band rather than being mapped
+# onto LAST_16 / LAST_32 because a cup's team counts drift year to year with
+# byes and re-entries, and because an FA Cup first-round tie between two League
+# Two clubs is not worth what a Champions League round-of-16 leg is worth.
+#
+# The ramp is deliberately gentle and lands just under the existing
+# QUARTER_FINALS band (2.5), which every knockout competition shares: a cup
+# round's stakes rise as the field narrows, and the quarterfinal onward IS the
+# same stage as a UEFA quarterfinal, so the two scales must meet there rather
+# than overlap.
+#
+# Early-round ties scoring LOW is the INTENDED behaviour, not a bug to floor
+# away: an EFL Cup second-round Wednesday produces ~25 ties, and they belong
+# at the bottom of the list where `max_games` trims them, not filtered out. DO
+# NOT add a minimum-score threshold for them.
+_CUP_ROUND_STAGE_SCORES: Dict[str, float] = {
+    "CUP_PRELIM": 0.2,
+    "CUP_R1":     0.4,
+    "CUP_R2":     0.6,
+    "CUP_R3":     1.0,
+    "CUP_R4":     1.4,
+    "CUP_R5":     1.8,
+}
+
 # Tournament-stage display labels. Keyed by the UPPER-cased `tournament_stage`
 # value a source attaches. Module-level (not a pick_tagline local) so the
 # {tournament} naming token can render the same prettified stage independently.
@@ -1336,6 +1376,14 @@ _TOURNAMENT_STAGE_LABELS: Dict[str, str] = {
     "PLAYOFF_ROUND": "Playoff", "PLAYOFFS": "Playoff",
     "EVENT": "Event",
     "MAJOR": "Major",
+    # Domestic-cup early rounds (sources/english_cup.py). Rendered as the
+    # round name a viewer would recognise from a broadcast caption.
+    "CUP_PRELIM": "Preliminary Round",
+    "CUP_R1": "Round 1",
+    "CUP_R2": "Round 2",
+    "CUP_R3": "Round 3",
+    "CUP_R4": "Round 4",
+    "CUP_R5": "Round 5",
 }
 
 

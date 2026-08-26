@@ -99,7 +99,7 @@ def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
     try:
         r = requests.get(url, timeout=timeout)
         if r.status_code >= 400:
-            logger.warning("[nhl] %s → %d", url, r.status_code)
+            logger.warning("[nhl] %s -> %d", url, r.status_code)
             return None
         return r.json()
     except (requests.RequestException, ValueError) as exc:

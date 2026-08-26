@@ -98,13 +98,15 @@ the **Test naming convention** action to preview a template before applying it.
 |---|---|---|
 | NCAA Football | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (1k req/day) |
 | NCAA Men's Basketball | [CollegeBasketballData.com](https://collegebasketballdata.com/) (same key as CFBD) | Yes |
-| EPL / EFL Championship / UCL / Bundesliga / La Liga / Serie A / Ligue 1 / FIFA World Cup / UEFA EURO | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, 12 free comps) |
+| EPL / EFL Championship / UCL / Bundesliga / La Liga / Serie A / Ligue 1 / Eredivisie / Primeira Liga / Brazilian Série A / FIFA World Cup / UEFA EURO | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, and those 12 competitions ARE the free tier — every domestic cup is paid-only) |
 | NHL (regular + Stanley Cup Playoffs) | [api-web.nhle.com](https://api-web.nhle.com/) (official, undocumented) | Yes (no key required) |
 | MLB (regular + postseason) | [statsapi.mlb.com](https://statsapi.mlb.com/) (official, undocumented) | Yes (no key required) |
 | NBA (regular + playoffs) | [site.api.espn.com](https://site.api.espn.com/) (unofficial — stats.nba.com WAF-blocks most homelab egress) | Yes (no key required) |
 | MLS (regular + Cup playoffs) | [site.api.espn.com](https://site.api.espn.com/) for schedule + [The Odds API](https://the-odds-api.com/) (`soccer_usa_mls`) for closeness | Yes (Odds API free tier; ESPN no key) |
 | NCAA Baseball (D1 regular season) | [site.api.espn.com](https://site.api.espn.com/) (unofficial) + D1Baseball.com poll | Yes (no key required) |
 | NCAA Soccer — Men's + Women's (D1 regular season) | [site.api.espn.com](https://site.api.espn.com/) (unofficial) + United Soccer Coaches Top 25 | Yes (no key required) |
+| EFL Cup (Carabao Cup) / FA Cup | [site.api.espn.com](https://site.api.espn.com/) (unofficial) — Football-Data.org gates every domestic cup behind a paid plan | Yes (no key required) |
+| Soccer friendlies — international (men's + women's) and club pre-season | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Field events — Formula 1 / NASCAR / PGA Golf / ATP + WTA Tennis / UFC | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Boxing | [Boxing Data API](https://rapidapi.com/bengroves1993/api/boxing-data-api) (RapidAPI — ESPN has no boxing feed) | Yes (free RapidAPI tier; ~7-day lookahead) |
 | Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |
