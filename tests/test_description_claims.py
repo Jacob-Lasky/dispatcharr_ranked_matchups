@@ -199,3 +199,61 @@ def test_cup_band_stays_below_the_shared_quarterfinal_scalar():
     qf = float(m.group(1))
     for stage, scalar in _code_cup_scalars().items():
         assert scalar < qf, f"{stage}={scalar} is not below QUARTER_FINALS={qf}"
+
+
+# ---------------------------------------------------------------------------
+# README.md carries the SAME two counts as plugin.json's description, and
+# nothing held it to the code (#191).
+#
+# The tests above pin plugin.json only. The README's opening paragraph states
+# "N leagues, tours and competitions (M of them soccer)" independently, so the
+# two could drift from each other AND from the toggles. That is exactly what
+# happened when the cups were added: plugin.json was updated to 39/22 and the
+# README was left at 37/20, and the drift was caught by a docs bot rather than
+# by this suite. Same reasoning as the module docstring: prose about the code
+# rots unless a test holds it to the code.
+# ---------------------------------------------------------------------------
+
+def _readme_counts():
+    m = re.search(
+        r"(\d+)\s+leagues,\s+tours\s+and\s+competitions\s*\((\d+)\s+of\s+them\s+soccer",
+        _read("README.md"),
+    )
+    assert m, (
+        "README.md no longer states its '<N> leagues, tours and competitions "
+        "(<M> of them soccer)' figures; either restore them or delete this "
+        "test, but do not leave unchecked numbers in the intro"
+    )
+    return int(m.group(1)), int(m.group(2))
+
+
+def test_readme_sport_total_matches_toggle_count():
+    total, _soccer = _readme_counts()
+    actual = len(_sport_toggle_ids())
+    assert total == actual, (
+        f"README.md claims {total} leagues/tours/competitions but plugin.json "
+        f"has {actual} sport toggles"
+    )
+
+
+def test_readme_soccer_count_matches_soccer_toggles():
+    _total, soccer = _readme_counts()
+    actual = len(SOCCER_TOGGLES)
+    assert soccer == actual, (
+        f"README.md claims {soccer} soccer competitions but SOCCER_TOGGLES "
+        f"lists {actual}"
+    )
+
+
+def test_readme_and_manifest_agree_with_each_other():
+    """Belt and braces: both are pinned to the toggles above, so they cannot
+    disagree without one of those failing first. Asserted directly anyway,
+    because this is the drift a reader would actually notice (the listing page
+    and the repo front page stating different numbers)."""
+    desc = _manifest()["description"]
+    m_total = re.search(r"(\d+)\s+leagues", desc)
+    m_soccer = re.search(r"(\d+)\s+of them soccer", desc)
+    assert m_total and m_soccer
+    assert _readme_counts() == (int(m_total.group(1)), int(m_soccer.group(1))), (
+        "README.md and plugin.json's description state different counts"
+    )
