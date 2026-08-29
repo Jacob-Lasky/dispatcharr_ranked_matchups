@@ -85,9 +85,13 @@ to sort to the top of group lists):
   number never moves (#121) and the list sorts by start time. `compact`:
   `allocate_compact_numbers` keeps every number inside
   `[base, base+compact_band_size)`, holds a published game on its slot, and
-  allocates new games ABOVE the highest in use so a wide band delays slot reuse.
-  Compact CAN omit a marker when the band is narrower than the slate; the apply
-  loop skips those games. `9000 + cache_index` was the pre-#119 scheme, gone
+  allocates new games ABOVE the highest in use. Handing a freed number to the
+  next game is safe since #204 (every programme published for a game ends by the
+  moment its channel goes away — see the gotcha below), so an exact band is a
+  supported configuration and the docs must NOT tell users to widen it for
+  safety. Compact CAN omit a marker when the band is narrower than the slate;
+  the apply loop skips those games. `9000 + cache_index` was the pre-#119
+  scheme, gone
 - `streams` = cloned via `ChannelStream` from the matched source channel
 - `epg_data` = a per-channel `EPGData` row in our dummy `EPGSource` with same
   name as the group; `ProgramData` description carries the WHY breakdown
@@ -246,10 +250,30 @@ stay in agreement with that one.
 
 - **A game's end time is ESTIMATED, and there is exactly one estimate.**
   No feed publishes one. `_game_end_utc` reuses `_epg_match_window`'s
-  per-sport post-game hours (~4h gridiron, 2.5h soccer). DO NOT add a second
-  duration table for reaping: the guide entry is written against the EPG
-  window, so a shorter reap window would delete a channel while its own
-  programme still claimed the game was on air.
+  per-sport post-game hours (~4h gridiron, 2.5h soccer, 24h boxing). DO NOT add
+  a second duration table: the apply path had one (a flat `EPG_POST_HOURS` for
+  `prog_end`) while the reaper used the per-sport window, so every soccer
+  channel was reaped 30 minutes before its own live programme said the match
+  had ended (#204). Both sides now come from `_game_end_utc`. The live row's
+  end is `min(_game_end_utc, start + EPG_POST_HOURS)`: the match window is a
+  match-RECALL tolerance, not a duration, so using it raw would label a boxing
+  card live for a day. Taking the minimum also preserves the invariant
+  everything below rests on, `prog_end <= reap_at`.
+- **No programme we publish may outlive the channel it describes** (#204).
+  The post-game "Final: ..." row bridges the whistle to the apply that drops the
+  channel, and `_compute_past_slot_end` clamps it to the reap deadline (floored
+  at `prog_end`; the floor is a separate step because `_next_fire_time` can
+  land before `prog_end` on a DST fall-back day and produce a negative-width
+  row). Callers pass `reap_at=None` when reaping is off — `_game_reap_at_utc(g, 0)`
+  is game-END, not None, so passing it through would collapse the past row to
+  zero width on the DEFAULT config — and skip the row entirely when the window
+  comes out empty, since Dispatcharr serialises a zero-width programme
+  verbatim rather than rejecting it. Symmetrically, `_partition_expired` takes
+  `settings` and holds a game until `_published_guide_end` has passed: the
+  deadline baked into a published row is a snapshot, while the reaper re-reads
+  the setting every tick, so lowering it would otherwise delete a channel out
+  from under its own live guide entry. This invariant is what makes compact
+  number reuse safe.
 - **CFBD `/games` carries EVERY NCAA division**, not just Division I:
   `homeClassification` / `awayClassification` are `fbs` / `fcs` / `ii` /
   `iii`, and are occasionally absent entirely. A time-window filter alone
