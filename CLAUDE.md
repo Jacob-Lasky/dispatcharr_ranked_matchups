@@ -80,8 +80,14 @@ to sort to the top of group lists):
 
 - `tvg_id` = `ranked_matchups:<SPORT>:<source_id>` — used for cleanup detection
   on next apply (any channel with this prefix in any group is "ours")
-- `channel_number` = `9000 + cache_index` — today's games occupy lowest
-  numbers, so any IPTV client's default sort puts them first
+- `channel_number` — TWO schemes, `channel_numbering_mode`. Default `kickoff`:
+  `base + minutes-since-CHANNEL_NUMBER_ORIGIN × SLOTS + hash%SLOTS`, so a game's
+  number never moves (#121) and the list sorts by start time. `compact`:
+  `allocate_compact_numbers` keeps every number inside
+  `[base, base+compact_band_size)`, holds a published game on its slot, and
+  allocates new games ABOVE the highest in use so a wide band delays slot reuse.
+  Compact CAN omit a marker when the band is narrower than the slate; the apply
+  loop skips those games. `9000 + cache_index` was the pre-#119 scheme, gone
 - `streams` = cloned via `ChannelStream` from the matched source channel
 - `epg_data` = a per-channel `EPGData` row in our dummy `EPGSource` with same
   name as the group; `ProgramData` description carries the WHY breakdown

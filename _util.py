@@ -94,6 +94,109 @@ def stable_channel_number(
     )
 
 
+def _next_free_slot(used, cursor, band_start, band_end):
+    """Lowest free slot at or after `cursor`, wrapping to `band_start` once the
+    top of the band is passed. None when every slot in the band is taken."""
+    span = band_end - band_start + 1
+    if len(used) >= span:
+        return None
+    n = band_start if cursor > band_end or cursor < band_start else cursor
+    for _ in range(span):
+        if n not in used:
+            return n
+        n = band_start if n + 1 > band_end else n + 1
+    return None
+
+
+def allocate_compact_numbers(
+    ordered_markers: List[str],
+    band_start: int,
+    band_size: int,
+    existing: Optional[Dict[str, int]] = None,
+    reserved: Optional[set] = None,
+) -> Dict[str, int]:
+    """Assign each game a slot inside a fixed, contiguous band of channel numbers.
+
+    The alternative to `stable_channel_number`, selected by the `compact` value of
+    the `channel_numbering_mode` setting. Where that function encodes kickoff time
+    into the number (chronological and permanent, at the cost of ~7 digits), this
+    one keeps every number inside `[band_start, band_start + band_size - 1]` so a
+    user who asks for "my games live in 400-424" gets exactly that.
+
+    `ordered_markers` MUST arrive in kickoff order: a band with nothing in it yet
+    is filled straight down that order, so a fresh slate comes out chronological.
+
+    **A PUBLISHED GAME NEVER MOVES.** `existing` maps marker -> the number the
+    game's live channel currently carries, and pass 1 hands each of those back
+    unchanged whenever it still falls inside the band. That is the property the
+    whole scheme rests on: Dispatcharr's Xtream Codes API binds the guide to a
+    channel BY its integer channel number (`epg_channel_id = str(channel_num_int)`,
+    hardcoded, re-verified on 0.29.0), so a number that moves under a client
+    holding a slightly stale guide shows one game's name over another game's
+    programme (#117). Reordering the band every refresh would reintroduce that bug
+    on every apply AND every reap.
+
+    Unlike the kickoff-encoded scheme, this one CANNOT make that failure
+    impossible, only rare: a band holds `band_size` distinct numbers while far
+    more than that many games pass through it in a day, so slots must eventually
+    be handed to a new game. Pass 2 therefore allocates ABOVE the highest slot in
+    use rather than filling the lowest hole, which spends the whole width of the
+    band before reusing anything. Widening the band is the user's lever on how
+    often reuse happens; at `band_size == len(games)` it happens constantly, and
+    the settings help text says so.
+
+    `reserved` is EVERY channel number already used by a channel we do not own,
+    and skipping those is not optional. The database's unique constraint is on
+    ``(channel_group, channel_number)``, so nothing stops our channel 401 from
+    coexisting with the user's channel 401 in another group. But the M3U, XMLTV
+    and Xtream Codes outputs all key the guide on the channel number ALONE, with
+    no group in it, so two channels sharing a number collapse into one
+    ``<channel id="401">`` and the guide binds arbitrarily. Measured on a live
+    instance 2026-08-29: a band of 400-499 landed on top of an existing Peacock
+    lineup and EVERY one of our 22 channels reported another channel's
+    programme. The kickoff-time scheme never hits this because ~5.5 million is
+    far above any real lineup; a compact band sits right in the middle of one.
+
+    Returns marker -> number, omitting any marker that did not fit. The caller
+    MUST tolerate a missing marker by skipping that game.
+    """
+    if band_size < 1:
+        return {}
+    band_end = band_start + band_size - 1
+    existing = existing or {}
+    assigned: Dict[str, int] = {}
+    # Seeding `used` with the reserved numbers is what makes the allocator skip
+    # them: they are never handed out, and never counted as free.
+    used: set = {
+        int(n) for n in (reserved or ())
+        if n is not None and band_start <= int(n) <= band_end
+    }
+
+    for marker in ordered_markers:
+        cur = existing.get(marker)
+        if cur is None:
+            continue
+        cur = int(cur)
+        # `cur not in used` now also rejects a number that has since been taken
+        # by a channel outside our group, so a colliding channel is renumbered
+        # on the next apply instead of being left on the duplicate.
+        if band_start <= cur <= band_end and cur not in used:
+            assigned[marker] = cur
+            used.add(cur)
+
+    cursor = (max(used) + 1) if used else band_start
+    for marker in ordered_markers:
+        if marker in assigned:
+            continue
+        slot = _next_free_slot(used, cursor, band_start, band_end)
+        if slot is None:
+            break
+        assigned[marker] = slot
+        used.add(slot)
+        cursor = slot + 1
+    return assigned
+
+
 def extract_game_number_after_marker(headline: str, marker: str) -> Optional[int]:
     """Extract the integer game number that immediately follows `marker` in
     `headline`. Strips an "(if necessary)" trailer that ESPN attaches to

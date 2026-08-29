@@ -55,6 +55,7 @@ from ._util import (
     series_record_text,
     series_result_lines,
     stable_channel_number,
+    allocate_compact_numbers,
     stable_hash_int,
 )
 
@@ -725,6 +726,29 @@ DEFAULT_VIRTUAL_CHANNEL_BASE = 0
 # are zero existing channels (fresh install): picked high enough not to
 # collide with auto-channel-sync ranges.
 _AUTO_BASE_FALLBACK = 9000
+
+# Channel-numbering schemes, selected by the `channel_numbering_mode` setting.
+#
+# KICKOFF is the default and encodes the game's start time into the number
+# (see _util.stable_channel_number). Numbers run to ~7 digits, but a game's
+# number is a pure function of its immutable kickoff time, so it NEVER moves.
+# That is what makes the #117 guide mismatch impossible rather than merely
+# rare, and it is why this stays the default.
+#
+# COMPACT keeps every number inside a fixed band the user names, which is what
+# people actually ask for ("put my games at 400-424"). It cannot make the
+# mismatch impossible: a band holds a fixed number of slots and more games than
+# that pass through in a day, so a slot eventually gets handed to a new game.
+# See _util.allocate_compact_numbers for how reuse is delayed, and the
+# channel_numbering_mode help_text in plugin.json for what the user is told.
+NUMBERING_MODE_KICKOFF = "kickoff"
+NUMBERING_MODE_COMPACT = "compact"
+DEFAULT_NUMBERING_MODE = NUMBERING_MODE_KICKOFF
+_NUMBERING_MODES = frozenset({NUMBERING_MODE_KICKOFF, NUMBERING_MODE_COMPACT})
+
+# Sentinel 0 means "auto": size the band to the live channel count, which gives
+# the user exactly the range they asked for and accepts constant slot reuse.
+DEFAULT_COMPACT_BAND_SIZE = 0
 
 # EPGSource fields. DO NOT use source_type="dummy": Dispatcharr's
 # EPGGridAPIView treats every channel attached to a dummy source as needing
@@ -2560,7 +2584,15 @@ def _build_marker_key(game: Dict[str, Any]) -> str:
 
 
 def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) -> int:
-    """Resolve the starting channel number for our virtual channels.
+    """Resolve the base channel number for our virtual channels.
+
+    WHAT THE BASE ACTUALLY DOES DEPENDS ON THE NUMBERING MODE, and conflating the
+    two is what made this setting look broken (#202). In COMPACT mode the base is
+    literally the first number in the band: 400 means channels start at 400. In
+    KICKOFF mode (the default) it is only a FLOOR that the kickoff-time term is
+    added to, and that term is ~5.5 million by late 2026, so a base of 400 yields
+    ~5,548,720 and is invisible in practice. Any help text, log line or doc that
+    calls this "the first channel number" without naming the mode is wrong.
 
     `virtual_channel_base` setting:
       - Positive int → use that as the base.
@@ -2599,17 +2631,63 @@ def _resolve_park_base(max_target_number: int) -> int:
     return int(max_target_number) + 1000
 
 
-def _assign_channel_numbers(
-    games: List[Dict[str, Any]], virtual_base: int, tz
-) -> Dict[str, int]:
-    """Map each game's marker to its stable channel number for this apply.
+def _resolve_numbering_mode(settings: Dict[str, Any]) -> str:
+    """Resolve `channel_numbering_mode`, falling back to the default on anything
+    unrecognised so a typo in a hand-edited settings blob cannot silently select
+    a scheme the user did not intend."""
+    raw = str(settings.get("channel_numbering_mode", DEFAULT_NUMBERING_MODE) or "").strip().lower()
+    if raw in _NUMBERING_MODES:
+        return raw
+    if raw:
+        logger.warning(
+            "[ranked_matchups] unknown channel_numbering_mode=%r, using %r",
+            raw, DEFAULT_NUMBERING_MODE,
+        )
+    return DEFAULT_NUMBERING_MODE
 
-    Numbers come from `stable_channel_number` (a pure function of kickoff time +
-    marker), so a given game keeps the same integer for its whole life
-    regardless of how the slate is ranked or which other games are present. That
-    stability is what lets both the default M3U/XMLTV output and the Xtream Codes
-    API bind the EPG correctly with no client setting (#121), while the numbers
-    still increase with kickoff time so the list sorts soonest-first.
+
+def _resolve_compact_band_size(settings: Dict[str, Any], game_count: int) -> int:
+    """Width of the compact band, in channel numbers.
+
+    Sentinel 0 (the default) means "auto": exactly as many slots as there are
+    games, so `virtual_channel_base = 400` with 25 games yields 400-424 and
+    nothing else. That is the literal request users make, and it is also the
+    worst case for slot reuse, which is why the setting exists at all: a band
+    wider than the live channel count is what buys the reuse delay described in
+    _util.allocate_compact_numbers.
+
+    Never returns less than 1, so an empty slate or a nonsense setting still
+    produces a usable band rather than a division-by-nothing downstream.
+    """
+    raw = settings.get("compact_band_size", DEFAULT_COMPACT_BAND_SIZE)
+    try:
+        size = int(float(raw))
+    except (TypeError, ValueError):
+        size = DEFAULT_COMPACT_BAND_SIZE
+    if size > 0:
+        return size
+    return max(1, int(game_count))
+
+
+def _assign_channel_numbers(
+    games: List[Dict[str, Any]],
+    virtual_base: int,
+    tz,
+    mode: str = DEFAULT_NUMBERING_MODE,
+    band_size: Optional[int] = None,
+    existing_numbers: Optional[Dict[str, int]] = None,
+    reserved_numbers: Optional[set] = None,
+) -> Dict[str, int]:
+    """Map each game's marker to its channel number for this apply.
+
+    Two schemes, selected by `mode` (see the NUMBERING_MODE_* constants):
+
+    KICKOFF (default) takes numbers from `stable_channel_number`, a pure function
+    of kickoff time + marker, so a given game keeps the same integer for its whole
+    life regardless of how the slate is ranked or which other games are present.
+    That stability is what lets both the default M3U/XMLTV output and the Xtream
+    Codes API bind the EPG correctly with no client setting (#121), while the
+    numbers still increase with kickoff time so the list sorts soonest-first.
 
     Two DIFFERENT games can only land on the same number if they share a kickoff
     minute AND a hash slot (uncommon; see CHANNEL_NUMBER_TIEBREAK_SLOTS). That
@@ -2617,7 +2695,51 @@ def _assign_channel_numbers(
     we resolve it deterministically: walk the games in (number, marker) order and
     bump any exact duplicate to the next free integer. This perturbs ONLY a
     colliding same-minute game, never games at other minutes, and is reproducible
-    across applies."""
+    across applies.
+
+    COMPACT hands the ordering job to `allocate_compact_numbers`, which keeps
+    every number inside a band the user names. Games are passed in kickoff order
+    so an empty band fills chronologically, and `existing_numbers` (marker -> the
+    number that game's live channel already carries) is honoured so a published
+    game never moves. A marker may be MISSING from the returned map when the band
+    is narrower than the slate; the caller must skip those games.
+    """
+    if mode == NUMBERING_MODE_COMPACT:
+        by_start: List[Tuple[datetime, str]] = []
+        for g in games:
+            start_dt = parse_iso_utc(g.get("start_time_utc"))
+            if start_dt is None:
+                continue
+            by_start.append((start_dt, _build_marker_key(g)))
+        by_start.sort(key=lambda sm: (sm[0], sm[1]))
+        ordered = [marker for _, marker in by_start]
+        size = band_size if band_size is not None else len(ordered)
+        reserved = reserved_numbers or set()
+        assigned = allocate_compact_numbers(
+            ordered, virtual_base, size, existing_numbers or {}, reserved,
+        )
+        blocked = sum(
+            1 for n in reserved if virtual_base <= int(n) <= virtual_base + size - 1
+        )
+        if blocked:
+            logger.info(
+                "[ranked_matchups] compact band %d-%d: %d number(s) skipped, already "
+                "used by channels outside our group (the guide keys on the channel "
+                "number alone, so a shared number breaks EPG binding)",
+                virtual_base, virtual_base + size - 1, blocked,
+            )
+        dropped = len(ordered) - len(assigned)
+        if dropped:
+            logger.warning(
+                "[ranked_matchups] compact band %d-%d has room for %d of %d games "
+                "(%d slot(s) taken by your other channels); dropping the %d latest. "
+                "Raise 'Compact range size', move 'Starting channel number' to an "
+                "empty stretch of your lineup, or lower 'Maximum channels'.",
+                virtual_base, virtual_base + size - 1, len(assigned), len(ordered),
+                blocked, dropped,
+            )
+        return assigned
+
     pairs: List[Tuple[str, int]] = []
     for g in games:
         start_dt = parse_iso_utc(g.get("start_time_utc"))
@@ -3249,6 +3371,95 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _reserved_channel_numbers(target_group, band_start: int, band_end: int) -> set:
+    """Every channel number in [band_start, band_end] that some OTHER channel
+    already publishes under, so compact allocation can route around it.
+
+    Two things this must get right, both found by review after the live test:
+
+    EFFECTIVE, NOT RAW. A `ChannelOverride` can renumber a channel without
+    touching `Channel.channel_number`, and every Dispatcharr output path
+    resolves the override first (`with_effective_values`, then
+    `effective_channel_number` in views.py / epg.py). Reading the raw column
+    misses a channel overridden INTO our band, and falsely reserves one
+    overridden OUT of it.
+
+    THE ARCHIVE COUNTS AS SOMEBODY ELSE. `_owned_tvg_id_q()` matches the
+    recordings archive channel too, since ARCHIVE_TVG_ID carries TVG_ID_PREFIX.
+    But the archive lives in a DIFFERENT group and publishes globally, so a band
+    covering its number would collide with it. Only our game channels in
+    `target_group` are ours to renumber; everything else is reserved.
+
+    Fractional numbers are reserved at their floor. The M3U/XMLTV path keeps the
+    fraction so it cannot collide, and the Xtream Codes path assigns fractional
+    channels the nearest FREE integer after all integers are placed, so no
+    single integer is predictable. Reserving the floor covers the common case
+    without over-reserving the whole band.
+    """
+    from apps.channels.models import Channel
+    from django.db.models import Q
+
+    qs = Channel.objects.exclude(_owned_tvg_id_q() & Q(channel_group=target_group))
+    field = "channel_number"
+    try:
+        from apps.channels.managers import with_effective_values
+        qs = with_effective_values(qs)
+        field = "effective_channel_number"
+    except Exception:
+        logger.warning(
+            "[ranked_matchups] with_effective_values unavailable; compact numbering "
+            "is reading raw channel numbers and may miss a ChannelOverride",
+            exc_info=True,
+        )
+    rows = (
+        qs.exclude(**{f"{field}__isnull": True})
+        .filter(**{f"{field}__gte": band_start, f"{field}__lte": band_end})
+        .values_list(field, flat=True)
+    )
+    return {int(n) for n in rows}
+
+
+def _invalidate_epg_output_cache() -> None:
+    """Drop Dispatcharr's cached XMLTV so /output/epg rebuilds from what we just wrote.
+
+    DO NOT delete this call, and do not assume the ORM writes take care of it.
+    Core drops that cache from exactly ONE place: the post_save receiver on
+    Channel (apps/channels/signals.py refresh_epg_programs). We never reach that
+    receiver, deliberately. Our channels are created without epg_data and the EPG
+    is attached with a queryset .update(), both to dodge the SAME receiver's other
+    half, which unconditionally deletes our ProgramData (the
+    parse_programs_for_tvg_id trap documented at the top of this file). Dodging
+    the destructive half also drops the beneficial one.
+
+    Without this call /output/epg keeps serving the previous slate's guide for up
+    to DEFAULT_CACHE_TTL (300s on 0.29.0) while the M3U (2s TTL) and the Xtream
+    Codes endpoints are already correct. A client that fetches both together in
+    that window gets a fresh channel list bound to a stale guide, which is a
+    server-side instance of the #117 mismatch: present even for a client that
+    caches nothing of its own. See #201.
+
+    Best-effort by design: this is not part of a documented plugin API, so a
+    Dispatcharr version that moves or renames it must degrade to a stale-guide
+    window rather than breaking the apply.
+    """
+    try:
+        from apps.output.streaming_chunk_cache import invalidate_epg_chunk_cache
+    except Exception:
+        logger.debug(
+            "[ranked_matchups] EPG chunk-cache invalidation unavailable on this "
+            "Dispatcharr build; /output/epg may serve a stale guide briefly",
+            exc_info=True,
+        )
+        return
+    try:
+        invalidate_epg_chunk_cache()
+        logger.info("[ranked_matchups] invalidated the /output/epg chunk cache")
+    except Exception:
+        logger.warning(
+            "[ranked_matchups] failed to invalidate the EPG chunk cache", exc_info=True,
+        )
+
+
 def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Clone-into-group + EPG-overlay strategy:
 
@@ -3488,19 +3699,85 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         .aggregate(m=_Max("channel_number"))["m"] or 0
     )
     virtual_base = _resolve_virtual_base(settings, highest_other)
-    # Stable per-game channel numbers (marker -> number). Computed once up front
-    # so collision resolution sees the whole slate and so park_base can be set
-    # above the true ceiling (kickoff-time based, so driven by how far ahead the
-    # slate reaches, not by the game count).
-    chnum_by_marker = _assign_channel_numbers(games, virtual_base, apply_tz)
+    numbering_mode = _resolve_numbering_mode(settings)
+    band_size = _resolve_compact_band_size(settings, len(games))
+    # Per-game channel numbers (marker -> number). Computed once up front so
+    # collision resolution sees the whole slate and so park_base can be set above
+    # the true ceiling. In KICKOFF mode that ceiling is driven by how far ahead
+    # the slate reaches rather than by the game count; in COMPACT mode it is the
+    # top of the band. Existing numbers are passed so COMPACT can hold a
+    # published game on the slot it already has (see allocate_compact_numbers).
+    # COMPACT only: every number in use by a channel we do NOT own. The DB
+    # constraint is per-group, so nothing stops a collision, but the M3U, XMLTV
+    # and Xtream Codes outputs all key the guide on the bare channel number, so
+    # a shared number silently binds the wrong programme. Measured live on
+    # 2026-08-29 against a Peacock lineup occupying 400-499. Skipped entirely in
+    # kickoff mode, where numbers are ~7 digits and cannot collide with a real
+    # lineup, so the extra scan is not paid on the default path.
+    reserved_numbers = None
+    if numbering_mode == NUMBERING_MODE_COMPACT:
+        reserved_numbers = _reserved_channel_numbers(
+            target_group, virtual_base, virtual_base + band_size - 1,
+        )
+    chnum_by_marker = _assign_channel_numbers(
+        games, virtual_base, apply_tz,
+        mode=numbering_mode,
+        band_size=band_size,
+        existing_numbers={
+            marker: int(ch.channel_number)
+            for marker, ch in existing_virtuals.items()
+            if ch.channel_number is not None
+        },
+        reserved_numbers=reserved_numbers,
+    )
+    if numbering_mode == NUMBERING_MODE_COMPACT and games:
+        # A game with no slot cannot be published: a null channel_number
+        # truncates the whole Xtream Codes feed. Drop it HERE, before the
+        # pre-pass, rather than skipping it in the write loop further down.
+        # seen_markers is populated by the pre-pass, so a game that reaches the
+        # pre-pass and is skipped afterwards is neither renumbered nor reaped: it
+        # keeps the temporary parking number it was given in phase 0 and is
+        # stranded there. Measured live on 2026-08-29, which left 22 channels
+        # sitting at 1400-1421. Dropping the game before the pre-pass hands its
+        # existing channel to the normal stale path, which preserves DVR
+        # recordings on the way out (#146).
+        placeable = [g for g in games if _build_marker_key(g) in chnum_by_marker]
+        if not placeable:
+            # Every slot in the band is taken. Publishing nothing would reap the
+            # entire group over what is almost certainly a mis-set range, so fail
+            # safe: touch nothing and tell the user which setting to move.
+            band_top = virtual_base + band_size - 1
+            # NOT "nothing was changed": by this point apply may already have
+            # created the target group, migrated channels into it after a rename,
+            # and created or upgraded the EPG source, all outside the transaction
+            # below. Claiming otherwise would send someone looking in the wrong
+            # place. What is true is that no channel was added, renumbered or
+            # removed, because every one of those happens after this return.
+            msg = (
+                f"Compact numbering found no free channel numbers in {virtual_base}-"
+                f"{band_top}: every number in that range is already used by another "
+                f"channel. No channels were added, renumbered or removed. Move "
+                f"'Starting channel number' to an empty stretch of your lineup, or "
+                f"raise 'Compact range size'."
+            )
+            logger.error("[ranked_matchups] %s", msg)
+            return {"status": "error", "message": msg}
+        if len(placeable) != len(games):
+            logger.warning(
+                "[ranked_matchups] compact: publishing %d of %d games; the rest have "
+                "no free number in %d-%d",
+                len(placeable), len(games), virtual_base, virtual_base + band_size - 1,
+            )
+        games = placeable
+
     max_target = max(chnum_by_marker.values(), default=virtual_base)
     park_base = _resolve_park_base(max_target)
     logger.info(
         "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r), "
-        "max_target=%d, park_base=%d",
+        "mode=%s, band_size=%d, max_target=%d, park_base=%d",
         virtual_base, highest_other,
         settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE),
-        max_target, park_base,
+        numbering_mode, band_size, max_target, park_base,
     )
 
     created = 0
@@ -3788,7 +4065,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 continue
 
         marker = _build_marker_key(g)
-        seen_markers.add(marker)
 
         signals, score = _build_signals_score_from_payload(g)
         extra = g.get("extra") or {}
@@ -3812,6 +4088,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         if start_dt is None:
             logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)
             continue
+
+        # ONLY NOW is the game genuinely seen. seen_markers drives stale
+        # detection, so a marker added before a later `continue` leaves its
+        # existing channel neither published nor reaped: it keeps the temporary
+        # parking number phase 0 gave it and commits there permanently. This
+        # line used to sit above the start-time parse, which stranded any
+        # channel whose cached start_time_utc had gone malformed, in BOTH
+        # numbering modes. Every `continue` above this point must stay above it.
+        seen_markers.add(marker)
 
         new_name = format_channel_name(
             g["sport_prefix"], signals, score, g["home"], g["away"],
@@ -3941,6 +4226,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # the loop below, so without this a kept stale channel would sit at the
         # parking number until the next cycle reaps it.
         prepark_numbers = {ch.id: ch.channel_number for ch in existing_virtuals.values()}
+        # Every channel number this run actually assigns to a channel. Used by
+        # the kept-for-recording restore below, which must not treat a merely
+        # PLANNED number as occupied.
+        written_numbers: set = set()
         if not dry_run and existing_virtuals:
             parked = list(existing_virtuals.values())
             for i, ch in enumerate(parked):
@@ -3967,11 +4256,19 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             resolved_logo_id = prep.logo_id
             source_streams = prep.source_streams
             start_dt = prep.start_dt
-            # Stable, kickoff-time-based channel number (keyed by marker, see
-            # _assign_channel_numbers / #121). Guaranteed present: both this map
-            # and the pre-pass skip exactly the same bad-start_time rows, so any
-            # marker with a plan also has a number here.
-            target_chnum = chnum_by_marker[marker]
+            # Channel number for this game (keyed by marker, see
+            # _assign_channel_numbers / #121). In KICKOFF mode this is always
+            # present: that map and the pre-pass skip exactly the same
+            # bad-start_time rows, so any marker with a plan also has a number.
+            # In COMPACT mode unplaceable games are filtered out of `games`
+            # BEFORE the pre-pass (see the placeable filter above), so this guard
+            # should never fire. It stays as a belt: publishing a channel with a
+            # null channel_number truncates the whole Xtream Codes feed (see
+            # _ARCHIVE_CHANNEL_NUMBER), which is far worse than dropping a game.
+            target_chnum = chnum_by_marker.get(marker)
+            if target_chnum is None:
+                continue
+            written_numbers.add(target_chnum)
             prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
             prog_end = start_dt + timedelta(hours=EPG_POST_HOURS)
             existing = existing_virtuals.get(marker)
@@ -4155,7 +4452,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # unique (channel_group, channel_number) constraint can't be hit;
             # any (rare) collision leaves that channel parked, still safe.
             if kept_for_recording:
-                assigned_now = set(chnum_by_marker.values())
+                # Numbers actually WRITTEN this run, not the whole plan.
+                # chnum_by_marker still holds entries for games the compact
+                # placeable-filter dropped and for games the pre-pass skipped,
+                # and treating those as taken refuses a kept channel its own
+                # original number and leaves it parked. Only a number some
+                # channel really carries can block a restore.
+                assigned_now = written_numbers
                 restore = []
                 for ch in kept_for_recording:
                     orig = prepark_numbers.get(ch.id)
@@ -4197,6 +4500,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # Runs on a dry run TOO (reads only, writes nothing) so the rehearsal
         # reports the profile change it would make.
         profile_stats = _sync_profile_memberships(settings, dry_run=dry_run)
+
+    # The channel and ProgramData writes above have now COMMITTED, which is the
+    # only point at which dropping the cached XMLTV is correct: invalidating
+    # inside the transaction would let a concurrent /output/epg rebuild from
+    # pre-commit state and re-populate the cache with exactly what we are trying
+    # to evict. Covers reap too, since reap delegates all deletion to this
+    # function (see _action_reap). #201.
+    if not dry_run:
+        _invalidate_epg_output_cache()
 
     # Persist the LLM-description cache (prune entries whose marker is no
     # longer in this refresh; keep file bounded to live games). Save outside
@@ -5346,7 +5658,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.24.0"
+    version = "1.25.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
