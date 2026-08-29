@@ -188,8 +188,51 @@ space: it arrives on a one-game schedule and gets bucketed against
 "6+ wins = bowl eligible". Return `None` (the default) unless your sport
 has that asymmetry.
 
+### Two daemon threads, not one
+
+`Plugin.__init__` starts BOTH a scheduler (periodic refresh+apply) and a
+reaper (removes finished games between refreshes, #196). They have SEPARATE
+reload-stable registries and must both be torn down in `stop()`.
+
+**The trap that already bit once: `_start_reaper()` must not sit behind the
+scheduler's early return.** `__init__` returns early when a live scheduler is
+already in the registry, and that is the COMMON path, because the loader
+rebuilds `Plugin` on every discovery. Anything placed after that return only
+runs on a cold worker, so the reaper shipped inert on upgrade until it was
+moved above the return. Any future third thread has the same hazard.
+
+`stop()` uses `_clear_if_exited`, which only nulls a registry slot whose
+thread actually died. Clearing a slot whose thread is still alive (the reaper
+can be parked on a subprocess well past the 5s join) makes the next
+`__init__` spawn a duplicate.
+
+### cache.json has TWO lists: `games` and `bench`
+
+`games` is what apply puts on air; `bench` is scored-but-not-applied stock the
+reaper promotes from as games finish (#197). Splitting them at write time
+rather than tagging rows is deliberate: `_action_apply` needs no knowledge of
+the bench at all, it still applies exactly the list it is handed.
+
+`reap_apply_pending` is a third key. The reaper rewrites the cache BEFORE
+calling apply, so a failed apply leaves the desired state published and the DB
+behind it. The flag is how the next tick knows to re-apply; without it the
+expired games are already absent from the cache and nothing could ever notice
+they still need removing.
+
+**Reaping delegates deletion to `_action_apply` on purpose.** Apply already
+reaps owned channels missing from the cache, with DVR-recording protection,
+the archive re-home, ChannelStream/EPGData cleanup, and signal-safe queryset
+deletes. Do NOT add a second deletion path; it would be a copy that has to
+stay in agreement with that one.
+
 ## Known gotchas / lessons learned
 
+- **A game's end time is ESTIMATED, and there is exactly one estimate.**
+  No feed publishes one. `_game_end_utc` reuses `_epg_match_window`'s
+  per-sport post-game hours (~4h gridiron, 2.5h soccer). DO NOT add a second
+  duration table for reaping: the guide entry is written against the EPG
+  window, so a shorter reap window would delete a channel while its own
+  programme still claimed the game was on air.
 - **CFBD `/games` carries EVERY NCAA division**, not just Division I:
   `homeClassification` / `awayClassification` are `fbs` / `fcs` / `ii` /
   `iii`, and are occasionally absent entirely. A time-window filter alone
