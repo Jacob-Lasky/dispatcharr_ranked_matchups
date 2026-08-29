@@ -62,30 +62,32 @@ implementation and testing are done by AI.
 ## Example output
 
 ```
-#9000  EPL ★10.0 · Brentford at Manchester United · title / UCL race
-       — both top-10 (#3 vs #9), title / UCL race, toss-up (line +0.5)
+#5548720  EPL ★10.0 · Brentford at Manchester United · title / UCL race
+          — both top-10 (#3 vs #9), title / UCL race, toss-up (line +0.5)
 
-       Description (what TiviMate/Plex/Jellyfin show):
-         Kickoff: Today 2:00 PM CDT 🔴 TODAY
-         Matchup: Brentford FC @ Manchester United FC
-         Sport: English Premier League
-         Score: 10.0/10  (raw 28.3)
-         Score breakdown:
-           rank_pair: +7.92
-           close_game: +3.38
-           importance: +17.0
-         Source channel: Manchester United
+          Description (what TiviMate/Plex/Jellyfin show):
+            Kickoff: Today 2:00 PM CDT 🔴 TODAY
+            Matchup: Brentford FC @ Manchester United FC
+            Sport: English Premier League
+            Score: 10.0/10  (raw 28.3)
+            Score breakdown:
+              rank_pair: +7.92
+              close_game: +3.38
+              importance: +17.0
+            Source channel: Manchester United
 
-#9002  EFL ⭐★10.0 · Middlesbrough at Wrexham · playoff / auto-promotion race
-       — both top-10 (#4 vs #6), favorite (Wrexham),
-         playoff / auto-promotion race, toss-up (line +0.2)
+#5550642  EFL ⭐★10.0 · Middlesbrough at Wrexham · playoff / auto-promotion race
+          — both top-10 (#4 vs #6), favorite (Wrexham),
+            playoff / auto-promotion race, toss-up (line +0.2)
 
-#9100  CFB ★9.2 · Ohio State (5) at Penn State (1) · top-5 showdown
-       — poll-ranked leagues show the rank inline after each team
+#5553521  CFB ★9.2 · Ohio State (5) at Penn State (1) · top-5 showdown
+          — poll-ranked leagues show the rank inline after each team
 ```
 
 Today's games are sorted to the front (lowest channel numbers) so they appear
-first in any IPTV client.
+first in any IPTV client. The numbers above are the default kickoff-time
+scheme; see [Channel numbering](#channel-numbering) for the compact alternative
+(`400-424` instead of seven digits) and what it costs.
 
 The channel name is fully customizable (see "Channel Naming" in settings). The
 default renders as above: poll ranks appear inline after each team, and any
@@ -196,7 +198,10 @@ form will collect everything needed to scope it.
    at the Xtream Codes API). No special TVG-ID setting is required, in either
    the default M3U/EPG output or the Xtream Codes API.
 
-   > **Why it sorts soonest-first and the guide stays correct.** Each channel's
+   > **Why it sorts soonest-first and the guide stays correct.** (This describes
+   > the default **Kickoff time** numbering; if you switch to **Compact range**,
+   > read [Channel numbering](#channel-numbering) first — the guarantee below is
+   > exactly what that mode trades away.) Each channel's
    > *number* is derived from its kickoff time: `virtual_base + minutes-since-a-
    > fixed-origin × slots + a small per-game tiebreak`. So the list sorts
    > strictly by day then start time (live/upcoming games first), and — crucially
@@ -333,13 +338,59 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   points your instance at a third-party service, so the recommended way in is to
   self-host `ghcr.io/sethwv/game-thumbs` and set "game-thumbs base URL" to your
   own instance. Leave the field blank and no request is made to anyone
-- Channel number: `9000 + cache_index`, so today's games occupy the lowest
-  numbers and appear first in any IPTV client's default sort
+- Channel number: two schemes, picked by the "Channel numbering" setting.
+  **Kickoff time** (default) derives the number from the game's start time, so
+  the list sorts soonest-first and no game's number ever changes. The numbers
+  are large, around 7 digits. **Compact range** keeps every channel inside a
+  band you name, e.g. 400-424, at the cost described under "Channel numbering"
+  below
 - Channel Profiles: the channels are enabled in every Channel Profile by
   default. Narrow that with "Channel Profiles to enable" (see below)
 
 If you rename the target group, the next apply detects the old group + its
 virtual channels (by tvg_id marker `ranked_matchups:`) and migrates them.
+
+### Channel numbering
+
+Two schemes, set by **Channel numbering**. This is a guide-accuracy tradeoff, not
+a cosmetic preference.
+
+**Kickoff time** (default) builds the number out of the game's start time:
+`starting number + minutes-since-a-fixed-origin × slots + a small per-game
+tiebreak`. Two consequences. The list sorts strictly by day then start time, and
+a game's number is fixed for its entire life, so the guide can never bind the
+wrong programme to a channel. The cost is that the numbers are large, around 7
+digits, and the **Starting channel number** setting is only a floor: the
+time-based term is in the millions, so setting it to 400 lands you near
+5,548,000 rather than at 400.
+
+**Compact range** keeps every channel inside a band you name. Set **Starting
+channel number** to 400 and **Compact range size** to 25 and the group runs
+400-424. A published game holds its slot until it finishes, so numbers do not
+shuffle underneath you on a refresh.
+
+**Pick a stretch of your lineup that is empty.** Channel numbers identify a
+channel to the guide *on their own*, with no group attached, so if one of your
+existing channels already sits at 401 and we put a game there too, the guide
+cannot tell them apart and both break. We skip any number in the range that is
+already taken and log how many, but if the range you chose is crowded there will
+not be room for every game. Give it more room than you need.
+
+What compact numbering cannot do is make the guide mismatch impossible, and it is
+worth understanding why before choosing it. A band holds a fixed number of slots
+while far more games than that pass through in a day, so a slot eventually gets
+handed to a new game. If your player is holding a guide it downloaded earlier, it
+will show the new game's *name* over the old game's *programme* until it
+refreshes the guide. **Compact range size** is the lever: reserve more numbers
+than you have channels and reuse becomes rare. A start of 400 with a size of 100
+spreads games across 400-499 and takes a long time to come back around.
+
+If you use the M3U and XMLTV URLs rather than the Xtream Codes API, you can side
+-step the tradeoff completely: set **TVG-ID Source = TVG-ID** on both URLs (the
+M3U and EPG buttons on the Channels page). The guide then binds by a stable
+per-game id and stops using the channel number at all, so compact numbering
+carries no risk for you. Xtream Codes has no equivalent setting; it binds the
+guide to the integer channel number and that is not configurable.
 
 ### Channel Profiles
 

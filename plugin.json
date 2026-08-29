@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.24.0",
+  "version": "1.25.0",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -608,7 +608,31 @@
       "type": "number",
       "label": "Starting channel number (0 = auto)",
       "default": 0,
-      "help_text": "First channel number assigned to virtual channels. Set to 0 to auto-pick (start at the highest existing non-virtual channel + 1) so the plugin slots in cleanly without colliding with your real channels. Or pin a fixed number — e.g. 9000 — if you want them at a known location. Today's games occupy the lowest numbers in this range so they appear first in any IPTV client."
+      "help_text": "Where our channels begin. What this actually does depends on 'Channel numbering' below. In Compact mode it is literal: 400 means the group runs 400, 401, 402 and up, skipping any number already in use elsewhere in your lineup. In Kickoff-time mode it is only a floor and the time-based part of the number dwarfs it, so 400 lands somewhere around 5,548,000 and you will not see 400 anywhere. Set to 0 to auto-pick (the highest existing non-virtual channel + 1) so we slot in after your real channels without colliding with them."
+    },
+    {
+      "id": "channel_numbering_mode",
+      "type": "select",
+      "label": "Channel numbering",
+      "default": "kickoff",
+      "options": [
+        {
+          "value": "kickoff",
+          "label": "Kickoff time (safe, large numbers)"
+        },
+        {
+          "value": "compact",
+          "label": "Compact range (e.g. 400-424)"
+        }
+      ],
+      "help_text": "How channel numbers are picked. THIS IS A GUIDE-ACCURACY TRADEOFF, not cosmetics. Kickoff time (default) builds the number out of the game's start time. Numbers are ugly (around 7 digits) but a game's number is fixed for its whole life, so the guide can never bind the wrong programme to a channel. Compact range keeps every channel inside a band you choose, which is what most people want to look at, but a band only holds so many slots and more games than that pass through in a day, so a slot eventually gets handed to a different game. If your player is holding a guide it downloaded earlier, that channel will show the new game's NAME over the old game's PROGRAMME until the guide refreshes. Widen 'Compact range size' to make that rare. If you use the M3U and XMLTV URLs (not Xtream Codes), you can avoid it entirely: set TVG-ID Source to TVG-ID on both URLs and the guide stops using the channel number at all."
+    },
+    {
+      "id": "compact_band_size",
+      "type": "number",
+      "label": "Compact range size (0 = exactly the channel count)",
+      "default": 0,
+      "help_text": "Compact mode only. How many channel numbers to reserve, counting up from the starting number. 0 means 'exactly as many as there are channels', so a start of 400 with 25 channels gives you 400-424 and nothing else. That is the tidiest option and also the worst for guide accuracy: with no spare slots, every game that finishes hands its number straight to the next game. Reserving more than you need is what buys the safety. 400 with a size of 100 spreads games across 400-499 and takes a long time to reuse anything. Any number in the range that is ALREADY used by one of your other channels is skipped, because the guide identifies a channel by its number alone and two channels sharing one breaks both, so pick a stretch of your lineup that is mostly empty and give it room. Ignored in Kickoff-time mode."
     },
     {
       "id": "placeholder_min_score",

@@ -5,6 +5,41 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.25.0] - 2026-08-29
+
+### Added
+
+- **Compact channel numbering.** A new "Channel numbering" setting picks between
+  the existing kickoff-time scheme (default, ~7-digit numbers that never move)
+  and a compact range that keeps every channel inside a band you name, so
+  "Starting channel number" 400 with "Compact range size" 25 gives you 400-424.
+  A published game holds its slot until it finishes; new games are allocated
+  above the highest slot in use, so reserving more numbers than you have
+  channels delays slot reuse. Both settings explain the guide-accuracy tradeoff
+  in the settings modal, and the README has a "Channel numbering" section
+  covering the M3U/XMLTV escape hatch (TVG-ID Source = TVG-ID) that removes the
+  tradeoff entirely for non-Xtream-Codes users. Numbers already used by your
+  other channels are skipped: the guide identifies a channel by its number
+  alone, with no group attached, so a band laid over an existing lineup would
+  otherwise break the guide for every channel it touched. (#202)
+
+### Fixed
+
+- **The XMLTV output no longer serves a stale guide after an apply or a reap.**
+  Dispatcharr caches `/output/epg` for 300s and drops that cache from a single
+  `post_save` receiver on `Channel`, which this plugin deliberately bypasses to
+  avoid the same receiver's `ProgramData`-wiping half. So nothing invalidated
+  it, and for up to 5 minutes after every slate change the M3U (2s cache) and
+  the Xtream Codes endpoints were correct while the XMLTV was not: a
+  server-side instance of the #117 guide mismatch, present even for clients
+  that cache nothing. Apply now invalidates the cache after its transaction
+  commits, which covers reap too since reap delegates deletion to apply. (#201)
+- **"Starting channel number" no longer promises something it does not do.** Its
+  help text said you could pin a fixed number "if you want them at a known
+  location", which was false under the kickoff-time scheme where the time-based
+  term dwarfs the base. It now states what the setting does in each mode. (#202)
+
+
 ## [1.24.0] - 2026-08-29
 
 ### Added

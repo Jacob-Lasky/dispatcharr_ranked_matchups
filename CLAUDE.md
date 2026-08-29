@@ -80,15 +80,32 @@ to sort to the top of group lists):
 
 - `tvg_id` = `ranked_matchups:<SPORT>:<source_id>` — used for cleanup detection
   on next apply (any channel with this prefix in any group is "ours")
-- `channel_number` = `9000 + cache_index` — today's games occupy lowest
-  numbers, so any IPTV client's default sort puts them first
+- `channel_number` — TWO schemes, `channel_numbering_mode`. Default `kickoff`:
+  `base + minutes-since-CHANNEL_NUMBER_ORIGIN × SLOTS + hash%SLOTS`, so a game's
+  number never moves (#121) and the list sorts by start time. `compact`:
+  `allocate_compact_numbers` keeps every number inside
+  `[base, base+compact_band_size)`, holds a published game on its slot, and
+  allocates new games ABOVE the highest in use so a wide band delays slot reuse.
+  Compact CAN omit a marker when the band is narrower than the slate; the apply
+  loop skips those games. `9000 + cache_index` was the pre-#119 scheme, gone
 - `streams` = cloned via `ChannelStream` from the matched source channel
 - `epg_data` = a per-channel `EPGData` row in our dummy `EPGSource` with same
   name as the group; `ProgramData` description carries the WHY breakdown
 
 A 2-phase renumber dance avoids the unique constraint on
-`(channel_group, channel_number)`: park existing channels at 19000+ first,
-then assign target numbers.
+`(channel_group, channel_number)`: park existing channels at
+`_resolve_park_base` (highest target number this apply will write + 1000)
+first, then assign target numbers.
+
+In `compact` mode only, apply also collects `_reserved_channel_numbers`:
+every number in the band already published by a channel we do NOT own
+(effective numbers, so a `ChannelOverride` counts; the recordings-archive
+channel counts as somebody else's because it lives in another group). The DB
+constraint is per-group so a duplicate is legal, but the M3U, XMLTV and Xtream
+Codes outputs all key the guide on the bare channel number, so a shared number
+binds the guide arbitrarily for BOTH channels. Reserved numbers are skipped; if
+the whole band is taken, apply returns an error rather than publishing nothing
+and reaping the group.
 
 ## The interestingness signals (priority order)
 
@@ -267,6 +284,18 @@ stay in agreement with that one.
   whitelist (FC, AFC, City, United, etc.) so the bare name "Hull" matches
   "Hull City AFC" but **doesn't** match "UNC Pembroke" (Pembroke isn't a
   qualifier).
+- **Apply MUST invalidate the `/output/epg` chunk cache itself** (#201).
+  Dispatcharr caches the XMLTV for 300s and drops that cache from exactly one
+  place: the `post_save` receiver on `Channel`. We never reach that receiver
+  on purpose (channels are created without `epg_data`, the EPG is attached with
+  a queryset `.update()`) because the same receiver's other half wipes our
+  `ProgramData` — and dodging the destructive half also drops the beneficial
+  one. So `_action_apply` calls `_invalidate_epg_output_cache()` AFTER the
+  transaction commits (inside it, a concurrent `/output/epg` would repopulate
+  the cache from pre-commit rows). This covers reap too, since reap delegates
+  deletion to apply. It reaches into Dispatcharr internals that are not a
+  documented API, so it is best-effort: a build that moves the function must
+  cost a stale-guide window, not the apply.
 - **Postgres connection pool**: long-running plugin code can exhaust the
   default Postgres connection pool. Monitor with `SELECT count(*) FROM
   pg_stat_activity` in the Dispatcharr container if you add worker-heavy
@@ -329,7 +358,8 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   keyless; Favorites-gated by default)
 - All scoring signals (rank, favorite, close_game, importance,
   tournament-stage, optional LLM narrative)
-- Today-first sort + channel renumbering, with auto / fixed virtual base
+- Today-first sort + channel renumbering, with auto / fixed virtual base and
+  either numbering mode (`kickoff` default, `compact` band)
 - Placeholder channels for unmatched-high-scoring games
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
