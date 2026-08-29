@@ -159,8 +159,46 @@ Four formats exist for the threshold cutoffs:
 state's `_teams[team][<_count_field>]` is what `terminal_outcomes`
 buckets against the threshold cutoff.
 
+### Every emitted row costs ~7s, and the refresh budget is 1500s
+
+**A source that flips `supports_importance = True` is buying a Monte Carlo
+season replay PER EMITTED GAME. Measured 2026-08-29 for NCAAF: ~7.0s each.**
+`tasks.py` kills the pipeline subprocess at 1500s, so the whole refresh
+affords roughly 200 importance-bearing rows across ALL sources combined.
+
+This is the budget that decides whether a `fetch_upcoming` filter is
+cosmetic or load-bearing, and it is invisible at authoring time because the
+cost lands in `plugin._action_refresh`, not in the source. Two rules:
+
+- **Bound what `fetch_upcoming` emits to what can actually score.** NCAAF
+  shipped without a division filter and pulled all of CFBD's D-II/D-III
+  feed: 157 games where 27 involved an FBS team, ~1100s of the budget, and
+  `auto_pipeline` timed out on every run from the day the season opened.
+- **The emitted universe and the simulated universe must be the same set.**
+  A team the simulator has never heard of has no strength estimate and no
+  win-count band, so its games score exactly 0.00 while still paying the
+  full 7s. Derive both from one predicate and one cached fetch; two call
+  sites that "agree" are a convention, and conventions drift silently.
+
+Separately, `outcome_eligible_teams()` on `PointsBasedSportSource` exists
+because game inclusion and outcome eligibility are different questions. An
+FBS-vs-FCS game belongs in the population (the win counts toward the FBS
+team's record) while the FCS opponent does NOT belong in CFB's outcome
+space: it arrives on a one-game schedule and gets bucketed against
+"6+ wins = bowl eligible". Return `None` (the default) unless your sport
+has that asymmetry.
+
 ## Known gotchas / lessons learned
 
+- **CFBD `/games` carries EVERY NCAA division**, not just Division I:
+  `homeClassification` / `awayClassification` are `fbs` / `fcs` / `ii` /
+  `iii`, and are occasionally absent entirely. A time-window filter alone
+  returns mostly Division II and III. See the refresh-budget section above.
+- **A "0 games" summary from a poll-driven source usually means the POLL
+  call failed, not that it is the offseason.** `_fetch_rankings` returning
+  `None` makes `fetch_upcoming` return `[]`, and NCAAF logged that as
+  "offseason (?)" regardless of cause, which cost a day of wrong diagnosis
+  on 2026-08-28. Distinguish request failure from unpublished poll.
 - **CFBD API is camelCase**: `homeTeam`, `awayTeam`, `startDate`,
   `neutralSite`, `excitementIndex`. We hit this once already — got 0 games
   because we used `home_team`. Their `/games` response also exposes
