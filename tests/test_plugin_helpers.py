@@ -17,35 +17,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG_NAME = os.path.basename(REPO_ROOT)
 
 
-def _load_plugin_module():
-    """Load `plugin.py` as a submodule of the (already-stub-registered)
-    package. Need to stub the Django imports it does at top-level too: but
-    actually plugin.py only does Django imports lazily inside functions, so
-    top-level load is safe."""
-    if f"{PKG_NAME}.plugin" in sys.modules:
-        return sys.modules[f"{PKG_NAME}.plugin"]
-    # _util is imported at module top by plugin; load it first.
-    util_spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}._util", os.path.join(REPO_ROOT, "_util.py")
-    )
-    util_mod = importlib.util.module_from_spec(util_spec)
-    sys.modules[f"{PKG_NAME}._util"] = util_mod
-    util_spec.loader.exec_module(util_mod)
-
-    spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}.plugin", os.path.join(REPO_ROOT, "plugin.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[f"{PKG_NAME}.plugin"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-@pytest.fixture(scope="module")
-def plugin():
-    return _load_plugin_module()
-
-
 class TestActionRefreshClearsFdCaches:
     """The FD.org batching refactor pins module-level caches into
     `sources/soccer.py` and relies on `_action_refresh` to wipe them at
@@ -436,6 +407,99 @@ class TestManifestFavoritesOnlyMatchesCode:
         ]
         assert field["default"] == plugin._FAVORITES_ONLY_OFF
         assert field["id"] == plugin._FAVORITES_ONLY_SETTING
+
+
+class TestRankPoolSizeWiring:
+    """The percentile rank signal is only correct if the POOL reaches the
+    scorer. Every scoring-level test can pass with plugin.py never forwarding
+    it, in which case every league game silently scores as a 25-team pool,
+    which is the exact bug #194 fixed. Pin the wiring, not just the maths."""
+
+    def test_league_pool_comes_from_the_standings_table(self, plugin):
+        """A league source's pool is its table length, per competition:
+        the Premier League's 20 and the Championship's 24 must stay distinct
+        without a second list to keep in sync."""
+        import inspect
+        src = inspect.getsource(plugin._action_refresh)
+        assert "len(standings_table)" in src, (
+            "refresh no longer derives the rank pool from the standings table"
+        )
+        assert "rank_pool_size=rank_pool" in src, (
+            "the derived pool is not being passed into GameSignals"
+        )
+
+    def test_pool_is_persisted_to_the_cache_row(self, plugin):
+        """The cache-replay scorer re-scores from the row. Without the pool on
+        it, a replayed league game defaults to a 25-team pool and disagrees
+        with the refresh that produced it."""
+        import inspect
+        src = inspect.getsource(plugin._action_refresh)
+        assert '"rank_pool_size": signals.rank_pool_size' in src
+
+    def test_cache_replay_reads_the_pool_back(self, plugin):
+        import inspect
+        fn = getattr(plugin, "_rescore_cached_game", None)
+        src = inspect.getsource(fn) if fn else inspect.getsource(plugin)
+        assert 'rank_pool_size=g.get("rank_pool_size")' in src
+
+    def test_base_source_does_not_hardcode_the_poll_depth(self):
+        """scoring.RANK_POOL_DEFAULT is the single source of truth. A second
+        copy on SportSource would be free to drift silently."""
+        from dispatcharr_ranked_matchups.sources.base import SportSource
+        assert SportSource.rank_pool_size is None
+
+    def test_poll_sources_inherit_the_undeclared_default(self):
+        from dispatcharr_ranked_matchups.sources import NcaafSource
+        assert NcaafSource(api_key="x").rank_pool_size is None
+
+    def test_undeclared_pool_scores_as_the_poll_depth(self):
+        """End of the chain: an undeclared pool must land on the poll depth,
+        not on 0 or a crash."""
+        from dispatcharr_ranked_matchups.scoring import (
+            GameSignals, Weights, score_game, RANK_POOL_DEFAULT,
+        )
+        undeclared = score_game(
+            GameSignals(rank_a=7, rank_b=None, rank_pool_size=None), Weights(),
+        ).breakdown["one_ranked"]
+        explicit = score_game(
+            GameSignals(rank_a=7, rank_b=None, rank_pool_size=RANK_POOL_DEFAULT),
+            Weights(),
+        ).breakdown["one_ranked"]
+        assert undeclared == explicit
+        # Literal, so collapsing RANK_POOL_DEFAULT cannot make this vacuous.
+        # Selective 25-deep poll: ((25 + 1 - 7)/25 + 0)/2 * 10 = 3.8
+        assert undeclared == 3.8
+
+
+class TestManifestNcaafDivisionsMatchesCode:
+    """plugin.json's ncaaf_divisions option values must equal the source's
+    DIVISION_SETS keys, mirroring TestManifestFavoritesOnlyMatchesCode. A
+    manifest value the source does not recognise silently degrades to the
+    default, so the UI would offer a setting that does nothing."""
+
+    def test_options_match_source_constants(self):
+        import json
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+
+        with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
+            manifest = json.load(f)
+        field = next(
+            x for x in manifest["fields"] if x["id"] == "ncaaf_divisions"
+        )
+        assert field["type"] == "select"
+        values = [o["value"] for o in field["options"]]
+        assert set(values) == set(ncaaf_mod.DIVISION_SETS)
+        assert field["default"] == ncaaf_mod.DEFAULT_DIVISIONS
+        assert field["default"] in values
+
+    def test_sits_next_to_its_toggle(self):
+        """The divisions select is meaningless without enable_ncaaf, so it
+        must render adjacent to it rather than elsewhere in an 86-field form."""
+        import json
+        with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
+            manifest = json.load(f)
+        ids = [x["id"] for x in manifest["fields"]]
+        assert ids.index("ncaaf_divisions") == ids.index("enable_ncaaf") + 1
 
 
 class TestEmptyRefreshResult:
@@ -853,6 +917,35 @@ class TestBuildSourcesToggles:
         # Public-release defaults: nothing enabled until the user opts in.
         sources = plugin._build_sources({})
         assert sources == []
+
+    def test_ncaaf_divisions_defaults_to_fbs(self, plugin, tmp_path, monkeypatch):
+        # Contract test: the setting must reach the source. A source-level
+        # test of the filter passes even if _build_sources never forwards
+        # the value, which is exactly how a fix ships inert.
+        keyfile = tmp_path / "cfbd_api_key"
+        keyfile.write_text("fake-key")
+        monkeypatch.setattr(plugin, "CFBD_KEY_PATH", str(keyfile))
+        sources = plugin._build_sources({"enable_ncaaf": True})
+        assert [s.sport_prefix for s in sources] == ["CFB"]
+        assert sources[0].divisions == "fbs"
+
+    def test_ncaaf_divisions_setting_is_forwarded(self, plugin, tmp_path, monkeypatch):
+        keyfile = tmp_path / "cfbd_api_key"
+        keyfile.write_text("fake-key")
+        monkeypatch.setattr(plugin, "CFBD_KEY_PATH", str(keyfile))
+        sources = plugin._build_sources(
+            {"enable_ncaaf": True, "ncaaf_divisions": "fbs_fcs"}
+        )
+        assert sources[0].divisions == "fbs_fcs"
+
+    def test_ncaaf_divisions_bad_value_degrades(self, plugin, tmp_path, monkeypatch):
+        keyfile = tmp_path / "cfbd_api_key"
+        keyfile.write_text("fake-key")
+        monkeypatch.setattr(plugin, "CFBD_KEY_PATH", str(keyfile))
+        sources = plugin._build_sources(
+            {"enable_ncaaf": True, "ncaaf_divisions": "nonsense"}
+        )
+        assert sources[0].divisions == "fbs"
 
 
 class TestStreamQualityRank:
@@ -2204,17 +2297,23 @@ class TestPluginStopTeardown:
 
     @pytest.fixture(autouse=True)
     def _isolate_registry(self, plugin):
-        # Snapshot + restore the reload-stable registry around each test so the
-        # scheduler tests don't leak state into one another.
+        # Snapshot + restore BOTH reload-stable registries around each test so
+        # the thread tests don't leak state into one another. The reaper (#196)
+        # has to be isolated here too: it is a second daemon thread started by
+        # the same __init__, so without this a spawned reaper survives the test
+        # that created it.
         import threading
         reg = plugin._scheduler_registry()
-        saved_thread, saved_event = reg.thread, reg.stop_event
+        rreg = plugin._reaper_registry()
+        saved = (reg.thread, reg.stop_event, rreg.thread, rreg.stop_event)
         reg.thread, reg.stop_event = None, None
+        rreg.thread, rreg.stop_event = None, None
         yield reg
         # Make sure no real thread we started lingers.
-        if reg.stop_event is not None:
-            reg.stop_event.set()
-        reg.thread, reg.stop_event = saved_thread, saved_event
+        for r in (reg, rreg):
+            if r.stop_event is not None:
+                r.stop_event.set()
+        reg.thread, reg.stop_event, rreg.thread, rreg.stop_event = saved
 
     def test_stop_signals_and_clears_registry(self, plugin, _isolate_registry):
         import threading
@@ -2260,9 +2359,19 @@ class TestPluginStopTeardown:
 
         monkeypatch.setattr(plugin.threading, "Thread", TrackingThread)
         plugin.Plugin()
-        assert spawned == ["ranked_matchups-scheduler"]
+        # Two daemon threads now: the refresh scheduler and the finished-game
+        # reaper (#196). Order matters only in that both must appear.
+        # The reaper starts FIRST and unconditionally: it must not sit behind
+        # the scheduler's live-thread early return, or an upgrade from a
+        # version without a reaper never starts one (#196).
+        assert spawned == [
+            "ranked_matchups-reaper", "ranked_matchups-scheduler",
+        ]
         assert _isolate_registry.thread is not None
         assert _isolate_registry.stop_event is not None
+        rreg = plugin._reaper_registry()
+        assert rreg.thread is not None
+        assert rreg.stop_event is not None
 
     def test_reload_init_keeps_live_thread_idempotent(self, plugin, monkeypatch, _isolate_registry):
         # #82/#136: the loader re-instantiates Plugin on EVERY discovery
@@ -2290,13 +2399,17 @@ class TestPluginStopTeardown:
         monkeypatch.setattr(plugin.threading, "Thread", TrackingThread)
         plugin.Plugin()  # a later discovery's incarnation
 
-        # The live thread is untouched: not signaled, not joined, not replaced,
-        # and no new thread spawned.
+        # The live SCHEDULER is untouched: not signaled, not joined, not
+        # replaced, and not re-spawned.
         assert not live_event.is_set()
         assert live.join_calls == 0
         assert reg.thread is live
         assert reg.stop_event is live_event
-        assert spawned == []
+        assert "ranked_matchups-scheduler" not in spawned
+        # The reaper, however, MUST still start. It has its own registry, and
+        # gating it on the scheduler's liveness is exactly what made it inert
+        # on upgrade (#196): this discovery path is the common one.
+        assert spawned == ["ranked_matchups-reaper"]
 
     def test_reload_init_replaces_dead_thread(self, plugin, monkeypatch, _isolate_registry):
         # If the registry's thread has died, __init__ starts a fresh one (the

@@ -33,6 +33,66 @@ if PKG_NAME not in sys.modules:
 import pytest  # noqa: E402  (must follow the package registration above)
 
 
+# ---------------------------------------------------------------------------
+# Shared module loaders.
+#
+# plugin.py and tasks.py cannot be imported normally: the package __init__
+# imports `.plugin`, which pulls Django models and starts the scheduler and
+# reaper threads. Loading the leaf modules by file path sidesteps that.
+#
+# These live HERE and nowhere else. Five test modules used to carry their own
+# byte-identical copy of the plugin loader and three carried the tasks loader,
+# which is one fact in eight places: if any copy drifted, that file's tests
+# would quietly load a differently-constructed module and nothing would say so.
+# ---------------------------------------------------------------------------
+
+def _load_plugin_module():
+    if f"{PKG_NAME}.plugin" in sys.modules:
+        return sys.modules[f"{PKG_NAME}.plugin"]
+    util_spec = importlib.util.spec_from_file_location(
+        f"{PKG_NAME}._util", os.path.join(REPO_ROOT, "_util.py")
+    )
+    util_mod = importlib.util.module_from_spec(util_spec)
+    sys.modules[f"{PKG_NAME}._util"] = util_mod
+    util_spec.loader.exec_module(util_mod)
+
+    spec = importlib.util.spec_from_file_location(
+        f"{PKG_NAME}.plugin", os.path.join(REPO_ROOT, "plugin.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[f"{PKG_NAME}.plugin"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_tasks_module():
+    if f"{PKG_NAME}.tasks" in sys.modules:
+        return sys.modules[f"{PKG_NAME}.tasks"]
+    spec = importlib.util.spec_from_file_location(
+        f"{PKG_NAME}.tasks", os.path.join(REPO_ROOT, "tasks.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[f"{PKG_NAME}.tasks"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture(scope="module")
+def plugin():
+    return _load_plugin_module()
+
+
+@pytest.fixture(scope="module")
+def plugin_mod():
+    """Alias kept for test_async_dispatch's existing parameter name."""
+    return _load_plugin_module()
+
+
+@pytest.fixture(scope="module")
+def tasks_mod():
+    return _load_tasks_module()
+
+
 @pytest.fixture(autouse=True)
 def _no_real_sleeps(monkeypatch):
     """Neutralize Football-Data.org request pacing for the whole suite.

@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.21.0",
+  "version": "1.24.0",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -25,6 +25,23 @@
       "label": "NCAA Football (CFBD)",
       "default": false,
       "help_text": "AP Top-25 + games + betting lines from CollegeFootballData.com. Offseason → no rows produced. Requires the CFBD API key below."
+    },
+    {
+      "id": "ncaaf_divisions",
+      "type": "select",
+      "label": "NCAA Football divisions",
+      "default": "fbs",
+      "options": [
+        {
+          "value": "fbs",
+          "label": "D1 FBS only (recommended)"
+        },
+        {
+          "value": "fbs_fcs",
+          "label": "D1 FBS + FCS"
+        }
+      ],
+      "help_text": "Which divisions NCAA Football pulls. CFBD's feed also carries Division II and III, which can never score (they are outside the simulated season) yet still cost about 7 seconds of importance simulation each — opening week 2026 was 157 games of which only 27 involved an FBS team. FBS only is the default and is the recommended setting. Adding FCS roughly triples the NCAAF share of a refresh, and scores those games with FBS win-count bands (6 wins = bowl eligible), which is an approximation since FCS has a different postseason."
     },
     {
       "id": "enable_ncaam",
@@ -443,6 +460,20 @@
       "help_text": "How many games the curated list keeps, highest-scored first. Capped at 60: above that, the per-game preview and logo lookups that run during Apply can outlast the internal run lock and let a second run start against the same channels. Ignored when a Curation preset other than Manual is selected."
     },
     {
+      "id": "remove_finished_after_minutes",
+      "type": "number",
+      "label": "Remove finished games after (minutes)",
+      "default": 0,
+      "help_text": "Minutes past a game's estimated end before its channel is removed from the group, without waiting for the next scheduled refresh. The end is estimated with the same per-sport window the EPG matcher uses (about 4 hours for gridiron, 2.5 for soccer), so this is measured from THAT, not from kickoff. 0 disables reaping and finished games stay until the next refresh. A background thread wakes at the next game's deadline rather than polling."
+    },
+    {
+      "id": "bench_size",
+      "type": "number",
+      "label": "Bench size (backfill stock)",
+      "default": 0,
+      "help_text": "How many EXTRA scored games to keep beyond the maximum, ready to take the place of games that finish. Without a bench the group simply shrinks through the day. These games are already fetched and scored, so the only added cost is matching them to a broadcast. 0 disables backfill. Needs 'Remove finished games after' to be set."
+    },
+    {
       "id": "lookahead_days",
       "type": "number",
       "label": "Lookahead window (days)",
@@ -689,6 +720,14 @@
       "id": "diagnose",
       "label": "Diagnose matching",
       "description": "Explain, in one copy-pasteable block, why each curated game did or did not match a channel: which of your channels named one team, both, or none, and why a near-miss was skipped. Read-only, no DB writes. Run this and paste the result when streams are not attaching."
+    },
+    {
+      "id": "reap_now",
+      "label": "Remove finished games now",
+      "description": "Drop games that ended more than 'Remove finished games after' minutes ago, and backfill from the bench. Does not re-fetch anything.",
+      "button_label": "Reap",
+      "button_variant": "outline",
+      "button_color": "orange"
     }
   ]
 }

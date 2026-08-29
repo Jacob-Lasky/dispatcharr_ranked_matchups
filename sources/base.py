@@ -135,6 +135,23 @@ class SportSource(ABC):
     # points for this source's games when it's false.
     supports_importance: bool = False
 
+    # How many teams carry a rank in the pool `rank_home` / `rank_away` are
+    # drawn from. Poll sources (AP Top 25, United Soccer Coaches Top 25,
+    # D1Baseball Top 25) are 25 deep, which is the default. A LEAGUE source
+    # should leave this alone and emit `extra["standings_table"]` instead:
+    # the table's length is the pool and it is already per-competition, so
+    # the Premier League's 20 and the Championship's 24 stay distinct without
+    # a second place to keep in sync.
+    #
+    # DO NOT treat this as cosmetic. scoring._rank_strength divides by it, so
+    # a wrong value silently rescales every game this source emits.
+    #
+    # None means "not declared", and scoring applies RANK_POOL_DEFAULT. DO NOT
+    # write the poll depth here as a literal: scoring.RANK_POOL_DEFAULT is the
+    # single source of truth for it, and a second copy in this file would be
+    # free to drift with nothing to report the divergence.
+    rank_pool_size: Optional[int] = None
+
     @property
     @abstractmethod
     def sport_prefix(self) -> str:

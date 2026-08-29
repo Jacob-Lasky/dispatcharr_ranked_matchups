@@ -345,11 +345,40 @@ class PointsBasedSportSource(SportSource):
         if ctx is None:
             return {}
         teams = state.get("_teams", {})
+        eligible = self.outcome_eligible_teams()
+        if eligible is not None:
+            teams = {t: row for t, row in teams.items() if t in eligible}
         out: Dict[str, List[str]] = {team: [] for team in teams}
         for min_count, label, _ in ctx.thresholds:
             for team, row in teams.items():
                 if row.get(self._count_field, 0) >= min_count:
                     out[team].append(label)
         return out
+
+    def outcome_eligible_teams(self) -> Optional[frozenset]:
+        """Teams that may be assigned this league's terminal outcome bands,
+        or None (the default) meaning every team in the state is eligible.
+
+        GAME INCLUSION AND OUTCOME ELIGIBILITY ARE DIFFERENT QUESTIONS, and
+        conflating them is a real modelling error rather than a tidiness
+        one. A source may need a game in the population purely so it counts
+        toward one participant's record while the OTHER participant does
+        not belong in this league's outcome space at all.
+
+        Worked example (NCAAF, measured 2026-08-29): the FBS-only season
+        population must keep FBS-vs-FCS games, because those wins count
+        toward the FBS team's bowl eligibility. That pulls the FCS
+        opponents into the state as a side effect: 100 of 238 teams end up
+        with 4 or fewer games and most with exactly 1, so they are scored
+        against a win-count band ("6+ wins = bowl eligible") they cannot
+        reach on a one-game schedule. Their contingency tables degenerate
+        and their leverage silently reads 0, which is the right answer for
+        the wrong reason and would flip to a wrong answer the moment the
+        thresholds moved.
+
+        Default None keeps every other points-based source (MLB, NBA, NHL,
+        WNBA, NCAA baseball/softball/basketball) byte-identical.
+        """
+        return None
 
 

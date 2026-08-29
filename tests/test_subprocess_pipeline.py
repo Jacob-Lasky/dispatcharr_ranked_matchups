@@ -28,23 +28,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG_NAME = "dispatcharr_ranked_matchups"
 
 
-def _load_tasks_module():
-    if f"{PKG_NAME}.tasks" in sys.modules:
-        return sys.modules[f"{PKG_NAME}.tasks"]
-    spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}.tasks", os.path.join(REPO_ROOT, "tasks.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[f"{PKG_NAME}.tasks"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-@pytest.fixture(scope="module")
-def tasks_mod():
-    return _load_tasks_module()
-
-
 def _completed(returncode=0, stdout="", stderr=""):
     """Stand-in for subprocess.CompletedProcess (only the attrs we read)."""
     return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)

@@ -96,7 +96,7 @@ the **Test naming convention** action to preview a template before applying it.
 
 | Sport | Source | Free tier? |
 |---|---|---|
-| NCAA Football | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (1k req/day) |
+| NCAA Football (D1 FBS; FCS optional) | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (1k req/day) |
 | NCAA Men's Basketball | [CollegeBasketballData.com](https://collegebasketballdata.com/) (same key as CFBD) | Yes |
 | EPL / EFL Championship / UCL / Bundesliga / La Liga / Serie A / Ligue 1 / Eredivisie / Primeira Liga / Brazilian Série A / FIFA World Cup / UEFA EURO | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, and those 12 competitions ARE the free tier — every domestic cup is paid-only) |
 | NHL (regular + Stanley Cup Playoffs) | [api-web.nhle.com](https://api-web.nhle.com/) (official, undocumented) | Yes (no key required) |
@@ -110,6 +110,33 @@ the **Test naming convention** action to preview a template before applying it.
 | Field events — Formula 1 / NASCAR / PGA Golf / ATP + WTA Tennis / UFC | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Boxing | [Boxing Data API](https://rapidapi.com/bengroves1993/api/boxing-data-api) (RapidAPI — ESPN has no boxing feed) | Yes (free RapidAPI tier; ~7-day lookahead) |
 | Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |
+
+### NCAA Football divisions
+
+CFBD's feed carries every NCAA division, not just Division I. The
+**NCAA Football divisions** setting selects what actually reaches the guide:
+
+| Setting | What is pulled |
+|---|---|
+| `D1 FBS only` (default) | Games where either side is FBS, including FBS-vs-FCS |
+| `D1 FBS + FCS` | The above, plus FCS-vs-FCS |
+
+Division II and III are never pulled under either setting. They are not
+merely uninteresting: the Monte Carlo importance simulation replays only the
+selected divisions' season, so a team outside it scores 0.00 every time while
+still costing roughly seven seconds of simulation. Opening week 2026 returned
+157 games in a seven-day window of which 27 involved an FBS team, so the
+unfiltered feed spent about eighteen minutes per refresh to add nothing.
+
+FCS teams stay unranked because the AP Top 25 is an FBS poll, and an
+FBS-vs-FCS game is ranked on its FBS team. Note that unranked does not mean
+unscored: the Monte Carlo importance signal is independent of the poll, so
+an FCS game can still score on stakes alone. Under `D1 FBS + FCS` those
+stakes are measured with FBS win-count bands (6 wins = bowl eligible,
+10+ = playoff contender), which FCS's own postseason does not work that
+way — treat FCS importance as an approximation rather than a like-for-like
+comparison with FBS. This is why FBS-only is the default.
+
 
 Adding a sport is a new file in `sources/` implementing the `SportSource`
 interface; everything else (scoring, matching, channel cloning, EPG
@@ -193,6 +220,33 @@ form will collect everything needed to scope it.
 | `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand. | Both |
 | `show_status` | Print the current curated list with per-game score breakdown. No writes. | — |
 | `preview_names` | Render the channel-name template against sample games so you can check the layout before applying. Reports template errors and lists every variable. No writes. | — |
+| `reap_now` | Drop games that finished more than `remove_finished_after_minutes` ago and backfill from the bench. Re-fetches nothing. | `cache.json` + DB |
+
+### Clearing out finished games
+
+By default a game's channel stays in the group until the next scheduled
+refresh, which on a five-a-day schedule can be hours after the final whistle.
+Two settings change that, both off by default:
+
+| Setting | Effect |
+|---|---|
+| `remove_finished_after_minutes` | Minutes past a game's estimated end before its channel is removed. `0` disables reaping. |
+| `bench_size` | How many extra scored games to keep in reserve, ready to replace ones that finish. `0` means the group just shrinks through the day. |
+
+The end of a game is **estimated**, because no feed publishes one: the plugin
+reuses the same per-sport window the EPG matcher uses, roughly 4 hours for
+gridiron and 2.5 for soccer. So `remove_finished_after_minutes = 30` means
+about four and a half hours after a college football kickoff, not thirty
+minutes. A game whose start time cannot be parsed is never reaped.
+
+With a bench, finishing games are replaced by the next-best scored games that
+have not started yet and do have a broadcast to point at, so the group holds
+its size instead of draining. Those games were already fetched and scored
+during the last refresh, so promotion costs no API calls and no simulation.
+
+A background thread handles this: it sleeps until the next game's deadline
+rather than polling, and falls back to a half-hourly heartbeat when there is
+nothing pending. Use the `reap_now` action to trigger it by hand.
 
 ## How games are matched to your lineup
 

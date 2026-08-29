@@ -5,6 +5,218 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.24.0] - 2026-08-29
+
+### Added
+
+- **Finished games are removed from the group without waiting for a refresh
+  (#196).** New setting `remove_finished_after_minutes` (0 = off, the default).
+  A game that ended more than N minutes ago has its channel reaped on its own
+  schedule, instead of lingering until the next of the five daily runs.
+
+  The end time is estimated with the SAME per-sport window the EPG matcher
+  already uses (about 4 hours for gridiron, 2.5 for soccer), so the setting is
+  measured from that, not from kickoff. A second duration table would be free
+  to drift from the one the guide entry is written against, and the reaper
+  would then delete a channel whose own programme still said the game was on.
+
+  **Mechanism: a thread that sleeps until the next known expiry, not a fixed
+  poll and not a per-channel timer.** There is no "game ended" event to
+  subscribe to (Dispatcharr's hooks fire on stream and feed activity, not on a
+  game clock), and a `threading.Timer` per channel would die with its uWSGI
+  worker AND duplicate across workers, since the plugin is instantiated once
+  per worker. Deriving the deadline from the persisted cache each tick gives a
+  timer's precision with a poll's robustness and self-heals after a restart. A
+  30-minute cap acts as a heartbeat when the cache is empty or unreadable.
+
+  A game whose start time will not parse is never reaped: a row we cannot date
+  is a row we must not delete on a guess.
+
+  Deletion is delegated to the existing apply path rather than reimplemented,
+  so reaping inherits the DVR-recording protection, the archive re-home, the
+  ChannelStream and EPGData cleanup, and the signal-safe queryset deletes. The
+  reaper edits the cache and calls apply; a second deletion path would be a
+  copy that has to stay in agreement with the first.
+
+  Runs out of process and under the SAME lock as apply: reaping deletes
+  channels and then re-applies, so it races apply exactly as apply races
+  itself (#155), and apply's bulk DB writes wedge a gevent worker (#142).
+
+  Also available on demand as the **Remove finished games now** action.
+
+- **Backfill from a bench as games finish (#197).** New setting `bench_size`
+  (0 = off, the default): how many EXTRA scored games to retain beyond
+  `max_games` as promotion stock. When the reaper drops N finished games it
+  promotes up to N benched games in score order, so the group holds its size
+  through the day instead of draining.
+
+  Previously everything below `max_games` was discarded at the cap even though
+  it had already been fetched, scored and Monte-Carlo simulated at full cost,
+  so there was nothing to promote from. The cache now carries `games` (on air)
+  and `bench` (stock) as separate lists, which means the apply path needed no
+  change at all: it still applies exactly the list it is handed.
+
+  A benched game is skipped if it expired while sitting there (promoting it
+  would create a channel the next tick deletes) or if it has no broadcast
+  match (apply would make it a placeholder, not a watchable channel).
+
+### Fixed
+
+- **`_write_cache` used one fixed temp path for every writer.** A uwsgi
+  worker, the scheduler's pipeline subprocess and the reaper's can all
+  legitimately write the cache at once, and a shared `cache.json.tmp` lets one
+  truncate the file another is still writing, so the atomic `os.replace` could
+  publish a half-written cache. The temp name is now per-process and
+  per-thread, and is cleaned up if the write fails.
+
+### Changed
+
+- Test suite: the plugin- and tasks-module loaders lived in eight
+  byte-identical copies across six test files. They now live once in
+  `tests/conftest.py` as shared fixtures. A drifting copy would have made one
+  file's tests load a differently-constructed module with nothing to report it.
+
+
+## [1.23.0] - 2026-08-29
+
+### Changed
+
+- **The rank signal now scores a team's percentile within its own ranked
+  pool, replacing two formulas that hard-coded a 25-team pool (#194).**
+
+  A rank only means something relative to how many teams carry one. A league
+  table ranks every club, so every fixture took the both-ranked branch worth
+  up to 10.0; a poll ranks the top 25 of a much larger field, so 111 of 136
+  FBS teams are unranked and nearly every game took the one-ranked branch,
+  capped at 4.17.
+
+  ```
+  both ranked: max(0, (50 - (ra + rb)) / 4.8)   # up to 10.0
+  one ranked:  max(0, (26 - rank)      / 6.0)   # up to  4.17
+  ```
+
+  The consequence, measured on live data 2026-08-29: **any league fixture
+  whose ranks summed to 30 or less outscored `#1 vs unranked`**, and ranks
+  summing to 30 is a 14th-vs-16th place game. Ordinary mid-table soccer
+  produced `rank_pair` values of 4.38 to 9.58 while the entire NCAAF slate
+  was capped at 4.17. It was backwards on the merits too: being ranked #1 of
+  136 is a stronger claim than 1st of 20.
+
+  The same hard-coded 25 was wrong in the other direction for small leagues:
+  with a 20-club table the rank sum can never exceed 40, so a
+  last-vs-second-last fixture collected `(50 - 40) / 4.8` = 2.08 points for
+  nothing but being in a short league.
+
+  Now one formula for both cases:
+
+  ```
+  exhaustive (league table):  (pool - rank) / (pool - 1)   # last -> 0.0
+  selective  (25-deep poll):  (pool + 1 - rank) / pool     # last -> 1/pool
+  rank_pts = mean(strength_home, strength_away) * 10 * weights.rank
+  ```
+
+  The exhaustive/selective split is load-bearing: last place in a league is
+  genuinely the worst team, but the last entry in a poll is still a top-20%
+  team. Collapsing both to 0.0 made `#25 vs unranked` score identically to
+  `unranked vs unranked`.
+
+  `pool` comes from the standings table for a league source and from
+  `SportSource.rank_pool_size` (default 25) for a poll source.
+
+  **This is surgical, not a rescale.** For a 25-deep pool it lands within a
+  rounding step of the old numbers, so poll sports keep their magnitude:
+
+  ```
+  case                            OLD    NEW
+  #1 vs #2      (pool 25)        9.79   9.79
+  #1 vs unranked(pool 25)        4.17   5.00
+  #7 vs unranked(pool 25)        3.17   3.75
+  1st vs 2nd    (pool 20)        9.79   9.74
+  14th vs 16th  (pool 20)        4.17   2.63
+  19th vs 20th  (pool 20)        2.29   0.26
+  ```
+
+  Existing caches lack `rank_pool_size` and fall back to a 25-deep pool,
+  which is right for the poll sources that dominate a pre-upgrade cache and
+  self-corrects on the next refresh.
+
+  The breakdown keys `rank_pair` and `one_ranked` are unchanged, so naming
+  tokens and cache readers keep working.
+
+
+## [1.22.0] - 2026-08-29
+
+### Fixed
+
+- **NCAA Football pulled every NCAA division, which timed out the whole
+  refresh once the season opened.** `auto_pipeline` had been failing on most
+  runs since 2026-08-21 with `pipeline subprocess timed out after 1500s`, so
+  the guide stopped updating entirely and the cache went stale. NCAAF itself
+  looked fine in the summaries (134-136 games), which is why it was not the
+  obvious suspect.
+
+  **Root cause:** `NcaafSource.fetch_upcoming` filtered CFBD's `/games` by
+  time window only, never by division, so every Division II and III fixture
+  entered the pipeline. Each emitted row costs a Monte Carlo importance
+  simulation, and those rows cannot even score: the season replay population
+  was already FBS-only, so a team outside it has no estimated strength and
+  returns 0.00 every time. Measured against the live 2026 season on
+  2026-08-29:
+
+  ```
+  next 7 days: 157 games   FBS-involved 27 | FCS-only 45 | D-II/D-III 85
+  compute_match_importance: ~7.0s per game
+    -> 157 x 7s = ~1100s of the 1500s budget, ~600s of it on games
+       structurally incapable of scoring above zero
+  ```
+
+  All summer this was inert: the offseason returned no upcoming games, so the
+  cost was zero. Week 1 filled the lookahead window and the pipeline went over
+  budget on the first day of the season.
+
+  The filter now gates BOTH the emitted games and the simulated season
+  population from one predicate, so the two cannot drift apart.
+
+- **A failed `/rankings` request was logged as "offseason".** Any transient
+  CFBD failure zeroes the entire NCAAF slate for that run, and the log line
+  claimed the season was over. Request failure, unpublished poll, and
+  missing-poll-in-snapshot are now three distinct messages at the right
+  levels.
+
+- **FCS opponents were bucketed into CFB win-count bands off a one-game
+  schedule.** The division filter for GAMES is an either-side rule, because
+  an FBS team's win over an FCS opponent counts toward its bowl eligibility
+  and the game has to stay in the population. That pulled the FCS opponents
+  into the simulated state as a side effect: measured 2026-08-29, 100 of the
+  238 teams in the FBS-only population had 4 or fewer games and most had
+  exactly 1, so they were scored against "6+ wins = bowl eligible" on a
+  schedule that cannot reach it. Their contingency tables degenerated and
+  their leverage read 0, the right number for the wrong reason.
+
+  `PointsBasedSportSource.outcome_eligible_teams()` now separates "games
+  needed to count a selected team's record" from "teams eligible for this
+  league's outcome bands". Defaults to None (no filtering), so MLB, NBA,
+  NHL, WNBA and the NCAA baseball/softball/basketball sources are
+  unchanged.
+
+- **The season schedule was fetched twice per refresh.** The upcoming-window
+  path and the Monte Carlo population made separate identical `/games`
+  calls, so they could disagree (a classification edited between them, a
+  season-year boundary crossed mid-refresh) with no way to see it. One
+  cached fetch now feeds both, which makes "the simulated universe matches
+  the emitted universe" structural instead of a convention, and halves the
+  request cost against the 1k/day free tier. A failed fetch is deliberately
+  not cached.
+
+### Added
+
+- **`NCAA Football divisions` setting** (`ncaaf_divisions`): `D1 FBS only`
+  (default) or `D1 FBS + FCS`. Division II and III are never pulled. FCS
+  teams stay unranked because the AP Top 25 is an FBS poll, so under
+  `D1 FBS + FCS` those games enter as low-scored filler and an FBS-vs-FCS
+  game is ranked on its FBS team.
+
+
 ## [1.21.0] - 2026-08-26
 
 ### Added
