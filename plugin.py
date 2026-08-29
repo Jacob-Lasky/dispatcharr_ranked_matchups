@@ -1069,10 +1069,38 @@ def _build_program_title(state: str, matchup: str, kickoff_local: str) -> str:
     return title
 
 
-def _compute_past_slot_end(prog_end_utc: datetime, settings: Dict[str, Any]) -> datetime:
-    """End time for the post-event EPG slot: runs until the next
-    scheduled refresh fire-time, so the slot disappears the moment the
-    refresh that would replace this channel runs.
+def _compute_past_slot_end(
+    prog_end_utc: datetime,
+    settings: Dict[str, Any],
+    reap_at: Optional[datetime] = None,
+) -> datetime:
+    """End time for the post-event EPG slot: the moment this channel goes away.
+
+    The slot bridges the final whistle to the apply that DROPS the channel, so
+    the guide doesn't go blank in between. Its end must therefore track the
+    channel's real lifetime.
+
+    **NEVER LET THIS RUN PAST `reap_at`.** Whatever we publish here is a
+    game-NAMED programme bound to this channel's number, and Dispatcharr's
+    outputs key the guide on that number alone (Xtream Codes hardcodes
+    `epg_channel_id = str(channel_num_int)`; M3U/XMLTV default to it). Once the
+    reaper deletes the channel, that number is free and, under compact
+    numbering, is handed straight to another game. A past row still running is
+    then "Final: <old game>" sitting on a number that now belongs to a
+    different match, and any client holding a guide fetched before the handover
+    renders it over the new game. That is issue #117, and it is not caused by
+    reusing the number: it is caused by publishing a programme that outlives
+    the channel it describes.
+
+    Bounding by the reap deadline makes the last programme we ever publish for
+    a game end at exactly the moment its number becomes available, so the
+    handover is safe BY CONSTRUCTION and needs no quarantine, no widened range
+    and no extra bookkeeping. A stale client sees no programme, never the wrong
+    one, which is the failure mode we can actually live with.
+
+    `reap_at` is None when reaping is off (`remove_finished_after_minutes = 0`)
+    or the game carries no usable start time. Then the channel really does
+    survive to the next refresh and the original bound is the correct one.
 
     Falls back to prog_end + 12h when:
       - auto_refresh is disabled (no scheduled refreshes coming), OR
@@ -1082,17 +1110,29 @@ def _compute_past_slot_end(prog_end_utc: datetime, settings: Dict[str, Any]) -> 
     """
     if prog_end_utc.tzinfo is None:
         prog_end_utc = prog_end_utc.replace(tzinfo=timezone.utc)
+
+    def _bounded(end: datetime) -> datetime:
+        # Clamp to the reap deadline, but never BEFORE the live row ends: a past
+        # row with end <= start is either rejected or renders as a zero-width
+        # artifact. prog_end <= reap_at holds whenever both are derived from
+        # _game_end_utc (reap_at = that end + a non-negative delay), so this
+        # only bites if a future change breaks that relationship.
+        if reap_at is not None:
+            ra = reap_at if reap_at.tzinfo else reap_at.replace(tzinfo=timezone.utc)
+            end = min(end, max(ra, prog_end_utc))
+        return end
+
     if not settings.get("auto_refresh_enabled", False):
-        return prog_end_utc + _PAST_SLOT_DEFAULT_DURATION
+        return _bounded(prog_end_utc + _PAST_SLOT_DEFAULT_DURATION)
     tz = _resolve_tz(settings.get("local_timezone", "UTC"))
     times = _parse_scheduled_times(settings.get("scheduled_times", ""))
     if not times:
-        return prog_end_utc + _PAST_SLOT_DEFAULT_DURATION
+        return _bounded(prog_end_utc + _PAST_SLOT_DEFAULT_DURATION)
     prog_end_local = prog_end_utc.astimezone(tz)
     next_fire = _next_fire_time(times, tz, now=prog_end_local)
     if next_fire is None:
-        return prog_end_utc + _PAST_SLOT_DEFAULT_DURATION
-    return next_fire.astimezone(timezone.utc)
+        return _bounded(prog_end_utc + _PAST_SLOT_DEFAULT_DURATION)
+    return _bounded(next_fire.astimezone(timezone.utc))
 
 
 # ---------- file helpers ----------
@@ -4270,7 +4310,16 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             written_numbers.add(target_chnum)
             prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
-            prog_end = start_dt + timedelta(hours=EPG_POST_HOURS)
+            # DO NOT compute this as start_dt + EPG_POST_HOURS. That is a flat
+            # 4h for every sport, while the reaper dates a game's end with the
+            # PER-SPORT window (_game_end_utc -> _epg_match_window: 2.5h for
+            # soccer, 24h for boxing). The two disagreed, so a soccer channel
+            # was reaped at start+2.5h+remove_after while its own live programme
+            # still claimed the match ran to start+4h: exactly the failure
+            # _game_end_utc's docstring warns about, and a second duration table
+            # of the kind that docstring forbids. Deriving it from the same
+            # function makes them incapable of drifting.
+            prog_end = _game_end_utc(g) or (start_dt + timedelta(hours=EPG_POST_HOURS))
             existing = existing_virtuals.get(marker)
 
             if existing:
@@ -4370,7 +4419,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 upnext_title = _build_program_title("upcoming", matchup, kickoff_local)
                 live_title = _build_program_title("live", matchup, kickoff_local)
                 past_title = _build_program_title("past", matchup, kickoff_local)
-                past_end = _compute_past_slot_end(prog_end, settings)
+                past_end = _compute_past_slot_end(
+                    prog_end, settings,
+                    reap_at=_game_reap_at_utc(g, _reap_settings(settings)),
+                )
                 # Sub-title is the condensed informative one-liner: tagline,
                 # matchday, toss-up.
                 subtitle = _build_subtitle(g, tagline)
@@ -5658,7 +5710,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.25.0"
+    version = "1.26.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

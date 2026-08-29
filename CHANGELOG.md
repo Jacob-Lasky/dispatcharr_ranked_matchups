@@ -5,6 +5,38 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.26.0] - 2026-08-29
+
+### Fixed
+
+- **A finished game's guide entry no longer outlives its channel.** The
+  post-game "Final: ..." programme ran until the next scheduled refresh, but
+  the reaper deletes the channel minutes after the game ends. So for hours
+  afterwards we were publishing a game-named programme bound to a channel
+  number we no longer owned, and under compact numbering that number had
+  already been handed to a different match. A player holding a guide it
+  downloaded earlier showed the finished game over the new one. The post-game
+  entry now ends when the channel does. (#204)
+
+  This is what makes an exact compact range safe. Every programme published for
+  a game now ends no later than the moment its number becomes available, so the
+  handover cannot be misread, with no widened range, no reserved gap and no
+  delay to backfill. Set the starting number to 400 with 25 channels and you get
+  400-424.
+
+- **Soccer channels were reaped before their own programme said the match had
+  ended.** The apply path dated a game's end with a flat 4 hours for every
+  sport while the reaper used the per-sport window (2.5 hours for soccer, 24 for
+  boxing), so a soccer channel was removed 30 minutes before its own guide entry
+  ran out. Both now come from the same function and cannot drift. (#204)
+
+### Changed
+
+- The compact-numbering settings no longer suggest reserving a wider range than
+  you need. An exact range is safe, so "Compact range size" is now only about
+  headroom.
+
+
 ## [1.25.0] - 2026-08-29
 
 ### Added

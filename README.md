@@ -244,6 +244,12 @@ gridiron and 2.5 for soccer. So `remove_finished_after_minutes = 30` means
 about four and a half hours after a college football kickoff, not thirty
 minutes. A game whose start time cannot be parsed is never reaped.
 
+That same estimate bounds the game's guide entry, so the post-game "Final: ..."
+listing ends exactly when the channel is removed rather than lingering until the
+next refresh. It matters more than it sounds: the guide identifies a channel by
+its number, so a listing that outlived its channel would be read as belonging to
+whichever game took that number next.
+
 With a bench, finishing games are replaced by the next-best scored games that
 have not started yet and do have a broadcast to point at, so the group holds
 its size instead of draining. Those games were already fetched and scored
@@ -374,16 +380,14 @@ channel to the guide *on their own*, with no group attached, so if one of your
 existing channels already sits at 401 and we put a game there too, the guide
 cannot tell them apart and both break. We skip any number in the range that is
 already taken and log how many, but if the range you chose is crowded there will
-not be room for every game. Give it more room than you need.
+not be room for every game.
 
-What compact numbering cannot do is make the guide mismatch impossible, and it is
-worth understanding why before choosing it. A band holds a fixed number of slots
-while far more games than that pass through in a day, so a slot eventually gets
-handed to a new game. If your player is holding a guide it downloaded earlier, it
-will show the new game's *name* over the old game's *programme* until it
-refreshes the guide. **Compact range size** is the lever: reserve more numbers
-than you have channels and reuse becomes rare. A start of 400 with a size of 100
-spreads games across 400-499 and takes a long time to come back around.
+When a game finishes, its channel is removed and the next game takes that
+number. That is safe: every programme we publish for a game ends no later than
+the moment its channel goes away, so a player holding a guide it downloaded
+earlier will show *nothing* on that number until it refreshes, never the wrong
+match. Getting that wrong is what made channel numbers seven digits long in the
+first place (see #117, #204).
 
 If you use the M3U and XMLTV URLs rather than the Xtream Codes API, you can side
 -step the tradeoff completely: set **TVG-ID Source = TVG-ID** on both URLs (the
