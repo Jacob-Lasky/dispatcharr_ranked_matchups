@@ -63,29 +63,31 @@ implementation and testing are done by AI.
 
 ```
 #5548720  EPL ★10.0 · Brentford at Manchester United · title / UCL race
-       — both top-10 (#3 vs #9), title / UCL race, toss-up (line +0.5)
+          — both top-10 (#3 vs #9), title / UCL race, toss-up (line +0.5)
 
-       Description (what TiviMate/Plex/Jellyfin show):
-         Kickoff: Today 2:00 PM CDT 🔴 TODAY
-         Matchup: Brentford FC @ Manchester United FC
-         Sport: English Premier League
-         Score: 10.0/10  (raw 28.3)
-         Score breakdown:
-           rank_pair: +7.92
-           close_game: +3.38
-           importance: +17.0
-         Source channel: Manchester United
+          Description (what TiviMate/Plex/Jellyfin show):
+            Kickoff: Today 2:00 PM CDT 🔴 TODAY
+            Matchup: Brentford FC @ Manchester United FC
+            Sport: English Premier League
+            Score: 10.0/10  (raw 28.3)
+            Score breakdown:
+              rank_pair: +7.92
+              close_game: +3.38
+              importance: +17.0
+            Source channel: Manchester United
 
-#9002  EFL ⭐★10.0 · Middlesbrough at Wrexham · playoff / auto-promotion race
-       — both top-10 (#4 vs #6), favorite (Wrexham),
-         playoff / auto-promotion race, toss-up (line +0.2)
+#5550642  EFL ⭐★10.0 · Middlesbrough at Wrexham · playoff / auto-promotion race
+          — both top-10 (#4 vs #6), favorite (Wrexham),
+            playoff / auto-promotion race, toss-up (line +0.2)
 
-#9100  CFB ★9.2 · Ohio State (5) at Penn State (1) · top-5 showdown
-       — poll-ranked leagues show the rank inline after each team
+#5553521  CFB ★9.2 · Ohio State (5) at Penn State (1) · top-5 showdown
+          — poll-ranked leagues show the rank inline after each team
 ```
 
 Today's games are sorted to the front (lowest channel numbers) so they appear
-first in any IPTV client.
+first in any IPTV client. The numbers above are the default kickoff-time
+scheme; see [Channel numbering](#channel-numbering) for the compact alternative
+(`400-424` instead of seven digits) and what it costs.
 
 The channel name is fully customizable (see "Channel Naming" in settings). The
 default renders as above: poll ranks appear inline after each team, and any
@@ -196,7 +198,10 @@ form will collect everything needed to scope it.
    at the Xtream Codes API). No special TVG-ID setting is required, in either
    the default M3U/EPG output or the Xtream Codes API.
 
-   > **Why it sorts soonest-first and the guide stays correct.** Each channel's
+   > **Why it sorts soonest-first and the guide stays correct.** (This describes
+   > the default **Kickoff time** numbering; if you switch to **Compact range**,
+   > read [Channel numbering](#channel-numbering) first — the guarantee below is
+   > exactly what that mode trades away.) Each channel's
    > *number* is derived from its kickoff time: `virtual_base + minutes-since-a-
    > fixed-origin × slots + a small per-game tiebreak`. So the list sorts
    > strictly by day then start time (live/upcoming games first), and — crucially
