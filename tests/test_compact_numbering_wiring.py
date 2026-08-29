@@ -345,18 +345,37 @@ class TestSettingsModalExplainsTheTradeoff:
         assert _field("channel_numbering_mode")["default"] == plugin.DEFAULT_NUMBERING_MODE
         assert _field("compact_band_size")["default"] == plugin.DEFAULT_COMPACT_BAND_SIZE
 
-    def test_the_mode_help_text_names_the_guide_consequence(self):
+    def test_the_mode_help_text_says_what_each_mode_does(self):
         help_text = _field("channel_numbering_mode")["help_text"].lower()
-        # The specific harm, not just the word "tradeoff": a reader has to learn
-        # that a channel can show the wrong programme.
-        assert "guide" in help_text
-        assert "programme" in help_text or "program" in help_text
-        assert "tvg-id" in help_text, "the M3U/XMLTV escape hatch must be offered"
+        assert "kickoff" in help_text and "compact" in help_text
+        assert "400" in help_text, "give the reader a concrete example number"
 
-    def test_the_band_size_help_text_names_the_cost_of_the_tidy_option(self):
+    def test_the_mode_help_text_warns_about_sharing_a_number(self):
+        """The one hazard the user can still walk into, because they choose the
+        range: the guide identifies a channel by its number alone, so a range
+        overlapping their existing lineup breaks both channels."""
+        help_text = _field("channel_numbering_mode")["help_text"].lower()
+        assert "guide" in help_text
+        assert "skip" in help_text or "already use" in help_text
+
+    def test_the_band_size_help_text_says_zero_means_exact(self):
         help_text = _field("compact_band_size")["help_text"].lower()
         assert "0" in help_text
-        assert "reus" in help_text, "must say that a tight band reuses numbers"
+        assert "400-424" in help_text or "400, 401" in help_text
+
+    def test_the_settings_do_not_advise_reserving_extra_room_for_safety(self):
+        """#204 made an exact range safe: every programme published for a game
+        now ends when its channel does, so number reuse cannot be misread. The
+        old text told users to widen the range to make reuse "rare", which is
+        both unnecessary and scatters their channels. If that advice reappears,
+        the fix has probably been reverted."""
+        blob = " ".join(
+            _field(f)["help_text"].lower()
+            for f in ("channel_numbering_mode", "compact_band_size", "virtual_channel_base")
+        )
+        for phrase in ("reuse becomes rare", "buys the safety", "worst for guide accuracy",
+                       "delays slot reuse", "reuse anything"):
+            assert phrase not in blob, f"stale widen-the-range advice is back: {phrase!r}"
 
     def test_the_settings_warn_about_overlapping_the_existing_lineup(self):
         """Found live: a band over an existing Peacock lineup silently broke the
@@ -368,6 +387,7 @@ class TestSettingsModalExplainsTheTradeoff:
             + " " + _field("virtual_channel_base")["help_text"]
         ).lower()
         assert "already" in blob and ("skip" in blob or "in use" in blob)
+        assert "room" in blob or "occupied" in blob
 
     def test_the_starting_number_help_text_no_longer_promises_a_known_location(self):
         """#202: it used to say you could pin a number 'if you want them at a
