@@ -5,6 +5,79 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-08-29
+
+### Fixed
+
+- **NCAA Football pulled every NCAA division, which timed out the whole
+  refresh once the season opened.** `auto_pipeline` had been failing on most
+  runs since 2026-08-21 with `pipeline subprocess timed out after 1500s`, so
+  the guide stopped updating entirely and the cache went stale. NCAAF itself
+  looked fine in the summaries (134-136 games), which is why it was not the
+  obvious suspect.
+
+  **Root cause:** `NcaafSource.fetch_upcoming` filtered CFBD's `/games` by
+  time window only, never by division, so every Division II and III fixture
+  entered the pipeline. Each emitted row costs a Monte Carlo importance
+  simulation, and those rows cannot even score: the season replay population
+  was already FBS-only, so a team outside it has no estimated strength and
+  returns 0.00 every time. Measured against the live 2026 season on
+  2026-08-29:
+
+  ```
+  next 7 days: 157 games   FBS-involved 27 | FCS-only 45 | D-II/D-III 85
+  compute_match_importance: ~7.0s per game
+    -> 157 x 7s = ~1100s of the 1500s budget, ~600s of it on games
+       structurally incapable of scoring above zero
+  ```
+
+  All summer this was inert: the offseason returned no upcoming games, so the
+  cost was zero. Week 1 filled the lookahead window and the pipeline went over
+  budget on the first day of the season.
+
+  The filter now gates BOTH the emitted games and the simulated season
+  population from one predicate, so the two cannot drift apart.
+
+- **A failed `/rankings` request was logged as "offseason".** Any transient
+  CFBD failure zeroes the entire NCAAF slate for that run, and the log line
+  claimed the season was over. Request failure, unpublished poll, and
+  missing-poll-in-snapshot are now three distinct messages at the right
+  levels.
+
+- **FCS opponents were bucketed into CFB win-count bands off a one-game
+  schedule.** The division filter for GAMES is an either-side rule, because
+  an FBS team's win over an FCS opponent counts toward its bowl eligibility
+  and the game has to stay in the population. That pulled the FCS opponents
+  into the simulated state as a side effect: measured 2026-08-29, 100 of the
+  238 teams in the FBS-only population had 4 or fewer games and most had
+  exactly 1, so they were scored against "6+ wins = bowl eligible" on a
+  schedule that cannot reach it. Their contingency tables degenerated and
+  their leverage read 0, the right number for the wrong reason.
+
+  `PointsBasedSportSource.outcome_eligible_teams()` now separates "games
+  needed to count a selected team's record" from "teams eligible for this
+  league's outcome bands". Defaults to None (no filtering), so MLB, NBA,
+  NHL, WNBA and the NCAA baseball/softball/basketball sources are
+  unchanged.
+
+- **The season schedule was fetched twice per refresh.** The upcoming-window
+  path and the Monte Carlo population made separate identical `/games`
+  calls, so they could disagree (a classification edited between them, a
+  season-year boundary crossed mid-refresh) with no way to see it. One
+  cached fetch now feeds both, which makes "the simulated universe matches
+  the emitted universe" structural instead of a convention, and halves the
+  request cost against the 1k/day free tier. A failed fetch is deliberately
+  not cached.
+
+### Added
+
+- **`NCAA Football divisions` setting** (`ncaaf_divisions`): `D1 FBS only`
+  (default) or `D1 FBS + FCS`. Division II and III are never pulled. FCS
+  teams stay unranked because the AP Top 25 is an FBS poll, so under
+  `D1 FBS + FCS` those games enter as low-scored filler and an FBS-vs-FCS
+  game is ranked on its FBS team.
+
+
 ## [1.21.0] - 2026-08-26
 
 ### Added

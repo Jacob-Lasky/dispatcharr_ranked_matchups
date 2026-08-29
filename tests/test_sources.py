@@ -42,6 +42,464 @@ class TestNcaafConstants:
         assert NcaafSource(api_key="x", poll_name="Coaches Poll").poll_name == "Coaches Poll"
 
 
+class TestNcaafDivisionFilter:
+    """CFBD's /games carries every NCAA division. Only FBS (optionally FCS)
+    belongs in the guide: an out-of-division team is absent from the Monte
+    Carlo season population, so it can only ever score 0.00 importance while
+    still costing ~7s of simulation. Measured 2026-08-29: opening week was
+    157 games in a 7-day window, of which 27 involved an FBS team."""
+
+    @staticmethod
+    def _game(home_cls, away_cls):
+        return {"homeClassification": home_cls, "awayClassification": away_cls}
+
+    def test_default_is_fbs_only(self):
+        assert NcaafSource(api_key="x").divisions == "fbs"
+
+    def test_opt_in_fbs_fcs(self):
+        assert NcaafSource(api_key="x", divisions="fbs_fcs").divisions == "fbs_fcs"
+
+    def test_unknown_value_falls_back_to_default(self):
+        # A stale saved setting must not take the source down; it degrades
+        # to the cheap, safe end of the range.
+        assert NcaafSource(api_key="x", divisions="d3_please").divisions == "fbs"
+
+    def test_fbs_keeps_fbs_vs_fbs(self):
+        src = NcaafSource(api_key="x")
+        assert src._in_selected_divisions(self._game("fbs", "fbs"))
+
+    def test_fbs_keeps_mixed_fbs_fcs(self):
+        # An FBS-vs-FCS cupcake counts toward the FBS team's win total, so
+        # it must survive the FBS-only filter.
+        src = NcaafSource(api_key="x")
+        assert src._in_selected_divisions(self._game("fbs", "fcs"))
+        assert src._in_selected_divisions(self._game("fcs", "fbs"))
+
+    def test_fbs_drops_fcs_only(self):
+        src = NcaafSource(api_key="x")
+        assert not src._in_selected_divisions(self._game("fcs", "fcs"))
+
+    @pytest.mark.parametrize("pair", [("ii", "ii"), ("iii", "iii"), ("fcs", "ii")])
+    def test_fbs_drops_lower_divisions(self, pair):
+        src = NcaafSource(api_key="x")
+        assert not src._in_selected_divisions(self._game(*pair))
+
+    def test_fbs_fcs_keeps_fcs_only(self):
+        src = NcaafSource(api_key="x", divisions="fbs_fcs")
+        assert src._in_selected_divisions(self._game("fcs", "fcs"))
+
+    @pytest.mark.parametrize("pair", [("ii", "ii"), ("iii", "iii"), ("ii", "iii")])
+    def test_fbs_fcs_still_drops_d2_d3(self, pair):
+        src = NcaafSource(api_key="x", divisions="fbs_fcs")
+        assert not src._in_selected_divisions(self._game(*pair))
+
+    def test_fbs_fcs_keeps_fcs_vs_d2(self):
+        # Either-side rule: the FCS team is in the selected set.
+        src = NcaafSource(api_key="x", divisions="fbs_fcs")
+        assert src._in_selected_divisions(self._game("fcs", "ii"))
+
+    @pytest.mark.parametrize("pair", [(None, None), (None, "ii"), ("ii", None)])
+    def test_missing_classification_is_not_selected(self, pair):
+        # CFBD omits the key on some non-NCAA exhibition rows. Guessing them
+        # in would reintroduce the noise the filter exists to remove.
+        src = NcaafSource(api_key="x", divisions="fbs_fcs")
+        assert not src._in_selected_divisions(self._game(*pair))
+
+    def test_missing_classification_kept_when_other_side_qualifies(self):
+        src = NcaafSource(api_key="x")
+        assert src._in_selected_divisions(self._game("fbs", None))
+
+
+class TestNcaafFetchGamesAppliesFilter:
+    """The predicate must be CALLED from the upcoming-window path, not just
+    exist. Every _in_selected_divisions unit test above passes even if
+    _fetch_games never invokes it, which is exactly how a fix ships inert."""
+
+    @staticmethod
+    def _payload():
+        when = datetime.now(timezone.utc) + timedelta(days=2)
+        stamp = when.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        rows = [
+            (0, "Ohio State", "Texas", "fbs", "fbs"),
+            (1, "Missouri", "Arkansas-Pine Bluff", "fbs", "fcs"),
+            (2, "Wagner", "Robert Morris", "fcs", "fcs"),
+            (3, "Davenport", "Gannon", "ii", "ii"),
+            (4, "Wheeling", "Thomas More", "iii", "iii"),
+        ]
+        return [
+            {"id": i, "homeTeam": h, "awayTeam": a,
+             "homeClassification": hc, "awayClassification": ac,
+             "startDate": stamp, "week": 1, "season": 2026, "completed": False}
+            for i, h, a, hc, ac in rows
+        ]
+
+    def _kept(self, monkeypatch, divisions):
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+        payload = self._payload()
+
+        class FakeResp:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return list(payload)
+
+        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        src = ncaaf_mod.NcaafSource(api_key="x", divisions=divisions)
+        return {g["id"] for g in src._fetch_games(2026, days_ahead=7)}
+
+    def test_fbs_only_window(self, monkeypatch):
+        assert self._kept(monkeypatch, "fbs") == {0, 1}
+
+    def test_fbs_fcs_window(self, monkeypatch):
+        assert self._kept(monkeypatch, "fbs_fcs") == {0, 1, 2}
+
+    def test_lower_divisions_never_reach_the_window(self, monkeypatch):
+        for divisions in ("fbs", "fbs_fcs"):
+            kept = self._kept(monkeypatch, divisions)
+            assert kept.isdisjoint({3, 4}), f"D-II/D-III leaked under {divisions}"
+
+    def test_out_of_window_games_still_dropped(self, monkeypatch):
+        """The division filter must not have displaced the time-window filter."""
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+        far = datetime.now(timezone.utc) + timedelta(days=90)
+        payload = [{
+            "id": 99, "homeTeam": "Ohio State", "awayTeam": "Texas",
+            "homeClassification": "fbs", "awayClassification": "fbs",
+            "startDate": far.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "week": 12, "season": 2026, "completed": False,
+        }]
+
+        class FakeResp:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return list(payload)
+
+        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        src = ncaaf_mod.NcaafSource(api_key="x")
+        assert src._fetch_games(2026, days_ahead=7) == []
+
+
+class TestNcaafSimulatedUniverseMatchesEmitted:
+    """The season replay population and the emitted games MUST use the same
+    division filter. A team present in one but not the other either scores a
+    guaranteed 0.00 (emitted, unsimulated) or wastes a fetch (simulated,
+    never emitted). Both directions are silent, so pin it."""
+
+    _RAW = [
+        {"id": 1, "homeTeam": "Ohio State", "awayTeam": "Texas",
+         "homeClassification": "fbs", "awayClassification": "fbs",
+         "startDate": "2026-09-05T16:00:00.000Z", "completed": False},
+        {"id": 2, "homeTeam": "Missouri", "awayTeam": "Arkansas-Pine Bluff",
+         "homeClassification": "fbs", "awayClassification": "fcs",
+         "startDate": "2026-09-05T16:00:00.000Z", "completed": False},
+        {"id": 3, "homeTeam": "Wagner", "awayTeam": "Robert Morris",
+         "homeClassification": "fcs", "awayClassification": "fcs",
+         "startDate": "2026-09-05T16:00:00.000Z", "completed": False},
+        {"id": 4, "homeTeam": "Davenport", "awayTeam": "Gannon",
+         "homeClassification": "ii", "awayClassification": "ii",
+         "startDate": "2026-09-05T16:00:00.000Z", "completed": False},
+    ]
+
+    def _season_ids(self, monkeypatch, divisions):
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+
+        class FakeResp:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return list(TestNcaafSimulatedUniverseMatchesEmitted._RAW)
+
+        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        src = ncaaf_mod.NcaafSource(api_key="x", divisions=divisions)
+        return {m["id"] for m in src._fetch_full_season_games()}
+
+    def test_fbs_season_population(self, monkeypatch):
+        assert self._season_ids(monkeypatch, "fbs") == {1, 2}
+
+    def test_fbs_fcs_season_population(self, monkeypatch):
+        assert self._season_ids(monkeypatch, "fbs_fcs") == {1, 2, 3}
+
+    def test_d2_never_simulated(self, monkeypatch):
+        for divisions in ("fbs", "fbs_fcs"):
+            assert 4 not in self._season_ids(monkeypatch, divisions)
+
+    def test_season_and_upcoming_agree(self, monkeypatch):
+        """Same predicate drives both paths, for every raw row."""
+        src = NcaafSource(api_key="x", divisions="fbs_fcs")
+        simulated = {
+            g["id"] for g in self._RAW if src._in_selected_divisions(g)
+        }
+        assert simulated == self._season_ids(monkeypatch, "fbs_fcs")
+
+
+class TestNcaafEmittedTeamsAreSimulated:
+    """WITNESS for the 2026-08-21 auto_pipeline timeout.
+
+    The invariant: every team in a game NcaafSource emits must also appear
+    in the season population the Monte Carlo replays. A team present in one
+    but not the other scores a guaranteed 0.00 importance while still
+    costing a full simulation, which is how 130 unscoreable Division II/III
+    rows per refresh pushed the pipeline past its 1500s budget.
+
+    This is written against methods that exist on BOTH the fixed and the
+    broken revision and constructs the source with no `divisions` kwarg, so
+    reverting the fix makes it fail as a real ASSERTION (D-II teams emitted,
+    absent from the FBS-only season population) rather than as an
+    AttributeError about a missing symbol.
+
+    It is also a CLASS guard, not just an instance one: it names no
+    division, so a future change that admits any unsimulated tier fails
+    here without anyone remembering to extend a literal list.
+    """
+
+    # Deliberately spans every tier CFBD serves, plus the missing-key row.
+    _RAW = [
+        ("Ohio State", "Texas", "fbs", "fbs"),
+        ("Missouri", "Arkansas-Pine Bluff", "fbs", "fcs"),
+        ("Wagner", "Robert Morris", "fcs", "fcs"),
+        ("Davenport", "Gannon", "ii", "ii"),
+        ("Wheeling", "Thomas More", "iii", "iii"),
+        ("Dayton", "Fairmont State", "fcs", "ii"),
+        ("Exhibition A", "Exhibition B", None, None),
+    ]
+
+    @classmethod
+    def _payload(cls, when):
+        stamp = when.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        return [
+            {
+                "id": i,
+                "homeTeam": h, "awayTeam": a,
+                "homeClassification": hc, "awayClassification": ac,
+                "startDate": stamp, "completed": False,
+                "week": 1, "season": 2026,
+            }
+            for i, (h, a, hc, ac) in enumerate(cls._RAW)
+        ]
+
+    @staticmethod
+    def _teams(rows, home_key, away_key):
+        out = set()
+        for r in rows:
+            out.add(r[home_key])
+            out.add(r[away_key])
+        return out
+
+    def test_every_emitted_team_is_in_the_simulated_season(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+
+        when = datetime.now(timezone.utc) + timedelta(days=2)
+        payload = self._payload(when)
+
+        class FakeResp:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return list(payload)
+
+        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+
+        # No `divisions` kwarg: this must construct on the broken revision too.
+        src = ncaaf_mod.NcaafSource(api_key="x")
+
+        emitted = self._teams(
+            src._fetch_games(2026, days_ahead=7), "homeTeam", "awayTeam",
+        )
+        simulated = self._teams(
+            src._fetch_full_season_games(), "home", "away",
+        )
+
+        # Instrument control: a vacuously empty emitted set would pass the
+        # subset assertion for the wrong reason.
+        assert emitted, "fixture produced no emitted games; test is vacuous"
+        assert simulated, "fixture produced no simulated games; test is vacuous"
+
+        orphans = emitted - simulated
+        assert not orphans, (
+            "emitted teams missing from the Monte Carlo season population "
+            f"(each costs a full simulation and can only score 0.00): {sorted(orphans)}"
+        )
+
+
+class TestNcaafOutcomeEligibility:
+    """Game inclusion and outcome eligibility are separate questions. An
+    FBS-vs-FCS game must stay in the population (the win counts for the FBS
+    team) while the FCS opponent must NOT be bucketed into CFB win-count
+    bands off a one-game schedule."""
+
+    _RAW = [
+        {"id": 1, "homeTeam": "Ohio State", "awayTeam": "Texas",
+         "homeClassification": "fbs", "awayClassification": "fbs",
+         "startDate": "2026-09-05T16:00:00.000Z", "completed": False},
+        {"id": 2, "homeTeam": "Missouri", "awayTeam": "Arkansas-Pine Bluff",
+         "homeClassification": "fbs", "awayClassification": "fcs",
+         "startDate": "2026-09-05T16:00:00.000Z", "completed": False},
+        {"id": 3, "homeTeam": "Wagner", "awayTeam": "Robert Morris",
+         "homeClassification": "fcs", "awayClassification": "fcs",
+         "startDate": "2026-09-05T16:00:00.000Z", "completed": False},
+    ]
+
+    def _src(self, monkeypatch, divisions):
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+
+        class FakeResp:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return list(TestNcaafOutcomeEligibility._RAW)
+
+        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        return ncaaf_mod.NcaafSource(api_key="x", divisions=divisions)
+
+    def test_fbs_excludes_the_fcs_opponent(self, monkeypatch):
+        src = self._src(monkeypatch, "fbs")
+        eligible = src.outcome_eligible_teams()
+        assert "Missouri" in eligible
+        # Present in the population (its game counts for Missouri) but not
+        # measured against bowl eligibility on a one-game schedule.
+        assert "Arkansas-Pine Bluff" not in eligible
+
+    def test_the_cupcake_game_is_still_in_the_population(self, monkeypatch):
+        """The whole point of the either-side rule: excluding the opponent
+        from OUTCOMES must not exclude the GAME from the record."""
+        src = self._src(monkeypatch, "fbs")
+        assert 2 in {m["id"] for m in src._fetch_full_season_games()}
+
+    def test_fbs_fcs_makes_fcs_teams_eligible(self, monkeypatch):
+        src = self._src(monkeypatch, "fbs_fcs")
+        eligible = src.outcome_eligible_teams()
+        assert {"Wagner", "Robert Morris", "Arkansas-Pine Bluff"} <= eligible
+
+    def test_terminal_outcomes_honours_eligibility(self, monkeypatch):
+        """The base class must actually consult the hook. A source-level
+        eligibility set that terminal_outcomes ignores is inert."""
+        src = self._src(monkeypatch, "fbs")
+        state = {"_applied": frozenset(), "_teams": {
+            "Missouri": {"wins": 11, "losses": 0, "pf": 0, "pa": 0, "games_played": 11},
+            "Arkansas-Pine Bluff": {"wins": 11, "losses": 0, "pf": 0, "pa": 0, "games_played": 11},
+        }}
+        out = src.terminal_outcomes(state)
+        assert "Missouri" in out and out["Missouri"], "eligible team lost its bands"
+        assert "Arkansas-Pine Bluff" not in out
+
+    def test_default_hook_is_transparent(self):
+        """Every other points-based source must be unaffected: the base
+        implementation returns None, meaning no filtering at all."""
+        from dispatcharr_ranked_matchups.sources.points_based import (
+            PointsBasedSportSource,
+        )
+        assert PointsBasedSportSource.outcome_eligible_teams(object()) is None
+
+
+class TestNcaafSeasonFetchIsSharedAndCached:
+    """One /games call feeds both the window filter and the season
+    population. Two separate requests could disagree, and the disagreement
+    would be invisible; it also doubles the spend against a 1k/day tier."""
+
+    @staticmethod
+    def _payload():
+        when = datetime.now(timezone.utc) + timedelta(days=2)
+        return [{
+            "id": 1, "homeTeam": "Ohio State", "awayTeam": "Texas",
+            "homeClassification": "fbs", "awayClassification": "fbs",
+            "startDate": when.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "week": 1, "season": 2026, "completed": False,
+        }]
+
+    def test_both_paths_share_one_request(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+        calls = []
+        payload = self._payload()
+
+        class FakeResp:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return list(payload)
+
+        def fake_get(url, **kwargs):
+            calls.append(url)
+            return FakeResp()
+
+        monkeypatch.setattr(ncaaf_mod.requests, "get", fake_get)
+        src = ncaaf_mod.NcaafSource(api_key="x")
+        year = src._current_season_year()
+        src._fetch_games(year, days_ahead=7)
+        src._fetch_full_season_games()
+        src.outcome_eligible_teams()
+        assert len(calls) == 1, f"expected one /games call, got {len(calls)}"
+
+    def test_a_failed_fetch_is_not_cached(self, monkeypatch):
+        """A transient error must not freeze an empty season for the life of
+        the instance, which would silently zero NCAAF until a restart."""
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+        payload = self._payload()
+        state = {"fail": True}
+
+        class FakeResp:
+            @staticmethod
+            def raise_for_status():
+                return None
+
+            @staticmethod
+            def json():
+                return list(payload)
+
+        def fake_get(url, **kwargs):
+            if state["fail"]:
+                state["fail"] = False
+                raise RuntimeError("boom")
+            return FakeResp()
+
+        monkeypatch.setattr(ncaaf_mod.requests, "get", fake_get)
+        src = ncaaf_mod.NcaafSource(api_key="x")
+        assert src._fetch_raw_season(2026) == []
+        assert len(src._fetch_raw_season(2026)) == 1
+
+
+class TestNcaafBadDivisionsIsLoud:
+    """Normalising a typo silently makes a real misconfiguration
+    indistinguishable from the default."""
+
+    def test_unknown_value_warns(self, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING):
+            src = NcaafSource(api_key="x", divisions="d3_please")
+        assert src.divisions == "fbs"
+        # getMessage() renders lazy %-args; r.message alone is the raw template.
+        assert any("d3_please" in r.getMessage() for r in caplog.records), caplog.text
+        assert any("fbs_fcs" in r.getMessage() for r in caplog.records), (
+            "the warning must name the valid values, or it cannot be acted on"
+        )
+
+    def test_none_does_not_warn(self, caplog):
+        """Unset is the normal case for a fresh install, not a misconfig."""
+        import logging
+        with caplog.at_level(logging.WARNING):
+            src = NcaafSource(api_key="x", divisions=None)
+        assert src.divisions == "fbs"
+        assert "unrecognised" not in caplog.text
+
+
 class TestNcaafSeasonYear:
     """CFBD ?year= is the season's START year (NCAAF runs Aug-Jan).
     Pivot at month 8."""

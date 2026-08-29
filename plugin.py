@@ -1436,7 +1436,14 @@ def _build_sources(settings: Dict[str, Any]):
     fd_key = _resolve_key(settings, "football_data_api_key", FD_KEY_PATH)
     odds_key = _resolve_key(settings, "odds_api_key", ODDS_KEY_PATH)
     if settings.get("enable_ncaaf", False) and cfbd_key:
-        sources.append(NcaafSource(api_key=cfbd_key))
+        # Divisions gate BOTH the emitted games and the Monte Carlo season
+        # population; see sources/ncaaf.py. DO NOT spell the default value
+        # here: NcaafSource normalizes an unset or unrecognised value to its
+        # own DEFAULT_DIVISIONS, so this stays a single source of truth.
+        sources.append(NcaafSource(
+            api_key=cfbd_key,
+            divisions=settings.get("ncaaf_divisions"),
+        ))
     # NCAAM uses the same CFBD/CBB-Data Bearer token as NCAAF.
     if settings.get("enable_ncaam", False) and cfbd_key:
         sources.append(NcaamSource(api_key=cfbd_key))
@@ -4925,7 +4932,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.21.0"
+    version = "1.22.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

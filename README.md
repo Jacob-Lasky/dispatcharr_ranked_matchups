@@ -96,7 +96,7 @@ the **Test naming convention** action to preview a template before applying it.
 
 | Sport | Source | Free tier? |
 |---|---|---|
-| NCAA Football | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (1k req/day) |
+| NCAA Football (D1 FBS; FCS optional) | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (1k req/day) |
 | NCAA Men's Basketball | [CollegeBasketballData.com](https://collegebasketballdata.com/) (same key as CFBD) | Yes |
 | EPL / EFL Championship / UCL / Bundesliga / La Liga / Serie A / Ligue 1 / Eredivisie / Primeira Liga / Brazilian Série A / FIFA World Cup / UEFA EURO | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, and those 12 competitions ARE the free tier — every domestic cup is paid-only) |
 | NHL (regular + Stanley Cup Playoffs) | [api-web.nhle.com](https://api-web.nhle.com/) (official, undocumented) | Yes (no key required) |
@@ -110,6 +110,33 @@ the **Test naming convention** action to preview a template before applying it.
 | Field events — Formula 1 / NASCAR / PGA Golf / ATP + WTA Tennis / UFC | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Boxing | [Boxing Data API](https://rapidapi.com/bengroves1993/api/boxing-data-api) (RapidAPI — ESPN has no boxing feed) | Yes (free RapidAPI tier; ~7-day lookahead) |
 | Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |
+
+### NCAA Football divisions
+
+CFBD's feed carries every NCAA division, not just Division I. The
+**NCAA Football divisions** setting selects what actually reaches the guide:
+
+| Setting | What is pulled |
+|---|---|
+| `D1 FBS only` (default) | Games where either side is FBS, including FBS-vs-FCS |
+| `D1 FBS + FCS` | The above, plus FCS-vs-FCS |
+
+Division II and III are never pulled under either setting. They are not
+merely uninteresting: the Monte Carlo importance simulation replays only the
+selected divisions' season, so a team outside it scores 0.00 every time while
+still costing roughly seven seconds of simulation. Opening week 2026 returned
+157 games in a seven-day window of which 27 involved an FBS team, so the
+unfiltered feed spent about eighteen minutes per refresh to add nothing.
+
+FCS teams stay unranked because the AP Top 25 is an FBS poll, and an
+FBS-vs-FCS game is ranked on its FBS team. Note that unranked does not mean
+unscored: the Monte Carlo importance signal is independent of the poll, so
+an FCS game can still score on stakes alone. Under `D1 FBS + FCS` those
+stakes are measured with FBS win-count bands (6 wins = bowl eligible,
+10+ = playoff contender), which FCS's own postseason does not work that
+way — treat FCS importance as an approximation rather than a like-for-like
+comparison with FBS. This is why FBS-only is the default.
+
 
 Adding a sport is a new file in `sources/` implementing the `SportSource`
 interface; everything else (scoring, matching, channel cloning, EPG

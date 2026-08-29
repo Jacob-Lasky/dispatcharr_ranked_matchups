@@ -438,6 +438,37 @@ class TestManifestFavoritesOnlyMatchesCode:
         assert field["id"] == plugin._FAVORITES_ONLY_SETTING
 
 
+class TestManifestNcaafDivisionsMatchesCode:
+    """plugin.json's ncaaf_divisions option values must equal the source's
+    DIVISION_SETS keys, mirroring TestManifestFavoritesOnlyMatchesCode. A
+    manifest value the source does not recognise silently degrades to the
+    default, so the UI would offer a setting that does nothing."""
+
+    def test_options_match_source_constants(self):
+        import json
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+
+        with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
+            manifest = json.load(f)
+        field = next(
+            x for x in manifest["fields"] if x["id"] == "ncaaf_divisions"
+        )
+        assert field["type"] == "select"
+        values = [o["value"] for o in field["options"]]
+        assert set(values) == set(ncaaf_mod.DIVISION_SETS)
+        assert field["default"] == ncaaf_mod.DEFAULT_DIVISIONS
+        assert field["default"] in values
+
+    def test_sits_next_to_its_toggle(self):
+        """The divisions select is meaningless without enable_ncaaf, so it
+        must render adjacent to it rather than elsewhere in an 86-field form."""
+        import json
+        with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
+            manifest = json.load(f)
+        ids = [x["id"] for x in manifest["fields"]]
+        assert ids.index("ncaaf_divisions") == ids.index("enable_ncaaf") + 1
+
+
 class TestEmptyRefreshResult:
     """Shared exit for the no-games-fetched and everything-filtered-out paths.
     Must persist an EMPTY cache (so a stale prior cache stops serving dropped
@@ -853,6 +884,35 @@ class TestBuildSourcesToggles:
         # Public-release defaults: nothing enabled until the user opts in.
         sources = plugin._build_sources({})
         assert sources == []
+
+    def test_ncaaf_divisions_defaults_to_fbs(self, plugin, tmp_path, monkeypatch):
+        # Contract test: the setting must reach the source. A source-level
+        # test of the filter passes even if _build_sources never forwards
+        # the value, which is exactly how a fix ships inert.
+        keyfile = tmp_path / "cfbd_api_key"
+        keyfile.write_text("fake-key")
+        monkeypatch.setattr(plugin, "CFBD_KEY_PATH", str(keyfile))
+        sources = plugin._build_sources({"enable_ncaaf": True})
+        assert [s.sport_prefix for s in sources] == ["CFB"]
+        assert sources[0].divisions == "fbs"
+
+    def test_ncaaf_divisions_setting_is_forwarded(self, plugin, tmp_path, monkeypatch):
+        keyfile = tmp_path / "cfbd_api_key"
+        keyfile.write_text("fake-key")
+        monkeypatch.setattr(plugin, "CFBD_KEY_PATH", str(keyfile))
+        sources = plugin._build_sources(
+            {"enable_ncaaf": True, "ncaaf_divisions": "fbs_fcs"}
+        )
+        assert sources[0].divisions == "fbs_fcs"
+
+    def test_ncaaf_divisions_bad_value_degrades(self, plugin, tmp_path, monkeypatch):
+        keyfile = tmp_path / "cfbd_api_key"
+        keyfile.write_text("fake-key")
+        monkeypatch.setattr(plugin, "CFBD_KEY_PATH", str(keyfile))
+        sources = plugin._build_sources(
+            {"enable_ncaaf": True, "ncaaf_divisions": "nonsense"}
+        )
+        assert sources[0].divisions == "fbs"
 
 
 class TestStreamQualityRank:

@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.21.0",
+  "version": "1.22.0",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -25,6 +25,23 @@
       "label": "NCAA Football (CFBD)",
       "default": false,
       "help_text": "AP Top-25 + games + betting lines from CollegeFootballData.com. Offseason → no rows produced. Requires the CFBD API key below."
+    },
+    {
+      "id": "ncaaf_divisions",
+      "type": "select",
+      "label": "NCAA Football divisions",
+      "default": "fbs",
+      "options": [
+        {
+          "value": "fbs",
+          "label": "D1 FBS only (recommended)"
+        },
+        {
+          "value": "fbs_fcs",
+          "label": "D1 FBS + FCS"
+        }
+      ],
+      "help_text": "Which divisions NCAA Football pulls. CFBD's feed also carries Division II and III, which can never score (they are outside the simulated season) yet still cost about 7 seconds of importance simulation each — opening week 2026 was 157 games of which only 27 involved an FBS team. FBS only is the default and is the recommended setting. Adding FCS roughly triples the NCAAF share of a refresh, and scores those games with FBS win-count bands (6 wins = bowl eligible), which is an approximation since FCS has a different postseason."
     },
     {
       "id": "enable_ncaam",
