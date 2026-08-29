@@ -25,48 +25,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG_NAME = "dispatcharr_ranked_matchups"
 
 
-def _load_tasks_module():
-    if f"{PKG_NAME}.tasks" in sys.modules:
-        return sys.modules[f"{PKG_NAME}.tasks"]
-    spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}.tasks", os.path.join(REPO_ROOT, "tasks.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[f"{PKG_NAME}.tasks"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _load_plugin_module():
-    """Same pattern as test_plugin_helpers -- sidestep package __init__."""
-    if f"{PKG_NAME}.plugin" in sys.modules:
-        return sys.modules[f"{PKG_NAME}.plugin"]
-    util_spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}._util", os.path.join(REPO_ROOT, "_util.py")
-    )
-    util_mod = importlib.util.module_from_spec(util_spec)
-    sys.modules[f"{PKG_NAME}._util"] = util_mod
-    util_spec.loader.exec_module(util_mod)
-
-    spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}.plugin", os.path.join(REPO_ROOT, "plugin.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[f"{PKG_NAME}.plugin"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-@pytest.fixture(scope="module")
-def tasks_mod():
-    return _load_tasks_module()
-
-
-@pytest.fixture(scope="module")
-def plugin_mod():
-    return _load_plugin_module()
-
-
 class TestInflightHelpers:
     """The inflight Redis key is what show_status reads to tell the
     UI 'work is still happening'. The helpers must (a) round-trip

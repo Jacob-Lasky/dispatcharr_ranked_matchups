@@ -25,33 +25,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG_NAME = os.path.basename(REPO_ROOT)
 
 
-def _load_plugin_module():
-    """Load plugin.py without exec-ing the package __init__ (which would start
-    the scheduler thread and import Django). plugin.py does its Django imports
-    lazily inside functions, so a top-level load is safe."""
-    if f"{PKG_NAME}.plugin" in sys.modules:
-        return sys.modules[f"{PKG_NAME}.plugin"]
-    util_spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}._util", os.path.join(REPO_ROOT, "_util.py")
-    )
-    util_mod = importlib.util.module_from_spec(util_spec)
-    sys.modules[f"{PKG_NAME}._util"] = util_mod
-    util_spec.loader.exec_module(util_mod)
-
-    spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}.plugin", os.path.join(REPO_ROOT, "plugin.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[f"{PKG_NAME}.plugin"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-@pytest.fixture(scope="module")
-def plugin():
-    return _load_plugin_module()
-
-
 NOW = datetime(2026, 6, 28, 18, 0, tzinfo=timezone.utc)
 
 

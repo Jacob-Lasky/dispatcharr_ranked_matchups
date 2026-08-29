@@ -36,49 +36,6 @@ PKG_NAME = os.path.basename(REPO_ROOT)
 PLUGIN_PY = os.path.join(REPO_ROOT, "plugin.py")
 
 
-def _load_plugin_module():
-    """Load plugin.py without exec-ing the package __init__ (which would start
-    the scheduler thread and import Django). Mirrors test_recording_preservation."""
-    if f"{PKG_NAME}.plugin" in sys.modules:
-        return sys.modules[f"{PKG_NAME}.plugin"]
-    util_spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}._util", os.path.join(REPO_ROOT, "_util.py")
-    )
-    util_mod = importlib.util.module_from_spec(util_spec)
-    sys.modules[f"{PKG_NAME}._util"] = util_mod
-    util_spec.loader.exec_module(util_mod)
-
-    spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}.plugin", os.path.join(REPO_ROOT, "plugin.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[f"{PKG_NAME}.plugin"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def _load_tasks_module():
-    if f"{PKG_NAME}.tasks" in sys.modules:
-        return sys.modules[f"{PKG_NAME}.tasks"]
-    spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}.tasks", os.path.join(REPO_ROOT, "tasks.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[f"{PKG_NAME}.tasks"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-@pytest.fixture(scope="module")
-def plugin():
-    return _load_plugin_module()
-
-
-@pytest.fixture(scope="module")
-def tasks_mod():
-    return _load_tasks_module()
-
-
 class TestDryRunEnabled:
     """ONE reader for the setting. apply decides whether to write from it and
     show_status tells the user what apply will do, so two private copies of the

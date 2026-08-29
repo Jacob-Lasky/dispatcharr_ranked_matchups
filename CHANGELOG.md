@@ -5,6 +5,78 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.24.0] - 2026-08-29
+
+### Added
+
+- **Finished games are removed from the group without waiting for a refresh
+  (#196).** New setting `remove_finished_after_minutes` (0 = off, the default).
+  A game that ended more than N minutes ago has its channel reaped on its own
+  schedule, instead of lingering until the next of the five daily runs.
+
+  The end time is estimated with the SAME per-sport window the EPG matcher
+  already uses (about 4 hours for gridiron, 2.5 for soccer), so the setting is
+  measured from that, not from kickoff. A second duration table would be free
+  to drift from the one the guide entry is written against, and the reaper
+  would then delete a channel whose own programme still said the game was on.
+
+  **Mechanism: a thread that sleeps until the next known expiry, not a fixed
+  poll and not a per-channel timer.** There is no "game ended" event to
+  subscribe to (Dispatcharr's hooks fire on stream and feed activity, not on a
+  game clock), and a `threading.Timer` per channel would die with its uWSGI
+  worker AND duplicate across workers, since the plugin is instantiated once
+  per worker. Deriving the deadline from the persisted cache each tick gives a
+  timer's precision with a poll's robustness and self-heals after a restart. A
+  30-minute cap acts as a heartbeat when the cache is empty or unreadable.
+
+  A game whose start time will not parse is never reaped: a row we cannot date
+  is a row we must not delete on a guess.
+
+  Deletion is delegated to the existing apply path rather than reimplemented,
+  so reaping inherits the DVR-recording protection, the archive re-home, the
+  ChannelStream and EPGData cleanup, and the signal-safe queryset deletes. The
+  reaper edits the cache and calls apply; a second deletion path would be a
+  copy that has to stay in agreement with the first.
+
+  Runs out of process and under the SAME lock as apply: reaping deletes
+  channels and then re-applies, so it races apply exactly as apply races
+  itself (#155), and apply's bulk DB writes wedge a gevent worker (#142).
+
+  Also available on demand as the **Remove finished games now** action.
+
+- **Backfill from a bench as games finish (#197).** New setting `bench_size`
+  (0 = off, the default): how many EXTRA scored games to retain beyond
+  `max_games` as promotion stock. When the reaper drops N finished games it
+  promotes up to N benched games in score order, so the group holds its size
+  through the day instead of draining.
+
+  Previously everything below `max_games` was discarded at the cap even though
+  it had already been fetched, scored and Monte-Carlo simulated at full cost,
+  so there was nothing to promote from. The cache now carries `games` (on air)
+  and `bench` (stock) as separate lists, which means the apply path needed no
+  change at all: it still applies exactly the list it is handed.
+
+  A benched game is skipped if it expired while sitting there (promoting it
+  would create a channel the next tick deletes) or if it has no broadcast
+  match (apply would make it a placeholder, not a watchable channel).
+
+### Fixed
+
+- **`_write_cache` used one fixed temp path for every writer.** A uwsgi
+  worker, the scheduler's pipeline subprocess and the reaper's can all
+  legitimately write the cache at once, and a shared `cache.json.tmp` lets one
+  truncate the file another is still writing, so the atomic `os.replace` could
+  publish a half-written cache. The temp name is now per-process and
+  per-thread, and is cleaned up if the write fails.
+
+### Changed
+
+- Test suite: the plugin- and tasks-module loaders lived in eight
+  byte-identical copies across six test files. They now live once in
+  `tests/conftest.py` as shared fixtures. A drifting copy would have made one
+  file's tests load a differently-constructed module with nothing to report it.
+
+
 ## [1.23.0] - 2026-08-29
 
 ### Changed

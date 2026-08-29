@@ -220,6 +220,33 @@ form will collect everything needed to scope it.
 | `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand. | Both |
 | `show_status` | Print the current curated list with per-game score breakdown. No writes. | — |
 | `preview_names` | Render the channel-name template against sample games so you can check the layout before applying. Reports template errors and lists every variable. No writes. | — |
+| `reap_now` | Drop games that finished more than `remove_finished_after_minutes` ago and backfill from the bench. Re-fetches nothing. | `cache.json` + DB |
+
+### Clearing out finished games
+
+By default a game's channel stays in the group until the next scheduled
+refresh, which on a five-a-day schedule can be hours after the final whistle.
+Two settings change that, both off by default:
+
+| Setting | Effect |
+|---|---|
+| `remove_finished_after_minutes` | Minutes past a game's estimated end before its channel is removed. `0` disables reaping. |
+| `bench_size` | How many extra scored games to keep in reserve, ready to replace ones that finish. `0` means the group just shrinks through the day. |
+
+The end of a game is **estimated**, because no feed publishes one: the plugin
+reuses the same per-sport window the EPG matcher uses, roughly 4 hours for
+gridiron and 2.5 for soccer. So `remove_finished_after_minutes = 30` means
+about four and a half hours after a college football kickoff, not thirty
+minutes. A game whose start time cannot be parsed is never reaped.
+
+With a bench, finishing games are replaced by the next-best scored games that
+have not started yet and do have a broadcast to point at, so the group holds
+its size instead of draining. Those games were already fetched and scored
+during the last refresh, so promotion costs no API calls and no simulation.
+
+A background thread handles this: it sleeps until the next game's deadline
+rather than polling, and falls back to a half-hourly heartbeat when there is
+nothing pending. Use the `reap_now` action to trigger it by hand.
 
 ## How games are matched to your lineup
 

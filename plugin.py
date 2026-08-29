@@ -1105,10 +1105,25 @@ def _read_cache() -> Dict[str, Any]:
 
 
 def _write_cache(data: Dict[str, Any]) -> None:
-    tmp = CACHE_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, sort_keys=False, ensure_ascii=False, default=str)
-    os.replace(tmp, CACHE_PATH)
+    # The temp name is per-writer, NOT a fixed CACHE_PATH + ".tmp". Several
+    # processes can legitimately be writing here at once (a uwsgi worker, the
+    # scheduler's pipeline subprocess, the reaper's), and a shared temp path
+    # lets one truncate the file another is still writing, so os.replace can
+    # publish a half-written cache. os.replace itself is atomic, so distinct
+    # temp names make the whole publish atomic.
+    tmp = f"{CACHE_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, sort_keys=False, ensure_ascii=False, default=str)
+        os.replace(tmp, CACHE_PATH)
+    finally:
+        # A crash between open and replace would otherwise leave litter next
+        # to the cache forever, one file per crashed writer.
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 # ---------- settings parsing ----------
@@ -2108,10 +2123,16 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # key so today-first + final + raw tiebreak survive the cap (otherwise the
     # whole "today's games occupy lowest channel numbers" guarantee breaks
     # whenever the cap kicks in).
-    if len(scored) > max_games:
+    # Retain max_games PLUS a bench (#197). The bench is promotion stock for
+    # the reaper: without it the guide just shrinks as games finish, because
+    # everything below the cap is discarded here even though it has already
+    # been fetched, scored and Monte-Carlo simulated at full cost.
+    bench_size = _bench_size(settings)
+    retain = max_games + bench_size
+    if len(scored) > retain:
         favs = [s for s in scored if s[1].favorite_match]
         non_favs = [s for s in scored if not s[1].favorite_match]
-        keep_non_favs = non_favs[: max(0, max_games - len(favs))]
+        keep_non_favs = non_favs[: max(0, retain - len(favs))]
         scored = sorted(favs + keep_non_favs, key=_sort_key)
 
     # 4. EPG match each game to a Dispatcharr channel.
@@ -2174,15 +2195,31 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "extra": dict(game.extra) if game.extra else {},
         })
 
+    # `games` is what apply puts on air; `bench` is everything else that was
+    # scored, kept in sort order for the reaper to promote from. Splitting
+    # here rather than tagging rows means _action_apply needs no change at
+    # all: it still applies exactly the list it is given.
+    applied_payload = games_payload[:max_games]
+    bench_payload = games_payload[max_games:]
+
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
         "summary": src_summary,
         "max_games": max_games,
+        "bench_size": bench_size,
         "weights": asdict(weights),
-        "games": games_payload,
+        "games": applied_payload,
+        "bench": bench_payload,
     }
     _write_cache(cache)
 
+    if bench_payload:
+        logger.info(
+            "[ranked_matchups] refresh: %d games applied, %d held on the bench "
+            "for backfill", len(applied_payload), len(bench_payload),
+        )
+
+    games_payload = applied_payload
     matched = sum(1 for g in games_payload if g["channel_id"])
     return {
         "status": "ok",
@@ -2465,6 +2502,39 @@ def _build_epg_lookup(local_tz=timezone.utc):
 
 
 # ---------- apply ----------
+
+def _game_end_utc(game: Dict[str, Any]) -> Optional[datetime]:
+    """Best estimate of when a cached game FINISHES, in UTC.
+
+    There is no real end time in any feed we consume, so this reuses the SAME
+    per-sport post-game window the EPG matcher already trusts
+    (_epg_match_window): 4 hours for gridiron sports, 2.5 for soccer, and so
+    on. DO NOT introduce a second duration table for reaping. The window is
+    deliberately generous because it also has to cover overtime, and a reaper
+    that fired earlier than the EPG window would delete a channel while its
+    own programme entry still claimed the game was on air.
+    """
+    start_raw = game.get("start_time_utc")
+    if not start_raw:
+        return None
+    start = parse_iso_utc(start_raw)
+    if start is None:
+        return None
+    _pre_min, post_hours = _epg_match_window(game.get("sport_prefix") or "")
+    return start + timedelta(hours=float(post_hours))
+
+
+def _game_reap_at_utc(
+    game: Dict[str, Any], remove_after_minutes: int,
+) -> Optional[datetime]:
+    """When this game's channel becomes eligible for reaping, or None if the
+    game carries no usable start time (in which case it is never reaped: a
+    row we cannot date is a row we must not delete on a guess)."""
+    end = _game_end_utc(game)
+    if end is None:
+        return None
+    return end + timedelta(minutes=max(0, int(remove_after_minutes)))
+
 
 def _build_marker_key(game: Dict[str, Any]) -> str:
     """Stable identifier per game so reruns find existing virtual channels.
@@ -3008,6 +3078,175 @@ def _build_description(
         sections.append(f"Source: {src_name}.")
 
     return "\n\n".join(sections)
+
+
+# ---------- reap finished games + backfill from the bench (#196 / #197) ----------
+
+def _reap_settings(settings: Dict[str, Any]) -> int:
+    """Minutes past a game's end before its channel is reaped. 0 disables."""
+    try:
+        return max(0, int(settings.get("remove_finished_after_minutes", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bench_size(settings: Dict[str, Any]) -> int:
+    """How many EXTRA scored games to keep beyond max_games as promotion
+    stock. 0 disables backfill (the list simply shrinks as games finish)."""
+    try:
+        return max(0, int(settings.get("bench_size", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _partition_expired(games, now, remove_after_minutes):
+    """Split applied games into (still_live, expired).
+
+    A game with no parseable start time lands in still_live: see
+    _game_reap_at_utc, we do not delete rows we cannot date.
+    """
+    live, expired = [], []
+    for g in games:
+        reap_at = _game_reap_at_utc(g, remove_after_minutes)
+        if reap_at is not None and now >= reap_at:
+            expired.append(g)
+        else:
+            live.append(g)
+    return live, expired
+
+
+def _promotable(bench, now, remove_after_minutes):
+    """Bench entries still worth putting on air, best first.
+
+    Two filters, and both matter: a benched game can have expired while it sat
+    there (promoting it would create a channel the reaper deletes on its very
+    next tick), and a benched game can have no broadcast match, which apply
+    would turn into a placeholder rather than a watchable channel.
+    """
+    out = []
+    for g in bench:
+        reap_at = _game_reap_at_utc(g, remove_after_minutes)
+        # Note the asymmetry with _partition_expired, and it is deliberate:
+        # an undatable game is never REAPED (we do not delete on a guess) but
+        # is also never PROMOTED, because an entry we cannot date could be
+        # arbitrarily stale and would occupy a slot until the next refresh.
+        # Refusing to act is conservative in both directions.
+        if reap_at is None or now >= reap_at:
+            continue
+        if not (g.get("channel_id") or g.get("channel_ids")):
+            continue
+        out.append(g)
+    return out
+
+
+def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop finished games from the guide, and backfill from the bench.
+
+    Deliberately does NOT re-run refresh. The whole point is to react to the
+    clock at a cadence a multi-minute Monte Carlo refresh cannot afford, so
+    this only rewrites the cache and re-applies. Every scored game already
+    carries its score and its channel match from the refresh that produced it.
+
+    DELETION IS DELEGATED TO _action_apply, on purpose. Apply already reaps
+    every owned channel that is no longer in the cache, and it does so with
+    the DVR-recording protection, the archive re-home, the ChannelStream and
+    EPGData cleanup, and the signal-safe queryset deletes. A second deletion
+    path here would be a copy that has to stay in agreement with that one,
+    and the two would drift silently: see the plugin's own history of
+    exactly that failure mode. So: edit the cache, then call apply.
+    """
+    remove_after = _reap_settings(settings)
+    if remove_after <= 0:
+        return {
+            "status": "ok",
+            "message": "Reaping is off (remove_finished_after_minutes = 0).",
+        }
+
+    cache = _read_cache()
+    games = list(cache.get("games") or [])
+    bench = list(cache.get("bench") or [])
+    pending = bool(cache.get("reap_apply_pending"))
+
+    if pending:
+        # A previous reap rewrote the cache and its apply did not finish, so
+        # the DB still holds channels the cache says are gone. Re-apply before
+        # anything else: without this the games are no longer listed, so no
+        # later tick would ever notice they need removing.
+        logger.info("[ranked_matchups] reap: retrying an apply left pending")
+        retry = _action_apply(settings)
+        if str(retry.get("status", "ok")).lower() != "error":
+            cache["reap_apply_pending"] = False
+            _write_cache(cache)
+        else:
+            return {
+                "status": "error",
+                "reaped": 0, "promoted": 0, "apply_pending": True,
+                "message": "Retry of the pending apply failed: "
+                           + str(retry.get("message", "")),
+            }
+
+    if not games:
+        return {"status": "ok", "message": "Cache empty; nothing to reap."}
+
+    now = datetime.now(timezone.utc)
+    live, expired = _partition_expired(games, now, remove_after)
+    if not expired:
+        return {
+            "status": "ok",
+            "message": f"Nothing finished yet ({len(games)} live).",
+        }
+
+    promoted = []
+    if bench:
+        candidates = _promotable(bench, now, remove_after)
+        promoted = candidates[: len(expired)]
+        promoted_ids = {id(g) for g in promoted}
+        bench = [g for g in bench if id(g) not in promoted_ids]
+
+    cache["games"] = live + promoted
+    cache["bench"] = bench
+    cache["reaped_at"] = now.isoformat()
+    _write_cache(cache)
+
+    logger.info(
+        "[ranked_matchups] reap: %d finished, %d promoted from bench, %d live",
+        len(expired), len(promoted), len(cache["games"]),
+    )
+
+    # The cache is now the DESIRED state and the DB has not caught up yet.
+    # Publish that fact before applying, so a crash between here and a
+    # successful apply is recoverable: the next tick sees the flag and
+    # re-applies instead of concluding there is nothing to do (the cache no
+    # longer lists the expired games, so it has no other way to know).
+    cache["reap_apply_pending"] = True
+    _write_cache(cache)
+
+    apply_result = _action_apply(settings)
+    failed = str(apply_result.get("status", "ok")).lower() == "error"
+    if not failed:
+        cache["reap_apply_pending"] = False
+        _write_cache(cache)
+    else:
+        logger.error(
+            "[ranked_matchups] reap: apply FAILED after the cache was "
+            "rewritten (%s); channels for finished games may still be on air "
+            "until the retry", apply_result.get("message", ""),
+        )
+
+    return {
+        # DO NOT hard-code ok here. Reporting success for a reap whose apply
+        # failed hides a half-done state: the cache says the games are gone
+        # and the guide still shows them.
+        "status": "error" if failed else "ok",
+        "reaped": len(expired),
+        "promoted": len(promoted),
+        "remaining": len(cache["games"]),
+        "apply_pending": failed,
+        "message": (
+            f"Reaped {len(expired)} finished, promoted {len(promoted)}. "
+            + str(apply_result.get("message", ""))
+        ),
+    }
 
 
 def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -4697,6 +4936,22 @@ def _stop_scheduler(thread, stop_event, reason: str) -> None:
             )
 
 
+def _clear_if_exited(reg, reason: str) -> None:
+    """Signal a registry's thread and clear the slot ONLY if it actually died.
+
+    DO NOT unconditionally null the registry. A thread that is mid-work (the
+    reaper can be parked on a subprocess for minutes) outlives the 5s join, and
+    a cleared slot makes the next __init__ believe none exists and spawn a
+    SECOND one. Leaving the live reference is the safer failure: the loop is
+    already signaled and exits at its next wake-up, and until then the
+    idempotence check correctly reports a live thread.
+    """
+    _stop_scheduler(reg.thread, reg.stop_event, reason)
+    if reg.thread is None or not reg.thread.is_alive():
+        reg.thread = None
+        reg.stop_event = None
+
+
 def _parse_scheduled_times(raw: str) -> List[Tuple[int, int]]:
     """Parse 'HHMM,HHMM,...' into [(hour, minute), ...], sorted, deduped.
     Tolerates whitespace / colons / 'HH:MM'. Bad entries are skipped."""
@@ -4850,6 +5105,137 @@ return 0
 """
 
 
+def _action_reap_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """HTTP/scheduler-facing reap: takes the cross-worker lock, runs the body
+    OUT OF PROCESS.
+
+    Reaping deletes Channels, ChannelStreams and EPGData and then re-applies,
+    so it is exactly as destructive as apply and races it just as badly. It
+    therefore takes the SAME lock rather than a reaper-specific one: two
+    different mutexes would let a reap and an apply run concurrently against
+    the same channels, which is the race #155 was filed for.
+
+    Out of process for the reason documented on _action_apply_locked: apply's
+    bulk DB writes wedged a gevent worker even after the transaction was
+    shrunk to sub-second, and reap ends by calling apply.
+    """
+    token = _try_acquire_scheduler_lock(destructive=True)
+    if not token:
+        return {
+            "status": "ok",
+            "lock_busy": True,
+            "message": "Another refresh/apply is in flight; skipping this reap.",
+        }
+    try:
+        return tasks.run_pipeline_subprocess(tasks.ACTION_REAP, settings)
+    finally:
+        _release_scheduler_lock(token)
+
+
+_REAPER_REGISTRY_KEY = "_dispatcharr_ranked_matchups_reaper_state"
+
+# Longest a parked reaper will sleep. The loop normally wakes at the earliest
+# pending expiry, which is precise; this cap is the heartbeat that recovers
+# from an empty or unreadable cache, and it bounds how stale the computed
+# deadlines can get after a refresh rewrites them.
+_REAPER_MAX_SLEEP_SECONDS = 30 * 60
+
+# Backoff after a tick that could not do its work. Without it an overdue game
+# clamps _next_reap_delay to its 1s floor, so a reaper blocked behind a long
+# refresh would ask Redis for the lock once a second, from every worker, for
+# the whole run.
+_REAPER_BACKOFF_SECONDS = 60
+
+
+def _reaper_registry():
+    reg = sys.modules.get(_REAPER_REGISTRY_KEY)
+    if reg is None:
+        reg = types.ModuleType(_REAPER_REGISTRY_KEY)
+        reg.thread = None
+        reg.stop_event = None
+        sys.modules[_REAPER_REGISTRY_KEY] = reg
+    return reg
+
+
+def _next_reap_delay(settings: Dict[str, Any]) -> float:
+    """Seconds until the earliest pending expiry, clamped to the heartbeat.
+
+    Returns the cap when nothing is pending, so a quiet cache costs one cheap
+    wake-up every half hour rather than a busy loop.
+    """
+    remove_after = _reap_settings(settings)
+    if remove_after <= 0:
+        return float(_REAPER_MAX_SLEEP_SECONDS)
+    try:
+        games = _read_cache().get("games") or []
+    except Exception:
+        return float(_REAPER_MAX_SLEEP_SECONDS)
+    now = datetime.now(timezone.utc)
+    soonest = None
+    for g in games:
+        reap_at = _game_reap_at_utc(g, remove_after)
+        if reap_at is None:
+            continue
+        if soonest is None or reap_at < soonest:
+            soonest = reap_at
+    if soonest is None:
+        return float(_REAPER_MAX_SLEEP_SECONDS)
+    # Never return <= 0: a past-due game must still round-trip through one
+    # sleep so a failing reap cannot spin the thread against the lock.
+    return max(1.0, min((soonest - now).total_seconds(), _REAPER_MAX_SLEEP_SECONDS))
+
+
+def _reaper_loop(plugin_ref, stop_event):
+    """Remove finished games from the guide between refreshes (#196).
+
+    SLEEPS UNTIL THE NEXT KNOWN EXPIRY rather than polling on a fixed
+    interval. There is no "game ended" event to subscribe to (Dispatcharr's
+    hooks fire on stream and feed activity, not on a game clock), and a
+    per-channel threading.Timer would die with its uWSGI worker AND duplicate
+    across workers, since the plugin is instantiated once per worker. Deriving
+    the deadline from the persisted cache on every tick gives a timer's
+    precision with a poll's robustness, and it self-heals after a restart.
+
+    Mirrors _scheduler_loop's lifecycle exactly: its own stop_event in the
+    reload-stable registry, and every park through _scheduler_sleep so a
+    parked thread holds no DB connection (#82/#136).
+    """
+    try:
+        while not stop_event.is_set():
+            try:
+                settings = plugin_ref.get_current_settings()
+                if _reap_settings(settings) <= 0:
+                    if _scheduler_sleep(stop_event, 300):
+                        return
+                    continue
+                delay = _next_reap_delay(settings)
+                logger.debug(
+                    "[ranked_matchups] reaper sleeping %.0fs until next expiry", delay,
+                )
+                if _scheduler_sleep(stop_event, delay):
+                    return
+                result = _action_reap_locked(plugin_ref.get_current_settings())
+                if result.get("reaped") or result.get("promoted"):
+                    logger.info(
+                        "[ranked_matchups] reaper: %s", result.get("message", ""),
+                    )
+                # A tick that could not finish its work must NOT come straight
+                # back: an overdue game pins the next delay to its 1s floor, so
+                # retrying immediately turns a blocked reaper into a per-second
+                # lock poll from every worker.
+                if (result.get("lock_busy")
+                        or result.get("apply_pending")
+                        or str(result.get("status", "")).lower() == "error"):
+                    if _scheduler_sleep(stop_event, _REAPER_BACKOFF_SECONDS):
+                        return
+            except Exception:
+                logger.exception("[ranked_matchups] reaper loop crashed; sleeping 10m")
+                if _scheduler_sleep(stop_event, 600):
+                    return
+    finally:
+        _scheduler_close_db()
+
+
 def _try_acquire_scheduler_lock(destructive: bool = True) -> Optional[str]:
     """Cross-worker mutex via Redis. Returns the caller's TOKEN on success (a
     truthy string), or None if the lock is held elsewhere / we refuse to run.
@@ -4944,6 +5330,9 @@ _ACTION_HANDLERS = {
     "show_status": _action_show_status,
     "preview_names": _action_preview_names,
     "diagnose": _action_diagnose,
+    # Locked wrapper, NOT the bare _action_reap: reap deletes channels and
+    # then re-applies, so it races apply exactly as apply races itself.
+    "reap_now": _action_reap_locked,
 }
 
 
@@ -4957,7 +5346,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.23.0"
+    version = "1.24.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
@@ -4979,6 +5368,13 @@ class Plugin:
         #     _scheduler_loop's finally, and the new one parks holding none.
         # Either way no connection leaks. Code updates ship via container restart
         # (fresh process -> fresh thread), so a kept thread never runs stale code.
+        # START THE REAPER FIRST, and unconditionally. It is a SEPARATE thread
+        # with its own registry, so it must not sit behind the scheduler's
+        # early return: on the common path (a discovery where the scheduler is
+        # still alive) that return fires, and on an upgrade from a version
+        # with no reaper the thread would then never start at all until the
+        # worker restarted. _start_reaper is itself idempotent.
+        self._start_reaper()
         if reg.thread is not None and reg.thread.is_alive():
             return
         stop_event = threading.Event()
@@ -4988,6 +5384,27 @@ class Plugin:
         reg.thread = t
         reg.stop_event = stop_event
         logger.info("[ranked_matchups] scheduler thread started (pid=%s)", os.getpid())
+
+    def _start_reaper(self):
+        """Start the finished-game reaper (#196), idempotently.
+
+        Same contract as the scheduler above: a live thread in the
+        reload-stable registry is LEFT ALONE, because the loader rebuilds this
+        Plugin on every discovery and stopping+starting per UI poll is what
+        churned a thread and leaked a DB connection per poll in #82.
+        """
+        reg = _reaper_registry()
+        if reg.thread is not None and reg.thread.is_alive():
+            return
+        stop_event = threading.Event()
+        t = threading.Thread(
+            target=_reaper_loop, args=(self, stop_event), daemon=True,
+            name="ranked_matchups-reaper",
+        )
+        t.start()
+        reg.thread = t
+        reg.stop_event = stop_event
+        logger.info("[ranked_matchups] reaper thread started (pid=%s)", os.getpid())
 
     def get_current_settings(self) -> Dict[str, Any]:
         try:
@@ -5013,9 +5430,13 @@ class Plugin:
         """
         del context  # unused; conform to loader's stop(context) shape
         reg = _scheduler_registry()
-        _stop_scheduler(reg.thread, reg.stop_event, "stop signal")
-        reg.thread = None
-        reg.stop_event = None
+        _clear_if_exited(reg, "stop signal")
+
+        # The reaper is a second daemon thread with the same leak profile, so
+        # it MUST be torn down here too. A thread left running after disable
+        # keeps waking, reading settings from Postgres and taking a connection
+        # per worker, which is the #82 lock-up with a different name on it.
+        _clear_if_exited(_reaper_registry(), "stop signal (reaper)")
 
     def run(self, action: Optional[str] = None,
             params: Optional[Dict[str, Any]] = None,

@@ -17,35 +17,6 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG_NAME = os.path.basename(REPO_ROOT)
 
 
-def _load_plugin_module():
-    """Load `plugin.py` as a submodule of the (already-stub-registered)
-    package. Need to stub the Django imports it does at top-level too: but
-    actually plugin.py only does Django imports lazily inside functions, so
-    top-level load is safe."""
-    if f"{PKG_NAME}.plugin" in sys.modules:
-        return sys.modules[f"{PKG_NAME}.plugin"]
-    # _util is imported at module top by plugin; load it first.
-    util_spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}._util", os.path.join(REPO_ROOT, "_util.py")
-    )
-    util_mod = importlib.util.module_from_spec(util_spec)
-    sys.modules[f"{PKG_NAME}._util"] = util_mod
-    util_spec.loader.exec_module(util_mod)
-
-    spec = importlib.util.spec_from_file_location(
-        f"{PKG_NAME}.plugin", os.path.join(REPO_ROOT, "plugin.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[f"{PKG_NAME}.plugin"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-@pytest.fixture(scope="module")
-def plugin():
-    return _load_plugin_module()
-
-
 class TestActionRefreshClearsFdCaches:
     """The FD.org batching refactor pins module-level caches into
     `sources/soccer.py` and relies on `_action_refresh` to wipe them at
@@ -2326,17 +2297,23 @@ class TestPluginStopTeardown:
 
     @pytest.fixture(autouse=True)
     def _isolate_registry(self, plugin):
-        # Snapshot + restore the reload-stable registry around each test so the
-        # scheduler tests don't leak state into one another.
+        # Snapshot + restore BOTH reload-stable registries around each test so
+        # the thread tests don't leak state into one another. The reaper (#196)
+        # has to be isolated here too: it is a second daemon thread started by
+        # the same __init__, so without this a spawned reaper survives the test
+        # that created it.
         import threading
         reg = plugin._scheduler_registry()
-        saved_thread, saved_event = reg.thread, reg.stop_event
+        rreg = plugin._reaper_registry()
+        saved = (reg.thread, reg.stop_event, rreg.thread, rreg.stop_event)
         reg.thread, reg.stop_event = None, None
+        rreg.thread, rreg.stop_event = None, None
         yield reg
         # Make sure no real thread we started lingers.
-        if reg.stop_event is not None:
-            reg.stop_event.set()
-        reg.thread, reg.stop_event = saved_thread, saved_event
+        for r in (reg, rreg):
+            if r.stop_event is not None:
+                r.stop_event.set()
+        reg.thread, reg.stop_event, rreg.thread, rreg.stop_event = saved
 
     def test_stop_signals_and_clears_registry(self, plugin, _isolate_registry):
         import threading
@@ -2382,9 +2359,19 @@ class TestPluginStopTeardown:
 
         monkeypatch.setattr(plugin.threading, "Thread", TrackingThread)
         plugin.Plugin()
-        assert spawned == ["ranked_matchups-scheduler"]
+        # Two daemon threads now: the refresh scheduler and the finished-game
+        # reaper (#196). Order matters only in that both must appear.
+        # The reaper starts FIRST and unconditionally: it must not sit behind
+        # the scheduler's live-thread early return, or an upgrade from a
+        # version without a reaper never starts one (#196).
+        assert spawned == [
+            "ranked_matchups-reaper", "ranked_matchups-scheduler",
+        ]
         assert _isolate_registry.thread is not None
         assert _isolate_registry.stop_event is not None
+        rreg = plugin._reaper_registry()
+        assert rreg.thread is not None
+        assert rreg.stop_event is not None
 
     def test_reload_init_keeps_live_thread_idempotent(self, plugin, monkeypatch, _isolate_registry):
         # #82/#136: the loader re-instantiates Plugin on EVERY discovery
@@ -2412,13 +2399,17 @@ class TestPluginStopTeardown:
         monkeypatch.setattr(plugin.threading, "Thread", TrackingThread)
         plugin.Plugin()  # a later discovery's incarnation
 
-        # The live thread is untouched: not signaled, not joined, not replaced,
-        # and no new thread spawned.
+        # The live SCHEDULER is untouched: not signaled, not joined, not
+        # replaced, and not re-spawned.
         assert not live_event.is_set()
         assert live.join_calls == 0
         assert reg.thread is live
         assert reg.stop_event is live_event
-        assert spawned == []
+        assert "ranked_matchups-scheduler" not in spawned
+        # The reaper, however, MUST still start. It has its own registry, and
+        # gating it on the scheduler's liveness is exactly what made it inert
+        # on upgrade (#196): this discovery path is the common one.
+        assert spawned == ["ranked_matchups-reaper"]
 
     def test_reload_init_replaces_dead_thread(self, plugin, monkeypatch, _isolate_registry):
         # If the registry's thread has died, __init__ starts a fresh one (the

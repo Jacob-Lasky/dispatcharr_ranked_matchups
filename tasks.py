@@ -117,6 +117,10 @@ _SUBPROCESS_TIMEOUT_SECONDS = 25 * 60
 ACTION_REFRESH = "refresh"
 ACTION_APPLY = "apply"
 ACTION_AUTO_PIPELINE = "auto_pipeline"
+# Reaping deletes Channels and their EPG rows, so it is destructive bulk DB
+# work and belongs OUT OF PROCESS for the same reason apply does (#142): those
+# writes wedged a gevent worker even after the transaction was shrunk.
+ACTION_REAP = "reap"
 
 
 def _redis():
