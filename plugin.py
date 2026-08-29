@@ -2036,9 +2036,24 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             g.home, g.away, g.sport_prefix,
         )
 
+        # A rank is only comparable across sports once you know how many
+        # teams carry one. The standings table IS the pool for a league
+        # source; poll sources fall back to the source's declared depth.
+        # See scoring._rank_strength.
+        rank_pool = len(standings_table) or getattr(
+            src, "rank_pool_size", None,
+        )
+        # A standings table lists every club, so it is EXHAUSTIVE and last
+        # place is genuinely worst. A poll lists only the top N of a much
+        # larger field, so its last entry is still elite. See
+        # scoring._rank_strength.
+        rank_pool_exhaustive = bool(standings_table)
+
         signals = GameSignals(
             rank_a=g.rank_home,
             rank_b=g.rank_away,
+            rank_pool_size=rank_pool,
+            rank_pool_exhaustive=rank_pool_exhaustive,
             team_a=g.home,
             team_b=g.away,
             favorite_match=match_favorites(g.home, g.away, favorites),
@@ -2128,6 +2143,11 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "away": game.away,
             "rank_home": game.rank_home,
             "rank_away": game.rank_away,
+            # Persisted so the cache-replay scorer in _rescore_cached_game
+            # reproduces the refresh's rank points instead of silently
+            # defaulting a league game to a 25-team pool.
+            "rank_pool_size": signals.rank_pool_size,
+            "rank_pool_exhaustive": signals.rank_pool_exhaustive,
             "start_time_utc": game.start_time.isoformat(),
             "kickoff_local": _format_kickoff(game.start_time, tz_local),
             "is_today": _is_today_local(game.start_time, tz_local),
@@ -2581,6 +2601,11 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
     signals = GameSignals(
         rank_a=g.get("rank_home"),
         rank_b=g.get("rank_away"),
+        # Cache files predating this key yield None, which scoring treats as
+        # RANK_POOL_DEFAULT: the right fallback for the poll sources that
+        # dominate a pre-upgrade cache, and self-corrects on the next refresh.
+        rank_pool_size=g.get("rank_pool_size"),
+        rank_pool_exhaustive=bool(g.get("rank_pool_exhaustive")),
         team_a=g.get("home", ""),
         team_b=g.get("away", ""),
         favorite_match=g.get("favorites_matched", []),
@@ -4932,7 +4957,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.22.0"
+    version = "1.23.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

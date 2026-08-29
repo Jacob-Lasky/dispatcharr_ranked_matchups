@@ -5,6 +5,73 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.23.0] - 2026-08-29
+
+### Changed
+
+- **The rank signal now scores a team's percentile within its own ranked
+  pool, replacing two formulas that hard-coded a 25-team pool (#194).**
+
+  A rank only means something relative to how many teams carry one. A league
+  table ranks every club, so every fixture took the both-ranked branch worth
+  up to 10.0; a poll ranks the top 25 of a much larger field, so 111 of 136
+  FBS teams are unranked and nearly every game took the one-ranked branch,
+  capped at 4.17.
+
+  ```
+  both ranked: max(0, (50 - (ra + rb)) / 4.8)   # up to 10.0
+  one ranked:  max(0, (26 - rank)      / 6.0)   # up to  4.17
+  ```
+
+  The consequence, measured on live data 2026-08-29: **any league fixture
+  whose ranks summed to 30 or less outscored `#1 vs unranked`**, and ranks
+  summing to 30 is a 14th-vs-16th place game. Ordinary mid-table soccer
+  produced `rank_pair` values of 4.38 to 9.58 while the entire NCAAF slate
+  was capped at 4.17. It was backwards on the merits too: being ranked #1 of
+  136 is a stronger claim than 1st of 20.
+
+  The same hard-coded 25 was wrong in the other direction for small leagues:
+  with a 20-club table the rank sum can never exceed 40, so a
+  last-vs-second-last fixture collected `(50 - 40) / 4.8` = 2.08 points for
+  nothing but being in a short league.
+
+  Now one formula for both cases:
+
+  ```
+  exhaustive (league table):  (pool - rank) / (pool - 1)   # last -> 0.0
+  selective  (25-deep poll):  (pool + 1 - rank) / pool     # last -> 1/pool
+  rank_pts = mean(strength_home, strength_away) * 10 * weights.rank
+  ```
+
+  The exhaustive/selective split is load-bearing: last place in a league is
+  genuinely the worst team, but the last entry in a poll is still a top-20%
+  team. Collapsing both to 0.0 made `#25 vs unranked` score identically to
+  `unranked vs unranked`.
+
+  `pool` comes from the standings table for a league source and from
+  `SportSource.rank_pool_size` (default 25) for a poll source.
+
+  **This is surgical, not a rescale.** For a 25-deep pool it lands within a
+  rounding step of the old numbers, so poll sports keep their magnitude:
+
+  ```
+  case                            OLD    NEW
+  #1 vs #2      (pool 25)        9.79   9.79
+  #1 vs unranked(pool 25)        4.17   5.00
+  #7 vs unranked(pool 25)        3.17   3.75
+  1st vs 2nd    (pool 20)        9.79   9.74
+  14th vs 16th  (pool 20)        4.17   2.63
+  19th vs 20th  (pool 20)        2.29   0.26
+  ```
+
+  Existing caches lack `rank_pool_size` and fall back to a 25-deep pool,
+  which is right for the poll sources that dominate a pre-upgrade cache and
+  self-corrects on the next refresh.
+
+  The breakdown keys `rank_pair` and `one_ranked` are unchanged, so naming
+  tokens and cache readers keep working.
+
+
 ## [1.22.0] - 2026-08-29
 
 ### Fixed

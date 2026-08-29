@@ -95,6 +95,192 @@ class TestSuffixTokens:
             assert tok in TEAM_QUALIFIER_TOKENS, f"{tok!r} drifted"
 
 
+class TestRankPercentileNormalization:
+    """#194: a poll rank and a league-table position are not the same
+    quantity, and the scorer used to read them as one.
+
+    Every assertion here is against a LITERAL, never against RANK_SCALE or
+    RANK_POOL_DEFAULT. Asserting `x == MY_CONSTANT` cannot fail when the
+    constant is wrong, because both sides move together. Before this class
+    the whole rank arithmetic was pinned by nothing stronger than
+    `assert breakdown["rank_pair"] > 0`, which is how a change to every
+    rank score in the plugin passed 3896 tests without a single failure.
+    """
+
+    @staticmethod
+    def _pts(ra, rb, pool=None, exhaustive=False):
+        b = score_game(
+            GameSignals(
+                rank_a=ra, rank_b=rb, rank_pool_size=pool,
+                rank_pool_exhaustive=exhaustive,
+            ),
+            Weights(),
+        ).breakdown
+        return b.get("rank_pair", b.get("one_ranked", 0.0))
+
+    @classmethod
+    def _league(cls, ra, rb, pool):
+        return cls._pts(ra, rb, pool=pool, exhaustive=True)
+
+    # ---- the property #194 is about ----
+
+    def test_top_poll_team_beats_a_dull_league_fixture(self):
+        """THE defect, stated as an ordering.
+
+        Before: `#1 vs unranked` capped at 4.17 while 14th-vs-16th of a
+        20-club table scored 4.17 on the both-ranked branch, so a bottom-half
+        La Liga game tied or beat the best team in college football.
+        """
+        best_poll_game = self._pts(1, None, pool=25)
+        dull_league_game = self._league(14, 16, 20)
+        assert best_poll_game > dull_league_game, (
+            f"#1-vs-unranked scored {best_poll_game}, a 14th-vs-16th league "
+            f"fixture scored {dull_league_game}"
+        )
+
+    def test_the_old_arithmetic_had_it_backwards(self):
+        """Pins the exact inversion, so nobody 'simplifies' back into it."""
+        old_one_ranked = max(0.0, (26 - 1) / 6.0)      # 4.17
+        old_pair = max(0.0, (50 - (14 + 16)) / 4.8)    # 4.17
+        assert round(old_one_ranked, 2) == 4.17
+        assert round(old_pair, 2) == 4.17
+        assert old_pair >= old_one_ranked  # the bug, preserved as a fact
+
+    # ---- pool size actually changes the answer ----
+
+    def test_same_ranks_different_pools_score_differently(self):
+        """If this ever ties, the pool argument has stopped being read."""
+        assert self._league(14, 16, 20) != self._pts(14, 16, pool=25)
+
+    def test_deeper_pool_means_a_given_rank_is_worth_more(self):
+        # Being 5th of 40 is a stronger claim than 5th of 10.
+        assert self._pts(5, None, pool=40) > self._pts(5, None, pool=10)
+
+    def test_missing_pool_falls_back_to_a_25_deep_poll(self):
+        assert self._pts(7, None, pool=None) == self._pts(7, None, pool=25)
+
+    def test_degenerate_pool_does_not_explode(self):
+        # An empty or single-entry standings table must not divide by zero.
+        for bad in (0, 1, -5):
+            assert self._pts(3, None, pool=bad) == self._pts(3, None, pool=25), bad
+
+    # ---- literal values: the scale is preserved where it was right ----
+
+    def test_two_number_ones_score_the_full_scale(self):
+        assert self._pts(1, 1, pool=25) == 10.0
+        assert self._league(1, 1, 20) == 10.0
+
+    def test_top_of_a_poll_is_unchanged_from_the_old_formula(self):
+        """The fix is surgical: for a 25-deep pool it lands within a rounding
+        step of the old numbers, so poll sports do NOT get silently rescaled.
+        Old (50 - (1+2)) / 4.8 = 9.79."""
+        assert abs(self._pts(1, 2, pool=25) - 9.80) < 0.05
+
+    def test_top_of_a_league_table_is_near_unchanged(self):
+        """Old (50 - (1+2)) / 4.8 = 9.79 for a 20-club league too; the new
+        value is 9.74, so a title clash keeps its magnitude."""
+        assert abs(self._league(1, 2, 20) - 9.74) < 0.02
+
+    def test_literal_values_for_the_cases_that_moved(self):
+        # Computed by hand from mean((pool - rank) / (pool - 1)) * 10:
+        # SELECTIVE poll, (pool + 1 - rank) / pool:
+        #   #1 vs unranked, pool 25 -> (25/25 + 0)/2 * 10            = 5.00
+        #   #7 vs unranked, pool 25 -> (19/25 + 0)/2 * 10            = 3.80
+        # EXHAUSTIVE table, (pool - rank) / (pool - 1):
+        #   14th vs 16th,   pool 20 -> (6/19 + 4/19)/2 * 10          = 2.63
+        #   19th vs 20th,   pool 20 -> (1/19 + 0/19)/2 * 10          = 0.26
+        assert self._pts(1, None, pool=25) == 5.0
+        assert self._pts(7, None, pool=25) == 3.8
+        assert self._league(14, 16, 20) == 2.63
+        assert self._league(19, 20, 20) == 0.26
+
+    def test_a_dire_league_fixture_is_no_longer_worth_two_points(self):
+        """Old formula gave 19th-vs-20th of a 20-club table 2.29, because it
+        assumed a 25-deep pool and the sum could never reach 50."""
+        assert round(max(0.0, (50 - 39) / 4.8), 2) == 2.29   # what it was
+        assert self._league(19, 20, 20) < 1.0              # what it is
+
+    # ---- breakdown keys still read at a glance ----
+
+    def test_both_ranked_uses_rank_pair_key(self):
+        b = score_game(
+            GameSignals(rank_a=3, rank_b=9, rank_pool_size=25), Weights(),
+        ).breakdown
+        assert "rank_pair" in b and "one_ranked" not in b
+
+    def test_one_ranked_uses_one_ranked_key(self):
+        b = score_game(
+            GameSignals(rank_a=3, rank_b=None, rank_pool_size=25), Weights(),
+        ).breakdown
+        assert "one_ranked" in b and "rank_pair" not in b
+
+    def test_no_rank_key_at_all_when_nobody_is_ranked(self):
+        b = score_game(GameSignals(rank_a=None, rank_b=None), Weights()).breakdown
+        assert "rank_pair" not in b and "one_ranked" not in b
+
+    def test_last_place_in_an_exhaustive_table_bottoms_out_at_zero(self):
+        """Last vs last in a LEAGUE really is the worst game available, and
+        must not litter the breakdown with a 0.0 stub entry."""
+        b = score_game(
+            GameSignals(
+                rank_a=20, rank_b=20, rank_pool_size=20,
+                rank_pool_exhaustive=True,
+            ),
+            Weights(),
+        ).breakdown
+        assert "rank_pair" not in b, b
+
+    # ---- selective pools: the bottom of a poll is still elite ----
+
+    def test_bottom_of_a_poll_still_beats_unranked(self):
+        """REGRESSION GUARD. Normalizing a 25-deep poll onto the full [0,1]
+        range made #25 score exactly 0.0, identical to unranked, so a top-25
+        team's game was indistinguishable from two unranked teams."""
+        ranked = self._pts(25, None, pool=25)
+        unranked = self._pts(None, None, pool=25)
+        assert unranked == 0.0
+        assert ranked > 0.0, "#25 of a 25-deep poll collapsed to unranked"
+
+    def test_poll_bottom_is_small_but_ordered(self):
+        assert self._pts(25, None, pool=25) < self._pts(24, None, pool=25)
+        assert self._pts(25, None, pool=25) == 0.2   # (1/25 + 0)/2 * 10
+
+    def test_poll_first_place_is_full_strength(self):
+        assert self._pts(1, 1, pool=25) == 10.0
+
+    def test_exhaustive_and_selective_differ_at_the_bottom(self):
+        """Same rank, same pool, different pool semantics."""
+        assert self._league(20, None, 20) == 0.0
+        assert self._pts(20, None, pool=20) > 0.0
+
+    def test_exhaustive_and_selective_agree_at_the_top(self):
+        assert self._league(1, None, 20) == self._pts(1, None, pool=20)
+
+    def test_out_of_range_rank_is_clamped_not_negative(self):
+        """A source emitting a rank outside its own pool is a bug, but it must
+        never scale a negative strength into the total."""
+        assert self._pts(99, None, pool=25) >= 0.0
+        assert self._league(99, None, 20) == 0.0
+        assert self._pts(0, None, pool=25) == self._pts(1, None, pool=25)
+
+    def test_bottom_of_a_20_club_table_is_worth_almost_nothing(self):
+        assert self._league(20, 20, 20) == 0.0
+        assert self._league(19, 19, 20) < 0.6
+
+    def test_note_names_the_pool_so_the_epg_text_is_honest(self):
+        notes = score_game(
+            GameSignals(rank_a=7, rank_b=None, rank_pool_size=25), Weights(),
+        ).notes
+        assert any("of 25" in n for n in notes), notes
+
+    def test_weight_scales_the_signal(self):
+        w = Weights(); w.rank = 2.0
+        b = score_game(
+            GameSignals(rank_a=1, rank_b=1, rank_pool_size=25), w,
+        ).breakdown
+        assert b["rank_pair"] == 20.0
+
+
 class TestScoreGame:
     def test_both_top_5(self):
         signals = GameSignals(rank_a=1, rank_b=5)

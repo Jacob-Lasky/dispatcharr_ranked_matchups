@@ -67,27 +67,90 @@ All weights are user-tunable from the Plugins settings page. The
 defaults reflect priority order: importance > rank > favorites >
 tournament/spread.
 
-### Signal: rank_pair
+### Signal: rank_pair / one_ranked
 
 For sports with a ranking (top-25 polls in NCAAF / NCAAM / NCAA
-Baseball; standings position in soccer leagues; etc.) the rank-pair
-signal rewards games featuring ranked teams.
+Baseball; standings position in soccer leagues; etc.) this signal
+rewards games featuring ranked teams.
+
+**A rank only means something relative to how many teams carry one.** A
+league table ranks every club, so every fixture has two ranks; a poll
+ranks the top 25 of a much larger field, so most games have one rank or
+none. Scoring is therefore done on each team's PERCENTILE within its own
+ranked pool:
+
+**Exhaustive and selective pools normalize differently**, and the
+difference matters at the bottom of the pool:
 
 ```python
-# Both teams ranked:
-sum_ranks = rank_home + rank_away
-rank_pts  = max(0, (50 - sum_ranks) / 4.8) * weights.rank
-# Maps sum=2  ("1 vs 1") → 10 pts
-#      sum=26 ("13 vs 13") → 5
-#      sum=50 ("25 vs 25") → 0
+# EXHAUSTIVE (a league table ranks every club):
+strength = (pool - rank) / (pool - 1)      # 1st → 1.0, last → 0.0
 
-# Only one team ranked:
-rank_pts = max(0, (26 - rank) / 6.0) * weights.rank
-# Maps rank=1  → 4.0
-#      rank=25 → 0.17
+# SELECTIVE (a poll ranks the top N of a larger field):
+strength = (pool + 1 - rank) / pool        # 1st → 1.0, last → 1/pool
+
+# either way:
+unranked = 0.0
+rank_pts = mean(strength_home, strength_away) * 10 * weights.rank
 ```
 
-Unranked vs unranked: signal contributes 0.
+Last place in a league really is the worst team available, so it bottoms
+out at zero. The last entry in a 25-deep poll is still a top-20% team, so
+it must stay strictly above an unranked opponent — otherwise `#25 vs
+unranked` scores the same as `unranked vs unranked`.
+
+`pool` is the number of teams carrying a rank: the length of the
+standings table for a league source, or 25 for a poll source. The
+breakdown key is `rank_pair` when both sides are ranked and `one_ranked`
+when only one is; the arithmetic is identical either way.
+
+| Example | pool | kind | pts |
+|---|---|---|---|
+| #1 vs #2 | 25 | poll | 9.80 |
+| #4 vs #7 | 25 | poll | 8.20 |
+| #1 vs unranked | 25 | poll | 5.00 |
+| #7 vs unranked | 25 | poll | 3.80 |
+| #25 vs unranked | 25 | poll | 0.20 |
+| 1st vs 2nd | 20 | table | 9.74 |
+| 14th vs 16th | 20 | table | 2.63 |
+| 19th vs 20th | 20 | table | 0.26 |
+
+Unranked vs unranked: signal contributes 0 and no key is emitted.
+
+**Known limitation.** This is a percentile within the PUBLISHED pool, not
+within the sport's full eligible population, so a poll's #1 and a league's
+#1 both read as 1.0 even though being #1 of 136 FBS teams is a stronger
+claim than being 1st of 20. Modelling the unranked tail properly needs a
+per-sport field size; tracked as a follow-up issue.
+
+#### Why this replaced the two-branch formula (#194)
+
+Until v1.23.0 the two cases used different formulas with different
+maxima, both hard-coded to a 25-team pool:
+
+```python
+both ranked: max(0, (50 - (ra + rb)) / 4.8)   # up to 10.0
+one ranked:  max(0, (26 - rank)      / 6.0)   # up to  4.17
+```
+
+Because a league table always filled the first branch and a poll almost
+always filled the second, **any league fixture whose ranks summed to 30
+or less outscored `#1 vs unranked`** — and ranks summing to 30 is a
+14th-vs-16th place game. Measured on live data 2026-08-29, ordinary
+mid-table soccer produced `rank_pair` values of 4.38 to 9.58 while the
+entire NCAAF slate was capped at 4.17. It was also backwards on the
+merits: being ranked #1 of 136 is a stronger claim than 1st of 20.
+
+The second hard-coded assumption was just as wrong in the other
+direction: with a 20-club table the rank sum can never exceed 40, so
+`(50 - 40) / 4.8` gave a **last-vs-second-last fixture 2.08 points** for
+being in a small league.
+
+The replacement is deliberately surgical. For a 25-deep pool it lands
+within a rounding step of the old numbers, so poll sports keep their
+magnitude; what changes is league tables (no longer scored as if 25 deep)
+and the unranked side (now costs a team its own share instead of
+collapsing the game into a lower-capped branch).
 
 ### Signal: close_game
 

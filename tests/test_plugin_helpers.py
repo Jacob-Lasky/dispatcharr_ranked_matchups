@@ -438,6 +438,68 @@ class TestManifestFavoritesOnlyMatchesCode:
         assert field["id"] == plugin._FAVORITES_ONLY_SETTING
 
 
+class TestRankPoolSizeWiring:
+    """The percentile rank signal is only correct if the POOL reaches the
+    scorer. Every scoring-level test can pass with plugin.py never forwarding
+    it, in which case every league game silently scores as a 25-team pool,
+    which is the exact bug #194 fixed. Pin the wiring, not just the maths."""
+
+    def test_league_pool_comes_from_the_standings_table(self, plugin):
+        """A league source's pool is its table length, per competition:
+        the Premier League's 20 and the Championship's 24 must stay distinct
+        without a second list to keep in sync."""
+        import inspect
+        src = inspect.getsource(plugin._action_refresh)
+        assert "len(standings_table)" in src, (
+            "refresh no longer derives the rank pool from the standings table"
+        )
+        assert "rank_pool_size=rank_pool" in src, (
+            "the derived pool is not being passed into GameSignals"
+        )
+
+    def test_pool_is_persisted_to_the_cache_row(self, plugin):
+        """The cache-replay scorer re-scores from the row. Without the pool on
+        it, a replayed league game defaults to a 25-team pool and disagrees
+        with the refresh that produced it."""
+        import inspect
+        src = inspect.getsource(plugin._action_refresh)
+        assert '"rank_pool_size": signals.rank_pool_size' in src
+
+    def test_cache_replay_reads_the_pool_back(self, plugin):
+        import inspect
+        fn = getattr(plugin, "_rescore_cached_game", None)
+        src = inspect.getsource(fn) if fn else inspect.getsource(plugin)
+        assert 'rank_pool_size=g.get("rank_pool_size")' in src
+
+    def test_base_source_does_not_hardcode_the_poll_depth(self):
+        """scoring.RANK_POOL_DEFAULT is the single source of truth. A second
+        copy on SportSource would be free to drift silently."""
+        from dispatcharr_ranked_matchups.sources.base import SportSource
+        assert SportSource.rank_pool_size is None
+
+    def test_poll_sources_inherit_the_undeclared_default(self):
+        from dispatcharr_ranked_matchups.sources import NcaafSource
+        assert NcaafSource(api_key="x").rank_pool_size is None
+
+    def test_undeclared_pool_scores_as_the_poll_depth(self):
+        """End of the chain: an undeclared pool must land on the poll depth,
+        not on 0 or a crash."""
+        from dispatcharr_ranked_matchups.scoring import (
+            GameSignals, Weights, score_game, RANK_POOL_DEFAULT,
+        )
+        undeclared = score_game(
+            GameSignals(rank_a=7, rank_b=None, rank_pool_size=None), Weights(),
+        ).breakdown["one_ranked"]
+        explicit = score_game(
+            GameSignals(rank_a=7, rank_b=None, rank_pool_size=RANK_POOL_DEFAULT),
+            Weights(),
+        ).breakdown["one_ranked"]
+        assert undeclared == explicit
+        # Literal, so collapsing RANK_POOL_DEFAULT cannot make this vacuous.
+        # Selective 25-deep poll: ((25 + 1 - 7)/25 + 0)/2 * 10 = 3.8
+        assert undeclared == 3.8
+
+
 class TestManifestNcaafDivisionsMatchesCode:
     """plugin.json's ncaaf_divisions option values must equal the source's
     DIVISION_SETS keys, mirroring TestManifestFavoritesOnlyMatchesCode. A
