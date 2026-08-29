@@ -24,6 +24,18 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   delay to backfill. Set the starting number to 400 with 25 channels and you get
   400-424.
 
+- **A boxing card is no longer listed as live for a whole day.** The per-sport
+  window is a match-recall tolerance (boxing's is 24 hours, to absorb a feed
+  whose start times can be a day out), not an event duration. The guide entry
+  now takes the shorter of that estimate and the 4-hour display default.
+
+- **Changing "Remove finished games after" no longer strands a guide entry.**
+  The end time baked into a game's guide entry is a snapshot from when it was
+  written, while the reaper re-reads the setting on every tick, so lowering it
+  used to delete a channel while a player's cached guide still showed that game
+  on its number. The reaper now holds a game until its own published entry has
+  ended.
+
 - **Soccer channels were reaped before their own programme said the match had
   ended.** The apply path dated a game's end with a flat 4 hours for every
   sport while the reaper used the per-sport window (2.5 hours for soccer, 24 for
