@@ -3413,65 +3413,196 @@ class TestCuratedStreamIdsContract:
         assert calls == 1
 
 
-class TestExclusionRunsBeforeSeenMarkers:
-    """#206: WHERE the exclusion runs is the whole correctness argument.
+class _FakeStreamQS:
+    """Minimal stand-in for `channel.streams` / `Stream.objects`."""
 
-    It must drop excluded streams in the pre-pass, above the placeholder/skip
-    decision, because that decision sits above `seen_markers.add(marker)`. A
-    `continue` below that line leaves an existing channel neither published nor
-    reaped, so it commits at phase 0's temporary parking number (measured live
-    2026-08-29: 22 channels stranded at 1400-1421).
+    def __init__(self, rows):
+        self._rows = list(rows)
 
-    Source-level because the apply path needs Django to import.
+    def all(self):
+        return self
+
+    def only(self, *_a):
+        return self
+
+    def filter(self, id__in=None):
+        return _FakeStreamQS([r for r in self._rows if r.id in set(id__in or [])])
+
+    def values_list(self, *fields, flat=False):
+        vals = [getattr(r, fields[0]) for r in self._rows]
+        return vals if flat else [(v,) for v in vals]
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class _FakeChannel:
+    def __init__(self, name, streams):
+        self.name = name
+        self.streams = _FakeStreamQS(streams)
+
+
+class _FakeStreamModel:
+    def __init__(self, rows):
+        self.objects = _FakeStreamQS(rows)
+
+
+class TestBuildStreamPool:
+    """#206 review findings 1, 2 and 4, as BEHAVIOURAL tests.
+
+    These were source-level assertions against the apply's structure until
+    `_build_stream_pool` was extracted with `select_streams_for_game` and the
+    Stream model injected. The extraction is what makes the real defects
+    reachable from a test: each case below published a non-placeholder channel
+    with zero streams, and for an existing channel deleted its old membership
+    on the way out.
+    """
+
+    GAME = {"home": "Bayern Munich", "away": "Dortmund"}
+
+    def _build(self, plugin, sources, explicit, all_streams=(), **over):
+        from dispatcharr_ranked_matchups.matcher import select_streams_for_game
+        kw = dict(
+            field_event=False,
+            home_kws=["bayern", "munich"],
+            away_kws=["dortmund"],
+            select_streams_for_game=select_streams_for_game,
+            stream_model=_FakeStreamModel(all_streams),
+            lang_prefs=["en"], prefer_us=False,
+            curated_ids=set(), fallback_only_ids=frozenset(),
+            excluded_ids=frozenset(),
+        )
+        kw.update(over)
+        return plugin._build_stream_pool(sources, list(explicit), self.GAME, **kw)
+
+    def test_a_source_donating_only_excluded_streams_yields_nothing(self, plugin):
+        st = _stream_stub(10, "Bayern Munich vs Dortmund")
+        ids, _foreign, dropped = self._build(
+            plugin, [_FakeChannel("DE Feed", [st])], [],
+            excluded_ids=frozenset({10}))
+        assert ids == []
+        assert dropped == {10}
+
+    def test_a_source_whose_only_live_stream_names_another_game_yields_nothing(self, plugin):
+        """Review finding 1, and the reason the cheap proxy was wrong.
+
+        The channel owns an EXCLUDED stream for this game plus a NON-excluded
+        stream for a different game. "Does it own a non-excluded stream?" says
+        yes; what it actually donates is nothing, because the matchup-name gate
+        drops the other game's feed.
+        """
+        mine = _stream_stub(10, "Bayern Munich vs Dortmund")
+        theirs = _stream_stub(11, "Arsenal vs Chelsea")
+        ids, foreign, dropped = self._build(
+            plugin, [_FakeChannel("Mixed", [mine, theirs])], [],
+            excluded_ids=frozenset({10}))
+        assert ids == [], "a channel donating nothing must yield an empty pool"
+        assert dropped == {10}
+        assert foreign == 1
+
+    def test_a_source_with_zero_streams_yields_nothing(self, plugin):
+        """Review finding 2. `if sids and sids <= excluded_ids` let an empty
+        channel through, because an empty set is not a subset worth dropping."""
+        ids, _f, _d = self._build(plugin, [_FakeChannel("Empty", [])], [])
+        assert ids == []
+
+    def test_an_explicit_id_for_a_deleted_stream_yields_nothing(self, plugin):
+        """Review finding 2, second half, and PRE-EXISTING: a cached stream id
+        can name a feed the provider dropped between refresh and apply."""
+        ids, _f, _d = self._build(plugin, [], [999], all_streams=[])
+        assert ids == []
+
+    def test_a_partially_excluded_source_still_donates_the_rest(self, plugin):
+        # Dropping a whole channel because SOME of its streams are excluded
+        # would over-apply the policy.
+        bad = _stream_stub(10, "Bayern Munich vs Dortmund UHD")
+        good = _stream_stub(11, "Bayern Munich vs Dortmund HD")
+        ids, _f, dropped = self._build(
+            plugin, [_FakeChannel("Mixed", [bad, good])], [],
+            excluded_ids=frozenset({10}))
+        assert ids == [11]
+        assert dropped == {10}
+
+    def test_the_same_excluded_stream_on_two_sources_counts_once(self, plugin):
+        """Review finding 4. A counter incremented per source reported "2
+        excluded-group streams skipped" for one distinct stream."""
+        shared = _stream_stub(10, "Bayern Munich vs Dortmund")
+        ids, _f, dropped = self._build(
+            plugin,
+            [_FakeChannel("A", [shared]), _FakeChannel("B", [shared])],
+            [], excluded_ids=frozenset({10}))
+        assert ids == []
+        assert dropped == {10}, "distinct ids, not an increment per source"
+
+    def test_explicit_exclusions_are_counted(self, plugin):
+        """Also finding 4: filtering explicit_stream_ids incremented nothing."""
+        st = _stream_stub(10, "Bayern Munich vs Dortmund")
+        ids, _f, dropped = self._build(
+            plugin, [], [10], all_streams=[st], excluded_ids=frozenset({10}))
+        assert ids == []
+        assert dropped == {10}
+
+    def test_a_field_event_keeps_every_stream(self, plugin):
+        # Field events are single-sided and their feed naming is delicate
+        # (#135), so the matchup-name gate must not run.
+        a = _stream_stub(10, "UFC 250 Prelims")
+        b = _stream_stub(11, "UFC 250 Main Card")
+        ids, foreign, _d = self._build(
+            plugin, [_FakeChannel("UFC", [a, b])], [], field_event=True)
+        assert sorted(ids) == [10, 11]
+        assert foreign == 0
+
+    def test_provenance_orders_the_pool(self, plugin):
+        uncurated = _stream_stub(10, "Bayern Munich vs Dortmund UHD")
+        curated = _stream_stub(11, "Bayern Munich vs Dortmund SD")
+        ids, _f, _d = self._build(
+            plugin, [_FakeChannel("A", [uncurated, curated])], [],
+            curated_ids={11})
+        assert ids == [11, 10], "curated must lead even at lower quality"
+
+
+class TestPlaceholderDecisionUsesTheRealPool:
+    """#206 review findings 1 and 2, at the call site.
+
+    The behavioural tests above prove the pool is right; these prove the apply
+    ASKS it. Source-level because the apply path needs Django to import, and
+    because the ORDER of these statements is the correctness argument: the
+    decision sits above `seen_markers.add(marker)`, and a `continue` below that
+    line strands the game's existing channel at phase 0's parking number
+    (measured live 2026-08-29, 22 channels at 1400-1421).
     """
 
     def _src(self):
         with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
             return fh.read()
 
-    def test_exclusion_filters_streams_above_the_seen_marker_line(self):
+    def test_the_pool_is_built_before_the_placeholder_decision(self):
         src = self._src()
-        filt = src.index("sid for sid in explicit_stream_ids if sid not in excluded_ids")
+        assert src.index("source_streams, _foreign_n, _policy_ids = _build_stream_pool(")             < src.index("if not source_streams:")
+
+    def test_the_placeholder_decision_is_above_the_seen_marker_line(self):
+        src = self._src()
         add = min(m.start() for m in re.finditer(
             r"^[ \t]*seen_markers\.add\(marker\)[ \t]*$", src, re.M))
-        assert filt < add
+        assert src.index("if not source_streams:") < add
 
-    def test_exclusion_filters_streams_above_the_placeholder_decision(self):
+    def test_the_decision_keys_on_the_pool_not_on_named_candidates(self):
+        """`source or explicit_stream_ids` says a candidate was NAMED, not that
+        anything survived exclusion, the name gate, and still exists."""
         src = self._src()
-        filt = src.index("sid for sid in explicit_stream_ids if sid not in excluded_ids")
-        decision = src.index("if not source and not explicit_stream_ids:")
-        assert filt < decision
+        assert "if not source_streams:" in src
+        assert "if not source and not explicit_stream_ids:" not in src
 
-    def test_the_late_guard_does_not_continue(self):
-        """The invariant check below seen_markers must LOG, never skip.
-
-        Skipping there is the stranding bug this whole class is about. A
-        stream-less channel is recoverable on the next apply; a channel
-        stranded at 1400+ is what the user actually notices.
-        """
+    def test_the_pool_is_built_exactly_once(self):
+        # A second build would let the two disagree again, which is the whole
+        # defect class this restructure closes.
         src = self._src()
-        i = src.index("if not placeholder and not source_streams:")
-        block = src[i:i + 600]
-        # CODE lines only. The guard's own comment says "DO NOT turn this into a
-        # `continue`", so a raw substring check fails on the documentation that
-        # exists to prevent the bug. Same trap as the seen_markers position test.
-        code = "\n".join(
-            ln for ln in block.split("\n") if not ln.strip().startswith("#")
-        )
-        assert "logger.error" in code
-        assert "continue" not in code
+        assert src.count("_build_stream_pool(") - src.count("def _build_stream_pool(") == 1
 
-    def test_a_partially_excluded_source_channel_is_kept(self):
-        # Dropping a whole channel because SOME of its streams are excluded
-        # would over-apply the policy.
+    def test_the_policy_counter_is_a_set_of_distinct_ids(self):
         src = self._src()
-        assert "if sids and sids <= excluded_ids:" in src
-
-    def test_the_lookup_side_counter_is_reported(self):
-        """A counter that is incremented and never read is a silent drop."""
-        src = self._src()
-        assert 'stats["policy_streams_excluded"] += 1' in src
-        assert 'epg_lookup.stats.get("policy_streams_excluded"' in src
+        assert "policy_dropped_stream_ids: set = set()" in src
+        assert "len(policy_dropped_stream_ids)" in src
 
 
 class TestDetectorPrecedenceRegressions:
@@ -3537,15 +3668,209 @@ class TestDetectorPrecedenceRegressions:
         assert plugin._parse_language_prefs("en-US, en-GB") == ["en"]
 
     def test_snapshot_provenance_matches_live_provenance(self):
-        """The exporter must exclude legacy owned markers too, or an offline
-        replay disagrees with production about which streams are curated."""
+        """`tools/export_snapshot.py` COPIES plugin.py's channel-ownership
+        constants, and the copies must agree or an offline replay silently
+        disagrees with production about which streams are curated.
+
+        The duplication is deliberate and cannot be extracted: the exporter is
+        `docker cp`-ed into the container ALONE and run from /tmp, so it cannot
+        import the plugin package, and importing plugin.py would start the
+        scheduler thread inside a script that must stay inert against the live
+        DB. So the copies are policed here instead, which is this repo's
+        standard move for a contract plugin.py cannot export.
+
+        Pins BOTH constants. An earlier version pinned only the legacy markers,
+        which left the far more likely edit -- renaming TVG_ID_PREFIX -- free to
+        desync provenance with nothing reporting it.
+        """
         with open(os.path.join(REPO_ROOT, "tools", "export_snapshot.py"),
                   encoding="utf-8") as fh:
             exp = fh.read()
         with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
             src = fh.read()
-        # Every legacy marker plugin.py owns must appear in the exporter.
-        i = src.index("_OWNED_TVG_ID_LEGACY_MARKERS: tuple = ")
-        legacy = src[i:src.index("\n", i)]
-        for marker in re.findall(r'"([^"]+)"', legacy):
-            assert marker in exp, f"exporter is missing legacy marker {marker!r}"
+
+        def _literal(text, name):
+            i = text.index(name)
+            line = text[i:text.index("\n", i)]
+            return re.findall(r'"([^"]+)"', line)
+
+        # Positive control FIRST: a parse that silently returns [] would make
+        # every assertion below vacuous, and this test's whole job is to be the
+        # thing that notices a desync.
+        prefix = _literal(src, "TVG_ID_PREFIX = ")
+        legacy = _literal(src, "_OWNED_TVG_ID_LEGACY_MARKERS: tuple = ")
+        assert prefix, "failed to parse TVG_ID_PREFIX out of plugin.py"
+        assert legacy, "failed to parse _OWNED_TVG_ID_LEGACY_MARKERS out of plugin.py"
+
+        exp_prefix = _literal(exp, "TVG_ID_PREFIX = ")
+        exp_legacy = _literal(exp, "OWNED_LEGACY_MARKERS = ")
+        assert exp_prefix == prefix, (
+            f"exporter TVG_ID_PREFIX {exp_prefix} != plugin.py {prefix}; "
+            "offline replay provenance would disagree with production"
+        )
+        assert exp_legacy == legacy, (
+            f"exporter legacy markers {exp_legacy} != plugin.py {legacy}"
+        )
+
+
+class TestManifestFieldsSurviveTheSerializer:
+    """Dispatcharr's PluginFieldSerializer SILENTLY DROPS a malformed field
+    entry (it logs `Invalid plugin field entry ignored:` and moves on), so a
+    typo in plugin.json costs a setting that simply never appears in the UI
+    with nothing in the plugin reporting it.
+
+    Mirrors the serializer's real contract, read off PluginFieldSerializer in a
+    live Dispatcharr 0.30.0 container on 2026-08-31 (every key below is a
+    CharField or a ChoiceField there, and none of them accepts null).
+
+    HONEST LIMIT, and it matters: this is a COPY of the contract, not the
+    serializer itself. Dispatcharr is not importable from the test container, so
+    these checks cannot notice UPSTREAM DRIFT -- if a future release adds a
+    required key or narrows a type, this file stays green and the field is
+    dropped in the UI anyway. Treat a pass here as "no manifest typo", not as
+    "validated against Dispatcharr". Re-read PluginFieldSerializer after any
+    Dispatcharr upgrade; the three #206 fields were additionally validated
+    against the real serializer in a live 0.30.0 container.
+    """
+
+    # Keys the serializer declares as CharField. A null in any of them is
+    # REJECTED upstream and the whole field is then discarded, which the
+    # allowed-keys check alone cannot see: `"placeholder": null` uses a
+    # perfectly legal key and still loses the setting.
+    NON_NULL_STRING_KEYS = frozenset({
+        "id", "label", "type", "help_text", "description", "placeholder",
+        "input_type",
+    })
+
+    # Declared keys, exactly as the serializer has them.
+    ALLOWED_KEYS = frozenset({
+        "id", "label", "type", "default", "help_text", "description",
+        "placeholder", "input_type", "min", "max", "step", "value", "options",
+    })
+    REQUIRED_KEYS = frozenset({"id", "type"})
+    VALID_TYPES = frozenset({
+        "boolean", "info", "number", "select", "string", "text",
+    })
+
+    @staticmethod
+    @pytest.fixture(scope="class")
+    def fields():
+        # staticmethod: a class-scoped fixture declared as an instance method is
+        # deprecated in pytest 8 and warns on every run.
+        import json
+        with open(os.path.join(REPO_ROOT, "plugin.json"), encoding="utf-8") as fh:
+            return json.load(fh)["fields"]
+
+    def test_the_fixture_actually_loaded_fields(self, fields):
+        # Positive control: an empty list would make every check below vacuous.
+        assert len(fields) > 50
+
+    def test_no_field_carries_a_key_the_serializer_would_reject(self, fields):
+        offenders = [
+            (f.get("id"), sorted(set(f) - self.ALLOWED_KEYS))
+            for f in fields if set(f) - self.ALLOWED_KEYS
+        ]
+        assert not offenders, f"unknown keys would drop these fields: {offenders}"
+
+    def test_every_field_has_the_required_keys(self, fields):
+        offenders = [f for f in fields if not self.REQUIRED_KEYS <= set(f)]
+        assert not offenders, f"fields missing id/type: {offenders}"
+
+    def test_every_type_is_one_the_serializer_accepts(self, fields):
+        bad = [(f["id"], f["type"]) for f in fields
+               if f["type"] not in self.VALID_TYPES]
+        assert not bad, f"invalid field types: {bad}"
+
+    def test_select_fields_carry_options_with_value_and_label(self, fields):
+        # PluginFieldOptionSerializer requires `value`; a select with no options
+        # renders as an empty dropdown the user cannot set.
+        for f in fields:
+            if f["type"] != "select":
+                continue
+            assert f.get("options"), f"{f['id']} is a select with no options"
+            for o in f["options"]:
+                assert "value" in o, f"{f['id']} option missing value: {o}"
+                assert "label" in o, f"{f['id']} option missing label: {o}"
+
+    def test_field_ids_are_unique(self, fields):
+        ids = [f["id"] for f in fields]
+        dupes = {i for i in ids if ids.count(i) > 1}
+        assert not dupes, f"duplicate field ids shadow each other in the UI: {dupes}"
+
+    def test_no_declared_string_key_is_null(self, fields):
+        """Review finding 6. A null in a CharField makes the serializer reject
+        the entry and the loader drop the field silently."""
+        offenders = []
+        for f in fields:
+            for k in self.NON_NULL_STRING_KEYS & set(f):
+                if f[k] is None:
+                    offenders.append((f.get("id"), k))
+        assert not offenders, f"null values in string keys: {offenders}"
+
+    def test_no_select_option_carries_a_null(self, fields):
+        # PluginFieldOptionSerializer requires `value` and it is a CharField, so
+        # `"value": null` passes a key-presence check and fails upstream.
+        offenders = []
+        for f in fields:
+            for o in f.get("options") or []:
+                for k in ("value", "label"):
+                    if o.get(k) is None:
+                        offenders.append((f["id"], k, o))
+        assert not offenders, f"null values in select options: {offenders}"
+
+    def test_declared_string_keys_hold_strings(self, fields):
+        # A number or bool where the serializer wants a CharField is the same
+        # class of silent drop. `default` is deliberately excluded: it is
+        # untyped upstream and legitimately holds bools and numbers.
+        offenders = []
+        for f in fields:
+            for k in self.NON_NULL_STRING_KEYS & set(f):
+                if not isinstance(f[k], str):
+                    offenders.append((f.get("id"), k, type(f[k]).__name__))
+        assert not offenders, f"non-string values in string keys: {offenders}"
+
+    def test_the_three_new_206_fields_are_present_and_string_typed(self, fields):
+        by_id = {f["id"]: f for f in fields}
+        for fid in ("language_preferences", "fallback_only_groups", "excluded_groups"):
+            assert fid in by_id, f"{fid} missing from the manifest"
+            assert by_id[fid]["type"] == "string"
+            # help_text is what the user reads to understand a free-text field;
+            # a string setting with no guidance is unusable.
+            assert by_id[fid].get("help_text")
+
+
+class TestKeptForRecordingChannelsHonourExclusion:
+    """#206 review finding 3.
+
+    A channel kept for an active recording (#146) never reaches the write loop,
+    so its ChannelStream rows survive untouched. If the user excludes one of
+    those streams' groups afterwards, it stays attached forever and quietly
+    contradicts "excluded streams are never attached". Source-level: the apply
+    path needs Django, and the surrounding code is a queryset delete.
+    """
+
+    def _src(self):
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_membership_is_stripped_from_kept_channels(self):
+        src = self._src()
+        assert "if kept_for_recording and excluded_ids:" in src
+        i = src.index("if kept_for_recording and excluded_ids:")
+        block = src[i:i + 500]
+        assert "ChannelStream.objects.filter(" in block
+        assert "stream_id__in=excluded_ids" in block
+
+    def test_only_membership_is_deleted_not_the_channel_or_recording(self):
+        """The channel is kept ON PURPOSE. Deleting it, or the Recording, would
+        destroy the thing #146 exists to protect."""
+        src = self._src()
+        i = src.index("if kept_for_recording and excluded_ids:")
+        block = src[i:src.index("# Restore kept channels", i)]
+        assert "Channel.objects" not in block
+        assert "Recording.objects" not in block
+
+    def test_the_strip_runs_only_when_a_policy_exists(self):
+        # `excluded_ids` empty must not issue a query, let alone a delete.
+        src = self._src()
+        assert "if kept_for_recording and excluded_ids:" in src

@@ -48,8 +48,44 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ### Review fixes folded into this release
 
-Found by an external review of the first cut; each wrong answer looked exactly
-like a right one, which is why they are listed rather than quietly squashed.
+Two external review rounds. Each wrong answer looked exactly like a right one,
+which is why they are listed rather than quietly squashed.
+
+**Second round** (after the first cut of the exclusion pre-pass):
+
+- **The placeholder decision now keys on the REAL stream pool.** The pre-pass
+  asked the cheap question "does this source own a non-excluded stream?", but
+  the pool also applies the matchup-name gate, so a channel owning one excluded
+  stream for THIS game plus a live stream for ANOTHER game passed the check and
+  then donated nothing. That published a non-placeholder channel with zero
+  streams and, for an existing channel, deleted its old membership on the way.
+  The pool build moved above the decision (`_build_stream_pool`, extracted with
+  its dependencies injected so it is testable without Django), so the two
+  cannot disagree by construction. Same fix covers a source channel with zero
+  streams, and a cached `stream_ids` entry naming a feed the provider has since
+  deleted (that one was pre-existing).
+- **A channel kept for an active recording now has excluded streams stripped.**
+  It never reaches the write loop, so its membership survived untouched and an
+  excluded stream stayed attached indefinitely. Membership only: the channel and
+  the Recording are what #146 exists to protect.
+- **The excluded-stream count is a set of distinct ids.** It undercounted
+  explicit-stream exclusions (no increment at all) and double-counted a stream
+  shared by two matched source channels.
+- **The corpus class guard was itself broken.** Its group-consistency loop had
+  an unconditional `break`, so it only ever tested one language; it looked for
+  tags only at the start of a name, missing `MK Dons`, `CF Monterrey`,
+  `St Helens` and `TV TBA` sitting in its own committed fixture; the
+  `Little Rock, AR` decoy silently tested nothing because its first word is not
+  two letters; and its group fallback searched a bare two-letter code as a
+  substring, so a generic group name could "prove" a language. All fixed, and
+  the group-consistency assertion was REMOVED rather than weakened once its own
+  positive control showed it had no rows to judge.
+- **The manifest test now rejects nulls and non-strings** in keys the serializer
+  declares as CharFields. It previously copied the allowed-key list only, so
+  `"placeholder": null` passed locally and would be dropped upstream. The test
+  now also states plainly that it cannot detect upstream contract drift.
+
+**First round** (on the initial diff):
 
 - **Exclusion now runs in the apply pre-pass, above `seen_markers.add(marker)`.**
   The first cut skipped the game below that line, which leaves an existing
@@ -74,6 +110,20 @@ like a right one, which is why they are listed rather than quietly squashed.
   cleanly and then matching nothing.
 - **`tools/export_snapshot.py` excludes legacy owned tvg_id markers too**, so
   offline replay agrees with production about which streams are curated.
+- **`SE` removed from the language-tag map.** It is Southeast in this domain
+  ("SE Missouri", "SE Louisiana", 13 real rows) with zero rows using it as a
+  Swedish tag. It survived the first cut because it was on a speculative
+  starting list; the new corpus class guard in `tests/test_language_corpus.py`
+  is what caught it. Swedish still resolves via "Swedish Feed".
+- **A committed corpus class guard** (`tests/fixtures/stream_names_corpus.json`,
+  475 real names sampled from a live 16,970-name corpus). The per-case tests are
+  instance-shaped; this one asks a question about the MAP, so it fails on a
+  colliding two-letter code nobody has thought of yet. Verified by adding `PL`
+  and `SE` back and watching it go red.
+- **A manifest/serializer contract test.** Dispatcharr silently drops a
+  malformed field entry, so a plugin.json typo costs a setting that never
+  appears in the UI with nothing reporting it. All three new fields were also
+  validated against the real `PluginFieldSerializer` in a live 0.30.0 container.
 
 ## [1.26.0] - 2026-08-29
 

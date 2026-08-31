@@ -1045,6 +1045,18 @@ _FEED_LANGUAGE_MARKERS = tuple(
 #                         it to case-insensitive and 'EFL36|No Scheduled Event'
 #                         reads as NORWEGIAN, which is a real corpus row.
 #
+# DO NOT add "SE" either. It is Southeast in this domain ("SE Missouri", "SE
+# Louisiana" -- 13 real rows) and has ZERO rows using it as a Swedish tag, so it
+# is pure downside. It was in the first cut of this map and the corpus guard in
+# tests/test_language_corpus.py is what caught it. Swedish still resolves via
+# "Swedish Feed".
+#
+# The rule the guard enforces: a code may sit in this map only if it is NOT a
+# measured domain term, OR the corpus shows it used as a genuine language tag.
+# "NO" is the interesting case and it stays: it collides with "NO EVENT" (1588
+# rows) AND has 38 real "NO:" rows in "Norway | Sports", and tag position is
+# what separates them.
+#
 # DO NOT add "PL" to the map below. Premier League owns that token here: 20 real rows
 # ('AU (STAN 97) | PL Saturday Wrap', 'PL Live') would all become Polish, and no
 # positional tightening separates them. Polish still resolves via "Polish Feed".
@@ -1067,7 +1079,7 @@ _LANG_TAG_TO_CODE = {
     # language tags
     "DE": "de", "TR": "tr", "IT": "it", "NL": "nl", "FR": "fr", "ES": "es",
     "NO": "no", "PT": "pt", "AR": "ar", "CZ": "cs",
-    "RU": "ru", "JP": "ja", "KR": "ko", "CN": "zh", "DK": "da", "SE": "sv",
+    "RU": "ru", "JP": "ja", "KR": "ko", "CN": "zh", "DK": "da",
     # country tags whose language differs from the code
     "BR": "pt", "GR": "el", "CY": "el",
     "MX": "es", "PA": "es", "CO": "es", "PY": "es", "CR": "es", "CL": "es",
@@ -1309,6 +1321,114 @@ def _stream_quality_sort_key(stream_stats, name):
         if height == 0 or width == 0 or resolution == "0x0":
             return (_PROBE_TIER_FAILED, 0, 0)
     return (_PROBE_TIER_NO_PROBE, _stream_quality_rank(name), 0)
+
+
+def _build_stream_pool(
+    sources,
+    explicit_stream_ids,
+    game,
+    *,
+    field_event,
+    home_kws,
+    away_kws,
+    select_streams_for_game,
+    stream_model,
+    lang_prefs,
+    prefer_us,
+    curated_ids,
+    fallback_only_ids,
+    excluded_ids,
+):
+    """Ordered stream ids to attach for one game, plus what was dropped and why.
+
+    Returns (stream_ids, foreign_dropped, policy_dropped_ids). `foreign_dropped`
+    is a count (a stream naming ANOTHER game, #162); `policy_dropped_ids` is a
+    SET of distinct stream ids removed by `excluded_groups`, because two matched
+    source channels can carry the same excluded stream and reporting it twice
+    misstates how much the policy removed.
+
+    Extracted from _action_apply and called BEFORE the placeholder decision,
+    which is the whole point (#206 review). The pre-pass used to ask "does this
+    source own any non-excluded stream?", but the pool ALSO applies the
+    matchup-name gate, so a channel owning one excluded stream for THIS game
+    plus one live stream for ANOTHER game passed the check and then donated
+    nothing. That published a non-placeholder channel with zero streams and, for
+    an existing channel, deleted its old membership on the way. Asking this
+    function what would ACTUALLY be donated makes the two agree by construction.
+
+    `select_streams_for_game` and `stream_model` are injected so this stays
+    importable and unit-testable without Django.
+    """
+    pool = []                       # (sort_key, tiebreak, stream_id)
+    seen: set = set()
+    foreign_dropped = 0
+    policy_dropped: set = set()
+
+    for src_order, src in enumerate(sources):
+        chan_streams = list(
+            src.streams.all().only("id", "name", "stream_stats", "channel_group_id")
+        )
+        if field_event:
+            keep_flags = [True] * len(chan_streams)
+        else:
+            keep_flags = select_streams_for_game(
+                [s.name or "" for s in chan_streams], home_kws, away_kws,
+            )
+        for st, keep in zip(chan_streams, keep_flags):
+            if not keep:
+                foreign_dropped += 1
+                continue
+            if st.id in seen:
+                continue
+            seen.add(st.id)
+            key = _pool_entry_key(
+                st, st.name or src.name or "",
+                lang_prefs=lang_prefs, prefer_us=prefer_us,
+                home=game["home"], away=game["away"],
+                curated_ids=curated_ids,
+                fallback_only_ids=fallback_only_ids,
+                excluded_ids=excluded_ids,
+            )
+            if key is None:
+                policy_dropped.add(st.id)
+                continue
+            pool.append((key, src_order, st.id))
+
+    # Path C: attach the specific stream-name-matched streams, NOT their parent
+    # channels' other (unrelated) streams. Ordered after the channel sources;
+    # the sort below re-ranks the whole pool anyway, so the base offset is only
+    # a stable tiebreak. De-duped against channel streams already pooled.
+    if explicit_stream_ids:
+        base = len(sources)
+        # A cached id can name a stream that no longer exists (a provider drops
+        # a feed between refresh and apply), and `by_id.get` then yields None.
+        # That is why the caller must key the placeholder decision on THIS
+        # function's result rather than on `explicit_stream_ids` being non-empty.
+        by_id = {
+            st.id: st for st in stream_model.objects
+            .filter(id__in=explicit_stream_ids)
+            .only("id", "name", "stream_stats", "channel_group_id")
+        }
+        for j, sid in enumerate(explicit_stream_ids):
+            st = by_id.get(sid)
+            if st is None or st.id in seen:
+                continue
+            seen.add(st.id)
+            key = _pool_entry_key(
+                st, st.name or "",
+                lang_prefs=lang_prefs, prefer_us=prefer_us,
+                home=game["home"], away=game["away"],
+                curated_ids=curated_ids,
+                fallback_only_ids=fallback_only_ids,
+                excluded_ids=excluded_ids,
+            )
+            if key is None:
+                policy_dropped.add(st.id)
+                continue
+            pool.append((key, base + j, st.id))
+
+    pool.sort()
+    return [sid for _, _, sid in pool], foreign_dropped, policy_dropped
 
 
 def _pool_entry_key(
@@ -4369,7 +4489,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # is never silent: a wrong gate that starts eating real feeds shows up here
     # in the apply summary rather than as quietly missing streams.
     foreign_streams_dropped = 0
-    policy_streams_dropped = 0  # #206: excluded_groups
+    # #206: DISTINCT stream ids removed by excluded_groups. A set, not a
+    # counter: two matched source channels can carry the same excluded
+    # stream, and reporting it twice misstates how much was removed.
+    policy_dropped_stream_ids: set = set()
     if matchup_logos_enabled and not dry_run:
         sportsdb_api_key = (
             _resolve_key(settings, "sportsdb_api_key", SPORTSDB_KEY_PATH)
@@ -4578,41 +4701,53 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         sources_by_id = {c.id: c for c in sources}
         sources = [sources_by_id[sid] for sid in source_ids if sid in sources_by_id]
 
-        # #206 exclusion, applied HERE and not at pool-build time. It has to
-        # happen before the placeholder/skip decision below, because that
-        # decision sits above `seen_markers.add(marker)` and the comment there
-        # is explicit that every `continue` must stay above it: a marker added
-        # and then skipped leaves its existing channel neither published nor
-        # reaped, committing at phase 0's temporary parking number (measured
-        # live 2026-08-29, 22 channels stranded at 1400-1421).
+        # #206: build the REAL stream pool here, above the placeholder
+        # decision, and let that decision key on whether anything is actually
+        # attachable. Two reasons it has to be here and not lower down:
         #
-        # Dropping the streams early means a game whose every candidate is
-        # excluded falls into the EXISTING "no source, no streams" path, which
-        # already does the right thing: placeholder if the score earns one,
-        # otherwise skip, and either way its old channel goes down the normal
-        # stale route which preserves DVR recordings (#146).
-        if excluded_ids:
-            explicit_stream_ids = [
-                sid for sid in explicit_stream_ids if sid not in excluded_ids
-            ]
-            # A source channel is only dropped when EVERY stream it would donate
-            # is excluded. A partially-excluded channel keeps contributing the
-            # rest, which is what "exclude these streams" means; dropping the
-            # whole channel would over-apply the policy.
-            kept_sources = []
-            for c in sources:
-                sids = set(c.streams.values_list("id", flat=True))
-                if sids and sids <= excluded_ids:
-                    policy_streams_dropped += len(sids)
-                    continue
-                kept_sources.append(c)
-            sources = kept_sources
-        source = sources[0] if sources else None
+        #  - The decision below sits above `seen_markers.add(marker)`, and the
+        #    comment on that line is explicit that every `continue` must stay
+        #    above it: a marker added and then skipped leaves its existing
+        #    channel neither published nor reaped, so it commits at phase 0's
+        #    temporary parking number (measured live 2026-08-29, 22 channels
+        #    stranded at 1400-1421).
+        #  - Asking "would this source donate anything?" is the only question
+        #    that cannot disagree with what the pool later does. A cheaper
+        #    proxy ("does it own a non-excluded stream?") was tried and was
+        #    wrong: a channel owning one excluded stream for THIS game plus a
+        #    live stream for ANOTHER game passed the proxy, then donated
+        #    nothing once the matchup-name gate ran, and published a
+        #    non-placeholder channel with zero streams.
+        #
+        # A game with nothing attachable therefore falls into the EXISTING
+        # "no source, no streams" path, which already does the right thing:
+        # placeholder if the score earns one, otherwise skip, and either way its
+        # old channel goes down the normal stale route, which preserves DVR
+        # recordings (#146).
+        field_event = is_field_event(g.get("away"), g.get("extra"))
+        home_kws = [] if field_event else _strong_team_keywords(g.get("home") or "")
+        away_kws = [] if field_event else _strong_team_keywords(g.get("away") or "")
+        source_streams, _foreign_n, _policy_ids = _build_stream_pool(
+            sources, explicit_stream_ids, g,
+            field_event=field_event, home_kws=home_kws, away_kws=away_kws,
+            select_streams_for_game=select_streams_for_game,
+            stream_model=Stream,
+            lang_prefs=lang_prefs, prefer_us=prefer_us,
+            curated_ids=curated_ids,
+            fallback_only_ids=fallback_only_ids,
+            excluded_ids=excluded_ids,
+        )
+        foreign_streams_dropped += _foreign_n
+        policy_dropped_stream_ids |= _policy_ids
 
         placeholder = False
-        # A stream-only match (no whole-channel source, but explicit streams) is
-        # a real match, NOT a placeholder.
-        if not source and not explicit_stream_ids:
+        # A stream-only match (no whole-channel source, but attachable streams)
+        # is a real match, NOT a placeholder. Keyed on `source_streams`, the
+        # pool actually built above, rather than on `source or
+        # explicit_stream_ids`: those say a candidate was NAMED, not that
+        # anything survived exclusion, the matchup-name gate, and still exists
+        # in the DB. See the comment on the pool build.
+        if not source_streams:
             score_val = float(g.get("score", 0.0))
             if score_val >= placeholder_threshold:
                 placeholder = True
@@ -4687,98 +4822,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 llm_failed += 1
             else:
                 llm_used += 1
-
-        # Rank the streams from every matched source channel (DB reads only).
-        #
-        # A whole-channel match donates every stream the channel carries, so a
-        # provider that bundles dedicated per-matchup feeds onto one channel
-        # turns one match into a pile of other games' broadcasts (#162). Gate
-        # each channel's streams on naming THIS game, relative to that channel
-        # (see select_streams_for_game for why relative, and why the gate is not
-        # inverted). Field events are single-sided and their feed naming is
-        # already delicate (#135), so they keep every stream.
-        field_event = is_field_event(g.get("away"), g.get("extra"))
-        home_kws = [] if field_event else _strong_team_keywords(g.get("home") or "")
-        away_kws = [] if field_event else _strong_team_keywords(g.get("away") or "")
-        stream_pool = []  # list of (sort_key, src_order, stream_id)
-        seen_stream_ids = set()
-        for src_order, src in enumerate(sources):
-            chan_streams = list(
-                src.streams.all().only(
-                    "id", "name", "stream_stats", "channel_group_id",
-                )
-            )
-            if field_event:
-                keep_flags = [True] * len(chan_streams)
-            else:
-                keep_flags = select_streams_for_game(
-                    [s.name or "" for s in chan_streams], home_kws, away_kws,
-                )
-            for s, keep in zip(chan_streams, keep_flags):
-                if not keep:
-                    foreign_streams_dropped += 1
-                    continue
-                if s.id in seen_stream_ids:
-                    continue
-                seen_stream_ids.add(s.id)
-                key = _pool_entry_key(
-                    s, s.name or src.name or "",
-                    lang_prefs=lang_prefs, prefer_us=prefer_us,
-                    home=g["home"], away=g["away"],
-                    curated_ids=curated_ids,
-                    fallback_only_ids=fallback_only_ids,
-                    excluded_ids=excluded_ids,
-                )
-                if key is None:
-                    policy_streams_dropped += 1
-                    continue
-                stream_pool.append((key, src_order, s.id))
-        # Path C: attach the specific stream-name-matched streams, NOT their
-        # parent channels' other (unrelated) streams. Ordered after the channel
-        # sources; the quality sort below re-ranks the whole pool anyway, so the
-        # base offset is only a stable tiebreak. De-duped against channel
-        # streams already pooled.
-        if explicit_stream_ids:
-            base = len(sources)
-            by_id = {
-                s.id: s for s in Stream.objects.filter(id__in=explicit_stream_ids)
-                .only("id", "name", "stream_stats", "channel_group_id")
-            }
-            for j, sid in enumerate(explicit_stream_ids):
-                s = by_id.get(sid)
-                if s is None or s.id in seen_stream_ids:
-                    continue
-                seen_stream_ids.add(s.id)
-                key = _pool_entry_key(
-                    s, s.name or "",
-                    lang_prefs=lang_prefs, prefer_us=prefer_us,
-                    home=g["home"], away=g["away"],
-                    curated_ids=curated_ids,
-                    fallback_only_ids=fallback_only_ids,
-                    excluded_ids=excluded_ids,
-                )
-                if key is None:
-                    policy_streams_dropped += 1
-                    continue
-                stream_pool.append((key, base + j, s.id))
-        stream_pool.sort()
-        source_streams = [sid for _, _, sid in stream_pool]
-
-        # #206 invariant check. The pre-pass already dropped excluded streams
-        # before the placeholder decision, so a non-placeholder game reaching
-        # here must have at least one stream. DO NOT turn this into a `continue`:
-        # it sits BELOW seen_markers.add(marker), and skipping here would strand
-        # the game's existing channel at phase 0's parking number (see the
-        # comment on that line). Log loudly instead and let the channel publish;
-        # a stream-less channel is recoverable on the next apply, a channel
-        # stranded at 1400+ is what the user actually notices.
-        if not placeholder and not source_streams:
-            logger.error(
-                "[ranked_matchups] apply: %s vs %s has no attachable stream "
-                "after group policy, which the pre-pass should have caught. "
-                "Publishing without streams; please report this.",
-                g.get("home"), g.get("away"),
-            )
 
         resolved_logo_id, logo_outcome = _resolve_matchup_logo_id(g, marker, source)
         if matchup_logos_enabled and not dry_run:
@@ -5076,6 +5119,30 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     EPGData.objects.filter(
                         epg_source=epg_source, tvg_id__in=reap_markers,
                     ).delete()
+            # #206: a channel KEPT for an active recording never goes through
+            # the write loop, so its ChannelStream rows are whatever the last
+            # apply left. If the user has since excluded one of those streams'
+            # groups, it would stay attached indefinitely and quietly contradict
+            # "excluded streams are never attached". Strip it here.
+            #
+            # Membership only, never the Channel and never the Recording: the
+            # channel is being kept ON PURPOSE so an in-flight recording keeps
+            # its target (#146). A recording already writing from an excluded
+            # stream is left to finish; the point is that nothing STARTS from
+            # one after the user excluded it.
+            if kept_for_recording and excluded_ids:
+                stripped = ChannelStream.objects.filter(
+                    channel_id__in=[c.id for c in kept_for_recording],
+                    stream_id__in=excluded_ids,
+                ).delete()[0]
+                if stripped:
+                    policy_dropped_stream_ids |= set(excluded_ids)
+                    logger.info(
+                        "[ranked_matchups] stripped %d excluded-group stream "
+                        "link(s) from %d channel(s) kept for an active recording",
+                        stripped, len(kept_for_recording),
+                    )
+
             # Restore kept channels (active recording) to their pre-park number
             # so they don't linger at a ~park_base value. Only restore numbers
             # not claimed by a current game this run (assigned set), so the
@@ -5206,8 +5273,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             foreign_streams_dropped,
         )
         foreign_msg = f" Other-matchup streams skipped: {foreign_streams_dropped}."
-    if policy_streams_dropped:
-        foreign_msg += f" Excluded-group streams skipped: {policy_streams_dropped}."
+    if policy_dropped_stream_ids:
+        foreign_msg += (
+            f" Excluded-group streams skipped: {len(policy_dropped_stream_ids)}."
+        )
     rec_msg = ""
     if rehomed_recordings or kept_for_recording_n:
         rec_msg = (
