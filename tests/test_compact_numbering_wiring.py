@@ -10,6 +10,7 @@ for the same shape).
 import ast
 import json
 import os
+import re
 
 import pytest
 
@@ -302,11 +303,24 @@ class TestReviewFindings:
 
     def test_seen_markers_is_added_after_the_start_time_guard(self):
         """A marker added before a later `continue` leaves its channel parked
-        forever. Applies to kickoff mode too; this predates compact numbering."""
+        forever. Applies to kickoff mode too; this predates compact numbering.
+
+        Matches the STATEMENT, not any mention of it: the rule is important
+        enough to be discussed in nearby comments, and an earlier version of
+        this test used a bare `src.index("seen_markers.add(marker)")` that a
+        comment quoting the call broke while the code was still correct.
+        """
         src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
         guard = src.index('logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)')
-        add = src.index("seen_markers.add(marker)")
-        assert guard < add, "seen_markers.add must come after the start-time guard"
+        statements = [
+            m.start() for m in re.finditer(
+                r"^[ \t]*seen_markers\.add\(marker\)[ \t]*$", src, re.M)
+        ]
+        assert statements, "the seen_markers.add(marker) statement has gone missing"
+        assert min(statements) > guard, (
+            "seen_markers.add must come after the start-time guard; found at "
+            f"{statements} vs guard at {guard}"
+        )
 
     def test_the_restore_uses_written_numbers_not_the_plan(self):
         """chnum_by_marker keeps entries for games that were filtered out or

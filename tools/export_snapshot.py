@@ -25,8 +25,19 @@ def main():
     import django
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "dispatcharr.settings")
     django.setup()
-    from apps.channels.models import Channel, Stream
+    from apps.channels.models import Channel, ChannelGroup, ChannelStream, Stream
     from apps.epg.models import ProgramData
+    from django.db.models import Q
+
+    # Must match plugin.py's TVG_ID_PREFIX. Imported rather than duplicated
+    # would mean importing plugin.py, which starts the scheduler thread; this
+    # script runs INSIDE the container against the live DB and must stay inert.
+    TVG_ID_PREFIX = "ranked_matchups:"
+    # Must ALSO match plugin.py's _OWNED_TVG_ID_LEGACY_MARKERS. Excluding only
+    # the current prefix made the snapshot disagree with live provenance: a
+    # stream attached solely to a legacy "dummy_top_matchups" channel is
+    # uncurated in production and would replay as curated.
+    OWNED_LEGACY_MARKERS = ("dummy_top_matchups",)
 
     chans = [
         {"id": c.id, "name": c.name, "tvg_id": getattr(c, "tvg_id", None),
@@ -44,15 +55,37 @@ def main():
          "epg_id": p.epg_id}
         for p in ProgramData.objects.all().only("id", "title", "sub_title", "description", "start_time", "end_time", "epg_id")
     ]
-    # Streams power Path C (stream-name matching). Only id + name are needed by
-    # the lookup; SELECT just those columns.
+    # Streams power Path C (stream-name matching) and, since #206, the
+    # per-group policy and the provenance sort key. channel_group_id is needed
+    # for the group policy and `curated` for provenance; WITHOUT them a replay
+    # silently exercises the pre-#206 path and reports no difference.
     streams = [
-        {"id": s.id, "name": s.name}
-        for s in Stream.objects.all().only("id", "name")
+        {"id": s.id, "name": s.name, "channel_group_id": s.channel_group_id}
+        for s in Stream.objects.all().only("id", "name", "channel_group_id")
     ]
-    json.dump({"channels": chans, "programs": progs, "streams": streams}, open(out, "w"))
+    # Group names, so a replay can resolve the policy the same way the apply
+    # does (_channel_group_names casefolds; the raw name is exported so the
+    # harness stays free to change that).
+    groups = dict(ChannelGroup.objects.values_list("id", "name"))
+    # Provenance (#206): stream ids the USER attached to a channel of their own.
+    # Excludes our OWN virtual channels for the reason _curated_stream_ids
+    # documents: counting them makes provenance self-reinforcing.
+    curated = sorted(
+        ChannelStream.objects
+        .exclude(
+            Q(channel__tvg_id__startswith=TVG_ID_PREFIX)
+            | Q(channel__tvg_id__in=OWNED_LEGACY_MARKERS)
+        )
+        .values_list("stream_id", flat=True)
+        .distinct()
+    )
+    json.dump({
+        "channels": chans, "programs": progs, "streams": streams,
+        "channel_groups": groups, "curated_stream_ids": curated,
+    }, open(out, "w"))
     print(f"exported {len(chans)} channels, {len(progs)} programs, "
-          f"{len(streams)} streams -> {out}")
+          f"{len(streams)} streams, {len(groups)} groups, "
+          f"{len(curated)} curated stream ids -> {out}")
 
 
 if __name__ == "__main__":

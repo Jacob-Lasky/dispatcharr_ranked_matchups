@@ -92,7 +92,14 @@ to sort to the top of group lists):
   safety. Compact CAN omit a marker when the band is narrower than the slate;
   the apply loop skips those games. `9000 + cache_index` was the pre-#119
   scheme, gone
-- `streams` = cloned via `ChannelStream` from the matched source channel
+- `streams` = cloned via `ChannelStream` from the matched source channel, plus
+  the Path C stream-name matches. `_stream_sort_key` orders the stack
+  outside-in: group policy (`fallback_only_groups` demotes a group below
+  everything else) → provenance (a stream the user attached to a channel of
+  their own beats one only the Path C sweep found) → language
+  (`language_preferences`, an ordered code list, default `en`) → quality
+  (ffprobe resolution/bitrate, then name hints). `excluded_groups` removes
+  streams outright; see the gotcha below for where that filter has to run
 - `epg_data` = a per-channel `EPGData` row in our dummy `EPGSource` with same
   name as the group; `ProgramData` description carries the WHY breakdown
 
@@ -320,6 +327,31 @@ stay in agreement with that one.
   deletion to apply. It reaches into Dispatcharr internals that are not a
   documented API, so it is best-effort: a build that moves the function must
   cost a stale-guide window, not the apply.
+- **`excluded_groups` must drop streams ABOVE `seen_markers.add(marker)`**
+  (#206). Every `continue` in the apply loop has to stay above that line: a
+  marker added and then skipped leaves its existing channel neither published
+  nor reaped, so it commits at phase 0's temporary parking number (measured
+  live 2026-08-29, 22 channels stranded at 1400-1421). The exclusion therefore
+  runs in the pre-pass, which drops a fully-excluded game into the existing
+  "no source, no streams" path — placeholder or skip, DVR recordings preserved.
+  The invariant check below that line LOGS and publishes; it must never
+  `continue`. The same policy also has to reach candidate LOOKUP
+  (`_build_epg_lookup(excluded_stream_ids=...)`, and `_action_diagnose` passes
+  it too), or the matcher can still pick an excluded stream as a game's primary
+  and apply then strips it, leaving the channel with no streams at all. A
+  source channel is dropped only when EVERY stream it would donate is excluded;
+  a partially-excluded one still contributes the rest.
+- **Provenance ordering is self-reinforcing if `_curated_stream_ids` counts our
+  own channels** (#206). Our virtual matchup channels are ordinary `Channel`
+  rows holding ordinary `ChannelStream` links, so a naive "attached to any
+  channel" test promotes whatever the previous apply attached and an uncurated
+  feed reads as curated from its second run onward. Hence the
+  `_owned_tvg_id_q("channel__")` exclude, and hence the query goes through
+  `ChannelStream` rather than `Stream.objects.filter(channels__isnull=False)
+  .exclude(...)`: `channels` is multi-valued, so that exclude would also drop
+  streams attached to BOTH a real channel and one of ours — exactly the curated
+  ones. `tools/export_snapshot.py` mirrors the prefix AND the legacy markers,
+  or an offline replay disagrees with production about what is curated.
 - **Postgres connection pool**: long-running plugin code can exhaust the
   default Postgres connection pool. Monitor with `SELECT count(*) FROM
   pg_stat_activity` in the Dispatcharr container if you add worker-heavy
@@ -389,6 +421,11 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)
 - Description includes kickoff time + WHY breakdown
+- Stream-stack ordering and per-group stream policy (#206):
+  `language_preferences` (ordered codes, default `en`), `fallback_only_groups`
+  (demote but keep playable), `excluded_groups` (never attach), plus
+  zero-config provenance ordering. `widen_stream_pool` widens the candidate
+  pool only; it no longer affects ordering
 - Per-matchup channel logos from TheSportsDB (`logos.py`): each virtual
   channel gets a pre-rendered 960x540 graphic showing both team crests +
   league badge, replacing the inherited source-channel logo. Free public

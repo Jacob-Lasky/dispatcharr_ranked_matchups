@@ -278,6 +278,34 @@ Path C is why you do not have to curate a stream into a channel first: streams
 are queried directly, and only the matched stream is attached, not its parent
 channel's unrelated feeds.
 
+### Controlling which streams get used, and in what order
+
+Because Path C sweeps your whole M3U, a matchup channel can pick up feeds you
+never promoted to channels: foreign-language backups are the common case. Three
+settings decide what happens to them, and none of them removes a stream unless
+you say so:
+
+| Setting | Effect |
+|---|---|
+| **Preferred languages** | Ordered list of language codes (`en`, or `de, en`). Streams in an earlier-listed language play first. Nothing is removed. |
+| **Demote stream groups** | Streams from these channel groups sort behind everything else. They stay playable as a last resort. |
+| **Exclude stream groups** | Streams from these groups are never attached at all, not even as a fallback. |
+
+Streams you have attached to a channel of your own always sort ahead of ones
+found only by the Path C sweep, so the lineup you curated leads by default and
+raw M3U inventory backs it up. Your own matchup channels do not count as
+curation.
+
+**Language is read from the stream name, so it is best-effort.** A `DE:` or
+`MX |` tag, a broadcaster like ZDF or Telemundo, an `English Feed` label, or
+accented spelling all resolve; a name with no such marker does not. The honest
+limit: a German Bundesliga feed named `Bayern Munich vs Dortmund` is
+character-for-character what an English one would be called, because the
+canonical English club names *are* the German ones. Measured against one real
+provider's German sports group, 8 of 10 per-match Bundesliga feeds carried no
+detectable language signal at all. **For those, use Demote stream groups**,
+which keys on the group rather than the name and is exact.
+
 Path A reads the sub-title and description as well as the title because
 European public broadcasters (ORF, ARD, ZDF, SRF) title the programme with the
 competition and put the fixture underneath it. Team names are matched in German

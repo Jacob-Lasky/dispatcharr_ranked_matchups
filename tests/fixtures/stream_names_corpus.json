@@ -1,0 +1,1902 @@
+[
+{
+"name": "CZ: ČT Sport HD",
+"group": "Czech | Sports"
+},
+{
+"name": "CZ: ČT Sport AD",
+"group": "Czech | Sports"
+},
+{
+"name": "CZ: Premier Sport 3",
+"group": "Czech | Sports"
+},
+{
+"name": "CZ: Premier Sport 2",
+"group": "Czech | Sports"
+},
+{
+"name": "CZ: Premier Sport 1",
+"group": "Czech | Sports"
+},
+{
+"name": "CZ: Oneplay Sport 4",
+"group": "Czech | Sports"
+},
+{
+"name": "CZ: Oneplay Sport 3",
+"group": "Czech | Sports"
+},
+{
+"name": "CZ: Oneplay Sport 2",
+"group": "Czech | Sports"
+},
+{
+"name": "TR: Ziport Feed 1",
+"group": "Turkey | Sports"
+},
+{
+"name": "TR: TRT Spor FHD Lokal",
+"group": "Turkey | Sports"
+},
+{
+"name": "TR: TRT Spor",
+"group": "Turkey | Sports"
+},
+{
+"name": "TR: TRT 1 FHD Lokal",
+"group": "Turkey | Sports"
+},
+{
+"name": "TR: Tivibu Spor 4",
+"group": "Turkey | Sports"
+},
+{
+"name": "TR: Tivibu Spor 3",
+"group": "Turkey | Sports"
+},
+{
+"name": "TR: Tivibu Spor 2",
+"group": "Turkey | Sports"
+},
+{
+"name": "TR: Tivibu Spor 1",
+"group": "Turkey | Sports"
+},
+{
+"name": "DE: Magenta Sport 1",
+"group": "Turkey | Sports"
+},
+{
+"name": "DE: World of Freesports FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "DE: Wedo Sports FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "DE: Sportdigital Fussball FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "DE: SPORT 1+ FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "DE: SPORT 1 FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "DE: Sky Sport Top Event FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "DE: Sky Sport Tennis FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "DE: Sky Sport Premier League FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "AR: YAS SPORT HD",
+"group": "Arabic | Sports"
+},
+{
+"name": "AR: SHABAB IRAQ SPORT 1 HD",
+"group": "Arabic | Sports"
+},
+{
+"name": "AR: PALESTINE SPORT (PS)",
+"group": "Arabic | Sports"
+},
+{
+"name": "AR: ONTIME SPORTS HD (EG)",
+"group": "Arabic | Sports"
+},
+{
+"name": "AR: ONTIME SPORTS FHD (EG)",
+"group": "Arabic | Sports"
+},
+{
+"name": "AR: ON SPORT HD",
+"group": "Arabic | Sports"
+},
+{
+"name": "AR: NILE SPORTS (EG)",
+"group": "Arabic | Sports"
+},
+{
+"name": "AR: LIBYA SPORT CHANNEL (LY)",
+"group": "Arabic | Sports"
+},
+{
+"name": "NO: Viasat Sport Extra",
+"group": "Norway | Sports"
+},
+{
+"name": "NO: Viasat Hockey",
+"group": "Norway | Sports"
+},
+{
+"name": "NO: VGTV",
+"group": "Norway | Sports"
+},
+{
+"name": "NO: V Sport+",
+"group": "Norway | Sports"
+},
+{
+"name": "NO: V Sport Vinter",
+"group": "Norway | Sports"
+},
+{
+"name": "NO: V SPORT UHD 4K",
+"group": "Norway | Sports"
+},
+{
+"name": "NO: V Sport Premium",
+"group": "Norway | Sports"
+},
+{
+"name": "NO: V Sport Premier League 4",
+"group": "Norway | Sports"
+},
+{
+"name": "IT: ZONA DAZN 1",
+"group": "Italy | Sports"
+},
+{
+"name": "IT: Unire Sat (EQU Race Play)",
+"group": "Italy | Sports"
+},
+{
+"name": "IT: Sky Sport 261",
+"group": "Italy | Sports"
+},
+{
+"name": "IT: Sky Sport 260",
+"group": "Italy | Sports"
+},
+{
+"name": "IT: Sky Sport 259",
+"group": "Italy | Sports"
+},
+{
+"name": "IT: Sky Sport 258",
+"group": "Italy | Sports"
+},
+{
+"name": "IT: Sky Sport 257",
+"group": "Italy | Sports"
+},
+{
+"name": "IT: Sky Sport 256",
+"group": "Italy | Sports"
+},
+{
+"name": "PA: TVMAX",
+"group": "Panama | TV"
+},
+{
+"name": "PA: Telemetro",
+"group": "Panama | TV"
+},
+{
+"name": "PA: Sertv Deportes",
+"group": "Panama | TV"
+},
+{
+"name": "PA: Sertv",
+"group": "Panama | TV"
+},
+{
+"name": "PA: Nex TV",
+"group": "Panama | TV"
+},
+{
+"name": "PA: Nex Sports",
+"group": "Panama | TV"
+},
+{
+"name": "PA: Mas23 TV",
+"group": "Panama | TV"
+},
+{
+"name": "PA: Canal 4 RPC TV",
+"group": "Panama | TV"
+},
+{
+"name": "US | UFC Network UHD",
+"group": "Latino | Sports"
+},
+{
+"name": "US | TUDN HD",
+"group": "Latino | Sports"
+},
+{
+"name": "US | Tigo Sports Latino",
+"group": "Latino | Sports"
+},
+{
+"name": "US | FOX Deportes HD",
+"group": "Latino | Sports"
+},
+{
+"name": "US | ESPN Deportes HD (MAX)",
+"group": "Latino | Sports"
+},
+{
+"name": "US | ESPN Deportes HD",
+"group": "Latino | Sports"
+},
+{
+"name": "RD | CDN Sports",
+"group": "Latino | Sports"
+},
+{
+"name": "PY | Tigo Sports Plus HD",
+"group": "Latino | Sports"
+},
+{
+"name": "PY | Fox Sports 3 LATAM HD",
+"group": "Latino | Sports"
+},
+{
+"name": "PY | Fox Sports 2 LATAM HD",
+"group": "Latino | Sports"
+},
+{
+"name": "PY | ESPN Andina 3 HD",
+"group": "Latino | Sports"
+},
+{
+"name": "PY | ESPN Andina 2 HD",
+"group": "Latino | Sports"
+},
+{
+"name": "PY | ESPN Sur HD",
+"group": "Latino | Sports"
+},
+{
+"name": "PE | Liga 1 MAX",
+"group": "Latino | Sports"
+},
+{
+"name": "PA | CableOnda Sports HD",
+"group": "Latino | Sports"
+},
+{
+"name": "PA | CableOnda Sports FC HD",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | TyC Sports Internacional HD",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | TVC Deportes HD",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | TDMAX Futbol",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | TD+ 2 HD",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | TD+ HD",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | Sky Sports HD",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | SKY Sports 87",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | SKY Sports 86",
+"group": "Latino | Sports"
+},
+{
+"name": "GT |  Tigo Sports HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CR | Tigo Sports HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CR | TD+ 2  HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CR | TD+  HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CR | FUTV HD+",
+"group": "Latino | Sports"
+},
+{
+"name": "CR | FUTV HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CO | Win Sports HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CO | FOX SPORTS 3 UHD",
+"group": "Latino | Sports"
+},
+{
+"name": "CO | FOX SPORTS 2 UHD",
+"group": "Latino | Sports"
+},
+{
+"name": "CO | ESPN 3 UHD",
+"group": "Latino | Sports"
+},
+{
+"name": "CO | ESPN 2 HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CO | ESPN HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CO | Directv Sports Plus UHD",
+"group": "Latino | Sports"
+},
+{
+"name": "CO | Directv Sports 2",
+"group": "Latino | Sports"
+},
+{
+"name": "CL | TNT Sports Premium HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CL | ESPN Premium HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CL | Directv Sports HD",
+"group": "Latino | Sports"
+},
+{
+"name": "CL | CDO Premium",
+"group": "Latino | Sports"
+},
+{
+"name": "CL | CDO Basico",
+"group": "Latino | Sports"
+},
+{
+"name": "NZ | SKY Sport Select",
+"group": "NZ | Sports"
+},
+{
+"name": "NZ | SKY Sport 9",
+"group": "NZ | Sports"
+},
+{
+"name": "NZ | SKY Sport 8",
+"group": "NZ | Sports"
+},
+{
+"name": "NZ | SKY Sport 7",
+"group": "NZ | Sports"
+},
+{
+"name": "NZ | SKY Sport 6",
+"group": "NZ | Sports"
+},
+{
+"name": "NZ | SKY Sport 5",
+"group": "NZ | Sports"
+},
+{
+"name": "NZ | SKY Sport 4",
+"group": "NZ | Sports"
+},
+{
+"name": "NZ | SKY Sport 3",
+"group": "NZ | Sports"
+},
+{
+"name": "AU: Sky Thoroughbred Central",
+"group": "AU | Sports"
+},
+{
+"name": "AU: Sky Racing 2",
+"group": "AU | Sports"
+},
+{
+"name": "AU: Sky Racing 1",
+"group": "AU | Sports"
+},
+{
+"name": "AU: Sky Greyhound",
+"group": "AU | Sports"
+},
+{
+"name": "AU: Racing.com FHD",
+"group": "AU | Sports"
+},
+{
+"name": "AU: Kayo 4K UHD 5 (Netball)",
+"group": "AU | Sports"
+},
+{
+"name": "AU: Kayo 4K UHD 4 (F1)",
+"group": "AU | Sports"
+},
+{
+"name": "AU: Kayo 4K UHD 3 (League)",
+"group": "AU | Sports"
+},
+{
+"name": "IE | Ulster GAA 03:",
+"group": "IE | Sports"
+},
+{
+"name": "IE | Ulster GAA 02:",
+"group": "IE | Sports"
+},
+{
+"name": "IE | Ulster GAA 01: Abbey Vocational School Donegal vs Our Lady & St Patrick's College Knock 13:00",
+"group": "IE | Sports"
+},
+{
+"name": "De: Sky Sport Bundesliga 2 HD [ Match Time ]",
+"group": "Sports | DE Sports"
+},
+{
+"name": "ES: M+ Liga de Campeones UHD",
+"group": "Spain | Sports"
+},
+{
+"name": "ES: M+ Liga de Campeones 13",
+"group": "Spain | Sports"
+},
+{
+"name": "ES: M+ Liga de Campeones 12",
+"group": "Spain | Sports"
+},
+{
+"name": "ES: M+ Liga de Campeones 11",
+"group": "Spain | Sports"
+},
+{
+"name": "ES: M+ Liga de Campeones 10",
+"group": "Spain | Sports"
+},
+{
+"name": "ES: M+ Liga de Campeones 9",
+"group": "Spain | Sports"
+},
+{
+"name": "ES: M+ Liga de Campeones 8",
+"group": "Spain | Sports"
+},
+{
+"name": "ES: M+ Liga de Campeones 7",
+"group": "Spain | Sports"
+},
+{
+"name": "NL: Ziggo Sport UHD",
+"group": "Netherlands | Sports"
+},
+{
+"name": "NL: Ziggo Sport 6",
+"group": "Netherlands | Sports"
+},
+{
+"name": "NL: Ziggo Sport 5",
+"group": "Netherlands | Sports"
+},
+{
+"name": "NL: Ziggo Sport 4",
+"group": "Netherlands | Sports"
+},
+{
+"name": "NL: Ziggo Sport 3",
+"group": "Netherlands | Sports"
+},
+{
+"name": "NL: Ziggo Sport 2",
+"group": "Netherlands | Sports"
+},
+{
+"name": "NL: Ziggo Sport 1",
+"group": "Netherlands | Sports"
+},
+{
+"name": "BR: SporTV 3",
+"group": "Brazil | Sports"
+},
+{
+"name": "BR: SporTV 2",
+"group": "Brazil | Sports"
+},
+{
+"name": "BR: SporTV",
+"group": "Brazil | Sports"
+},
+{
+"name": "BR: ESPN 6",
+"group": "Brazil | Sports"
+},
+{
+"name": "BR: ESPN 5",
+"group": "Brazil | Sports"
+},
+{
+"name": "BR: ESPN 4",
+"group": "Brazil | Sports"
+},
+{
+"name": "BR: ESPN 3",
+"group": "Brazil | Sports"
+},
+{
+"name": "BR: ESPN 2",
+"group": "Brazil | Sports"
+},
+{
+"name": "NL: ESPN 4",
+"group": "Netherlands | Sports"
+},
+{
+"name": "CY | Cytavision Sports 7",
+"group": "Greece | Sports"
+},
+{
+"name": "CY | Cytavision Sports 6",
+"group": "Greece | Sports"
+},
+{
+"name": "CY | Cytavision Sports 5",
+"group": "Greece | Sports"
+},
+{
+"name": "CY | Cytavision Sports 4",
+"group": "Greece | Sports"
+},
+{
+"name": "CY | Cytavision Sports 3",
+"group": "Greece | Sports"
+},
+{
+"name": "CY | Cytavision Sports 2",
+"group": "Greece | Sports"
+},
+{
+"name": "CY | Cytavision Sports 1",
+"group": "Greece | Sports"
+},
+{
+"name": "CY | Cablenet Sports 2",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | SPORT PLUS",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS START",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS PRIME",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS PREMIER LEAGUE",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS EXTRA 2",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS EXTRA",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS 6",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS 5",
+"group": "Greece | Sports"
+},
+{
+"name": "UK | PDC Darts 8",
+"group": "UK | Sports"
+},
+{
+"name": "TSN+ 08: NO EVENT",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 07: NO EVENT",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 06: NO EVENT",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 02: US Open: Day #2 - RedZone at the US Open @ 31 Aug 11:00 AM ET",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 01: US Open: Day #2 - Court TBD @ 31 Aug 11:00 AM ET",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 17: NO EVENT",
+"group": "Sports | TSN+"
+},
+{
+"name": "ESPN+ 56: En Español-Philadelphia Phillies vs. Arizona Diamondbacks @ Aug 31 9:30PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 51: St. Thomas (FL) vs. Florida International @ Aug 31 7:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 45: En Español-2026 US Open (Primera Ronda) @ Aug 31 7:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 36: FC Barcelona vs. Rayo Vallecano (Matchday #3) @ Aug 31 3:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 35: En Español-FC Barcelona vs. Rayo Vallecano (Jornada 3) @ Aug 31 3:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 32: En Español-CA Osasuna vs. Getafe CF (Jornada 3) @ Aug 31 1:25PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 31: CA Osasuna vs. Getafe CF (Matchday #3) @ Aug 31 1:20PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 10: US Open Press Conferences @ Aug 31 11:00AM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN UNLTD 132: MLB: SF vs. ATL • NYM vs. TB (08.31 06:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 115: ACCN: Authentic ACC: NC State Spring Football (08.31 04:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 092: US Open: Court 9 (08.31 01:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 005: ACCN: NC State vs. Virginia (08.31 07:00 AM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "TRILLER 003: SOCCA WC 2026 GS, Aug 31, ES (08.31 01:00 PM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "TRILLER 001: SOCCA WC 2026 GS, Aug 31, AS (08.31 08:00 AM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "EFL12ⓧ| Burnley 20:00 Middlesbrough (CH) 02/09",
+"group": "Sports | EFL Matches (2)"
+},
+{
+"name": "EFL11ⓧ| West Bromwich Albion 19:45 Charlton Athletic (CH) 02/09",
+"group": "Sports | EFL Matches (2)"
+},
+{
+"name": "EFL10ⓧ| Queens Park Rangers 19:45 Cardiff City (CH) 02/09",
+"group": "Sports | EFL Matches (2)"
+},
+{
+"name": "EFL09ⓧ| Millwall 19:45 Wrexham (CH) 02/09",
+"group": "Sports | EFL Matches (2)"
+},
+{
+"name": "AU (STAN 100) | Qualifying: Grand Prix of Laguna Seca  Indycar 2026 (2026-09-06 06:30:39)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 99) | Argentina v Australia  Men`s International 2026 (2026-09-06 06:30:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 98) | Qualifying: Lone Star Le Mans  WEC 2026 (2026-09-06 05:50:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 97) | PL Saturday Wrap: Matchweek 3  Sep 6 (2026-09-06 05:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "La Liga 02: Barcelona 20:30 Rayo Vallecano 31/08",
+"group": "Sports | La Liga"
+},
+{
+"name": "La Liga 01: Osasuna 18:30 Getafe 31/08",
+"group": "Sports | La Liga"
+},
+{
+"name": "DAZN US 04: La Dazoneta (in Spanish) @ 31 Aug 09:00 AM ET",
+"group": "Sports | DAZN US"
+},
+{
+"name": "ESPN UNLTD 170: Soccer: St. Thomas (FL) vs. FIU (08.31 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 154: MLB: SD vs. CIN • MIA vs. WSH • MIL vs. CHC (08.31 06:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 151: MLB: SD vs. CIN • MIL vs. CHC (08.31 06:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 149: MLB: SD vs. CIN • MIA vs. WSH (08.31 06:15 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN+ 180: UC Irvine vs. Pacific @ Aug 30 10:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 153: Le Moyne vs. St. Bonaventure @ Aug 30 5:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 135: UC Santa Barbara vs. Arizona @ Aug 30 3:30PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 124: UL Monroe vs. East Texas A&M @ Aug 30 3:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 108: UC Riverside vs. Samford @ Aug 30 2:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 96: NC State vs. UCF @ Aug 30 2:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 07: Bruno Classic (at Brown) @ Aug 30 9:00AM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 03: FC Saarbrucken vs. F.C. Hansa Rostock @ Aug 30 7:30AM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 01: FC Utrecht vs. PSV @ Aug 30 6:10AM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "Soccer08: Sunderland vs Fulham ( Sky Sport 7/HD Feed ) @ 9:00 am",
+"group": "Sports | Football / Soccer"
+},
+{
+"name": "Soccer06: Leeds United vs Brentford ( Sky Sport 6/HD Feed ) @ 9:00 am",
+"group": "Sports | Football / Soccer"
+},
+{
+"name": "ESPN UNLTD 129: Soccer: St Thomas (MN) vs. E Illinois (08.30 01:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 020: ESPN+: Bruno Classic (at Brown) (08.30 09:00 AM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 001: ACCN: NC State vs. Virginia (08.30 05:15 AM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "PEACOCK SPORTS 001: La Vuelta a España: Stage 9 (08.30 06:00 AM ET)",
+"group": "Sports | Peacock"
+},
+{
+"name": "TRILLER 008: SOCCA WC 2026 GS, Aug 30, ES (08.30 01:00 PM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "TRILLER 004: SOCCA WC 2026 GS, Aug 30, AS (08.30 08:00 AM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "TRILLER 001: SOCCA WC 2026 GS, Aug 30, MS (08.30 03:00 AM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "Paramount+ 04: cbssportshq: HQ Gameday Scoreboard @ 30 Aug 12:00 PM ET",
+"group": "Sports | Paramount+"
+},
+{
+"name": "Sportsnet+ 02: FC Utrecht vs. PSV Eindhoven @ Aug 30 6:05AM ET",
+"group": "Sports | Sportsnet+"
+},
+{
+"name": "MiLB 60: MiLB AAA 14: El Paso Chihuahuas at Oklahoma City Comets 30 @ Aug 07:05 PM ET",
+"group": "Sports | MiLB"
+},
+{
+"name": "SEC+ / ACC extra 31: UC Davis vs. #1 Stanford (ACCNX) @ Aug 30 10:00PM ET",
+"group": "Sports | SEC+ / ACC Extra"
+},
+{
+"name": "SEC+ / ACC extra 17: UL Monroe vs. Ole Miss (SECPLUS) @ Aug 30 3:00PM ET",
+"group": "Sports | SEC+ / ACC Extra"
+},
+{
+"name": "DAZN US 20: AEW: All In London 2026 - Buy-In @ 30 Aug 11:00 AM ET",
+"group": "Sports | DAZN US"
+},
+{
+"name": "DAZN CA 27: AEW: All In London 2026 - Buy-In @ 30 Aug 10:00 AM ET",
+"group": "Sports | DAZN CA"
+},
+{
+"name": "ViaPlay NO 45: Road America: Race (GT World Challenge America) @ 30 Aug 08:30 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 40: Snap-On Milwaukee Mile 250: Race 2 (IndyCar) @ 30 Aug 07:00 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 39: FM Championship: Siste runde (LPGA) @ 30 Aug 07:00 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 34: Rennes - Le Mans: 2. runde (Ligue 1) @ 30 Aug 05:10 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 30: Road America: Kvalifisering (GT World Challenge America) @ 30 Aug 04:05 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 18: Nürburgring: Endurance (GT World Challenge Asia) @ 30 Aug 02:30 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 05: British Masters: Siste runde (DP World Tour) @ 30 Aug 11:00 AM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 02: Nürburgring: Kvalifisering (GT World Challenge Europe) @ 30 Aug 09:40 AM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "MLS 05 | MLS Wrap-Up (English) 30 Aug 9:25PM ET",
+"group": "Sports | MLS (2)"
+},
+{
+"name": "ESPN UNLTD 356: ESPN+: Our Lady vs. Texas A&M-CC (08.30 08:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 348: ESPNU: TrueSouth: Ocean Springs, MS (08.30 07:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 342: ESPNU: TrueSouth: Jacksonville, FL (08.30 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 316: ESPN+: Le Moyne vs. St Bonaventure (08.30 05:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 264: SEC Network +: UL Monroe vs. Ole Miss (08.30 03:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 255: Volleyball: UL Monroe vs. E Texas A&M (08.30 03:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 235: ESPNU: TrueSouth: Charleston, SC (08.30 02:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 230: ESPNU: TrueSouth: Clinton, GA (08.30 02:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 224: ESPN+: SC State vs. Wofford (08.30 02:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 217: ESPN+: GA Southern vs. Murray St (08.30 02:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 209: ESPN+: SE Missouri vs. North Alabama (08.30 02:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 137: MLB: SD vs. TB • SEA vs. TOR (08.30 01:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "TSN+ 17: Premier Lacrosse League: QF - Maryland Whipsnakes vs. Boston Cannons @ 29 Aug 08:30 PM ET",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 12: Premier Lacrosse League: QF - Denver Outlaws vs. California Redwoods @ 29 Aug 06:00 PM ET",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 02: IndyCar Qualifying: Snap-on Makers and Fixers 250 @ 29 Aug 11:00 AM ET",
+"group": "Sports | TSN+"
+},
+{
+"name": "ESPN+ 153: El Paso Locomotive FC vs. Loudoun United FC @ Aug 29 9:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 55: UT Rio Grande Valley vs. UMBC @ Aug 29 3:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 34: Georgetown (KY) vs. Butler @ Aug 29 1:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 30: Miami (OH) vs. Indiana @ Aug 29 1:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 25: AZ vs. Go Ahead Eagles @ Aug 29 12:40PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 05: Berwyn, PA vs. Oakley, CA @ Aug 29 10:30AM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 03: Bruno Classic (at Brown) @ Aug 29 10:00AM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "NCAAF 041: UT PERMIAN BASIN AT UTRGV | 8.29 8:00PM | ESPN+",
+"group": "Sports | NCAAF Events"
+},
+{
+"name": "NCAAF 040: ALABAMA A&M VS HOWARD (IN ATLANTA, GA) | 8.29 7:30PM | ABC",
+"group": "Sports | NCAAF Events"
+},
+{
+"name": "NCAAF 032: OK PANHANDLE STATE AT UIW | 8.29 7:00PM | ESPN+",
+"group": "Sports | NCAAF Events"
+},
+{
+"name": "NCAAF 027: MOREHOUSE VS UAPB (IN LITTLE ROCK, AR) | 8.29 7:00PM | SWAC TV (HTTPS://TV.SWAC.ORG/)",
+"group": "Sports | NCAAF Events"
+},
+{
+"name": "NCAAF 025: ST. FRANCIS (IL) AT ILLINOIS STATE | 8.29 7:00PM | ESPN+",
+"group": "Sports | NCAAF Events"
+},
+{
+"name": "NCAAF 004: ROOSEVELT AT CHICAGO STATE | 8.29 1:00PM | TV TBA",
+"group": "Sports | NCAAF Events"
+},
+{
+"name": "NCAAF 003: GEORGETOWN (KY) AT BUTLER | 8.29 1:00PM | ESPN+",
+"group": "Sports | NCAAF Events"
+},
+{
+"name": "Soccer23: RB Leipzig vs Borussia M'gladbach ( OneSoccer Feed ) @ 9:30 am",
+"group": "Sports | Football / Soccer"
+},
+{
+"name": "Soccer22: RB Leipzig vs Borussia M'gladbach ( OneSoccer Feed ) @ 9:30 am",
+"group": "Sports | Football / Soccer"
+},
+{
+"name": "Soccer04: AFC Bournemouth vs Everton ( Sky Sport 8/HD Feed ) @ 10:00 am",
+"group": "Sports | Football / Soccer"
+},
+{
+"name": "Paramount+ 18: cbssportshq: HQ Gameday Scoreboard @ 29 Aug 12:00 PM ET",
+"group": "Sports | Paramount+"
+},
+{
+"name": "ESPN UNLTD 136: Volleyball: UT Rio Grande vs. UMBC (08.29 03:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 080: Football: Georgetown (KY) vs. Butler (08.29 01:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 067: Soccer: AZ vs. Go Ahead (AZ vs. Go Ahead (ESP)) (08.29 12:40 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 066: Soccer: AZ vs. Go Ahead (08.29 12:40 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 027: Baseball: Berwyn, PA vs. Oakley, CA (08.29 10:30 AM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 025: ESPN+: Bruno Classic (at Brown) (08.29 10:00 AM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "TRILLER 010: SOCCA WC 2026 GS, Aug 29, ES (08.29 01:00 PM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "TRILLER 009: Al Ain vs Al Nasr (08.29 12:20 PM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "TRILLER 006: Al Jazira vs Ajman (08.29 09:45 AM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "TRILLER 004: SOCCA WC 2026 GS, Aug 29, AS (08.29 08:00 AM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "TRILLER 001: SOCCA WC 2026 GS, Aug 29, MS (08.29 03:00 AM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "Peacock 03: RB Leipzig vs. Borussia Monchengladbach (Español) @ 29 Aug 09:20 AM ET",
+"group": "Sports | Peacock (2)"
+},
+{
+"name": "Sky Sports + 07: WTA Tour Final at the Abierto GNP Seguros M. Kozyreva/M. Lumsden v M. Joint/Xu Yifan Aug 29 9:55 PM BST",
+"group": "UK | Sky Sports+"
+},
+{
+"name": "Sportsnet+ 05: AZ Alkmaar vs. Go Ahead Eagles @ Aug 29 12:35PM ET",
+"group": "Sports | Sportsnet+"
+},
+{
+"name": "Bundesliga 03: SV Elversberg 14:30 Bayer 04 Leverkusen 29/08",
+"group": "Sports | DE Sports"
+},
+{
+"name": "Bundesliga 02: RB Leipzig 14:30 Borussia Mönchengladbach 29/08",
+"group": "Sports | DE Sports"
+},
+{
+"name": "SEC+ ACCNX 015: SEC Network +: UT Arlington vs. Arkansas (08.29 08:00 PM ET)",
+"group": "Sports | SEC+ / ACC Extra (2)"
+},
+{
+"name": "Tennis 05: TC Live | Live & On Demand: TC Live at the Hall of Fame @ 29 Aug 06:00 PM ET",
+"group": "Sports | Tennis"
+},
+{
+"name": "Tennis 04: ATP Winston Salem & WTA Monterrey: Kozyreva M / Lumsden M - Joint M / Xu Y @ 29 Aug 05:00 PM ET",
+"group": "Sports | Tennis"
+},
+{
+"name": "MiLB 34: MiLB AAA 10: El Paso Chihuahuas at Oklahoma City Comets 29 @ Aug 07:05 PM ET",
+"group": "Sports | MiLB"
+},
+{
+"name": "DAZN CA 52: CS Saint-Laurent vs. McKenzie United SC @ 29 Aug 05:00 PM ET",
+"group": "Sports | DAZN CA"
+},
+{
+"name": "ViaPlay NO 59: FM Championship: 3. runde (LPGA) @ 29 Aug 09:00 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 54: Lyon - Le Havre: 2. runde (Ligue 1) @ 29 Aug 08:40 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 53: Snap-On Makers and Fixers 250: Race 1 (IndyCar) @ 29 Aug 08:30 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 43: Snap-On Milwaukee Mile 250: Kvalifisering (IndyCar) @ 29 Aug 05:00 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 13: Kolding IF - AB Gladsaxe: 6. runde (Betinia LIGA) @ 29 Aug 12:55 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 01: British Masters: 3. runde (DP World Tour) @ 29 Aug 10:30 AM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ESPN UNLTD 332: Soccer: El Paso vs. Loudoun (08.29 09:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 313: ESPN+: CA Baptist vs. New Mexico St (08.29 08:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 302: ESPNU: TrueSouth: Jasper, AL (08.29 07:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 265: ESPNU: TrueSouth: Little Rock, AR (08.29 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 263: Football: SF Austin vs. McNeese (08.29 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 247: NCAA Football: CW College Football Countdown (08.29 06:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 237: Football: SE Missouri vs. Indiana St (08.29 06:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 232: Football: DeSoto (TX) vs. St. Thomas Aquinas (FL) (08.29 06:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 170: Spanish LALIGA: OH vs. NV • SEV vs. ATM (08.29 03:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 168: Baseball: Ohio vs. Nevada (Hamilton, OH vs. Nevada (ESP)) (08.29 03:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 156: MLB: OH vs. NV • HOU vs. NYM (08.29 03:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "CZ: Oneplay Sport 1",
+"group": "Czech | Sports"
+},
+{
+"name": "CZ: Nova Sport 6",
+"group": "Czech | Sports"
+},
+{
+"name": "CZ: Nova Sport 5",
+"group": "Czech | Sports"
+},
+{
+"name": "CZ: Nova Sport 4",
+"group": "Czech | Sports"
+},
+{
+"name": "TR: Tivibu Spor",
+"group": "Turkey | Sports"
+},
+{
+"name": "TR: Tabii Spor 6",
+"group": "Turkey | Sports"
+},
+{
+"name": "TR: Tabii Spor 5",
+"group": "Turkey | Sports"
+},
+{
+"name": "TR: Tabii Spor 4",
+"group": "Turkey | Sports"
+},
+{
+"name": "DE: Sky Sport News FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "DE: Sky Sport Mix FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "DE: Sky Sport Golf FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "DE: Sky Sport F1 FHD",
+"group": "Germany | Sports"
+},
+{
+"name": "AR: LIBYA SPORT 2 HD (LY)",
+"group": "Arabic | Sports"
+},
+{
+"name": "AR: KTV SPORT HD",
+"group": "Arabic | Sports"
+},
+{
+"name": "AR: KSA SPORTS 3 HD",
+"group": "Arabic | Sports"
+},
+{
+"name": "IT: Sky Sport 255",
+"group": "Italy | Sports"
+},
+{
+"name": "IT: Sky Sport 254",
+"group": "Italy | Sports"
+},
+{
+"name": "IT: Sky Sport 253",
+"group": "Italy | Sports"
+},
+{
+"name": "IT: Sky Sport 252",
+"group": "Italy | Sports"
+},
+{
+"name": "PA: Canal 2 TVN",
+"group": "Panama | TV"
+},
+{
+"name": "PA: Cable Onda Sports (COS FC)",
+"group": "Panama | TV"
+},
+{
+"name": "MX | SKY Sports 85",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | SKY Sports 84",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | SKY Sports 83",
+"group": "Latino | Sports"
+},
+{
+"name": "MX | SKY Sports 82",
+"group": "Latino | Sports"
+},
+{
+"name": "CO | CLARO Sports LATAM HD",
+"group": "Latino | Sports"
+},
+{
+"name": "NZ | SKY Sport 2",
+"group": "NZ | Sports"
+},
+{
+"name": "NZ | SKY Sport 1",
+"group": "NZ | Sports"
+},
+{
+"name": "St Mirren TV",
+"group": "Sports | SPFL Teams"
+},
+{
+"name": "Super League + 01: ???? LIVE | St Helens v Leeds Rhinos | Round 25 | Betfred Super League",
+"group": "Sports | SuperLeague+"
+},
+{
+"name": "ESPN+ 143: Belton (MO) vs. Kearney (MO) @ Aug 28 8:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 138: Raymore-Peculiar (MO) vs. Liberty (MO) @ Aug 28 8:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN UNLTD 020: Volleyball: SC Upstate vs. Old Dominion (08.28 10:00 AM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "TRILLER 006: SOCCA WC 2026 GS, Aug 28, ES (08.28 01:00 PM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "TRILLER 005: Al Wasl vs Shabab Al-Ahli (08.28 12:20 PM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "TRILLER 002: SOCCA WC 2026 GS, Aug 28, AS (08.28 08:00 AM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "Peacock 03: AC Milan vs. Venezia (Español) @ 28 Aug 02:30 PM ET",
+"group": "Sports | Peacock (2)"
+},
+{
+"name": "Sky Sports + 05: WTA Tour Semi-Finals at the Abierto GNP Seguros S. Aoyama/Liang En-Shuo v M. Joint/Xu Yifan Aug 29 3:25 AM BST",
+"group": "UK | Sky Sports+"
+},
+{
+"name": "Sportsnet+ 03: St Helens vs. Leeds Rhinos @ Aug 28 2:30PM ET",
+"group": "Sports | Sportsnet+"
+},
+{
+"name": "SEC+ ACCNX 019: SEC Network +: SE Louisiana vs. Ole Miss (08.28 07:00 PM ET)",
+"group": "Sports | SEC+ / ACC Extra (2)"
+},
+{
+"name": "Tennis 07: ATP Winston Salem & WTA Monterrey: Aoyama S / Liang E - Joint M / Xu Y @ 28 Aug 10:10 PM ET",
+"group": "Sports | Tennis"
+},
+{
+"name": "Tennis 05: ATP Winston Salem & WTA Monterrey: Wqf1 - Li, Ann @ 28 Aug 07:00 PM ET",
+"group": "Sports | Tennis"
+},
+{
+"name": "SEC+ / ACC extra 16: SE Louisiana vs. Ole Miss (SECPLUS) @ Aug 28 7:00PM ET",
+"group": "Sports | SEC+ / ACC Extra"
+},
+{
+"name": "ViaPlay NO 14: AC Horsens - Viborg FF: 6. runde (Superliga) @ 28 Aug 06:55 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 07: FM Championship: 2. runde (LPGA) @ 28 Aug 03:00 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 04: British Masters: 2. runde (DP World Tour) @ 28 Aug 01:30 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ESPN UNLTD 316: Football: Belton vs. Kearney (MO) (08.28 08:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 313: Football: Raymore-Peculiar (MO) vs. Liberty (MO) (08.28 08:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 281: Big 12 Conference: Texas A&M-CC vs. Kansas St (08.28 07:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 271: Football: St. Joseph Reg. vs. Mount Carmel (IL) (08.28 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 254: ESPN+: SF Austin vs. Wichita St (08.28 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 250: Soccer: GA Southern vs. Jacksonville (08.28 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "LIVE EVENT 07 - Grand Theft Auto VI: An Extended Look (VOD)",
+"group": "PPV Events | 2"
+},
+{
+"name": "NCAAF 008: NORTHWESTERN (IA) AT WESTERN ILLINOIS | 8.27 7:00 PM | ESPN+",
+"group": "Sports | NCAAF Events"
+},
+{
+"name": "ESPN UNLTD 108: ESPNews: SportsCenter Special: My Wish 2025 (08.27 02:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN+ 28: AC Omonia vs. K. Sint-Truidense VV (UEFA Europa League) @ Aug 27 1:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "Tennis 04: ATP Winston Salem & WTA Monterrey: Parks, Alycia - Li, Ann @ 27 Aug 05:00 PM ET",
+"group": "Sports | Tennis"
+},
+{
+"name": "ViaPlay NO 02: FM Championship: 1. runde (LPGA) @ 27 Aug 03:00 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ViaPlay NO 01: British Masters: 1. runde (DP World Tour) @ 27 Aug 01:30 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "ESPN UNLTD 345: ESPNU: TrueSouth: Charleston, SC (08.27 11:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 326: ESPNU: TrueSouth: Jacksonville, FL (08.27 09:30 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 291: ESPN+: Sam Houston vs. Texas A&M-CC (08.27 08:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 268: MLB: KC vs. TOR • HOU vs. NYY (08.27 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 262: MLB: KC vs. TOR • HOU vs. NYY • LAD vs. ATL (08.27 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 222: Football: NW College vs. W Illinois (08.27 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 213: ESPN+: GA Southern vs. Mercer (08.27 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 171: Soccer: SF Austin vs. Arkansas St (08.27 05:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 139: ESPN2: SportsCenter Special: My Wish 2025 (08.27 03:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ViaPlay NO 01: FA 2000 - Lyngby: 2. runde (Betano Pokalen) @ 26 Aug 05:25 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "PARAMOUNT + 012: Concacaf Champions Cup: LD Alajuelense vs. Plaza Amador (08.26 10:25 PM ET)",
+"group": "Sports | Paramount+ (2)"
+},
+{
+"name": "PARAMOUNT + 010: Concacaf Champions Cup: CS Herediano vs. Antigua GFC (08.26 08:25 PM ET)",
+"group": "Sports | Paramount+ (2)"
+},
+{
+"name": "PARAMOUNT + 009: Concacaf Champions Cup: CD Marathon vs. Real Estelí (08.26 08:25 PM ET)",
+"group": "Sports | Paramount+ (2)"
+},
+{
+"name": "ESPN UNLTD 066: MLB: NV vs. IA • CHC vs. ARI (08.26 03:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "TRILLER 003: NT Strike vs Victoria (08.26 08:30 PM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "Tennis 06: ATP Winston Salem & WTA Monterrey: Timofeeva, Maria - Li, Ann @ 26 Aug 05:00 PM ET",
+"group": "Sports | Tennis"
+},
+{
+"name": "MAX UK 12: UEFA Champions League | Play-Offs | 2nd Leg: NK Celje - Slovan Bratislava @ 26 Aug 07:55 PM GMT-1",
+"group": "Sports | HBO Max UK"
+},
+{
+"name": "MAX UK 04: Wuhan Open | Round 4: Judd Trump - Si Jiahui @ 26 Aug 07:00 AM GMT-1",
+"group": "Sports | HBO Max UK"
+},
+{
+"name": "Paramount+ 17: Concacaf Champions Cup: LD Alajuelense vs. Plaza Amador @ 26 Aug 10:25 PM ET",
+"group": "Sports | Paramount+"
+},
+{
+"name": "Paramount+ 15: Concacaf Champions Cup: CD Marathon vs. Real Estelí @ 26 Aug 08:25 PM ET",
+"group": "Sports | Paramount+"
+},
+{
+"name": "Paramount+ 14: Concacaf Champions Cup: CS Herediano vs. Antigua GFC @ 26 Aug 08:25 PM ET",
+"group": "Sports | Paramount+"
+},
+{
+"name": "PARAMOUNT + 013: Concacaf Champions Cup: CS Cartaginés vs. CD FAS (08.25 10:25 PM ET)",
+"group": "Sports | Paramount+ (2)"
+},
+{
+"name": "ESPN UNLTD 117: MLB: TB vs. DET • BOS vs. MIA • HOU vs. NYY (08.25 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 116: MLB: TB vs. DET • HOU vs. NYY (08.25 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 096: MLB: TB vs. DET • BOS vs. MIA (08.25 06:15 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "TSN+ 11: 2026 US Open Tennis: Roger Federer - An Icon Returns to New York @ 25 Aug 08:00 PM ET",
+"group": "Sports | TSN+"
+},
+{
+"name": "ESPN+ 35: 2026 US Open: Roger Federer, An Icon Returns to New York @ Aug 25 8:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ViaPlay NO 03: Brønshøj - AB: 2. runde (Betano Pokalen) @ 25 Aug 06:25 PM Oslo",
+"group": "Sports | ViaPlay"
+},
+{
+"name": "MLS 02 | CF Monterrey vs. Chicago Fire FC (Spanish) 25 Aug 8:25PM ET",
+"group": "Sports | MLS (2)"
+},
+{
+"name": "MLS 01 | CF Monterrey vs. Chicago Fire FC (English) 25 Aug 8:25PM ET",
+"group": "Sports | MLS (2)"
+},
+{
+"name": "MAX UK 06: Wuhan Open | Round 3: Mark Selby - He Guoqiang @ 25 Aug 12:30 PM GMT-1",
+"group": "Sports | HBO Max UK"
+},
+{
+"name": "MAX UK 04: Wuhan Open | Round 3: Si Jiahui - Dylan Emery @ 25 Aug 07:00 AM GMT-1",
+"group": "Sports | HBO Max UK"
+},
+{
+"name": "ESPN PLUS 040: Missoula, MT vs. Hermiston, OR (Softball) (07.18 9PM ET/6PM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 037: Concord, NH vs. St. Albans, VT (Softball) (07.18 8PM ET/5PM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 028: Omaha, NE vs. Columbia, MO (Softball) (07.18 7PM ET/4PM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 021: Live Oak, CA vs. San Marino, CA (Softball) (07.18 6PM ET/3PM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 016: Gorham, ME vs. Worcester, MA (Softball) (07.18 4PM ET/1PM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 015: Appleton, WI vs. St. Clair, MI (Softball) (07.18 4PM ET/1PM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 014: Monument, CO vs. Soldotna, AK (Softball) (07.18 3PM ET/12PM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 012: Carlsbad, NM vs. Kenner, LA (Softball) (07.18 2PM ET/11AM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 009: Lebanon, TN vs. Mountain Brook, AL (Softball) (07.18 1PM ET/10AM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 008: Johnston, IA (Softball) (07.18 1PM ET/10AM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 007: Las Vegas, NV vs. Sahuarita, AZ (Softball) (07.18 12PM ET/9AM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 006: Inez, TX vs. Helotes, TX (Softball) (07.18 11AM ET/8AM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 005: Washington, DC vs. Toms River, NJ (Softball) (07.18 10AM ET/7AM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 004: Logan, WV vs. Warner Robins, GA (Softball) (07.18 10AM ET/7AM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN PLUS 003: Elmhurst, IL (Softball) (07.18 10AM ET/7AM PT)",
+"group": "Sports | ESPN+ (2)"
+},
+{
+"name": "ESPN UNLTD 130: MLB: TB vs. DET • TEX vs. CHW (08.24 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "TRILLER 002: NT Strike vs ACT Comets (08.24 08:30 PM ET)",
+"group": "Sports | Triller"
+},
+{
+"name": "EFL14ⓧ| MK Dons 12:30 Leicester City (L1) 29/08",
+"group": "Sports | EFL Matches (2)"
+},
+{
+"name": "L1 | MK Dons",
+"group": "Sports | EFL Teams"
+},
+{
+"name": "Sky Sport 1 UHD (NZ)",
+"group": "4K / UHD"
+},
+{
+"name": "NFL Channel (PC)",
+"group": "US | Sports"
+},
+{
+"name": "NBC Golf Pass (PC)",
+"group": "US | Sports"
+},
+{
+"name": "ESPN+ 26: CA Osasuna vs. Levante UD (Matchday #2) @ Aug 24 1:20PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "Soccer08: Hallescher FC vs Schalke 04 ( Sky Sport 2/HD Feed ) @ 2:45 pm",
+"group": "Sports | Football / Soccer"
+},
+{
+"name": "Paramount+ 06: cbssportshq: HQ Gameday Scoreboard @ 23 Aug 12:00 PM ET",
+"group": "Sports | Paramount+"
+},
+{
+"name": "Tennis 07: ATP Winston Salem & WTA Monterrey: Osorio, Camila - Li, Ann @ 24 Aug 05:00 PM ET",
+"group": "Sports | Tennis"
+},
+{
+"name": "MAX UK 02: Wuhan Open | Round 2: Wu Yize - Artemijs Žižins   @ 24 Aug 07:00 AM GMT-1",
+"group": "Sports | HBO Max UK"
+},
+{
+"name": "BR: ESPN",
+"group": "Brazil | Sports"
+},
+{
+"name": "BR: Band Sports HD",
+"group": "Brazil | Sports"
+},
+{
+"name": "NL: ESPN 3",
+"group": "Netherlands | Sports"
+},
+{
+"name": "NL: ESPN 2",
+"group": "Netherlands | Sports"
+},
+{
+"name": "NL: ESPN",
+"group": "Netherlands | Sports"
+},
+{
+"name": "CY | Cablenet Sports 1",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS 4",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS 3",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS 2",
+"group": "Greece | Sports"
+},
+{
+"name": "GR | NOVA SPORTS 1",
+"group": "Greece | Sports"
+},
+{
+"name": "UK DAZN 1 (HD)",
+"group": "Sports | DAZN"
+},
+{
+"name": "UK (DZ) DAZN 1 (HD)",
+"group": "Sports | DAZN"
+},
+{
+"name": "PT DAZN 4 (HD)",
+"group": "Sports | DAZN"
+},
+{
+"name": "PT DAZN 4 (FHD)",
+"group": "Sports | DAZN"
+},
+{
+"name": "PT DAZN 3 (HD)",
+"group": "Sports | DAZN"
+},
+{
+"name": "PT DAZN 3 (FHD)",
+"group": "Sports | DAZN"
+},
+{
+"name": "FR Ligue1+ (HD)",
+"group": "Sports | DAZN"
+},
+{
+"name": "FR Ligue1+ (FHD)",
+"group": "Sports | DAZN"
+},
+{
+"name": "(UK) (Dazn 050) | Rolly vs. Teofimo (2026-08-23 01:00:00)",
+"group": "Sports | DAZN UK"
+},
+{
+"name": "(UK) (Dazn 049) | Chiefs @ Buccaneers (2026-08-23 00:30:10)",
+"group": "Sports | DAZN UK"
+},
+{
+"name": "Sky Sci-Fi FHD 5.1",
+"group": "UK | Sky Now 5.1"
+},
+{
+"name": "Sky Cinema Sci-Fi Horror FHD 5.1",
+"group": "UK | Sky Now 5.1"
+},
+{
+"name": "TSN+ 16: NO EVENT",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 15: NO EVENT",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 14: NO EVENT",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 13: NO EVENT",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 12: NO EVENT",
+"group": "Sports | TSN+"
+},
+{
+"name": "TSN+ 11: NO EVENT",
+"group": "Sports | TSN+"
+},
+{
+"name": "AU (STAN 99) | PL Live • 5 September  Premier League 2026/27 (2026-09-05 20:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 40) | PL Weekend Wrap: Matchweek 2  Aug 31 (2026-08-31 04:00:39)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "ESPN UNLTD 083: Volleyball: Western KY vs. SE Missouri (08.29 01:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "AU (STAN 71) | PL Weekend Wrap: Matchweek 2  Aug 31 (2026-08-31 04:00:39)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 22) | PL Saturday Wrap: Matchweek 2  Aug 30 (2026-08-30 05:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "ESPN UNLTD 287: ESPN+: #25 Oregon vs. SE Missouri (08.29 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "OHL TV: No Scheduled Event",
+"group": "Sports | OHL/WHL/QMJHL"
+},
+{
+"name": "ESPN UNLTD 096: Volleyball: Western KY vs. SE Missouri (08.28 01:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "AU (STAN 82) | PL Live • 5 September  Premier League 2026/27 (2026-09-05 20:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 61) | PL Weekend Wrap: Matchweek 2  Aug 31 (2026-08-31 04:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 38) | PL Saturday Wrap: Matchweek 2  Aug 30 (2026-08-30 05:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "ESPN UNLTD 233: Volleyball: SE Louisiana vs. Ole Miss (08.28 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN+ 94: Houston Christian vs. SE Louisiana @ Aug 27 7:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "ESPN+ 59: SE Louisiana vs. Southern Miss @ Aug 27 5:00PM ET",
+"group": "Sports | ESPN+"
+},
+{
+"name": "AU (STAN 90) | PL Live • 5 September  Premier League 2026/27 (2026-09-05 20:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 70) | PL Weekend Wrap: Matchweek 2  Aug 31 (2026-08-31 04:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 60) | PL Live • 30 August  Premier League 2026/27 (2026-08-30 22:00:34)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 47) | PL Saturday Wrap: Matchweek 2  Aug 30 (2026-08-30 05:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "ESPN UNLTD 215: Football: Hou Christian vs. SE Louisiana (08.27 07:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 164: Soccer: SE Missouri vs. Missouri St (08.27 05:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "ESPN UNLTD 163: Soccer: SE Louisiana vs. Southern Miss (08.27 05:00 PM ET)",
+"group": "Sports | ESPN Unlimited"
+},
+{
+"name": "AU (STAN 95) | PL Live • 5 September  Premier League 2026/27 (2026-09-05 20:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 76) | PL Weekend Wrap: Matchweek 2  Aug 31 (2026-08-31 04:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 66) | PL Live • 30 August  Premier League 2026/27 (2026-08-30 22:00:39)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 53) | PL Saturday Wrap: Matchweek 2  Aug 30 (2026-08-30 05:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "AU (STAN 66) | PL Saturday Wrap: Matchweek 2  Aug 30 (2026-08-30 05:00:29)",
+"group": "Sports | Stan (2)"
+},
+{
+"name": "EFL36ⓧ| No Scheduled Event",
+"group": "Sports | EFL Matches (2)"
+},
+{
+"name": "AU (STAN 67) | PL Saturday Wrap: Matchweek 2  Aug 30 (2026-08-30 05:00:29)",
+"group": "Sports | Stan (2)"
+}
+]

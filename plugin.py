@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import types
@@ -87,6 +88,39 @@ logger = logging.getLogger(f"plugins.{PLUGIN_KEY}")
 # reads and plugin.json can't drift apart. Other one-off settings stay inline.
 _WIDEN_STREAM_POOL_SETTING = "widen_stream_pool"
 
+# Ordered language preference for a matchup channel's stream stack (#206),
+# e.g. "en, fr, es". REPLACED the #111 scheme where English-first ordering was
+# reachable only by enabling `widen_stream_pool`, an unrelated setting: a German
+# household could not ask for German, and an English one silently got
+# quality-only ordering. widen_stream_pool now does only its pool-widening job.
+#
+# Blank means no language preference (quality-only within a provenance tier).
+# The default is "en", so an install that never touches this gets English-first,
+# which is the behaviour change #206 asked for.
+_LANGUAGE_PREFS_SETTING = "language_preferences"
+_LANGUAGE_PREFS_DEFAULT = "en"
+
+# Provenance tiers (#206). A stream the user attached to a channel of their own
+# outranks one reachable only through the global Path C stream-name sweep. See
+# _stream_sort_key for why this is the outermost sort key and
+# _curated_stream_ids for the plugin-owned-channel trap it has to dodge.
+_PROVENANCE_CURATED = 0
+_PROVENANCE_UNCURATED = 1
+
+# Per-ChannelGroup stream policy (#206), two comma-separated group-name lists.
+# DELIBERATELY two settings and not one three-state list: demoting a group and
+# removing it have materially different availability consequences, and folding
+# them into one control makes "keep this as an emergency backup" unsayable.
+#
+# DO NOT infer these from group names. An earlier design classified all 346
+# groups by language automatically; it was dropped because a group is a source
+# taxonomy, not an audio-language guarantee (measured: "Sports | DE Sports"
+# carries "Sky Sport Premier League", a German feed named entirely in English,
+# and generic groups like "Sports | ESPN Unlimited" carry no signal at all).
+# Group identity is a user-authored policy boundary; only the user knows it.
+_FALLBACK_ONLY_GROUPS_SETTING = "fallback_only_groups"
+_EXCLUDED_GROUPS_SETTING = "excluded_groups"
+
 # Stream ordering preference. "quality" (default) keeps the historical
 # quality-only ordering; "us_preferred" keeps quality primary but breaks ties
 # toward US English broadcasts. The value strings are constants (not inline
@@ -139,12 +173,17 @@ _FAVORITES_ONLY_POSTSEASON = "postseason"  # favorites + any postseason game
 _ENABLED_PROFILES_SETTING = "enabled_channel_profiles"
 
 
-def _parse_profile_names(raw: Any) -> List[str]:
-    """Split the comma-separated profile setting into clean names.
+def _parse_name_list(raw: Any) -> List[str]:
+    """Split a comma-separated setting into clean names.
+
+    Shared by `enabled_channel_profiles` (ChannelProfile names) and by #206's
+    `fallback_only_groups` / `excluded_groups` (ChannelGroup names). One parser
+    rather than three: the settings differ in what the names MEAN, not in how a
+    human types a comma-separated list, and a second copy would drift.
 
     Order-preserving and case-insensitively deduped, because the value is
     reported back to the user and a list echoing their typo twice reads as a
-    bug. Blank/None yields [], which callers read as "all profiles".
+    bug. Blank/None yields [], which every caller reads as "no restriction".
     """
     if not raw or not isinstance(raw, str):
         return []
@@ -157,6 +196,97 @@ def _parse_profile_names(raw: Any) -> List[str]:
         seen.add(name.casefold())
         out.append(name)
     return out
+
+
+def _curated_stream_ids() -> set:
+    """Stream ids the USER has attached to a channel of their own (#206).
+
+    This is the provenance signal behind _stream_sort_key's outermost key. It is
+    read from the Channel<->Stream through-table rather than guessed from a
+    stream's name, because it is a statement of intent the user already made:
+    the #206 reporter said "I haven't added them as channels because they're
+    just backups".
+
+    THE TRAP, and it is self-reinforcing if you get it wrong: our OWN virtual
+    matchup channels are ordinary Channel rows holding ordinary ChannelStream
+    links, so a naive "attached to any channel" test counts them. Every apply
+    would promote the streams the previous apply attached, so an uncurated feed
+    would look curated from its second run onward and the error would compound
+    forever. Measured on a live instance at the time of writing: 34 streams were
+    attached ONLY to plugin-owned channels. Hence the _owned_tvg_id_q() exclude.
+
+    DO NOT rewrite this as `Stream.objects.filter(channels__isnull=False)
+    .exclude(...)`. `channels` is multi-valued, so the exclude would drop a
+    stream that is attached to BOTH a real channel and one of ours (95 such
+    streams on that same instance) -- exactly the streams that ARE curated. The
+    through-table row is single-valued per (channel, stream) pair, which is what
+    makes the exclude mean what it reads as.
+    """
+    from apps.channels.models import ChannelStream
+    return set(
+        ChannelStream.objects
+        .exclude(_owned_tvg_id_q("channel__"))
+        .values_list("stream_id", flat=True)
+    )
+
+
+def _streams_in_groups(group_names_cf: frozenset) -> set:
+    """Stream ids whose ChannelGroup name is in `group_names_cf` (casefolded).
+
+    Resolved to a flat ID SET, once per apply, rather than carrying group names
+    down to the per-stream comparison. Two reasons, and the second is the one
+    that matters:
+
+    1. It is two queries instead of an N+1 over a pool that can hold thousands
+       of streams (`.only(...)` on the stream queryset defers the group join).
+    2. It lets the EXCLUSION run early enough. The apply must drop excluded
+       streams BEFORE `seen_markers.add(marker)`, because a `continue` after
+       that point leaves an existing channel neither published nor reaped, and
+       it then commits at the temporary parking number phase 0 gave it (measured
+       live 2026-08-29: 22 channels stranded at 1400-1421). Working in ID sets
+       makes the pre-pass able to ask "is every candidate stream excluded?"
+       before it has built anything.
+
+    Empty input returns an empty set without touching the DB, so an install
+    with no policy pays nothing.
+    """
+    if not group_names_cf:
+        return set()
+    from apps.channels.models import ChannelGroup, Stream
+    gids = [
+        gid for gid, name in ChannelGroup.objects.values_list("id", "name")
+        if (name or "").casefold() in group_names_cf
+    ]
+    if not gids:
+        return set()
+    return set(
+        Stream.objects.filter(channel_group_id__in=gids).values_list("id", flat=True)
+    )
+
+
+def _group_policy(settings: Dict[str, Any]) -> Tuple[frozenset, frozenset]:
+    """(fallback_only, excluded) ChannelGroup names, casefolded for matching.
+
+    Casefolded because the user copies a group name out of the UI by eye and
+    "de sports" vs "DE Sports" is not a decision worth failing on, matching how
+    _select_profiles treats profile names.
+
+    The two lists are enforced in different places and that is deliberate:
+      - `excluded` must apply at CANDIDATE LOOKUP as well as at apply. If it
+        only filtered at apply, the matcher could still choose an excluded
+        stream as a game's primary, and the apply would then strip it and leave
+        the matchup channel with no streams at all.
+      - `fallback_only` is purely an ORDERING statement, so it applies at apply
+        and nowhere else. A demoted stream must stay reachable; that is the
+        whole difference between demoting a group and excluding it.
+    """
+    fallback = frozenset(
+        n.casefold() for n in _parse_name_list(settings.get(_FALLBACK_ONLY_GROUPS_SETTING, ""))
+    )
+    excluded = frozenset(
+        n.casefold() for n in _parse_name_list(settings.get(_EXCLUDED_GROUPS_SETTING, ""))
+    )
+    return fallback, excluded
 
 
 def _select_profiles(available: List[str], requested: List[str]) -> Tuple[List[str], List[str]]:
@@ -615,7 +745,7 @@ def _sync_profile_memberships(settings: Dict[str, Any], dry_run: bool = False) -
     """
     from apps.channels.models import Channel, ChannelProfile, ChannelProfileMembership
 
-    requested = _parse_profile_names(settings.get(_ENABLED_PROFILES_SETTING, ""))
+    requested = _parse_name_list(settings.get(_ENABLED_PROFILES_SETTING, ""))
     profiles = list(ChannelProfile.objects.all())
     available = [p.name for p in profiles]
     selected_names, unknown = _select_profiles(available, requested)
@@ -793,17 +923,37 @@ def _stream_quality_rank(name: str) -> int:
     return _QUALITY_RANK_UNKNOWN
 
 
-# Language preference tiers for the widen pool (#111). English first, then
-# unknown, then non-English. Within each tier the quality ordering still
-# applies, so the full order is: English-4K, English-1080, ..., English-SD,
-# unknown..., non-English-4K, ..., non-English-SD.
-_LANG_RANK_ENGLISH = 0
-_LANG_RANK_UNKNOWN = 1
-_LANG_RANK_NON_ENGLISH = 2
+# Language handling (#206). The user states an ORDERED preference list of
+# language codes (`language_preferences`, e.g. "en, fr, es"); a stream name is
+# resolved to one code and ranked by its position in that list.
+#
+# This REPLACED a three-tier English/unknown/non-English scheme (#111) that was
+# hardwired to English and, worse, was reachable only when `widen_stream_pool`
+# was on. A German household could not ask for German, and an English one got
+# quality-only ordering unless it happened to enable an unrelated setting. See
+# #206 for the report that killed it.
+#
+# Detection returns one of three shapes, and the three exist because the
+# evidence genuinely comes in three strengths:
+#   - a specific code ("de", "es", ...): a marker named the language outright.
+#   - _LANG_NOT_EN: positively NOT English (an accented letter), but WHICH
+#     language is unknowable from the name. DO NOT collapse this into a guess;
+#     see _rank_for_language for why it is ranked conditionally.
+#   - None: no signal at all.
+_LANG_NOT_EN = "_not_en"
 
-# Accented Latin letters that mark a Spanish / Portuguese / French feed. ASCII
-# punctuation is deliberately excluded so an em dash or "(TM)" doesn't read as
-# foreign.
+# Rank offsets appended AFTER the user's preference list. A stream carrying no
+# language signal outranks one whose language the user did not ask for, because
+# "might be what you want" beats "known not to be".
+_LANG_RANK_NO_SIGNAL = 0    # + len(prefs)
+_LANG_RANK_UNWANTED = 1     # + len(prefs)
+
+# Accented Latin letters that mark a NON-ENGLISH feed. ASCII punctuation is
+# deliberately excluded so an em dash or "(TM)" doesn't read as foreign.
+#
+# These say "not English" and nothing more: 'ü' is German or Turkish, 'í' is
+# Spanish or Portuguese. DO NOT map them to a specific language; that is what
+# _LANG_NOT_EN exists to represent.
 _FOREIGN_ACCENT_CHARS = frozenset("áéíóúñüàèìòùâêîôûäëïöãõçÁÉÍÓÚÑÜÀÈÌÒÙÂÊÎÔÛÄËÏÖÃÕÇ")
 
 # Whitespace-padded tokens that reliably mark an ENGLISH feed. DO NOT add
@@ -815,7 +965,7 @@ _ENGLISH_PROVIDER_TOKENS = (
 )
 
 # US-broadcast preference (stream_priority="us_preferred"): rank US English feeds
-# ahead of equal-quality non-US ones. US networks ONLY — deliberately excludes
+# ahead of equal-quality non-US ones. US networks ONLY -- deliberately excludes
 # Canadian (TSN/Sportsnet) and UK (BBC/ITV/Sky) feeds. "TNT" is omitted because
 # "TNT Sports" is now UK; "FOX"/"FOX SPORTS" are kept as US (Jake's call). DO NOT
 # add bare " US " / " USA ": a USMNT fixture name ("USA vs Mexico") carries those
@@ -832,15 +982,23 @@ _US_PROVIDER_TOKENS = (
 _US_RANK_US = 0
 _US_RANK_NON_US = 1
 
-# Non-English broadcaster tokens plus Spanish country spellings common in the
-# WC Telemundo/Peacock-Spanish feeds whose names carry no accent (e.g. "Estados
-# Unidos", "Argelia"). Accented spellings are caught by _FOREIGN_ACCENT_CHARS.
-_FOREIGN_PROVIDER_TOKENS = (
-    " TELEMUNDO ", " UNIVERSO ", " TUDN ", " DEPORTES ", " MOVISTAR ",
-    " CANAL+ ", " SPORTTV ", " SPORT TV ", " GLOBO ", " RAI ", " ZDF ",
-    " ARD ", "ESPN DEPORTES", " DAZN ES ", " DAZN DE ", " DAZN IT ",
-    " BEIN AR ", " BEIN MENA ",
+# Broadcaster tokens that identify a SPECIFIC language, whitespace-padded.
+# Distinct from the accent set above: these name the language, so they resolve
+# to a code the user can ask for by name in `language_preferences`.
+_LANG_PROVIDER_TOKENS = (
+    (" TELEMUNDO ", "es"), (" UNIVERSO ", "es"), (" TUDN ", "es"),
+    (" DEPORTES ", "es"), (" MOVISTAR ", "es"), ("ESPN DEPORTES", "es"),
+    (" DAZN ES ", "es"),
+    (" ZDF ", "de"), (" ARD ", "de"), (" DAZN DE ", "de"),
+    (" CANAL+ ", "fr"),
+    (" SPORTTV ", "pt"), (" SPORT TV ", "pt"), (" GLOBO ", "pt"),
+    (" RAI ", "it"), (" DAZN IT ", "it"),
+    (" BEIN AR ", "ar"), (" BEIN MENA ", "ar"),
 )
+
+# Spanish country spellings common in the WC Telemundo/Peacock-Spanish feeds
+# whose names carry no accent (e.g. "Estados Unidos", "Argelia"). Accented
+# spellings are caught by _FOREIGN_ACCENT_CHARS.
 _SPANISH_COUNTRY_HINTS = (
     " ESTADOS UNIDOS ", " ALEMANIA ", " INGLATERRA ", " CROACIA ", " SUIZA ",
     " COSTA DE MARFIL ", " ARGELIA ", " EGIPTO ", " MARRUECOS ", " JORDANIA ",
@@ -848,76 +1006,258 @@ _SPANISH_COUNTRY_HINTS = (
     " UCRANIA ", " ESCOCIA ", " GALES ", " IRLANDA ", " CHEQUIA ",
 )
 
-# A foreign-language audio label (e.g. "Czech Feed", "Korean Commentary"): the
-# team names are spelled in English but the COMMENTARY is foreign, so the
-# English-team-name check would wrongly rank it English. #113: surfaced live on
-# a WC channel where "TSN+ Czech Feed" / "Korean Feed" sorted ahead of the
-# plain English FIFA feed. "English" is intentionally absent from the language
-# list. Matched as "<lang> <feed-noun>" so a team like "Czechia" (no feed noun)
-# never trips it.
-_FOREIGN_FEED_LANGUAGES = (
-    "SPANISH", "FRENCH", "GERMAN", "ITALIAN", "PORTUGUESE", "CZECH", "KOREAN",
-    "JAPANESE", "ARABIC", "DUTCH", "POLISH", "RUSSIAN", "TURKISH", "GREEK",
-    "DANISH", "SWEDISH", "NORWEGIAN", "CROATIAN", "SERBIAN", "CHINESE",
-)
+# A foreign-language audio label ("Czech Feed", "Korean Commentary"): the team
+# names are spelled in English but the COMMENTARY is not, so the English-team-
+# name check would wrongly read it as English. #113: surfaced live on a WC
+# channel where "TSN+ Czech Feed" / "Korean Feed" sorted ahead of the plain
+# English FIFA feed. Matched as "<lang> <feed-noun>" so a team like "Czechia"
+# (no feed noun) never trips it.
+#
+# "ENGLISH" IS in this map, unlike the pre-#206 version which deliberately
+# omitted it: now that a code is returned rather than a foreign/not bit, an
+# explicit "English Feed" is a positive English signal worth having.
+_FEED_LANGUAGE_CODES = {
+    "ENGLISH": "en", "SPANISH": "es", "FRENCH": "fr", "GERMAN": "de",
+    "ITALIAN": "it", "PORTUGUESE": "pt", "CZECH": "cs", "KOREAN": "ko",
+    "JAPANESE": "ja", "ARABIC": "ar", "DUTCH": "nl", "POLISH": "pl",
+    "RUSSIAN": "ru", "TURKISH": "tr", "GREEK": "el", "DANISH": "da",
+    "SWEDISH": "sv", "NORWEGIAN": "no", "CROATIAN": "hr", "SERBIAN": "sr",
+    "CHINESE": "zh",
+}
 _FOREIGN_FEED_NOUNS = ("FEED", "COMMENTARY", "AUDIO", "COMMS")
-_FOREIGN_FEED_MARKERS = tuple(
-    f"{lang} {noun}" for lang in _FOREIGN_FEED_LANGUAGES for noun in _FOREIGN_FEED_NOUNS
+# Compiled with a trailing word boundary: a bare substring test read "German
+# Feedback Channel" as German, because "GERMAN FEED" is a prefix of "GERMAN
+# FEEDBACK". The leading boundary matters less but costs nothing.
+_FEED_LANGUAGE_MARKERS = tuple(
+    (re.compile(r"\b" + lang + r"\s+" + noun + r"\b"), code)
+    for lang, code in _FEED_LANGUAGE_CODES.items()
+    for noun in _FOREIGN_FEED_NOUNS
+)
+
+# Country/language tag codes, validated against all 16,970 real stream names on
+# a live instance (2026-08-31): 480 detections, ZERO false positives.
+#
+# TWO FORMS, and the split is load-bearing. Both were measured, not reasoned:
+#   _LANG_TAG_DELIMITED  'DE: Magenta Sport 1', 'MX | TyC Sports', 'De: Sky
+#                         Sport Bundesliga 2'. Case-INSENSITIVE, because the
+#                         corpus really does carry 'De:'.
+#   _LANG_TAG_BARE       'PT DAZN 4 (HD)', 'FR Ligue1+'. UPPERCASE ONLY. Lower
+#                         it to case-insensitive and 'EFL36|No Scheduled Event'
+#                         reads as NORWEGIAN, which is a real corpus row.
+#
+# DO NOT add "SE" either. It is Southeast in this domain ("SE Missouri", "SE
+# Louisiana" -- 13 real rows) and has ZERO rows using it as a Swedish tag, so it
+# is pure downside. It was in the first cut of this map and the corpus guard in
+# tests/test_language_corpus.py is what caught it. Swedish still resolves via
+# "Swedish Feed".
+#
+# The rule the guard enforces: a code may sit in this map only if it is NOT a
+# measured domain term, OR the corpus shows it used as a genuine language tag.
+# "NO" is the interesting case and it stays: it collides with "NO EVENT" (1588
+# rows) AND has 38 real "NO:" rows in "Norway | Sports", and tag position is
+# what separates them.
+#
+# DO NOT add "PL" to the map below. Premier League owns that token here: 20 real rows
+# ('AU (STAN 97) | PL Saturday Wrap', 'PL Live') would all become Polish, and no
+# positional tightening separates them. Polish still resolves via "Polish Feed".
+#
+# Codes must sit in TAG POSITION (start of name, or straight after a '|'). A
+# looser predicate was measured first and was far worse: bare-delimited matching
+# read 1588 'TSN+ 08: NO EVENT' rows as Norwegian, 'SE Missouri' and 'SE
+# Louisiana' as Swedish, and 'Little Rock, AR' as Arabic.
+# The vocabulary was ENUMERATED from the corpus, not guessed: every two-letter
+# leading tag actually present was listed, then mapped. That is how CZ ("CZ:
+# CANAL+ Sport", 21 rows in "Czech | Sports") was caught -- without it the
+# CANAL+ broadcaster token won and the Czech CANAL+ read as FRENCH.
+#
+# DO NOT add "US". It looks like the obvious English tag and is not: all 6 real
+# "US:" rows sit in "Latino | Sports" (US Spanish-language broadcasters), so
+# mapping it to English would be wrong for every observed case. It also collides
+# with the team name in a USMNT fixture, which is the same DO-NOT that keeps
+# bare " US " out of _US_PROVIDER_TOKENS.
+_LANG_TAG_TO_CODE = {
+    # language tags
+    "DE": "de", "TR": "tr", "IT": "it", "NL": "nl", "FR": "fr", "ES": "es",
+    "NO": "no", "PT": "pt", "AR": "ar", "CZ": "cs",
+    "RU": "ru", "JP": "ja", "KR": "ko", "CN": "zh", "DK": "da",
+    # country tags whose language differs from the code
+    "BR": "pt", "GR": "el", "CY": "el",
+    "MX": "es", "PA": "es", "CO": "es", "PY": "es", "CR": "es", "CL": "es",
+    "RD": "es", "PE": "es", "GT": "es",
+    # English-speaking markets
+    "AU": "en", "NZ": "en", "IE": "en", "UK": "en",
+}
+_LANG_TAG_CODES = tuple(_LANG_TAG_TO_CODE)
+_LANG_TAG_ALTERNATION = "|".join(_LANG_TAG_CODES)
+_LANG_TAG_DELIMITED = re.compile(
+    r"(?:^|\|)\s*(" + _LANG_TAG_ALTERNATION + r")\s*(?::|\|)", re.I
+)
+# The lookahead admits a digit or an opening bracket as well as a letter:
+# "DE 4K Sport" and "DE [FHD] Sport" are real name shapes, and rejecting them
+# sent a German-tagged feed down the team-name inference, which reads it as
+# ENGLISH. The uppercase-only CODE (no re.I on this pattern) is what keeps
+# "| No Scheduled Event" from matching, NOT this lookahead.
+_LANG_TAG_BARE = re.compile(
+    r"(?:^|\|)\s*(" + _LANG_TAG_ALTERNATION + r")\s+(?=[A-Z0-9(\[])"
 )
 
 
-def _has_foreign_language_marker(name: str) -> bool:
-    """True when a stream name carries a reliable non-English signal: an
-    accented Latin letter, a foreign-language broadcaster, a Spanish country
-    spelling, or a foreign-language audio-feed label ("Czech Feed"). Best-effort
-    (#111/#113); stays silent on ambiguous names so they land in the unknown
-    middle tier rather than being mislabeled."""
-    if any(c in _FOREIGN_ACCENT_CHARS for c in name):
-        return True
-    upper = name.upper()
-    if any(marker in upper for marker in _FOREIGN_FEED_MARKERS):
-        return True
-    padded = f" {upper} "
-    if any(tok in padded for tok in _FOREIGN_PROVIDER_TOKENS):
-        return True
-    if any(tok in padded for tok in _SPANISH_COUNTRY_HINTS):
-        return True
-    return False
+def _language_tag_code(name: str) -> Optional[str]:
+    """Language code from an explicit country/language TAG, or None.
+
+    See _LANG_TAG_CODES for the two accepted forms and why the bare form is
+    case-sensitive while the delimited one is not.
+
+    The EARLIEST tag by position wins, not whichever pattern is tried first.
+    Trying delimited-then-bare made "DE Sky Sport | ES: Telemundo" resolve to
+    Spanish, so changing a later tag from bare to colon-delimited could flip the
+    answer, which is not a distinction the name is making.
+    """
+    matches = [
+        m for m in (rx.search(name or "") for rx in (_LANG_TAG_DELIMITED, _LANG_TAG_BARE))
+        if m
+    ]
+    if not matches:
+        return None
+    first = min(matches, key=lambda m: m.start())
+    return _LANG_TAG_TO_CODE.get(first.group(1).upper())
 
 
-def _stream_language_rank(name: str, home: str = "", away: str = "") -> int:
-    """Language-preference bucket for a stream name (#111): English (0),
-    unknown (1), non-English (2). Lower sorts earlier.
+def _detect_stream_language(
+    name: str, home: str = "", away: str = ""
+) -> Optional[str]:
+    """Best-effort language of a stream from its NAME (#206).
 
-    Primary signal: both teams' English-name keywords present in the name. The
-    WC Spanish feeds spell teams differently ("Turquía" not "Turkey", "Estados
-    Unidos" not "United States"), so a name carrying BOTH English spellings is
-    an English-language feed. A foreign-marker check (accent / foreign
-    broadcaster / Spanish country spelling) runs FIRST and wins, since a loose
-    single-word English token would otherwise mislabel a Spanish name. Then the
-    both-team-name check, then explicit English provider tokens (for feeds that
-    name only one team, e.g. "WC2026: BBC Scotland"). Anything matching nothing
-    stays unknown rather than being guessed.
+    Returns a language code ("en", "de", "es", ...), the _LANG_NOT_EN sentinel
+    (positively not English, specific language unknowable), or None (no signal).
+
+    Checked strongest-evidence-first, and the ORDER MATTERS:
+
+    1. An explicit language/country tag ("DE:", "PT DAZN"). Most specific.
+    2. A language-named audio label ("German Commentary"). Also explicit.
+    3. A language-specific broadcaster (ZDF, Telemundo, RAI).
+    4. A Spanish country spelling ("Estados Unidos").
+    5. An accented letter -> _LANG_NOT_EN. Reliable that it is not English,
+       useless for which language, so it must run AFTER 1-4 or it would mask
+       a perfectly good specific answer.
+    6. Both teams' ENGLISH name keywords present -> "en". WEAK, and last for a
+       reason: it is inference, not evidence. Real Spanish feeds spell teams
+       differently ("Turquía", "Estados Unidos"), which is what makes it work
+       at all, and it is exactly why 'Arabia Saudí v. Uruguay' needs step 5 to
+       run first.
+    7. An explicit English broadcaster (BBC, ITV) -> "en", for feeds naming
+       only one team ("WC2026: BBC Scotland").
+
+    KNOWN BLIND SPOT, and it is the one #206 was filed about: a Bundesliga feed
+    named 'Bayern Munich vs Dortmund' is textually identical in German and
+    English, because the canonical English club names ARE the German ones. Step
+    6 reads it as English and there is no name-based fix. That case is covered
+    by per-group policy (_GROUP_POLICY_SETTING), not here. DO NOT "fix" it by
+    dropping step 6; that would lose the WC Spanish-feed discrimination which
+    is measured and real.
     """
     if not name:
-        return _LANG_RANK_UNKNOWN
-    # Foreign markers are checked FIRST and win: a single-word English token can
-    # otherwise short-circuit to English on a clearly-Spanish name. Real case:
-    # "Arabia Saudí v. Uruguay" (game Saudi Arabia vs Uruguay) matches "Arabia"
-    # and "Uruguay", yet the "í" in "Saudí" is the reliable Spanish tell.
-    if _has_foreign_language_marker(name):
-        return _LANG_RANK_NON_ENGLISH
+        return None
     upper = name.upper()
+    padded = f" {upper} "
+    # 1. An explicit AUDIO label ("Spanish Feed") is the strongest evidence
+    #    there is, and it beats a market tag: "AU | Spanish Feed" is Spanish
+    #    audio on an Australian feed, and "MX | English Feed" is English audio
+    #    on a Mexican one. Checking the tag first got both backwards.
+    for marker, code in _FEED_LANGUAGE_MARKERS:
+        if marker.search(upper):
+            return code
+    # 2. An explicit language/country tag ("DE:", "PT DAZN").
+    tag = _language_tag_code(name)
+    if tag:
+        return tag
+    # 3. A language-specific broadcaster (ZDF, Telemundo, RAI).
+    for token, code in _LANG_PROVIDER_TOKENS:
+        if token in padded:
+            return code
+    # 4. A Spanish country spelling ("Estados Unidos").
+    if any(tok in padded for tok in _SPANISH_COUNTRY_HINTS):
+        return "es"
+    # 5. An explicit ENGLISH broadcaster, ABOVE the accent check. An accented
+    #    proper noun is not evidence about commentary: "BBC | Sao Paulo vs
+    #    Santos" with the a-tilde is a BBC feed, and treating the accent as
+    #    decisive demoted it out of the English tier.
+    if any(tok in padded for tok in _ENGLISH_PROVIDER_TOKENS):
+        return "en"
+    # 6. An accent -> positively not English, language unknowable. Must stay
+    #    ABOVE the team-name inference: "Arabia Saudi v. Uruguay" with the
+    #    i-acute matches the English tokens "Arabia" and "Uruguay", and the
+    #    accent is the reliable tell. Measured live.
+    if any(c in _FOREIGN_ACCENT_CHARS for c in name):
+        return _LANG_NOT_EN
+    # 7. Both teams' ENGLISH names present. WEAKEST, and last: it is inference,
+    #    not evidence. See the KNOWN BLIND SPOT above.
     if home and away:
         from .matcher import _team_keywords
         home_hit = any(k.upper() in upper for k in _team_keywords(home))
         away_hit = any(k.upper() in upper for k in _team_keywords(away))
         if home_hit and away_hit:
-            return _LANG_RANK_ENGLISH
-    if any(tok in f" {upper} " for tok in _ENGLISH_PROVIDER_TOKENS):
-        return _LANG_RANK_ENGLISH
-    return _LANG_RANK_UNKNOWN
+            return "en"
+    return None
 
+
+def _parse_language_prefs(raw: Any) -> List[str]:
+    """Split the comma-separated `language_preferences` setting into codes.
+
+    Order-preserving and deduped, lowercased, since the value is an ordered
+    preference list ("en, fr, es" prefers English, then French, then Spanish).
+    Blank/None yields [], which callers read as "no language preference", i.e.
+    the pre-#206 quality-only ordering.
+
+    Deliberately does NOT validate against a known-code list. A user typing a
+    code this plugin cannot detect gets no benefit, but also no error, and no
+    stream is ever DROPPED for its language, so a typo costs ordering rather
+    than availability. Rejecting unknown codes would mean shipping a closed
+    vocabulary that every new detector has to be added to twice.
+    """
+    if not raw or not isinstance(raw, str):
+        return []
+    out: List[str] = []
+    seen = set()
+    for part in raw.split(","):
+        code = part.strip().lower()
+        # "en-US" / "en_GB" -> "en". A region subtag is a reasonable thing for a
+        # user to type and the detector only ever produces primary subtags, so
+        # without this the value parses fine and then never matches anything.
+        code = code.replace("_", "-").split("-", 1)[0].strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append(code)
+    return out
+
+
+def _rank_for_language(name: str, prefs: List[str], home: str = "", away: str = "") -> int:
+    """Position of this stream's language in the user's preference list.
+
+    Lower sorts earlier. With prefs ["en", "de"]: an English feed is 0, a German
+    one 1, a signal-less one 2, and a Spanish one 3.
+
+    _LANG_NOT_EN is ranked CONDITIONALLY, and this is the subtle part. It means
+    "not English, language unknown". If the user asked only for English, that is
+    positively unwanted. But if they asked for any non-English language, the
+    stream might BE that language ('Bayern München' is an accented German name),
+    so demoting it below the no-signal tier would be a guess against the user's
+    stated interest. It lands in the no-signal tier instead.
+    """
+    if not prefs:
+        return 0
+    code = _detect_stream_language(name, home, away)
+    if code is None:
+        return len(prefs) + _LANG_RANK_NO_SIGNAL
+    if code == _LANG_NOT_EN:
+        wants_only_english = all(p == "en" for p in prefs)
+        return len(prefs) + (
+            _LANG_RANK_UNWANTED if wants_only_english else _LANG_RANK_NO_SIGNAL
+        )
+    if code in prefs:
+        return prefs.index(code)
+    return len(prefs) + _LANG_RANK_UNWANTED
 
 def _us_broadcast_rank(name: str) -> int:
     """US-broadcast preference bucket: US English feed (0) vs everything else (1).
@@ -925,13 +1265,21 @@ def _us_broadcast_rank(name: str) -> int:
     stream_priority is "us_preferred", so it never promotes a lower-quality US
     feed over a higher-quality non-US one.
 
-    A foreign-language marker disqualifies a name even if it carries a US network
-    token, so "ESPN Deportes" / Telemundo Spanish feeds are NOT ranked as the
-    preferred US broadcast (the intent is the American ENGLISH feed). DO NOT add
-    bare " US " / " USA " tokens to _US_PROVIDER_TOKENS: a USMNT fixture name
+    A non-English language signal disqualifies a name even if it carries a US
+    network token, so "ESPN Deportes" / Telemundo Spanish feeds are NOT ranked as
+    the preferred US broadcast (the intent is the American ENGLISH feed). DO NOT
+    add bare " US " / " USA " tokens to _US_PROVIDER_TOKENS: a USMNT fixture name
     ("USA vs Mexico") carries them as a TEAM and would mislabel a foreign feed.
+
+    A name with NO language signal stays eligible; only a positive non-English
+    detection disqualifies. That keeps the pre-#206 behaviour, where an
+    unrecognised name was never treated as foreign, while newly catching a
+    tagged feed like "DE: Sport 1" that the old accent/broadcaster check missed.
     """
-    if not name or _has_foreign_language_marker(name):
+    if not name:
+        return _US_RANK_NON_US
+    code = _detect_stream_language(name)
+    if code is not None and code != "en":
         return _US_RANK_NON_US
     if any(tok in f" {name.upper()} " for tok in _US_PROVIDER_TOKENS):
         return _US_RANK_US
@@ -975,33 +1323,205 @@ def _stream_quality_sort_key(stream_stats, name):
     return (_PROBE_TIER_NO_PROBE, _stream_quality_rank(name), 0)
 
 
-def _stream_sort_key(stream_stats, name, english_first=False, prefer_us=False, home="", away=""):
-    """Stream ordering key. Quality-only by default (historical behavior).
+def _build_stream_pool(
+    sources,
+    explicit_stream_ids,
+    game,
+    *,
+    field_event,
+    home_kws,
+    away_kws,
+    select_streams_for_game,
+    stream_model,
+    lang_prefs,
+    prefer_us,
+    curated_ids,
+    fallback_only_ids,
+    excluded_ids,
+):
+    """Ordered stream ids to attach for one game, plus what was dropped and why.
 
-    When english_first is True (#111, set when widen_stream_pool is on), the
-    language rank is prepended so ALL English variants sort ahead of ALL
-    non-English ones, with the quality ordering preserved within each language
-    tier. home/away are the game's English team names, used by
-    _stream_language_rank to detect English-language feeds.
+    Returns (stream_ids, foreign_dropped, policy_dropped_ids). `foreign_dropped`
+    is a count (a stream naming ANOTHER game, #162); `policy_dropped_ids` is a
+    SET of distinct stream ids removed by `excluded_groups`, because two matched
+    source channels can carry the same excluded stream and reporting it twice
+    misstates how much the policy removed.
+
+    Extracted from _action_apply and called BEFORE the placeholder decision,
+    which is the whole point (#206 review). The pre-pass used to ask "does this
+    source own any non-excluded stream?", but the pool ALSO applies the
+    matchup-name gate, so a channel owning one excluded stream for THIS game
+    plus one live stream for ANOTHER game passed the check and then donated
+    nothing. That published a non-placeholder channel with zero streams and, for
+    an existing channel, deleted its old membership on the way. Asking this
+    function what would ACTUALLY be donated makes the two agree by construction.
+
+    `select_streams_for_game` and `stream_model` are injected so this stays
+    importable and unit-testable without Django.
+    """
+    pool = []                       # (sort_key, tiebreak, stream_id)
+    seen: set = set()
+    foreign_dropped = 0
+    policy_dropped: set = set()
+
+    for src_order, src in enumerate(sources):
+        chan_streams = list(
+            src.streams.all().only("id", "name", "stream_stats", "channel_group_id")
+        )
+        if field_event:
+            keep_flags = [True] * len(chan_streams)
+        else:
+            keep_flags = select_streams_for_game(
+                [s.name or "" for s in chan_streams], home_kws, away_kws,
+            )
+        for st, keep in zip(chan_streams, keep_flags):
+            if not keep:
+                foreign_dropped += 1
+                continue
+            if st.id in seen:
+                continue
+            seen.add(st.id)
+            key = _pool_entry_key(
+                st, st.name or src.name or "",
+                lang_prefs=lang_prefs, prefer_us=prefer_us,
+                home=game["home"], away=game["away"],
+                curated_ids=curated_ids,
+                fallback_only_ids=fallback_only_ids,
+                excluded_ids=excluded_ids,
+            )
+            if key is None:
+                policy_dropped.add(st.id)
+                continue
+            pool.append((key, src_order, st.id))
+
+    # Path C: attach the specific stream-name-matched streams, NOT their parent
+    # channels' other (unrelated) streams. Ordered after the channel sources;
+    # the sort below re-ranks the whole pool anyway, so the base offset is only
+    # a stable tiebreak. De-duped against channel streams already pooled.
+    if explicit_stream_ids:
+        base = len(sources)
+        # A cached id can name a stream that no longer exists (a provider drops
+        # a feed between refresh and apply), and `by_id.get` then yields None.
+        # That is why the caller must key the placeholder decision on THIS
+        # function's result rather than on `explicit_stream_ids` being non-empty.
+        by_id = {
+            st.id: st for st in stream_model.objects
+            .filter(id__in=explicit_stream_ids)
+            .only("id", "name", "stream_stats", "channel_group_id")
+        }
+        for j, sid in enumerate(explicit_stream_ids):
+            st = by_id.get(sid)
+            if st is None or st.id in seen:
+                continue
+            seen.add(st.id)
+            key = _pool_entry_key(
+                st, st.name or "",
+                lang_prefs=lang_prefs, prefer_us=prefer_us,
+                home=game["home"], away=game["away"],
+                curated_ids=curated_ids,
+                fallback_only_ids=fallback_only_ids,
+                excluded_ids=excluded_ids,
+            )
+            if key is None:
+                policy_dropped.add(st.id)
+                continue
+            pool.append((key, base + j, st.id))
+
+    pool.sort()
+    return [sid for _, _, sid in pool], foreign_dropped, policy_dropped
+
+
+def _pool_entry_key(
+    stream,
+    display_name,
+    *,
+    lang_prefs,
+    prefer_us,
+    home,
+    away,
+    curated_ids,
+    fallback_only_ids,
+    excluded_ids,
+):
+    """Sort key for one candidate stream, or None when group policy EXCLUDES it.
+
+    One helper for both pool-building branches (channel-donated streams and
+    Path C stream-name matches) because the policy is identical for both: a
+    user who excluded a group meant it regardless of how the stream was found.
+    Two copies of this would be two places to forget a rule.
+
+    Takes resolved ID SETS, not group names; see _streams_in_groups for why.
+    Returning None here is a backstop, not the primary enforcement: the apply
+    pre-pass already drops excluded streams before it decides whether a game is
+    publishable at all.
+    """
+    if stream.id in excluded_ids:
+        return None
+    return _stream_sort_key(
+        stream.stream_stats,
+        display_name,
+        lang_prefs=lang_prefs,
+        prefer_us=prefer_us,
+        home=home,
+        away=away,
+        curated=stream.id in curated_ids,
+        fallback_only=stream.id in fallback_only_ids,
+    )
+
+
+def _stream_sort_key(
+    stream_stats,
+    name,
+    lang_prefs=None,
+    prefer_us=False,
+    home="",
+    away="",
+    curated=False,
+    fallback_only=False,
+):
+    """Ordering key for one stream in a matchup channel's fallback stack.
+
+    Lower sorts earlier. Composed outside-in:
+
+      1. GROUP POLICY (#206). A stream from a `fallback_only_groups` group is
+         demoted below everything else. This is an explicit user instruction,
+         so it outranks the inferred signal below it.
+      2. PROVENANCE (#206). A stream the user attached to a real channel of
+         their own outranks one found only by the global stream-name sweep
+         (Path C). Outermost but for group policy, in BOTH modes including
+         "us_preferred", because it is not an attribute of the stream: it is
+         the user having already said which inventory they curate. The report
+         behind #206 said it outright ("I haven't added them as channels").
+      3. LANGUAGE, when `lang_prefs` is non-empty: position in the user's
+         ordered `language_preferences` list. See _rank_for_language.
+      4. QUALITY: ffprobe resolution then bitrate, falling back to name hints.
 
     When prefer_us is True (stream_priority="us_preferred"), QUALITY decides
-    first and a US-broadcast rank breaks quality ties (a 1080p TSN feed still
-    beats a 720p ESPN feed). This DELIBERATELY overrides english_first's
-    language-first ordering (#111): with widen_stream_pool on, a high-quality
-    feed whose name is not an English token (e.g. "FOX 4K") would otherwise sink
-    below a 1080p "TSN" (TSN IS an English token, FOX is not), which is the
-    opposite of the quality-first intent. Language is kept only as a final
-    sub-tiebreak below quality and US.
+    ahead of language and a US-broadcast rank breaks quality ties (a 1080p TSN
+    feed still beats a 720p ESPN feed). That DELIBERATELY overrides the
+    language-first ordering: a high-quality feed whose name is not an English
+    token (e.g. "FOX 4K") would otherwise sink below a 1080p "TSN" (TSN IS an
+    English token, FOX is not), which is the opposite of the quality-first
+    intent. Language survives as a final sub-tiebreak below quality and US.
+
+    `lang_prefs` empty (the default) means no language preference and restores
+    the pre-#206 quality-only ordering within a provenance tier. home/away are
+    the game's English team names, needed by the detector's both-teams check.
     """
+    prefs = lang_prefs or []
+    provenance = (
+        1 if fallback_only else 0,
+        _PROVENANCE_CURATED if curated else _PROVENANCE_UNCURATED,
+    )
     quality = _stream_quality_sort_key(stream_stats, name)
     if prefer_us:
-        key = quality + (_us_broadcast_rank(name),)
-        if english_first:
-            key = key + (_stream_language_rank(name, home, away),)
+        key = provenance + quality + (_us_broadcast_rank(name),)
+        if prefs:
+            key = key + (_rank_for_language(name, prefs, home, away),)
         return key
-    if english_first:
-        return (_stream_language_rank(name, home, away),) + quality
-    return quality
+    if prefs:
+        return provenance + (_rank_for_language(name, prefs, home, away),) + quality
+    return provenance + quality
 
 
 # ---------- timezone helpers ----------
@@ -2221,7 +2741,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # 4. EPG match each game to a Dispatcharr channel.
     # _build_epg_lookup excludes ALL our virtual channels by tvg_id prefix:
     # covers both the current target group and any orphans from a renamed group.
-    epg_lookup = _build_epg_lookup(local_tz=_resolve_tz(settings.get("local_timezone", "UTC")))
+    # Only the exclusion half is used at LOOKUP time; demotion is ordering-only
+    # and therefore an apply-time concern. See _group_policy.
+    _excluded_stream_ids = _streams_in_groups(_group_policy(settings)[1])
+    epg_lookup = _build_epg_lookup(
+        local_tz=_resolve_tz(settings.get("local_timezone", "UTC")),
+        excluded_stream_ids=_excluded_stream_ids,
+    )
     api_key = _resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH)
     model = settings.get("model", "claude-haiku-4-5")
     # #108: off-by-default. When on, the matcher stacks same-fixture provider
@@ -2229,6 +2755,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # the matchup channel.
     widen = bool(settings.get(_WIDEN_STREAM_POOL_SETTING, False))
     matches = match_games_to_channels(scored, epg_lookup, api_key, model, widen=widen)
+    policy_excluded = epg_lookup.stats.get("policy_streams_excluded", 0)
+    if policy_excluded:
+        logger.info(
+            "[ranked_matchups] refresh: skipped %d candidate stream(s) in "
+            "excluded channel groups (see 'Exclude stream groups')",
+            policy_excluded,
+        )
     stale_dropped = epg_lookup.stats.get("stale_dated_streams_dropped", 0)
     if stale_dropped:
         logger.info(
@@ -2315,7 +2848,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- EPG lookup (closure over Django ORM) ----------
 
-def _build_epg_lookup(local_tz=timezone.utc):
+def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
     """Return a callable: GameRow -> List[ChannelCandidate]. Closure over ORM.
 
     `local_tz` is the user's configured timezone. It is used ONLY to widen the
@@ -2350,7 +2883,7 @@ def _build_epg_lookup(local_tz=timezone.utc):
 
     # Counters the caller reports after the whole slate is matched. A dict
     # rather than a nonlocal int so the accessor below is a plain attribute.
-    stats = {"stale_dated_streams_dropped": 0}
+    stats = {"stale_dated_streams_dropped": 0, "policy_streams_excluded": 0}
 
     def lookup(game) -> List[ChannelCandidate]:
         # Per-sport match window: soccer needs a tighter window to avoid
@@ -2545,7 +3078,15 @@ def _build_epg_lookup(local_tz=timezone.utc):
         # `name_q` (both query a `name` field with the same both-teams gate), so
         # it is reused rather than rebuilt; the per-segment refinement below is
         # what makes the stream-name case safe against feed-prefix collisions.
+        # #206 exclusion is applied HERE as well as in the apply. If it were
+        # apply-only, the matcher could still pick an excluded stream as a
+        # game's PRIMARY and cache it as the match, which then has to be undone
+        # downstream. Taking it out of the candidate set means the match never
+        # references it. Empty set = no filtering, so the default is unchanged.
         for s in Stream.objects.filter(name_q).only("id", "name"):
+            if s.id in excluded_stream_ids:
+                stats["policy_streams_excluded"] += 1
+                continue
             # Guard the feed-prefix false positive (e.g. 'USA Soccer09: Australia
             # vs Turkey' matching United States vs Australia: 'USA' is the feed
             # label, not the team). Two-team games require both sides to co-occur
@@ -3602,11 +4143,21 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             recordings_group_name,
         )
     dry_run = _dry_run_enabled(settings)
-    # #111: when the widen pool is on, order each channel's pooled streams
-    # English+quality first, then non-English. Same toggle as the matcher-side
-    # widening (widen_stream_pool); language only matters once a channel has
-    # more than one stream, which is what widening produces.
-    english_first = bool(settings.get(_WIDEN_STREAM_POOL_SETTING, False))
+    # #206: ordered language preference for each channel's pooled streams. This
+    # used to be `bool(settings.get(_WIDEN_STREAM_POOL_SETTING))`, i.e. English
+    # ordering was reachable only by turning on an unrelated pool-widening
+    # setting. Now it is its own setting, it is ordered rather than a boolean,
+    # and it defaults to English-first instead of off.
+    lang_prefs = _parse_language_prefs(
+        settings.get(_LANGUAGE_PREFS_SETTING, _LANGUAGE_PREFS_DEFAULT)
+    )
+    # #206: which streams the user curated, and their per-group policy. Read
+    # ONCE for the whole apply; _curated_stream_ids is a single indexed query
+    # and calling it per game would issue one per matchup channel.
+    curated_ids = _curated_stream_ids()
+    _fallback_groups, _excluded_groups_cf = _group_policy(settings)
+    fallback_only_ids = _streams_in_groups(_fallback_groups)
+    excluded_ids = _streams_in_groups(_excluded_groups_cf)
     # Stream ordering: quality decides first always; "us_preferred" additionally
     # breaks quality ties toward US English broadcasts (see _stream_sort_key).
     prefer_us = settings.get(_STREAM_PRIORITY_SETTING, _STREAM_PRIORITY_QUALITY) == _STREAM_PRIORITY_US
@@ -3938,6 +4489,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # is never silent: a wrong gate that starts eating real feeds shows up here
     # in the apply summary rather than as quietly missing streams.
     foreign_streams_dropped = 0
+    # #206: DISTINCT stream ids removed by excluded_groups. A set, not a
+    # counter: two matched source channels can carry the same excluded
+    # stream, and reporting it twice misstates how much was removed.
+    policy_dropped_stream_ids: set = set()
     if matchup_logos_enabled and not dry_run:
         sportsdb_api_key = (
             _resolve_key(settings, "sportsdb_api_key", SPORTSDB_KEY_PATH)
@@ -4145,12 +4700,54 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         sources = list(Channel.objects.filter(id__in=source_ids))
         sources_by_id = {c.id: c for c in sources}
         sources = [sources_by_id[sid] for sid in source_ids if sid in sources_by_id]
-        source = sources[0] if sources else None
+
+        # #206: build the REAL stream pool here, above the placeholder
+        # decision, and let that decision key on whether anything is actually
+        # attachable. Two reasons it has to be here and not lower down:
+        #
+        #  - The decision below sits above `seen_markers.add(marker)`, and the
+        #    comment on that line is explicit that every `continue` must stay
+        #    above it: a marker added and then skipped leaves its existing
+        #    channel neither published nor reaped, so it commits at phase 0's
+        #    temporary parking number (measured live 2026-08-29, 22 channels
+        #    stranded at 1400-1421).
+        #  - Asking "would this source donate anything?" is the only question
+        #    that cannot disagree with what the pool later does. A cheaper
+        #    proxy ("does it own a non-excluded stream?") was tried and was
+        #    wrong: a channel owning one excluded stream for THIS game plus a
+        #    live stream for ANOTHER game passed the proxy, then donated
+        #    nothing once the matchup-name gate ran, and published a
+        #    non-placeholder channel with zero streams.
+        #
+        # A game with nothing attachable therefore falls into the EXISTING
+        # "no source, no streams" path, which already does the right thing:
+        # placeholder if the score earns one, otherwise skip, and either way its
+        # old channel goes down the normal stale route, which preserves DVR
+        # recordings (#146).
+        field_event = is_field_event(g.get("away"), g.get("extra"))
+        home_kws = [] if field_event else _strong_team_keywords(g.get("home") or "")
+        away_kws = [] if field_event else _strong_team_keywords(g.get("away") or "")
+        source_streams, _foreign_n, _policy_ids = _build_stream_pool(
+            sources, explicit_stream_ids, g,
+            field_event=field_event, home_kws=home_kws, away_kws=away_kws,
+            select_streams_for_game=select_streams_for_game,
+            stream_model=Stream,
+            lang_prefs=lang_prefs, prefer_us=prefer_us,
+            curated_ids=curated_ids,
+            fallback_only_ids=fallback_only_ids,
+            excluded_ids=excluded_ids,
+        )
+        foreign_streams_dropped += _foreign_n
+        policy_dropped_stream_ids |= _policy_ids
 
         placeholder = False
-        # A stream-only match (no whole-channel source, but explicit streams) is
-        # a real match, NOT a placeholder.
-        if not source and not explicit_stream_ids:
+        # A stream-only match (no whole-channel source, but attachable streams)
+        # is a real match, NOT a placeholder. Keyed on `source_streams`, the
+        # pool actually built above, rather than on `source or
+        # explicit_stream_ids`: those say a candidate was NAMED, not that
+        # anything survived exclusion, the matchup-name gate, and still exists
+        # in the DB. See the comment on the pool build.
+        if not source_streams:
             score_val = float(g.get("score", 0.0))
             if score_val >= placeholder_threshold:
                 placeholder = True
@@ -4225,66 +4822,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 llm_failed += 1
             else:
                 llm_used += 1
-
-        # Rank the streams from every matched source channel (DB reads only).
-        #
-        # A whole-channel match donates every stream the channel carries, so a
-        # provider that bundles dedicated per-matchup feeds onto one channel
-        # turns one match into a pile of other games' broadcasts (#162). Gate
-        # each channel's streams on naming THIS game, relative to that channel
-        # (see select_streams_for_game for why relative, and why the gate is not
-        # inverted). Field events are single-sided and their feed naming is
-        # already delicate (#135), so they keep every stream.
-        field_event = is_field_event(g.get("away"), g.get("extra"))
-        home_kws = [] if field_event else _strong_team_keywords(g.get("home") or "")
-        away_kws = [] if field_event else _strong_team_keywords(g.get("away") or "")
-        stream_pool = []  # list of (sort_key, src_order, stream_id)
-        seen_stream_ids = set()
-        for src_order, src in enumerate(sources):
-            chan_streams = list(src.streams.all().only("id", "name", "stream_stats"))
-            if field_event:
-                keep_flags = [True] * len(chan_streams)
-            else:
-                keep_flags = select_streams_for_game(
-                    [s.name or "" for s in chan_streams], home_kws, away_kws,
-                )
-            for s, keep in zip(chan_streams, keep_flags):
-                if not keep:
-                    foreign_streams_dropped += 1
-                    continue
-                if s.id in seen_stream_ids:
-                    continue
-                seen_stream_ids.add(s.id)
-                key = _stream_sort_key(
-                    s.stream_stats, s.name or src.name or "",
-                    english_first=english_first, prefer_us=prefer_us,
-                    home=g["home"], away=g["away"],
-                )
-                stream_pool.append((key, src_order, s.id))
-        # Path C: attach the specific stream-name-matched streams, NOT their
-        # parent channels' other (unrelated) streams. Ordered after the channel
-        # sources; the quality sort below re-ranks the whole pool anyway, so the
-        # base offset is only a stable tiebreak. De-duped against channel
-        # streams already pooled.
-        if explicit_stream_ids:
-            base = len(sources)
-            by_id = {
-                s.id: s for s in Stream.objects.filter(id__in=explicit_stream_ids)
-                .only("id", "name", "stream_stats")
-            }
-            for j, sid in enumerate(explicit_stream_ids):
-                s = by_id.get(sid)
-                if s is None or s.id in seen_stream_ids:
-                    continue
-                seen_stream_ids.add(s.id)
-                key = _stream_sort_key(
-                    s.stream_stats, s.name or "",
-                    english_first=english_first, prefer_us=prefer_us,
-                    home=g["home"], away=g["away"],
-                )
-                stream_pool.append((key, base + j, s.id))
-        stream_pool.sort()
-        source_streams = [sid for _, _, sid in stream_pool]
 
         resolved_logo_id, logo_outcome = _resolve_matchup_logo_id(g, marker, source)
         if matchup_logos_enabled and not dry_run:
@@ -4582,6 +5119,30 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     EPGData.objects.filter(
                         epg_source=epg_source, tvg_id__in=reap_markers,
                     ).delete()
+            # #206: a channel KEPT for an active recording never goes through
+            # the write loop, so its ChannelStream rows are whatever the last
+            # apply left. If the user has since excluded one of those streams'
+            # groups, it would stay attached indefinitely and quietly contradict
+            # "excluded streams are never attached". Strip it here.
+            #
+            # Membership only, never the Channel and never the Recording: the
+            # channel is being kept ON PURPOSE so an in-flight recording keeps
+            # its target (#146). A recording already writing from an excluded
+            # stream is left to finish; the point is that nothing STARTS from
+            # one after the user excluded it.
+            if kept_for_recording and excluded_ids:
+                stripped = ChannelStream.objects.filter(
+                    channel_id__in=[c.id for c in kept_for_recording],
+                    stream_id__in=excluded_ids,
+                ).delete()[0]
+                if stripped:
+                    policy_dropped_stream_ids |= set(excluded_ids)
+                    logger.info(
+                        "[ranked_matchups] stripped %d excluded-group stream "
+                        "link(s) from %d channel(s) kept for an active recording",
+                        stripped, len(kept_for_recording),
+                    )
+
             # Restore kept channels (active recording) to their pre-park number
             # so they don't linger at a ~park_base value. Only restore numbers
             # not claimed by a current game this run (assigned set), so the
@@ -4712,6 +5273,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             foreign_streams_dropped,
         )
         foreign_msg = f" Other-matchup streams skipped: {foreign_streams_dropped}."
+    if policy_dropped_stream_ids:
+        foreign_msg += (
+            f" Excluded-group streams skipped: {len(policy_dropped_stream_ids)}."
+        )
     rec_msg = ""
     if rehomed_recordings or kept_for_recording_n:
         rec_msg = (
@@ -5142,7 +5707,12 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     Read-only: no DB writes, no apply; reflects the EPG as it stands now.
     """
-    del settings  # interface-required (Plugin.run dispatch), not read here
+    # `settings` IS read now (#206): the deep dive builds a real candidate
+    # lookup, and it must apply the same `excluded_groups` policy the apply
+    # does, or diagnose reports streams that would never actually be attached.
+    # This line used to be `del settings  # ... not read here`; if you make
+    # diagnose settings-free again, restore the del rather than leaving an
+    # unused parameter.
     from types import SimpleNamespace
     from .matcher import (
         _regex_filter_channel_name,
@@ -5247,7 +5817,9 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
                                    start_time=start_dt, home=home, away=away,
                                    extra=target.get("extra") or {})
             try:
-                cands = _build_epg_lookup()(shim)
+                cands = _build_epg_lookup(
+                    excluded_stream_ids=_streams_in_groups(_group_policy(settings)[1])
+                )(shim)
             except Exception:
                 cands = []
             # Path C: stream NAMES (not channel names) that name the team(s).
@@ -5794,7 +6366,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.26.0"
+    version = "1.27.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

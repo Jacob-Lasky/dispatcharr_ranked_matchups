@@ -5,6 +5,126 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.27.0] - 2026-08-31
+
+### Added
+
+- **Preferred languages (`language_preferences`), an ordered list.** Replaces
+  the English-only ordering that was reachable only by enabling the unrelated
+  `widen_stream_pool` setting. `en` (the new default) prefers English
+  commentary; `de, en` prefers German and falls back to English. Earlier in the
+  list wins, a stream whose language cannot be read from its name sorts after
+  your listed languages but ahead of ones you did not list, and nothing is ever
+  removed for its language. Language tags were enumerated from 16,970 real
+  stream names: 480 detections, zero false positives. `PL` and `US:` are
+  deliberately NOT language tags (Premier League, and US Spanish-language
+  broadcasting, own those in this domain).
+- **Demote stream groups (`fallback_only_groups`).** Named channel groups whose
+  streams sort behind everything else while staying playable. This is the fix
+  for foreign-language backup feeds whose names carry no language marker.
+- **Exclude stream groups (`excluded_groups`).** Named channel groups whose
+  streams are never attached, not even as a fallback. Applied at candidate
+  lookup as well as at apply, so the matcher cannot pick an excluded stream as
+  a game's primary and leave the channel with no streams.
+- **Provenance ordering.** A stream you attached to a channel of your own sorts
+  ahead of one found only by the Path C M3U sweep. Zero configuration. Our own
+  virtual matchup channels deliberately do not count as curation; counting them
+  would make the signal self-reinforcing, promoting whatever the previous apply
+  attached.
+
+### Changed
+
+- `widen_stream_pool` no longer affects stream ORDERING; it only widens the
+  candidate pool as its name says. Use `language_preferences` for ordering.
+- `tools/export_snapshot.py` now exports `channel_group_id` per stream plus
+  `channel_groups` and `curated_stream_ids`, so an offline replay exercises the
+  group policy and provenance instead of silently replaying the old path.
+
+### Fixed
+
+- Reported case: German-language backup feeds present in the M3U but never
+  added as channels were attaching to Bundesliga matchups and, because
+  ordering was quality-only, could lead the stack. (#206)
+
+### Review fixes folded into this release
+
+Two external review rounds. Each wrong answer looked exactly like a right one,
+which is why they are listed rather than quietly squashed.
+
+**Second round** (after the first cut of the exclusion pre-pass):
+
+- **The placeholder decision now keys on the REAL stream pool.** The pre-pass
+  asked the cheap question "does this source own a non-excluded stream?", but
+  the pool also applies the matchup-name gate, so a channel owning one excluded
+  stream for THIS game plus a live stream for ANOTHER game passed the check and
+  then donated nothing. That published a non-placeholder channel with zero
+  streams and, for an existing channel, deleted its old membership on the way.
+  The pool build moved above the decision (`_build_stream_pool`, extracted with
+  its dependencies injected so it is testable without Django), so the two
+  cannot disagree by construction. Same fix covers a source channel with zero
+  streams, and a cached `stream_ids` entry naming a feed the provider has since
+  deleted (that one was pre-existing).
+- **A channel kept for an active recording now has excluded streams stripped.**
+  It never reaches the write loop, so its membership survived untouched and an
+  excluded stream stayed attached indefinitely. Membership only: the channel and
+  the Recording are what #146 exists to protect.
+- **The excluded-stream count is a set of distinct ids.** It undercounted
+  explicit-stream exclusions (no increment at all) and double-counted a stream
+  shared by two matched source channels.
+- **The corpus class guard was itself broken.** Its group-consistency loop had
+  an unconditional `break`, so it only ever tested one language; it looked for
+  tags only at the start of a name, missing `MK Dons`, `CF Monterrey`,
+  `St Helens` and `TV TBA` sitting in its own committed fixture; the
+  `Little Rock, AR` decoy silently tested nothing because its first word is not
+  two letters; and its group fallback searched a bare two-letter code as a
+  substring, so a generic group name could "prove" a language. All fixed, and
+  the group-consistency assertion was REMOVED rather than weakened once its own
+  positive control showed it had no rows to judge.
+- **The manifest test now rejects nulls and non-strings** in keys the serializer
+  declares as CharFields. It previously copied the allowed-key list only, so
+  `"placeholder": null` passed locally and would be dropped upstream. The test
+  now also states plainly that it cannot detect upstream contract drift.
+
+**First round** (on the initial diff):
+
+- **Exclusion now runs in the apply pre-pass, above `seen_markers.add(marker)`.**
+  The first cut skipped the game below that line, which leaves an existing
+  channel neither published nor reaped so it commits at the temporary parking
+  number (the failure measured live on 2026-08-29 that stranded 22 channels at
+  1400-1421). A game whose every candidate is excluded now falls into the
+  existing "no source, no streams" path, which preserves DVR recordings.
+- **A partially-excluded source channel keeps contributing its other streams**
+  instead of being dropped whole.
+- **The bare tag form admits digits and brackets** (`DE 4K Sport`,
+  `DE [FHD] Sport`). Requiring a letter made those miss the tag and fall through
+  to the team-name inference, reading a German feed as English.
+- **An explicit audio label now beats a market tag.** `AU | Spanish Feed` was
+  English and `MX | English Feed` was Spanish.
+- **An explicit English broadcaster now beats an accented proper noun.**
+  `BBC | São Paulo vs Santos` was demoted out of the English tier by the `ã`.
+- **Feed-language markers are word-bounded**, so `German Feedback Channel` no
+  longer reads as German.
+- **The earliest tag by position wins**, so changing a later tag's punctuation
+  cannot flip the answer.
+- **`en-US` / `en_GB` normalise to their primary subtag**, instead of parsing
+  cleanly and then matching nothing.
+- **`tools/export_snapshot.py` excludes legacy owned tvg_id markers too**, so
+  offline replay agrees with production about which streams are curated.
+- **`SE` removed from the language-tag map.** It is Southeast in this domain
+  ("SE Missouri", "SE Louisiana", 13 real rows) with zero rows using it as a
+  Swedish tag. It survived the first cut because it was on a speculative
+  starting list; the new corpus class guard in `tests/test_language_corpus.py`
+  is what caught it. Swedish still resolves via "Swedish Feed".
+- **A committed corpus class guard** (`tests/fixtures/stream_names_corpus.json`,
+  475 real names sampled from a live 16,970-name corpus). The per-case tests are
+  instance-shaped; this one asks a question about the MAP, so it fails on a
+  colliding two-letter code nobody has thought of yet. Verified by adding `PL`
+  and `SE` back and watching it go red.
+- **A manifest/serializer contract test.** Dispatcharr silently drops a
+  malformed field entry, so a plugin.json typo costs a setting that never
+  appears in the UI with nothing reporting it. All three new fields were also
+  validated against the real `PluginFieldSerializer` in a live 0.30.0 container.
+
 ## [1.26.0] - 2026-08-29
 
 ### Fixed
