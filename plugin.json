@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.26.0",
+  "version": "1.27.0",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -668,7 +668,7 @@
       "type": "boolean",
       "label": "Widen stream pool (extra fallback streams)",
       "default": false,
-      "help_text": "When a game airs on several provider channels that all name both teams, the matcher normally keeps just the one it judges best and discards the rest. Turn this on to also stack those other same-fixture channels as lower-priority fallback streams, so if the primary upstream goes down (e.g. a provider 503) the channel fails over instead of going dark. Only channels naming BOTH teams are stacked, never single-team-keyword guesses. Off by default: it trades tighter curation for resilience, and cannot help games your providers do not carry at all."
+      "help_text": "When a game airs on several provider channels that all name both teams, the matcher normally keeps just the one it judges best and discards the rest. Turn this on to also stack those other same-fixture channels as lower-priority fallback streams, so if the primary upstream goes down (e.g. a provider 503) the channel fails over instead of going dark. Only channels naming BOTH teams are stacked, never single-team-keyword guesses. Off by default: it trades tighter curation for resilience, and cannot help games your providers do not carry at all. This setting no longer affects stream ORDERING; use 'Preferred languages' for that."
     },
     {
       "id": "stream_priority",
@@ -686,6 +686,30 @@
         }
       ],
       "help_text": "How a virtual channel's stacked fallback streams are ordered. 'Quality' sorts by ffprobe resolution then bitrate, falling back to HD/FHD/UHD hints in the stream name when a stream was never probed (the historical behavior). 'Prefer US broadcasts' keeps that quality ordering but, among streams of EQUAL quality, puts the US English feed (ESPN/FOX/NBC/ABC/CBS/etc.) ahead of Canadian (TSN/Sportsnet) and overseas feeds. It never promotes a lower-quality US feed over a higher-quality non-US one. US is detected from the stream name; Spanish-language US feeds (ESPN Deportes, Telemundo) are not treated as the preferred US feed."
+    },
+    {
+      "id": "language_preferences",
+      "type": "string",
+      "label": "Preferred languages",
+      "default": "en",
+      "placeholder": "en, de, es",
+      "help_text": "Ordered, comma-separated language codes deciding which stream a matchup channel plays FIRST when several carry the same game. 'en' prefers English commentary; 'de, en' prefers German and falls back to English. Earlier in the list wins. Streams whose language cannot be told from their name sort after your listed languages but ahead of languages you did not list, and NOTHING is ever removed for its language, so a backup feed stays reachable as a fallback. Leave blank to ignore language and order by quality alone. Language is read from the stream name (a 'DE:' or 'MX |' tag, a broadcaster like ZDF or Telemundo, an 'English Feed' label, or accented spelling), so it is best-effort: a German Bundesliga feed named 'Bayern Munich vs Dortmund' is indistinguishable from an English one, because the English club names ARE the German ones. Use 'Demote stream groups' below for those."
+    },
+    {
+      "id": "fallback_only_groups",
+      "type": "string",
+      "label": "Demote stream groups",
+      "default": "",
+      "placeholder": "Sports | DE Sports, Germany | Sports",
+      "help_text": "Comma-separated Dispatcharr channel-group names whose streams should be used only as a last resort. They stay attached and playable, but sort behind every other stream on the channel. This is the fix for backup feeds you keep in your M3U but do not want to hear: put their group here and they will only play if everything else fails. Names are matched case-insensitively and must match the group name exactly otherwise (copy it from the Channels page)."
+    },
+    {
+      "id": "excluded_groups",
+      "type": "string",
+      "label": "Exclude stream groups",
+      "default": "",
+      "placeholder": "Adult | XXX, Latino | Sports",
+      "help_text": "Comma-separated channel-group names whose streams are never attached to a matchup channel at all. Stronger than 'Demote stream groups' above and worth reaching for only when you never want the group: an excluded stream is not available as a fallback either, so a game your providers only carry in that group will have no stream. Prefer demoting unless you mean it."
     },
     {
       "id": "_section_schedule",

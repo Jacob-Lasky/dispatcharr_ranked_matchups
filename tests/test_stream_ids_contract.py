@@ -123,7 +123,35 @@ class TestPathCRejectsStaleDatedStreams:
         import os
         with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
             src = fh.read()
-        assert '_build_epg_lookup(local_tz=_resolve_tz(settings.get("local_timezone", "UTC")))' in src
+        # Kept as a source-level assertion rather than a behavioural one because
+        # plugin.py needs Django to import: every matcher-level timezone test
+        # passes with the refresh never threading the tz in at all.
+        assert 'local_tz=_resolve_tz(settings.get("local_timezone", "UTC"))' in src
+
+    def test_refresh_threads_the_excluded_groups_policy_in(self):
+        """#206: excluded_groups must reach the LOOKUP, not just the apply.
+
+        If it only reached the apply, the matcher could still choose an excluded
+        stream as a game's primary and the apply would then strip it, leaving
+        the matchup channel with no streams. Source-level for the same reason as
+        the test above.
+        """
+        import os
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        assert "excluded_stream_ids=_excluded_stream_ids" in src
+        assert "def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):" in src
+
+    def test_diagnose_applies_the_same_exclusion_policy(self):
+        """#206: diagnose must not report candidates the apply would drop.
+
+        Contract-level: the stub in test_diagnose.py accepts **kw, so a
+        regression that stopped passing the policy would still pass there.
+        """
+        import os
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        assert "excluded_stream_ids=_streams_in_groups(_group_policy(settings)[1])" in src
 
 
 class TestPathAReadsSubtitleAndDescription:

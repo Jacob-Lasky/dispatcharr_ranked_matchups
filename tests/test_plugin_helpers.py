@@ -7,6 +7,7 @@ __init__.py."""
 
 import importlib.util
 import os
+import re
 import sys
 import types
 from datetime import timezone
@@ -2624,104 +2625,240 @@ class TestActionPreviewNames:
         assert "Alabama (15) at St. John's" in r["message"]
 
 
-class TestStreamLanguageRank:
-    """#111: language-preference bucket for widen-pool ordering. Cases are
-    drawn from real `!Top Matchups` stream names observed on the live box."""
+class TestDetectStreamLanguage:
+    """#206: name -> language code. Cases are drawn from real stream names
+    observed on a live box, not invented; the country-tag set below was
+    validated against all 16,970 of them (480 hits, zero false positives)."""
 
     def test_both_english_team_names_is_english(self, plugin):
         n = "FIFA World Cup 2026 02: [4K] Mexico 20:00 South Africa"
-        assert plugin._stream_language_rank(n, "Mexico", "South Africa") == plugin._LANG_RANK_ENGLISH
+        assert plugin._detect_stream_language(n, "Mexico", "South Africa") == "en"
 
-    def test_accented_spelling_is_non_english(self, plugin):
-        # "Turquía" carries an accent and the English "Turkey" is absent.
+    def test_accented_spelling_is_not_english(self, plugin):
+        # "Turquía" carries an accent and the English "Turkey" is absent. An
+        # accent says "not English" but cannot say WHICH language.
         n = "US (Peacock 038) |  Australia v. Turquía (2026-06-13 23:00:00)"
-        assert plugin._stream_language_rank(n, "Australia", "Turkey") == plugin._LANG_RANK_NON_ENGLISH
+        assert plugin._detect_stream_language(n, "Australia", "Turkey") == plugin._LANG_NOT_EN
 
-    def test_spanish_country_without_accent_is_non_english(self, plugin):
-        # No accent, but "Estados Unidos" is a curated Spanish-country hint.
+    def test_spanish_country_without_accent_is_spanish(self, plugin):
+        # No accent, but "Estados Unidos" is a curated Spanish-country hint, so
+        # this one resolves to a SPECIFIC code rather than just not-English.
         n = "US (Peacock 022) |  Estados Unidos v. Paraguay (2026-06-12 20:30:00)"
-        assert plugin._stream_language_rank(n, "United States", "Paraguay") == plugin._LANG_RANK_NON_ENGLISH
+        assert plugin._detect_stream_language(n, "United States", "Paraguay") == "es"
 
     def test_accent_wins_over_partial_english_token(self, plugin):
         # Regression (caught in live verification): "Arabia Saudí v. Uruguay"
         # matches the single-word English tokens "Arabia" and "Uruguay", but the
-        # "í" in "Saudí" is the reliable Spanish tell. The foreign-marker check
-        # must run before the both-team-name check so this stays non-English.
+        # "í" in "Saudí" is the reliable Spanish tell. The accent check must run
+        # before the both-team-name check so this never reads as English.
         n = "US (Peacock 061) |  Arabia Saudí v. Uruguay (2026-06-15 17:00:00)"
-        assert plugin._stream_language_rank(n, "Saudi Arabia", "Uruguay") == plugin._LANG_RANK_NON_ENGLISH
+        assert plugin._detect_stream_language(n, "Saudi Arabia", "Uruguay") == plugin._LANG_NOT_EN
 
-    def test_foreign_audio_feed_label_is_non_english(self, plugin):
+    def test_foreign_audio_feed_label_resolves_to_that_language(self, plugin):
         # Regression (#113, caught live): the audio is Czech/Korean even though
-        # the team names are spelled in English, so the "<lang> Feed" label must
-        # demote it below the plain English feed.
+        # the team names are spelled in English.
         czech = "TSN+ 11 : Czech Feed: FIFA World Cup 2026: Korea Republic vs. Czechia"
         korean = "TSN+ 12 : Korean Feed: FIFA World Cup 2026: Korea Republic vs. Czechia"
-        assert plugin._stream_language_rank(czech, "South Korea", "Czechia") == plugin._LANG_RANK_NON_ENGLISH
-        assert plugin._stream_language_rank(korean, "South Korea", "Czechia") == plugin._LANG_RANK_NON_ENGLISH
+        assert plugin._detect_stream_language(czech, "South Korea", "Czechia") == "cs"
+        assert plugin._detect_stream_language(korean, "South Korea", "Czechia") == "ko"
 
-    def test_plain_english_feed_outranks_foreign_audio_feed(self, plugin):
-        # The plain English FIFA feed (no "<lang> Feed" label) must sort ahead.
-        czech = plugin._stream_language_rank(
-            "TSN+ 11 : Czech Feed: ... Korea Republic vs. Czechia", "South Korea", "Czechia")
-        english = plugin._stream_language_rank(
-            "FIFA World Cup 2026 05: Korea Republic 03:00 Czechia", "South Korea", "Czechia")
-        assert english < czech  # English (0) before non-English (2)
+    def test_explicit_english_feed_label_is_english(self, plugin):
+        # "ENGLISH" is in the feed-language map post-#206 (it was deliberately
+        # absent before, when the map only answered foreign-or-not).
+        n = "TSN+ 09 : English Feed: FIFA World Cup 2026: Korea Republic vs. Czechia"
+        assert plugin._detect_stream_language(n, "South Korea", "Czechia") == "en"
 
     def test_team_name_alone_does_not_trip_feed_marker(self, plugin):
         # "Czechia" contains "CZECH" but no feed noun follows, so a plain feed
-        # naming the team must NOT be mislabeled foreign.
+        # naming the team must NOT be mislabeled.
         n = "FIFA World Cup 2026 05: Korea Republic 03:00 Czechia"
-        assert plugin._stream_language_rank(n, "South Korea", "Czechia") == plugin._LANG_RANK_ENGLISH
+        assert plugin._detect_stream_language(n, "South Korea", "Czechia") == "en"
 
     def test_english_provider_with_single_team_is_english(self, plugin):
         # Only one team named, but "BBC" is an English provider marker.
-        n = "WC2026: BBC Scotland"
-        assert plugin._stream_language_rank(n, "Scotland", "Haiti") == plugin._LANG_RANK_ENGLISH
+        assert plugin._detect_stream_language("WC2026: BBC Scotland", "Scotland", "Haiti") == "en"
 
-    def test_no_signal_is_unknown(self, plugin):
-        assert plugin._stream_language_rank("Generic Sports Channel 12", "Foo", "Bar") == plugin._LANG_RANK_UNKNOWN
+    def test_no_signal_is_none(self, plugin):
+        assert plugin._detect_stream_language("Generic Sports Channel 12", "Foo", "Bar") is None
 
-    def test_empty_name_is_unknown(self, plugin):
-        assert plugin._stream_language_rank("", "Mexico", "South Africa") == plugin._LANG_RANK_UNKNOWN
+    def test_empty_name_is_none(self, plugin):
+        assert plugin._detect_stream_language("", "Mexico", "South Africa") is None
 
     def test_peacock_alone_is_not_english(self, plugin):
         # Guard the DO-NOT: "Peacock" must not be treated as an English marker
-        # (it carries Telemundo Spanish too). With no team-name match and no
-        # other signal it stays unknown, never English.
-        assert plugin._stream_language_rank("US (Peacock 099) | Highlights", "Foo", "Bar") != plugin._LANG_RANK_ENGLISH
+        # (it carries Telemundo Spanish too).
+        assert plugin._detect_stream_language("US (Peacock 099) | Highlights", "Foo", "Bar") != "en"
+
+    # --- country/language tags, all from the live corpus -------------------
+
+    @pytest.mark.parametrize("name,code", [
+        ("DE: Sportdigital Fussball FHD", "de"),
+        ("De: Sky Sport Bundesliga 2 HD [ Match Time ]", "de"),   # lowercase tag, real row
+        ("TR: TRT Spor FHD Lokal", "tr"),
+        ("IT: ZONA DAZN 1", "it"),
+        ("AR: YAS SPORT HD", "ar"),
+        ("ES: M+ Liga de Campeones 13", "es"),
+        ("NO: Viasat Sport Extra", "no"),
+        ("NL: Ziggo Sport UHD", "nl"),
+        ("MX | TyC Sports Internacional HD", "es"),               # country tag -> language
+        ("GR | NOVA SPORTS PRIME", "el"),
+        ("BR: SporTV 3", "pt"),
+        ("PT DAZN 4 (HD)", "pt"),                                 # bare uppercase form
+        ("FR Ligue1+ (FHD)", "fr"),
+        # Enumerated from the corpus rather than guessed. CZ is the one that
+        # PROVES the tag must be checked before the broadcaster token: without
+        # it, "CZ: CANAL+ Sport" (21 real Czech rows) read as FRENCH.
+        ("CZ: CANAL+ Sport", "cs"),
+        ("CY | NOVA SPORTS 2", "el"),
+        ("PA: Sertv Deportes", "es"),
+        ("CO | Win Sports+", "es"),
+        ("AU | Fox Sports 501", "en"),
+        ("NZ | Sky Sport 1", "en"),
+        ("IE | Premier Sports 1", "en"),
+    ])
+    def test_country_tag_resolves(self, plugin, name, code):
+        assert plugin._detect_stream_language(name) == code
+
+    @pytest.mark.parametrize("name", [
+        # Each of these was a MEASURED false positive of a looser predicate.
+        "TSN+ 08: NO EVENT",                                    # not Norwegian
+        "EFL36ⓧ| No Scheduled Event",                            # not Norwegian (title case)
+        "ESPN UNLTD 209: ESPN+: SE Missouri vs. North Alabama",  # not Swedish
+        "SEC+ / ACC extra 16: SE Louisiana vs. Ole Miss",        # not Swedish
+        "NCAAF 027: MOREHOUSE VS UAPB (IN LITTLE ROCK, AR)",     # not Arabic
+        "US: Canal 47",                                          # "US" is deliberately not a tag
+    ])
+    def test_corpus_false_positives_stay_undetected(self, plugin, name):
+        assert plugin._detect_stream_language(name) is None
+
+    @pytest.mark.parametrize("name", [
+        "AU (STAN 97) | PL Saturday Wrap: Matchweek 3  Sep 6",
+        "AU (STAN 99) | PL Live • 5 September",
+    ])
+    def test_pl_never_reads_as_polish(self, plugin, name):
+        """These rows resolve to English via the leading AU tag, which is
+        correct: they are Australian Stan feeds. The invariant is narrower than
+        "undetectable" -- "PL" must never become Polish."""
+        assert plugin._detect_stream_language(name) != "pl"
+
+    @pytest.mark.parametrize("tag", ["PL", "US"])
+    def test_deliberately_excluded_tags_stay_out_of_the_map(self, plugin, tag):
+        """Guard both DO-NOTs on _LANG_TAG_TO_CODE.
+
+        "PL" is Premier League in this domain (20 real rows). "US:" is US
+        Spanish-language broadcasting in all 6 real rows, so mapping it to
+        English would be wrong for every observed case, and bare "US" also
+        collides with the team name in a USMNT fixture.
+        """
+        assert tag not in plugin._LANG_TAG_TO_CODE
+        assert tag not in plugin._LANG_TAG_CODES
+
+    def test_tag_codes_and_map_cannot_drift(self, plugin):
+        # _LANG_TAG_CODES is derived from the map; a hand-maintained second
+        # list would let a code be matched by the regex and then resolve to
+        # None, which reads as "no signal" instead of the language it names.
+        assert set(plugin._LANG_TAG_CODES) == set(plugin._LANG_TAG_TO_CODE)
 
 
-class TestStreamSortKeyEnglishFirst:
-    """#111: english_first prepends the language rank so all English variants
-    sort ahead of all non-English ones, quality preserved within each tier."""
+class TestParseLanguagePrefs:
+    """#206: the comma-separated ordered preference list."""
+
+    @pytest.mark.parametrize("raw", ["", None, "   ", ",,,", ["en"], 7])
+    def test_blank_and_non_string_yield_empty(self, plugin, raw):
+        assert plugin._parse_language_prefs(raw) == []
+
+    def test_order_is_preserved_and_codes_lowercased(self, plugin):
+        assert plugin._parse_language_prefs(" EN , de,  Es ") == ["en", "de", "es"]
+
+    def test_duplicates_dropped_keeping_first_position(self, plugin):
+        assert plugin._parse_language_prefs("en, de, en") == ["en", "de"]
+
+    def test_unknown_codes_are_kept_not_rejected(self, plugin):
+        # Deliberate: no closed vocabulary. A code we cannot detect costs
+        # ordering, never availability.
+        assert plugin._parse_language_prefs("en, xx") == ["en", "xx"]
+
+    def test_manifest_default_matches_code_default(self, plugin):
+        import json, os
+        root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        fields = json.load(open(os.path.join(root, "plugin.json"), encoding="utf-8"))["fields"]
+        field = next(f for f in fields if f["id"] == plugin._LANGUAGE_PREFS_SETTING)
+        assert field["default"] == plugin._LANGUAGE_PREFS_DEFAULT
+
+
+class TestRankForLanguage:
+    """#206: position in the user's ordered preference list."""
+
+    def test_no_prefs_is_flat(self, plugin):
+        assert plugin._rank_for_language("anything", []) == 0
+
+    def test_listed_languages_rank_in_order(self, plugin):
+        prefs = ["en", "de"]
+        eng = plugin._rank_for_language("TSN+ 09 : English Feed: x", prefs)
+        ger = plugin._rank_for_language("DE: Sport 1 FHD", prefs)
+        assert eng == 0 and ger == 1
+
+    def test_no_signal_beats_an_unwanted_language(self, plugin):
+        prefs = ["en"]
+        unknown = plugin._rank_for_language("Generic Sports Channel 12", prefs)
+        spanish = plugin._rank_for_language("ES: M+ Liga de Campeones 13", prefs)
+        assert unknown < spanish
+
+    def test_not_en_is_unwanted_when_only_english_is_asked_for(self, plugin):
+        prefs = ["en"]
+        accented = plugin._rank_for_language("Australia v. Turquía", prefs)
+        unknown = plugin._rank_for_language("Generic Sports Channel 12", prefs)
+        assert unknown < accented
+
+    def test_not_en_is_only_unknown_when_a_foreign_language_is_asked_for(self, plugin):
+        # The subtle case: "Bayern München" is accented, so it reads as
+        # _LANG_NOT_EN. A user who asked for German must not have it demoted
+        # BELOW the no-signal tier, because it might be the German they wanted.
+        prefs = ["de", "en"]
+        accented = plugin._rank_for_language("Bayern München vs Stuttgart", prefs)
+        unknown = plugin._rank_for_language("Generic Sports Channel 12", prefs)
+        assert accented == unknown
+
+    def test_german_household_prefers_german_over_english(self, plugin):
+        prefs = ["de", "en"]
+        ger = plugin._rank_for_language("DE: Sky Sport Bundesliga 1", prefs)
+        eng = plugin._rank_for_language("WC2026: BBC Scotland", prefs)
+        assert ger < eng
+
+
+class TestStreamSortKeyLanguagePrefs:
+    """#206: a non-empty lang_prefs prepends the language rank, so every stream
+    in a preferred language sorts ahead of one that is not, quality preserved
+    within each language tier. Was `english_first` (#111) before #206 made the
+    preference an ordered user-supplied list."""
 
     def test_quality_only_when_flag_off(self, plugin):
         # Default behavior unchanged: UHD non-English sorts before SD English.
         eng_sd = plugin._stream_sort_key(None, "Mexico vs South Africa SD", home="Mexico", away="South Africa")
         non_uhd = plugin._stream_sort_key(None, "Sudáfrica vs México UHD", home="Mexico", away="South Africa")
-        assert non_uhd < eng_sd  # quality wins when english_first defaults off
+        assert non_uhd < eng_sd  # quality wins when lang_prefs defaults empty
 
     def test_english_low_quality_beats_non_english_high_quality(self, plugin):
         eng_sd = plugin._stream_sort_key(
-            None, "Mexico vs South Africa SD", english_first=True, home="Mexico", away="South Africa")
+            None, "Mexico vs South Africa SD", lang_prefs=["en"], home="Mexico", away="South Africa")
         non_uhd = plugin._stream_sort_key(
-            None, "Sudáfrica vs México UHD", english_first=True, home="Mexico", away="South Africa")
+            None, "Sudáfrica vs México UHD", lang_prefs=["en"], home="Mexico", away="South Africa")
         assert eng_sd < non_uhd  # language is primary
 
     def test_quality_preserved_within_english_tier(self, plugin):
         eng_uhd = plugin._stream_sort_key(
-            None, "Mexico vs South Africa UHD", english_first=True, home="Mexico", away="South Africa")
+            None, "Mexico vs South Africa UHD", lang_prefs=["en"], home="Mexico", away="South Africa")
         eng_sd = plugin._stream_sort_key(
-            None, "Mexico vs South Africa SD", english_first=True, home="Mexico", away="South Africa")
+            None, "Mexico vs South Africa SD", lang_prefs=["en"], home="Mexico", away="South Africa")
         assert eng_uhd < eng_sd  # within English, UHD before SD
 
     def test_unknown_sorts_between_english_and_non_english(self, plugin):
         eng = plugin._stream_sort_key(
-            None, "Mexico vs South Africa HD", english_first=True, home="Mexico", away="South Africa")
+            None, "Mexico vs South Africa HD", lang_prefs=["en"], home="Mexico", away="South Africa")
         unknown = plugin._stream_sort_key(
-            None, "Generic Channel HD", english_first=True, home="Mexico", away="South Africa")
+            None, "Generic Channel HD", lang_prefs=["en"], home="Mexico", away="South Africa")
         non_eng = plugin._stream_sort_key(
-            None, "Sudáfrica vs México HD", english_first=True, home="Mexico", away="South Africa")
+            None, "Sudáfrica vs México HD", lang_prefs=["en"], home="Mexico", away="South Africa")
         assert eng < unknown < non_eng
 
 
@@ -2768,12 +2905,12 @@ class TestUsBroadcastPreference:
         assert us == non_us
 
     def test_acceptance_4k_fox_usa_v_aus_is_top(self, plugin):
-        # Real config: widen_stream_pool ON (english_first=True) AND us_preferred,
+        # Real config: widen_stream_pool ON (lang_prefs=["en"]) AND us_preferred,
         # with realistic live feed names (no team names): "FOX 4K" is a US token
         # but NOT an English token; "TSN 1" IS an English token. Under us_preferred
         # quality leads, so the probed-4K Fox tops the 1080p TSN. The bug this
-        # guards: english_first alone sank FOX below TSN (TSN-first symptom).
-        kw = dict(english_first=True, prefer_us=True, home="United States", away="Australia")
+        # guards: language-first alone sank FOX below TSN (TSN-first symptom).
+        kw = dict(lang_prefs=["en"], prefer_us=True, home="United States", away="Australia")
         fox_4k = plugin._stream_sort_key(
             {"width": 3840, "height": 2160, "ffmpeg_output_bitrate": 12876.0}, "FOX 4K", **kw)
         tsn_1080 = plugin._stream_sort_key(
@@ -2786,19 +2923,19 @@ class TestUsBroadcastPreference:
             key=lambda t: t[1])
         assert ranked[0][0] == "fox_4k", f"expected fox_4k first, got {[r[0] for r in ranked]}"
 
-    def test_us_preferred_overrides_english_first_language_ordering(self, plugin):
-        # Regression for the live bug: with english_first ON, a 4K feed whose name
+    def test_us_preferred_overrides_language_ordering(self, plugin):
+        # Regression for the live bug: with a language preference set, a 4K feed whose name
         # is NOT an English token must still beat a 1080p English-token feed under
         # us_preferred (quality leads; language is only a final tiebreak). Without
-        # prefer_us, english_first sinks the 4K feed below the 1080p one.
+        # prefer_us, the language key sinks the 4K feed below the 1080p one.
         fox_4k, tsn_1080 = {"width": 3840, "height": 2160}, {"width": 1920, "height": 1080}
         hw = dict(home="United States", away="Australia")
         # us_preferred: 4K FOX wins (quality leads)
-        assert plugin._stream_sort_key(fox_4k, "FOX 4K", english_first=True, prefer_us=True, **hw) < \
-               plugin._stream_sort_key(tsn_1080, "TSN 1", english_first=True, prefer_us=True, **hw)
-        # english_first only (the #111 behavior that produced TSN-first): TSN wins
-        assert plugin._stream_sort_key(tsn_1080, "TSN 1", english_first=True, **hw) < \
-               plugin._stream_sort_key(fox_4k, "FOX 4K", english_first=True, **hw)
+        assert plugin._stream_sort_key(fox_4k, "FOX 4K", lang_prefs=["en"], prefer_us=True, **hw) < \
+               plugin._stream_sort_key(tsn_1080, "TSN 1", lang_prefs=["en"], prefer_us=True, **hw)
+        # language only (the #111 behavior that produced TSN-first): TSN wins
+        assert plugin._stream_sort_key(tsn_1080, "TSN 1", lang_prefs=["en"], **hw) < \
+               plugin._stream_sort_key(fox_4k, "FOX 4K", lang_prefs=["en"], **hw)
 
     def test_manifest_stream_priority_matches_code(self, plugin):
         # plugin.json's stream_priority option values + default MUST match the
@@ -3104,3 +3241,311 @@ class TestBuildSourcesEnglishCups:
             help_text = field["help_text"]
             assert "ESPN" in help_text
             assert "Football-Data.org" in help_text
+
+
+def _stream_stub(sid, name, group_id=None, stats=None):
+    """Minimal stand-in for a Stream row, matching what _pool_entry_key reads."""
+    return types.SimpleNamespace(
+        id=sid, name=name, channel_group_id=group_id, stream_stats=stats or {},
+    )
+
+
+class TestGroupPolicyParsing:
+    """#206: the two per-group settings. Two lists, not one three-state field,
+    because demoting a group and excluding it differ in availability."""
+
+    def test_blank_settings_yield_empty_sets(self, plugin):
+        fallback, excluded = plugin._group_policy({})
+        assert fallback == frozenset() and excluded == frozenset()
+
+    def test_names_are_casefolded_for_matching(self, plugin):
+        fallback, excluded = plugin._group_policy({
+            "fallback_only_groups": "Sports | DE Sports",
+            "excluded_groups": "Latino | Sports , Adult | XXX",
+        })
+        assert fallback == frozenset({"sports | de sports"})
+        assert excluded == frozenset({"latino | sports", "adult | xxx"})
+
+    def test_group_names_may_contain_pipes(self, plugin):
+        # Real group names look like "Sports | DE Sports"; only the COMMA
+        # separates entries, so a pipe inside a name must survive parsing.
+        fallback, _ = plugin._group_policy({"fallback_only_groups": "Germany | Sports"})
+        assert fallback == frozenset({"germany | sports"})
+
+    def test_the_two_lists_are_independent(self, plugin):
+        fallback, excluded = plugin._group_policy({"excluded_groups": "A"})
+        assert fallback == frozenset() and excluded == frozenset({"a"})
+
+    @pytest.mark.parametrize("setting_attr", [
+        "_FALLBACK_ONLY_GROUPS_SETTING", "_EXCLUDED_GROUPS_SETTING",
+    ])
+    def test_manifest_declares_each_setting_with_a_blank_default(self, plugin, setting_attr):
+        import json
+        fields = json.load(open(os.path.join(REPO_ROOT, "plugin.json"), encoding="utf-8"))["fields"]
+        field = next(f for f in fields if f["id"] == getattr(plugin, setting_attr))
+        assert field["type"] == "string"
+        # Blank by default: neither list may silently drop or demote a stream on
+        # a fresh install. #138 wanted the global sweep and must keep working.
+        assert field["default"] == ""
+
+
+class TestPoolEntryKeyPolicy:
+    """#206: _pool_entry_key is the single enforcement point shared by the
+    channel-donated and Path C pool branches."""
+
+    # Stream ids 10/11 stand in for the two candidates; policy arrives as
+    # resolved ID SETS (see _streams_in_groups), not group names.
+    _KW = dict(
+        lang_prefs=["en"], prefer_us=False, home="Bayern Munich", away="Dortmund",
+        curated_ids=set(), fallback_only_ids=frozenset(), excluded_ids=frozenset(),
+    )
+
+    def _key(self, plugin, stream, **over):
+        kw = dict(self._KW); kw.update(over)
+        return plugin._pool_entry_key(stream, stream.name, **kw)
+
+    def test_excluded_group_returns_none(self, plugin):
+        s = _stream_stub(10, "Bundesliga 01: Bayern Munich vs Dortmund", group_id=1)
+        assert self._key(plugin, s, excluded_ids=frozenset({10})) is None
+
+    def test_group_not_in_any_list_is_unaffected(self, plugin):
+        s = _stream_stub(10, "EPL01: Bayern Munich vs Dortmund", group_id=2)
+        assert self._key(plugin, s, excluded_ids=frozenset({99})) is not None
+
+    def test_an_empty_policy_set_excludes_nothing(self, plugin):
+        s = _stream_stub(10, "Some Feed", group_id=None)
+        assert self._key(plugin, s, excluded_ids=frozenset()) is not None
+
+    def test_fallback_only_group_sorts_behind_everything(self, plugin):
+        german = _stream_stub(10, "Bayern Munich vs Dortmund UHD", group_id=1)
+        english = _stream_stub(11, "Bayern Munich vs Dortmund SD", group_id=2)
+        fb = frozenset({10})   # the German feed's stream id
+        assert self._key(plugin, english, fallback_only_ids=fb) < \
+               self._key(plugin, german, fallback_only_ids=fb)
+
+    def test_fallback_only_beats_curated(self, plugin):
+        # Explicit user policy outranks the inferred provenance signal: a
+        # demoted group stays demoted even for a stream the user curated.
+        demoted_curated = _stream_stub(10, "Feed A", group_id=1)
+        plain_uncurated = _stream_stub(11, "Feed B", group_id=2)
+        kw = dict(fallback_only_ids=frozenset({10}), curated_ids={10})
+        assert self._key(plugin, plain_uncurated, **kw) < self._key(plugin, demoted_curated, **kw)
+
+    def test_curated_stream_outranks_uncurated_at_equal_quality(self, plugin):
+        curated = _stream_stub(10, "Bayern Munich vs Dortmund", group_id=2)
+        uncurated = _stream_stub(11, "Bayern Munich vs Dortmund", group_id=2)
+        assert self._key(plugin, curated, curated_ids={10}) < \
+               self._key(plugin, uncurated, curated_ids={10})
+
+    def test_curated_outranks_higher_quality_uncurated(self, plugin):
+        """The #206 report, reduced: an uncurated German backup must not lead.
+
+        Provenance is the OUTERMOST key, so a curated SD feed beats an
+        uncurated UHD one. Without that, the 4K German backup wins on quality.
+        """
+        curated_sd = _stream_stub(10, "Bayern Munich vs Dortmund SD", group_id=2)
+        uncurated_uhd = _stream_stub(11, "Bayern Munich vs Dortmund UHD", group_id=1)
+        assert self._key(plugin, curated_sd, curated_ids={10}) < \
+               self._key(plugin, uncurated_uhd, curated_ids={10})
+
+    def test_provenance_leads_even_under_us_preferred(self, plugin):
+        # us_preferred puts quality ahead of LANGUAGE, but provenance is about
+        # the user's own curation and stays outermost in both modes.
+        curated = _stream_stub(10, "Bayern Munich vs Dortmund SD", group_id=2)
+        uncurated = _stream_stub(11, "ESPN 4K", group_id=2,
+                                 stats={"width": 3840, "height": 2160})
+        assert self._key(plugin, curated, curated_ids={10}, prefer_us=True) < \
+               self._key(plugin, uncurated, curated_ids={10}, prefer_us=True)
+
+    def test_a_bare_stream_stub_is_tolerated(self, plugin):
+        # The offline replay harness and fake-ORM build lightweight stubs; the
+        # key must need nothing beyond id / name / stream_stats.
+        s = types.SimpleNamespace(id=10, name="Feed", stream_stats={})
+        assert self._key(plugin, s) is not None
+
+
+class TestCuratedStreamIdsContract:
+    """#206: source-level, because plugin.py needs Django to import and
+    _curated_stream_ids is a pure ORM query. The two properties asserted here
+    are the two ways the query is wrong in a way nothing else would catch."""
+
+    def _src(self):
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def _code(self):
+        """_curated_stream_ids' body with its docstring stripped.
+
+        The docstring deliberately NAMES the forbidden query shape
+        ("channels__isnull") as a DO-NOT, so a naive substring check over the
+        whole body would fail on the very comment that documents the trap.
+        """
+        src = self._src()
+        i = src.index("def _curated_stream_ids(")
+        body = src[i:src.index("\ndef ", i + 10)]
+        head, _, rest = body.partition('"""')
+        _doc, _, code = rest.partition('"""')
+        return head + code
+
+    def test_excludes_our_own_virtual_channels(self):
+        """Without this, provenance is self-reinforcing: every apply promotes
+        the streams the previous apply attached, so an uncurated feed reads as
+        curated from its second run on. Measured on a live instance: 34 streams
+        were attached ONLY to plugin-owned channels."""
+        assert '_owned_tvg_id_q("channel__")' in self._code()
+
+    def test_queries_the_through_table_not_the_m2m(self):
+        """`Stream.objects.filter(channels__isnull=False).exclude(...)` looks
+        equivalent and is not: `channels` is multi-valued, so the exclude also
+        drops streams attached to BOTH a real channel and one of ours (95 on
+        that same instance), which are exactly the curated ones."""
+        code = self._code()
+        assert "ChannelStream.objects" in code
+        assert "channels__isnull" not in code
+        # And the DO-NOT that explains why must survive in the docstring.
+        assert "channels__isnull" in self._src()
+
+    def test_apply_reads_it_once_not_per_game(self):
+        # A per-game call would issue one query per matchup channel. Count
+        # CALL sites only: the `def` line matches the same substring.
+        src = self._src()
+        calls = src.count("_curated_stream_ids()") - src.count("def _curated_stream_ids()")
+        assert calls == 1
+
+
+class TestExclusionRunsBeforeSeenMarkers:
+    """#206: WHERE the exclusion runs is the whole correctness argument.
+
+    It must drop excluded streams in the pre-pass, above the placeholder/skip
+    decision, because that decision sits above `seen_markers.add(marker)`. A
+    `continue` below that line leaves an existing channel neither published nor
+    reaped, so it commits at phase 0's temporary parking number (measured live
+    2026-08-29: 22 channels stranded at 1400-1421).
+
+    Source-level because the apply path needs Django to import.
+    """
+
+    def _src(self):
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_exclusion_filters_streams_above_the_seen_marker_line(self):
+        src = self._src()
+        filt = src.index("sid for sid in explicit_stream_ids if sid not in excluded_ids")
+        add = min(m.start() for m in re.finditer(
+            r"^[ \t]*seen_markers\.add\(marker\)[ \t]*$", src, re.M))
+        assert filt < add
+
+    def test_exclusion_filters_streams_above_the_placeholder_decision(self):
+        src = self._src()
+        filt = src.index("sid for sid in explicit_stream_ids if sid not in excluded_ids")
+        decision = src.index("if not source and not explicit_stream_ids:")
+        assert filt < decision
+
+    def test_the_late_guard_does_not_continue(self):
+        """The invariant check below seen_markers must LOG, never skip.
+
+        Skipping there is the stranding bug this whole class is about. A
+        stream-less channel is recoverable on the next apply; a channel
+        stranded at 1400+ is what the user actually notices.
+        """
+        src = self._src()
+        i = src.index("if not placeholder and not source_streams:")
+        block = src[i:i + 600]
+        # CODE lines only. The guard's own comment says "DO NOT turn this into a
+        # `continue`", so a raw substring check fails on the documentation that
+        # exists to prevent the bug. Same trap as the seen_markers position test.
+        code = "\n".join(
+            ln for ln in block.split("\n") if not ln.strip().startswith("#")
+        )
+        assert "logger.error" in code
+        assert "continue" not in code
+
+    def test_a_partially_excluded_source_channel_is_kept(self):
+        # Dropping a whole channel because SOME of its streams are excluded
+        # would over-apply the policy.
+        src = self._src()
+        assert "if sids and sids <= excluded_ids:" in src
+
+    def test_the_lookup_side_counter_is_reported(self):
+        """A counter that is incremented and never read is a silent drop."""
+        src = self._src()
+        assert 'stats["policy_streams_excluded"] += 1' in src
+        assert 'epg_lookup.stats.get("policy_streams_excluded"' in src
+
+
+class TestDetectorPrecedenceRegressions:
+    """#206 review findings. Each case here was a defect an external review
+    found in the first cut; all are ordering or regex-shape bugs whose wrong
+    answer looks exactly like a right one."""
+
+    def test_explicit_audio_label_beats_a_market_tag(self, plugin):
+        # "AU | Spanish Feed" resolved to English from the AU tag, and
+        # "MX | English Feed" to Spanish from MX. An explicit audio label is
+        # the strongest evidence in the name; a market tag is not.
+        assert plugin._detect_stream_language("AU | Spanish Feed") == "es"
+        assert plugin._detect_stream_language("MX | English Feed") == "en"
+
+    def test_english_broadcaster_beats_an_accented_proper_noun(self, plugin):
+        # An accent says nothing about commentary when a broadcaster is named:
+        # São Paulo / München / Köln are just spellings.
+        assert plugin._detect_stream_language("BBC | São Paulo vs Santos") == "en"
+        assert plugin._detect_stream_language("ITV | Köln vs Hoffenheim") == "en"
+
+    def test_accent_still_wins_over_the_team_name_inference(self, plugin):
+        # The measured case this ordering must NOT break: the English tokens
+        # "Arabia" and "Uruguay" both hit, and the í is the reliable tell.
+        n = "US (Peacock 061) |  Arabia Saudí v. Uruguay (2026-06-15 17:00:00)"
+        assert plugin._detect_stream_language(n, "Saudi Arabia", "Uruguay") == plugin._LANG_NOT_EN
+
+    @pytest.mark.parametrize("name", [
+        "DE 4K Bayern Munich vs Dortmund",
+        "DE [FHD] Sport",
+        "DE (HD) Sportdigital",
+    ])
+    def test_bare_tag_admits_digits_and_brackets(self, plugin, name):
+        # The lookahead used to demand [A-Z], so these missed the tag entirely
+        # and fell through to the team-name inference, reading GERMAN as English.
+        assert plugin._detect_stream_language(name, "Bayern Munich", "Dortmund") == "de"
+
+    def test_lowercase_word_after_a_code_is_still_not_a_tag(self, plugin):
+        # Widening the lookahead must not reopen the "No Scheduled Event" hole.
+        # The uppercase-only CODE is what closes it.
+        assert plugin._detect_stream_language("EFL36ⓧ| No Scheduled Event") is None
+
+    def test_earliest_tag_by_position_wins(self, plugin):
+        # Resolving delimited-before-bare made this Spanish, so changing a later
+        # tag's punctuation flipped the answer.
+        assert plugin._detect_stream_language("DE Sky Sport | ES: Telemundo") == "de"
+
+    def test_feed_marker_requires_a_word_boundary(self, plugin):
+        # "GERMAN FEED" is a prefix of "GERMAN FEEDBACK", so a bare substring
+        # test read this as German.
+        assert plugin._detect_stream_language("German Feedback Channel") is None
+        assert plugin._detect_stream_language("Italian Feedback") is None
+        # And the real form still resolves.
+        assert plugin._detect_stream_language("TSN+ 11 : German Feed: WC") == "de"
+        # "English Feedback" is deliberately NOT here: it resolves to English
+        # via the " ENGLISH " provider token, which is a separate and correct
+        # signal, not the feed-marker bug.
+        assert plugin._detect_stream_language("English Feedback") == "en"
+
+    def test_region_subtags_are_normalised(self, plugin):
+        # "en-US" parsed fine and then matched nothing, because the detector
+        # only ever emits primary subtags.
+        assert plugin._parse_language_prefs("en-US, de_DE") == ["en", "de"]
+        assert plugin._parse_language_prefs("en-US, en-GB") == ["en"]
+
+    def test_snapshot_provenance_matches_live_provenance(self):
+        """The exporter must exclude legacy owned markers too, or an offline
+        replay disagrees with production about which streams are curated."""
+        with open(os.path.join(REPO_ROOT, "tools", "export_snapshot.py"),
+                  encoding="utf-8") as fh:
+            exp = fh.read()
+        with open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        # Every legacy marker plugin.py owns must appear in the exporter.
+        i = src.index("_OWNED_TVG_ID_LEGACY_MARKERS: tuple = ")
+        legacy = src[i:src.index("\n", i)]
+        for marker in re.findall(r'"([^"]+)"', legacy):
+            assert marker in exp, f"exporter is missing legacy marker {marker!r}"

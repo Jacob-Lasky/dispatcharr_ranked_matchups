@@ -87,7 +87,11 @@ def _run(plugin, games, *, window_rows=None, lookup_cands=None):
     """Drive _action_diagnose with the two DB helpers stubbed."""
     plugin._read_cache = lambda: {"games": games}
     plugin._diagnose_window_sample = lambda *a, **k: list(window_rows or [])
-    plugin._build_epg_lookup = lambda: (lambda shim: list(lookup_cands or []))
+    # **kw: _action_diagnose threads the excluded_groups policy through (#206),
+    # and a stub that rejects kwargs would raise a TypeError that the action's
+    # own `except Exception` swallows into an empty candidate list, i.e. a wrong
+    # message rather than a failure. Measured: that is exactly how it broke.
+    plugin._build_epg_lookup = lambda **kw: (lambda shim: list(lookup_cands or []))
     out = plugin._action_diagnose({})
     assert out["status"] == "ok"
     return out["message"]

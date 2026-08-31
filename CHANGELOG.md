@@ -5,6 +5,76 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.27.0] - 2026-08-31
+
+### Added
+
+- **Preferred languages (`language_preferences`), an ordered list.** Replaces
+  the English-only ordering that was reachable only by enabling the unrelated
+  `widen_stream_pool` setting. `en` (the new default) prefers English
+  commentary; `de, en` prefers German and falls back to English. Earlier in the
+  list wins, a stream whose language cannot be read from its name sorts after
+  your listed languages but ahead of ones you did not list, and nothing is ever
+  removed for its language. Language tags were enumerated from 16,970 real
+  stream names: 480 detections, zero false positives. `PL` and `US:` are
+  deliberately NOT language tags (Premier League, and US Spanish-language
+  broadcasting, own those in this domain).
+- **Demote stream groups (`fallback_only_groups`).** Named channel groups whose
+  streams sort behind everything else while staying playable. This is the fix
+  for foreign-language backup feeds whose names carry no language marker.
+- **Exclude stream groups (`excluded_groups`).** Named channel groups whose
+  streams are never attached, not even as a fallback. Applied at candidate
+  lookup as well as at apply, so the matcher cannot pick an excluded stream as
+  a game's primary and leave the channel with no streams.
+- **Provenance ordering.** A stream you attached to a channel of your own sorts
+  ahead of one found only by the Path C M3U sweep. Zero configuration. Our own
+  virtual matchup channels deliberately do not count as curation; counting them
+  would make the signal self-reinforcing, promoting whatever the previous apply
+  attached.
+
+### Changed
+
+- `widen_stream_pool` no longer affects stream ORDERING; it only widens the
+  candidate pool as its name says. Use `language_preferences` for ordering.
+- `tools/export_snapshot.py` now exports `channel_group_id` per stream plus
+  `channel_groups` and `curated_stream_ids`, so an offline replay exercises the
+  group policy and provenance instead of silently replaying the old path.
+
+### Fixed
+
+- Reported case: German-language backup feeds present in the M3U but never
+  added as channels were attaching to Bundesliga matchups and, because
+  ordering was quality-only, could lead the stack. (#206)
+
+### Review fixes folded into this release
+
+Found by an external review of the first cut; each wrong answer looked exactly
+like a right one, which is why they are listed rather than quietly squashed.
+
+- **Exclusion now runs in the apply pre-pass, above `seen_markers.add(marker)`.**
+  The first cut skipped the game below that line, which leaves an existing
+  channel neither published nor reaped so it commits at the temporary parking
+  number (the failure measured live on 2026-08-29 that stranded 22 channels at
+  1400-1421). A game whose every candidate is excluded now falls into the
+  existing "no source, no streams" path, which preserves DVR recordings.
+- **A partially-excluded source channel keeps contributing its other streams**
+  instead of being dropped whole.
+- **The bare tag form admits digits and brackets** (`DE 4K Sport`,
+  `DE [FHD] Sport`). Requiring a letter made those miss the tag and fall through
+  to the team-name inference, reading a German feed as English.
+- **An explicit audio label now beats a market tag.** `AU | Spanish Feed` was
+  English and `MX | English Feed` was Spanish.
+- **An explicit English broadcaster now beats an accented proper noun.**
+  `BBC | São Paulo vs Santos` was demoted out of the English tier by the `ã`.
+- **Feed-language markers are word-bounded**, so `German Feedback Channel` no
+  longer reads as German.
+- **The earliest tag by position wins**, so changing a later tag's punctuation
+  cannot flip the answer.
+- **`en-US` / `en_GB` normalise to their primary subtag**, instead of parsing
+  cleanly and then matching nothing.
+- **`tools/export_snapshot.py` excludes legacy owned tvg_id markers too**, so
+  offline replay agrees with production about which streams are curated.
+
 ## [1.26.0] - 2026-08-29
 
 ### Fixed

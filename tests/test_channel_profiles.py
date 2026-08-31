@@ -33,26 +33,26 @@ PKG_NAME = os.path.basename(REPO_ROOT)
 class TestParseProfileNames:
     def test_blank_is_empty(self, plugin):
         for raw in ("", "   ", None, ",,,", "  ,  ,"):
-            assert plugin._parse_profile_names(raw) == []
+            assert plugin._parse_name_list(raw) == []
 
     def test_splits_and_strips(self, plugin):
-        assert plugin._parse_profile_names(" Sports , Soccer ") == ["Sports", "Soccer"]
+        assert plugin._parse_name_list(" Sports , Soccer ") == ["Sports", "Soccer"]
 
     def test_preserves_order(self, plugin):
-        assert plugin._parse_profile_names("Soccer,Sports") == ["Soccer", "Sports"]
+        assert plugin._parse_name_list("Soccer,Sports") == ["Soccer", "Sports"]
 
     def test_dedupes_case_insensitively_keeping_first_spelling(self, plugin):
         # The value is echoed back to the user; a list repeating their entry
         # reads as a bug.
-        assert plugin._parse_profile_names("Sports, sports, SPORTS") == ["Sports"]
+        assert plugin._parse_name_list("Sports, sports, SPORTS") == ["Sports"]
 
     def test_non_string_is_empty(self, plugin):
         # Settings come out of a JSON blob, so a number or a list is reachable.
-        assert plugin._parse_profile_names(["Sports"]) == []
-        assert plugin._parse_profile_names(7) == []
+        assert plugin._parse_name_list(["Sports"]) == []
+        assert plugin._parse_name_list(7) == []
 
     def test_name_containing_spaces_survives(self, plugin):
-        assert plugin._parse_profile_names("USL Super League, NHL") == [
+        assert plugin._parse_name_list("USL Super League, NHL") == [
             "USL Super League", "NHL",
         ]
 
@@ -158,7 +158,7 @@ class TestManifestMatchesCode:
         # default, so flipping both in lockstep still trips this.
         field = self._field(plugin)
         assert field["default"] == ""
-        assert plugin._parse_profile_names(field["default"]) == []
+        assert plugin._parse_name_list(field["default"]) == []
         assert plugin._select_profiles(["Sports"], [])[0] == ["Sports"]
 
     def test_the_group_setting_says_it_is_not_a_profile(self, plugin):
