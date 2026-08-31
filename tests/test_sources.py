@@ -2,6 +2,8 @@
 class-level constants and the shape-handling logic so a typo or refactor
 doesn't ship silently."""
 
+from typing import Any, Dict, List, Tuple
+
 import random
 from datetime import date, datetime, timedelta, timezone
 

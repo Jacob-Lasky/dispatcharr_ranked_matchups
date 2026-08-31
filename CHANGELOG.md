@@ -5,6 +5,36 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.27.1] - 2026-08-31
+
+### Fixed
+
+- **Every `apply` crashed with `name 'source' is not defined`.** The 1.27.0
+  refactor that moved the stream-pool build above the placeholder decision
+  deleted the line binding `source`, which the logo resolver still uses. 1.27.0
+  is withdrawn; use this release.
+
+  It shipped through 4281 passing tests, a byte-compile gate, two external
+  review rounds, a full-corpus sweep and a deploy, and was caught only when the
+  action was finally driven end-to-end against a live container. Nothing in the
+  suite could see it: `plugin.py` imports Django, so no test imports it or
+  executes `_action_apply`, and `compileall` only checks syntax — an undefined
+  name is valid syntax.
+
+- **New gate: `tests/test_no_undefined_names.py`.** Runs `pyflakes` over every
+  `.py` in the tree and fails on undefined names, which is precisely the class
+  above. It carries a positive control (the file list must be non-empty) and an
+  instrument check that plants an undefined name and asserts pyflakes flags it,
+  because a detector that silently stopped working would report clean forever.
+  **`pyflakes` must be in the test-run dependency list or the gate SKIPS.**
+
+- **23 pre-existing undefined names in `tests/`** (`Dict`, `List`, `Tuple`,
+  `Any` used in PEP 526 local annotations with no `typing` import). Harmless at
+  runtime because local annotations are never evaluated, which is why they
+  survived, but they were the noise that would have made the gate unreadable
+  and got it scoped down or skipped.
+
+
 ## [1.27.0] - 2026-08-31
 
 ### Added

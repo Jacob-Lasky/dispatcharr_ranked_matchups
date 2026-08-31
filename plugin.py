@@ -4700,6 +4700,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         sources = list(Channel.objects.filter(id__in=source_ids))
         sources_by_id = {c.id: c for c in sources}
         sources = [sources_by_id[sid] for sid in source_ids if sid in sources_by_id]
+        # Primary whole-channel source, used by the logo resolver below. Bound
+        # HERE and not inside the #206 block: an earlier revision defined it at
+        # the end of that block, and rewriting the block dropped the binding,
+        # so every apply died with `name 'source' is not defined`. Nothing
+        # caught it because plugin.py cannot be imported without Django, so no
+        # test executes this function. `pyflakes` in the test run does now.
+        source = sources[0] if sources else None
 
         # #206: build the REAL stream pool here, above the placeholder
         # decision, and let that decision key on whether anything is actually
@@ -6366,7 +6373,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.27.0"
+    version = "1.27.1"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

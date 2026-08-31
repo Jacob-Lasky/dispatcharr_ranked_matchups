@@ -1,5 +1,7 @@
 """Tests for scoring.py: pure logic, no Django, no network."""
 
+from typing import Dict, List, Tuple
+
 from dispatcharr_ranked_matchups.scoring import (
     GameSignals,
     Weights,
