@@ -46,16 +46,20 @@ except ImportError:  # py < 3.9 fallback (won't hit on Dispatcharr's Python 3.13
     ZoneInfo = None  # type: ignore
 
 from ._util import (
+    current_standings_table,
     group_advance_text,
     group_phase_text,
     group_results_lines,
     group_standings_lines,
     is_field_event,
+    ordinal,
     parse_iso_utc,
     series_phase_text,
     series_record_text,
     series_result_lines,
+    looks_seeded,
     stable_channel_number,
+    trusted_impact_narratives,
     allocate_compact_numbers,
     stable_hash_int,
 )
@@ -2575,18 +2579,22 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         comp_code = extra.get("fd_competition_code")
         league_ctx = LEAGUE_CONTEXTS.get(comp_code) if comp_code else None
 
-        # Standings table is still consumed downstream by
-        # build_impact_narratives (which writes the natural-language
-        # "rooting against X" prose for the EPG description). The
-        # importance signal pulls its standings from the simulator's
-        # initial_state, not this table: they're built from the same
-        # FD.org payload so they agree.
-        standings_table = extra.get("standings_table") or []
+        # TWO TABLES, DELIBERATELY, and they must not be merged (#209).
+        #
+        # SCORING reads the seeded table: `standings_table` is the ranking
+        # prior, and the rank pool, the exhaustiveness flag and the
+        # favorites-in-league set below all feed the score. Switching them to
+        # the current table would silently re-rank every early-season game,
+        # which is a different change from fixing the prose.
+        #
+        # PROSE reads the current table, inside `_impact_narratives_for`,
+        # because a sentence a human reads must be true today.
+        scoring_table = extra.get("standings_table") or []
         favs_with_standings: List[Dict[str, Any]] = []
-        if standings_table:
+        if scoring_table:
             for fav in favorites:
                 fav_lc = fav.lower()
-                for entry in standings_table:
+                for entry in scoring_table:
                     name = entry.get("name", "")
                     if fav_lc in name.lower():
                         favs_with_standings.append({
@@ -2595,14 +2603,14 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                             "points": entry.get("points"),
                         })
                         break
+
         # Pre-render the natural-language impact narrative now and stash
         # on the row so it survives the post-score cap/resort. Apply
         # reads it straight from the cache without redoing the standings
         # lookup. Narrative is editorial output (separate from scoring);
         # the importance signal handles scoring directly.
-        g.extra["impact_narratives"] = build_impact_narratives(
-            g.rank_home, g.rank_away, g.home, g.away,
-            favs_with_standings, standings_table,
+        g.extra["impact_narratives"] = _impact_narratives_for(
+            extra, g.home, g.away, favorites, build_impact_narratives,
         )
 
         # Monte Carlo importance. Queries cover the two playing teams'
@@ -2658,14 +2666,14 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # teams carry one. The standings table IS the pool for a league
         # source; poll sources fall back to the source's declared depth.
         # See scoring._rank_strength.
-        rank_pool = len(standings_table) or getattr(
+        rank_pool = len(scoring_table) or getattr(
             src, "rank_pool_size", None,
         )
         # A standings table lists every club, so it is EXHAUSTIVE and last
         # place is genuinely worst. A poll lists only the top N of a much
         # larger field, so its last entry is still elite. See
         # scoring._rank_strength.
-        rank_pool_exhaustive = bool(standings_table)
+        rank_pool_exhaustive = bool(scoring_table)
 
         signals = GameSignals(
             rank_a=g.rank_home,
@@ -3500,6 +3508,74 @@ def _build_subtitle(g: Dict[str, Any], tagline: str) -> str:
     return " · ".join(parts)
 
 
+def _impact_narratives_for(
+    extra: Dict[str, Any],
+    home: str,
+    away: str,
+    favorites: List[str],
+    build_narratives: Any,
+) -> List[str]:
+    """The "Man City fans: rooting against Arsenal" prose for one fixture.
+
+    Reads the CURRENT-season table, never `extra["standings_table"]`. Inside
+    the seed window that key holds LAST season's points, which rendered as
+    "Manchester City fans: rooting against Arsenal (1 spot and 7 pts ahead)"
+    on a matchday where City actually led Arsenal by 3. Same #209 bug as the
+    prompt builder and the deterministic description, third location.
+
+    Positions come from the current table too, NOT from `rank_home` /
+    `rank_away`: those are the seeded SCORING ranks and disagree with it by
+    design. Returns [] when there is no current table, because a narrative
+    with no true numbers behind it is worse than no narrative.
+
+    `build_narratives` is injected (rather than imported at module scope)
+    because scoring is imported lazily inside the refresh path; passing it
+    keeps that arrangement and makes the function trivially stubbable.
+    """
+    table = current_standings_table(extra)
+    if not table:
+        return []
+    by_name = {e.get("name"): e for e in table if e.get("name")}
+
+    def _position(team: str) -> Optional[int]:
+        entry = by_name.get(team)
+        pos = entry.get("position") if entry else None
+        return pos if isinstance(pos, int) else None
+
+    favs_with_standings: List[Dict[str, Any]] = []
+    for fav in favorites:
+        fav_lc = fav.lower()
+        for entry in table:
+            name = entry.get("name", "")
+            if fav_lc in name.lower():
+                favs_with_standings.append({
+                    "name": name,
+                    "position": entry["position"],
+                    "points": entry.get("points"),
+                })
+                break
+    return build_narratives(
+        _position(home), _position(away), home, away,
+        favs_with_standings, table,
+    )
+
+
+def _row_ranks_are_seeded(g: Dict[str, Any]) -> bool:
+    """True when a row's `rank_home` / `rank_away` came from the previous
+    season's table rather than this season's.
+
+    The status action displays those ranks directly, and inside the seed
+    window they are a scoring prior: showing "EPL 1v10" for a matchday-3
+    fixture invites reading it as the live table, which is the #209 mistake in
+    miniature. Detected by flag where present and by shape otherwise, so
+    pre-#209 cache rows are covered too.
+    """
+    extra = g.get("extra") or {}
+    if extra.get("standings_seeded"):
+        return True
+    return looks_seeded(extra.get("standings_table") or [])
+
+
 def _league_context_for(g: Dict[str, Any]):
     """Resolve the LEAGUE_CONTEXTS entry for a cache row. Returns the
     LeagueContext or None. Single source of truth for both the deterministic
@@ -3523,39 +3599,25 @@ def _is_catchup_matchday(g: Dict[str, Any]) -> bool:
     behind the rest of the league.
 
     The league's "current matchday" is derived from `max(played)` across the
-    cached standings table. Returns False for non-league fixtures (no
+    CURRENT-season standings table. Returns False for non-league fixtures (no
     standings table → no current-matchday signal) and for caches that
     predate the 'played' field. See #3.
+
+    DO NOT read `extra["standings_table"]` here. Inside the seed window that
+    key holds last season's table with every `played` forced to 0, so
+    `max(played)` is 0 and no fixture can ever look like a catch-up. #209 made
+    the real current table available; use it.
     """
     extra = g.get("extra") or {}
     matchday = extra.get("matchday")
     if not isinstance(matchday, int):
         return False
-    table = extra.get("standings_table") or []
+    table = current_standings_table(extra)
     played_counts = [e.get("played") for e in table if isinstance(e.get("played"), int)]
     if not played_counts:
         return False
     league_current = max(played_counts)
     return matchday <= league_current - _CATCHUP_MATCHDAY_GAP
-
-
-_ORDINAL_SUFFIXES = ("th", "st", "nd", "rd")
-
-
-def _ordinal(n: int) -> str:
-    """1 → '1st', 2 → '2nd', 4 → '4th', 11 → '11th', 23 → '23rd'.
-
-    DO NOT use `min(n%10, 3)` to index the suffixes: that clamps 4..9 to
-    "rd", yielding "4rd"/"5rd"/etc. The teen rule (11-13 are "th", not
-    "st"/"nd"/"rd") handles n%100 in [11..13]; everything else uses the
-    last digit, defaulting to "th" for 0 and 4..9.
-    """
-    last_two = n % 100
-    if 11 <= last_two <= 13:
-        return f"{n}th"
-    last = n % 10
-    suffix = _ORDINAL_SUFFIXES[last] if last <= 3 else "th"
-    return f"{n}{suffix}"
 
 
 def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
@@ -3568,11 +3630,16 @@ def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
     neither playing team appears in the table (e.g. cold-start with
     promoted teams), or if essential fields are missing.
 
-    Surfaces the position+points data the soccer source already cached
-    under extra.standings_table: see #10.
+    Surfaces the position+points data the soccer source already cached: see
+    #10.
+
+    Reads the CURRENT-season table, never `extra["standings_table"]`. This is
+    the deterministic fallback the EPG shows whenever the LLM path is off or
+    fails, so the seeded-prior falsehood in #209 reached it too: it would
+    render "Arsenal 1st, 85 pts" on matchday 3.
     """
     extra = g.get("extra") or {}
-    table = extra.get("standings_table") or []
+    table = current_standings_table(extra)
     if not table:
         return None
 
@@ -3597,7 +3664,7 @@ def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
         pts = entry.get("points")
         if pos is None or pts is None:
             return None
-        return f"{name} {_ordinal(int(pos))}, {int(pts)} pts"
+        return f"{name} {ordinal(int(pos))}, {int(pts)} pts"
 
     home_str = _format(home_name, home_entry)
     away_str = _format(away_name, away_entry)
@@ -3669,10 +3736,12 @@ def _build_description(
     """
     extra = g.get("extra") or {}
     favorites_matched = g.get("favorites_matched") or []
+    # Gated: a pre-#209 cache row's narratives were built from the seeded
+    # table and state a false gap. The legacy top-level shape is checked the
+    # same way, so an old row cannot slip the falsehood in through either key.
     impact_narratives = (
-        extra.get("impact_narratives")
-        or g.get("impact_narratives")
-        or []
+        trusted_impact_narratives(extra)
+        or trusted_impact_narratives({**extra, "impact_narratives": g.get("impact_narratives")})
     )
 
     sections: List[str] = []
@@ -4824,6 +4893,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 cache=llm_cache,
                 boundary_summary=_boundary,
                 marker=marker,
+                # Supplies the outcome-band cutoffs the prompt needs to state
+                # each team's exact distance from relegation / Europe rather
+                # than leaving the model to infer it from a table slice (#209).
+                league_context=_ctx,
             )
             if description is before:
                 llm_failed += 1
@@ -5530,11 +5603,17 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     for i, g in enumerate(games[:25], 1):
         rh = g.get("rank_home")
         ra = g.get("rank_away")
+        # Marked when these ranks are the previous-season prior rather than
+        # this season's positions, so "EPL 1v10" for a matchday-3 fixture is
+        # not read as the current table. They are still worth showing: they
+        # are what the SCORE was computed from, which is what this action is
+        # for. See #209.
+        seeded_suffix = "~" if _row_ranks_are_seeded(g) else ""
         if rh is not None and ra is not None:
             lo, hi = sorted([rh, ra])
-            rank_str = f"{lo}v{hi}"
+            rank_str = f"{lo}v{hi}{seeded_suffix}"
         elif rh is not None or ra is not None:
-            rank_str = f"{rh or ra}vUR"
+            rank_str = f"{rh or ra}vUR{seeded_suffix}"
         else:
             rank_str = "UR"
         chan_str = f"→ {g.get('channel_name_current') or '(unmatched)'}"
@@ -6373,7 +6452,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.27.1"
+    version = "1.28.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

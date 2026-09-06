@@ -5,6 +5,167 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.28.0] - 2026-09-06
+
+### Fixed
+
+- **LLM descriptions were largely false: 16 of 21 live previews contained at
+  least one false, checkable claim** (#209). Audited by reproducing the exact
+  production prompt for every described game (21/21 byte-exact `prompt_hash`
+  matches) and checking each claim against live football-data.org standings.
+
+  The dominant cause was not a thin prompt. Early in a season
+  `_fetch_standings_with_seed` deliberately swaps the SCORING table for last
+  season's final table as a ranking prior, and the prompt builder rendered
+  that as the current standings with nothing marking the swap. 14 of 25 games
+  were affected. The model faithfully described what it was told:
+
+  - "Arsenal's seven-point cushion at the top" — Arsenal were 3rd, 3 points
+    behind the leader.
+  - "Manchester United sit third but Everton are scrapping just outside the
+    top four" — United 12th, Everton 10th. Fully inverted.
+  - "Osasuna sits just two points above the relegation zone ... a dogfight to
+    avoid the bottom three" — they were 6th and 5th.
+
+  The seeded table now travels alongside the real one rather than replacing
+  it. `extra["standings_table"]` keeps its scoring meaning and behaviour;
+  `extra["standings_table_current"]` is the real table and is what every
+  human-facing sentence reads, via `_util.current_standings_table`. Fixed in
+  all three places the falsehood reached: the LLM prompt, the deterministic
+  description (`_build_standings_posture_line`), and the impact-on-favorites
+  narrative.
+
+- **Promoted teams had no row anywhere in the prompt** and the model invented
+  a league position for them (Monza, Malaga, Troyes on the audited slate).
+  Absence is now stated: "did not play in this league last season (newly
+  promoted)".
+
+- **Boundary rules without boundary rows.** The prompt gave "bottom 4 →
+  relegation" and a window around each team but never the rows at the line, so
+  every "N points clear of the drop" was a guess. This broke descriptions even
+  where the standings were correct (Remo called "three points above the
+  relegation zone" while 19th, inside it). Each team's exact gaps are now
+  precomputed. Tie-tolerant: FD.org shares a position between tied teams and
+  skips the next, so a real PL table had no row at 18 at all and an exact
+  cutoff lookup silently dropped every relegation line.
+
+- **Nested top bands read as the wrong one.** 3rd place satisfies both the
+  top-4 and top-7 cutoffs, so a UCL-place side was reported as "in the Europa
+  places". Only the tightest satisfied top band is now reported.
+
+- **The table slice was centred on the seeded ranks**, so the Osasuna/Alaves
+  fixture (5th and 6th now, 16th and 14th last season) rendered a window
+  containing neither team.
+
+### Added
+
+- **Last season's final table and previous meetings** in the prompt, both
+  explicitly labelled. Early in a season this is the only real form guide
+  there is. Head-to-head spans the current season always (free: the match list
+  is already fetched for the importance simulator) and last season only inside
+  the seed window (one extra FD.org call per competition, taken exactly when
+  the current season is too young to hold a prior meeting).
+
+- **Season phase, for every sport.** A game is described as at the opener, in
+  the early season, midseason, or the run-in, with guidance attached. The
+  model was framing a week-1 opener as a run-in because nothing told it
+  otherwise.
+
+- **Records and win-threshold distances for win-count sports.** College
+  football previews carried a week number and nothing else, so the only thing
+  the model could say was that both teams were "chasing bowl eligibility",
+  which is equally true of all 130 teams in week 1. Now: "5-4. 3 games left.
+  1 more win for bowl eligible." Unreachable thresholds are omitted rather
+  than dangled. Derived from the season payload `_fetch_raw_season` already
+  caches, so it costs no extra CFBD request.
+
+- **Poll ranks and neutral-site / conference-game facts** in the prompt. The
+  AP ranks were already in every cache row and simply never rendered, so a
+  #9-vs-#24 meeting was previewed as "two programs chasing bowl eligibility".
+
+- **System-prompt guardrails** against stating any position, record, gap or
+  zone proximity not present in the supplied lines, against reading the
+  reachable-outcome band list as urgency, and against describing last season
+  as the current standing. `prompt_hash` folds `SYSTEM_PROMPT`, so every
+  cached description written under the old rules is invalidated automatically.
+
+### Fixed (second review round, external check)
+
+An external review (codex, gpt-5.6-sol) of the fix above found four further
+paths by which the same falsehood survived, plus a scoring regression the fix
+itself introduced. All are addressed here.
+
+- **Cache rows written before this release carried neither the new flag nor
+  the new table**, so the selector fell through and returned the seeded table
+  anyway. Every `apply` between upgrading and the next refresh would have kept
+  serving the original false prose. Now caught by SHAPE: `looks_seeded()`
+  keys on every team being on zero games played while somebody has points,
+  which is physically impossible for a real table and is exactly what the
+  seeding step produces. A genuine pre-season table (zero points AND zero
+  games) is not flagged.
+
+- **The "rooting against X" narratives are pre-rendered INTO the cache row**,
+  so fixing their producer did not fix rows already on disk. The prompt-hash
+  change invalidates the LLM's cached OUTPUT but not its cached INPUT, so the
+  false sentence would simply have been rewritten. Both consumers now read
+  them through `trusted_impact_narratives`, which drops them when the row they
+  came from cannot be trusted.
+
+- **A transient Football-Data.org failure could zero the importance score for
+  a whole competition.** Since this release the current-season match list is
+  fetched early, for head-to-head; it was also cached as `[]` on failure, and
+  the Monte Carlo simulator reads that same cache later in the refresh. A 429
+  during the fetch phase would therefore hand the scorer an empty season even
+  if the provider recovered. Neither match-list fetch caches a failure now,
+  matching the rule the sibling CFBD fetcher already states outright.
+
+- **An unplayed table was rendered as a standing.** FD.org assigns positions
+  before a ball is kicked, so the model could read "Currently in: title" off a
+  team with no games while the opener guidance in the same prompt said nothing
+  had been decided. The table and the posture lines are now suppressed until
+  at least one game has been played.
+
+- **Tied rows made a gap disappear depending on payload order.** Tied teams
+  share a position, and the position-to-row map kept whichever row came last;
+  if that one lacked points, an otherwise computable relegation gap silently
+  vanished. A row with usable points is now preferred.
+
+- **Three system-prompt rules could still license a false claim.** The
+  knockout rule treated the ABSENCE of series lines as permission for "win or
+  go home" framing, which is equally absent on a regular-season league fixture;
+  it now requires positive evidence of a knockout. The run-in rule told the
+  model to be concrete about what a result settles even for two safe mid-table
+  sides; it now requires a posture line putting a band within reach. The
+  promoted-team rule said such a team has "NO record in this league" while the
+  prompt supplied its current-season record; it now says no LAST-SEASON record.
+
+- **The status action displayed seeded ranks unmarked**, so "EPL 1v10" on
+  matchday 3 read as the live table. Seeded rows are now suffixed `~`.
+
+- Guards for inputs that cannot arise from the current producers but would
+  render as fact if they ever did: a 0-0 or negative win-loss record now reads
+  as "has not played yet", `season_phase` rejects a negative count itself
+  rather than relying on its caller, and a season length smaller than the
+  games played is treated as unknown instead of printing "20 of 12".
+
+### Changed
+
+- `SoccerSource._fetch_standings_with_seed` returns a `StandingsBundle`
+  (position map, scoring table, current table, previous-season final table,
+  seeded flag) instead of a 2-tuple.
+- `SEED_PLAYED_THRESHOLD` and the outcome-band direction predicate
+  (`is_bottom_outcome`) moved to `_util` as single definitions. Both were
+  facts the scoring path and the prose path had to agree on, and #209 shipped
+  precisely because the two paths disagreed about what the standings meant.
+  `sources.soccer.SEED_PLAYED_THRESHOLD` still resolves for the sim harness.
+- `_ordinal` consolidated into `_util.ordinal`; `plugin.py` and `honours.py`
+  each carried a copy.
+- `_is_catchup_matchday` reads the current table. On the seeded table every
+  `played` is forced to 0, so `max(played)` was 0 and no fixture could ever be
+  detected as a catch-up.
+- `test_util`'s redaction guard checks the parsed import rather than matching
+  a single-line regex, which failed on a correct multi-line import.
+
 ## [1.27.1] - 2026-08-31
 
 ### Fixed

@@ -32,6 +32,8 @@ import logging
 import os
 from typing import Dict, List, Optional, Union
 
+from ._util import ordinal
+
 logger = logging.getLogger(__name__)
 
 _HONOURS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "honours.json")
@@ -124,16 +126,6 @@ def _count(val: TitleValue) -> int:
     return val if isinstance(val, int) else len(val)
 
 
-def _ordinal(n: int) -> str:
-    """1 -> 1st, 2 -> 2nd, 4 -> 4th, 11 -> 11th. Standalone copy (honours.py is
-    loaded by file path in tests, so it cannot import plugin._ordinal)."""
-    if 10 <= (n % 100) <= 20:
-        suffix = "th"
-    else:
-        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suffix}"
-
-
 def _phrase(
     team: str, val: Optional[TitleValue], comp_label: str, is_final: bool
 ) -> Optional[str]:
@@ -163,7 +155,7 @@ def _phrase(
     else:
         base = f"{team} — {n} {noun}"
     if is_final:
-        return f"{base}, a win would be their {_ordinal(n + 1)}"
+        return f"{base}, a win would be their {ordinal(n + 1)}"
     return base
 
 

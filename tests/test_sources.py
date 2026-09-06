@@ -21,6 +21,7 @@ from dispatcharr_ranked_matchups.sources import (
     SOCCER_COMPETITIONS,
 )
 from dispatcharr_ranked_matchups.sources.base import MatchResult, SportSource
+from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
 
 
 class TestNcaafConstants:
@@ -890,28 +891,24 @@ class TestPreviousSeasonStartYear:
     year. Off-by-one would query the wrong FD.org season."""
 
     def test_august_returns_previous_year(self):
-        from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
         # Aug 2026 → 2026-27 season is current → previous is 2025-26 (start=2025).
         assert soccer_mod._previous_season_start_year(
             datetime(2026, 8, 15, tzinfo=timezone.utc)
         ) == 2025
 
     def test_january_returns_two_years_ago(self):
-        from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
         # Jan 2026 → still in 2025-26 season → previous is 2024-25 (start=2024).
         assert soccer_mod._previous_season_start_year(
             datetime(2026, 1, 15, tzinfo=timezone.utc)
         ) == 2024
 
     def test_may_end_of_season_returns_two_years_ago(self):
-        from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
         # May 2026 → 2025-26 season ending → previous is still 2024-25.
         assert soccer_mod._previous_season_start_year(
             datetime(2026, 5, 24, tzinfo=timezone.utc)
         ) == 2024
 
     def test_july_returns_two_years_ago(self):
-        from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
         # July (preseason) → current season hasn't started yet → previous
         # is the one that just ENDED (2024-25), not the upcoming one.
         assert soccer_mod._previous_season_start_year(
@@ -926,7 +923,6 @@ class TestH2HToCloseness:
     close-game signal magnitude across the user's whole season."""
 
     def _call(self, *args, **kwargs):
-        from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
         return soccer_mod._h2h_to_closeness(*args, **kwargs)
 
     def test_perfect_coinflip(self):
@@ -1018,9 +1014,14 @@ class TestSoccerSeedFromPreviousSeason:
             calls.append(season)
             return ({r["name"]: r["position"] for r in current_table}, current_table)
         src._fetch_standings = fake_fetch
-        by_team, table = src._fetch_standings_with_seed()
-        assert table == current_table
+        bundle = src._fetch_standings_with_seed()
+        assert bundle.scoring_table == current_table
         assert calls == [None]  # only the current-season call; no seed fetch
+        # Not seeded: the scoring table IS the current table, and there is no
+        # previous-season table because none was fetched.
+        assert bundle.seeded is False
+        assert bundle.current_table == current_table
+        assert bundle.prev_final_table == []
 
     def test_seed_used_when_median_played_below_threshold(self):
         # Median played < threshold → fetch previous and use it.
@@ -1040,7 +1041,8 @@ class TestSoccerSeedFromPreviousSeason:
                 return ({r["name"]: r["position"] for r in current_table}, current_table)
             return ({r["name"]: r["position"] for r in seed_table}, seed_table)
         src._fetch_standings = fake_fetch
-        by_team, table = src._fetch_standings_with_seed()
+        bundle = src._fetch_standings_with_seed()
+        table = bundle.scoring_table
         assert len(calls) == 2
         assert calls[0] is None
         assert calls[1] is not None  # previous-season year passed
@@ -1053,6 +1055,15 @@ class TestSoccerSeedFromPreviousSeason:
         assert table[0]["position"] == 1
         # Points carried through so impact-narrative can render "X pts ahead".
         assert table[0]["points"] == seed_table[0]["points"]
+        # #209: the seeded scoring table must NOT be the only thing that
+        # escapes. The real (sparse) current table and last season's final
+        # table both survive alongside it, distinguishable by `seeded`.
+        assert bundle.seeded is True
+        assert bundle.current_table == current_table
+        assert all(r["name"].startswith("Veteran") for r in bundle.prev_final_table)
+        # prev_final_table keeps REAL playedGames: it is only ever rendered
+        # under an explicit "last season" label, so zeroing it would be a lie.
+        assert all(r["playedGames"] == 38 for r in bundle.prev_final_table)
 
     def test_seed_falls_through_when_previous_season_empty(self):
         # If the previous-season fetch returns nothing (API failure or
@@ -1067,8 +1078,12 @@ class TestSoccerSeedFromPreviousSeason:
                 return ({"Team 1": 1}, current_table)
             return ({}, [])
         src._fetch_standings = fake_fetch
-        by_team, table = src._fetch_standings_with_seed()
-        assert table == current_table
+        bundle = src._fetch_standings_with_seed()
+        assert bundle.scoring_table == current_table
+        # Fell through: nothing was seeded, so nothing may claim to be a
+        # previous-season table.
+        assert bundle.seeded is False
+        assert bundle.prev_final_table == []
 
     def test_seed_skipped_when_current_table_empty(self):
         # Empty current table (median computes to 0): by the rules above,
@@ -1082,7 +1097,8 @@ class TestSoccerSeedFromPreviousSeason:
                 return ({}, [])
             return ({"Veteran 1": 1}, seed_table)
         src._fetch_standings = fake_fetch
-        by_team, table = src._fetch_standings_with_seed()
+        bundle = src._fetch_standings_with_seed()
+        by_team, table = bundle.position_by_team, bundle.scoring_table
         # Note: empty current → median is 0 (the `or [0]` fallback inside),
         # so the seed fires and we get the previous-season table.
         assert any(r["name"] == "Veteran 1" for r in table)
@@ -11504,3 +11520,401 @@ class TestEnglishCupStageLabelsAreScored:
                 weights,
             ).breakdown.get("tournament_stage", 0.0)
             assert early < qf, f"{stage} scores {early} >= QF {qf}"
+
+
+# ---------------------------------------------------------------------------
+# #209: head-to-head history and the three-way standings split.
+# ---------------------------------------------------------------------------
+
+
+def _finished(home, away, hg, ag, date_str):
+    return {
+        "utcDate": f"{date_str}T15:00:00Z",
+        "status": "FINISHED",
+        "homeTeam": {"name": home},
+        "awayTeam": {"name": away},
+        "score": {"fullTime": {"home": hg, "away": ag}},
+    }
+
+
+class TestBuildH2HEntries:
+    def test_returns_only_meetings_between_the_exact_pair(self):
+        matches = [
+            _finished("Arsenal FC", "Chelsea FC", 2, 1, "2026-04-12"),
+            _finished("Arsenal FC", "Everton FC", 3, 0, "2026-03-01"),
+            _finished("Chelsea FC", "Everton FC", 1, 1, "2026-02-01"),
+        ]
+        out = soccer_mod.build_h2h_entries(matches, "Arsenal FC", "Chelsea FC", "last season")
+        assert len(out) == 1
+        assert out[0]["home"] == "Arsenal FC" and out[0]["away"] == "Chelsea FC"
+        assert out[0]["home_goals"] == 2 and out[0]["away_goals"] == 1
+        assert out[0]["season"] == "last season"
+        assert out[0]["date"] == "2026-04-12"
+
+    def test_matches_the_reverse_fixture_too(self):
+        matches = [_finished("Chelsea FC", "Arsenal FC", 0, 4, "2025-11-30")]
+        out = soccer_mod.build_h2h_entries(matches, "Arsenal FC", "Chelsea FC", "last season")
+        assert len(out) == 1
+        # Reported as actually played, home team first: not normalised to the
+        # upcoming fixture's orientation, which would misstate who was at home.
+        assert out[0]["home"] == "Chelsea FC"
+        assert out[0]["home_goals"] == 0 and out[0]["away_goals"] == 4
+
+    def test_skips_unfinished_and_scoreless_payloads(self):
+        matches = [
+            {"utcDate": "2026-09-06T15:00:00Z", "status": "SCHEDULED",
+             "homeTeam": {"name": "Arsenal FC"}, "awayTeam": {"name": "Chelsea FC"},
+             "score": {"fullTime": {"home": None, "away": None}}},
+            {"utcDate": "2026-05-01T15:00:00Z", "status": "FINISHED",
+             "homeTeam": {"name": "Arsenal FC"}, "awayTeam": {"name": "Chelsea FC"},
+             "score": {"fullTime": {"home": None, "away": None}}},
+        ]
+        assert soccer_mod.build_h2h_entries(matches, "Arsenal FC", "Chelsea FC", "x") == []
+
+    def test_most_recent_first_and_capped(self):
+        matches = [
+            _finished("Arsenal FC", "Chelsea FC", 1, 0, f"202{i}-01-01")
+            for i in range(1, 7)
+        ]
+        out = soccer_mod.build_h2h_entries(matches, "Arsenal FC", "Chelsea FC", "x", limit=3)
+        assert len(out) == 3
+        assert [e["date"] for e in out] == ["2026-01-01", "2025-01-01", "2024-01-01"]
+
+    def test_does_not_fuzzy_match_a_different_club(self):
+        """Exact matching is deliberate: a near-miss would attribute another
+        club's result to this fixture, which is the #209 class of bug."""
+        matches = [_finished("Arsenal FC", "Chelsea FC U21", 5, 0, "2026-04-12")]
+        assert soccer_mod.build_h2h_entries(matches, "Arsenal FC", "Chelsea FC", "x") == []
+
+
+class TestPrevSeasonMatchesGating:
+    def test_prev_season_fetch_is_cached_per_competition(self):
+        soccer_mod._PREV_SEASON_MATCHES_CACHE.clear()
+        calls = []
+
+        def fake_get(url, key, params=None):
+            calls.append((url, params))
+
+            class R:
+                @staticmethod
+                def json():
+                    return {"matches": [_finished("A", "B", 1, 0, "2025-10-01")]}
+            return R()
+
+        orig = soccer_mod._fd_get
+        soccer_mod._fd_get = fake_get
+        try:
+            first = soccer_mod._fetch_prev_season_matches_for_code("k", "PL")
+            second = soccer_mod._fetch_prev_season_matches_for_code("k", "PL")
+        finally:
+            soccer_mod._fd_get = orig
+            soccer_mod._PREV_SEASON_MATCHES_CACHE.clear()
+        assert first == second
+        assert len(calls) == 1, "second call must come from cache, not a second FD.org hit"
+        assert calls[0][1]["season"] == soccer_mod._previous_season_start_year()
+
+    def test_clear_fd_caches_drops_prev_season_entries(self):
+        soccer_mod._PREV_SEASON_MATCHES_CACHE["PL"] = [{"x": 1}]
+        soccer_mod._clear_fd_caches()
+        assert soccer_mod._PREV_SEASON_MATCHES_CACHE == {}
+
+    def test_a_failed_fetch_is_not_cached(self):
+        """A transient 429 must NOT be remembered as "no matches".
+
+        Caching the failure turns one bad request into a refresh-wide negative:
+        every remaining fixture in the competition silently loses head-to-head,
+        and for the CURRENT-season list (same pattern, shared cache with the
+        Monte Carlo importance simulator) it would hand the scorer an empty
+        season it never asked for. The sibling CFBD fetcher states the same
+        rule outright in sources/ncaaf.py::_fetch_raw_season.
+        """
+        soccer_mod._PREV_SEASON_MATCHES_CACHE.clear()
+        calls = []
+
+        def boom(url, key, params=None):
+            calls.append(url)
+            raise RuntimeError("429")
+
+        orig = soccer_mod._fd_get
+        soccer_mod._fd_get = boom
+        try:
+            assert soccer_mod._fetch_prev_season_matches_for_code("k", "PL") == []
+            assert soccer_mod._fetch_prev_season_matches_for_code("k", "PL") == []
+            assert "PL" not in soccer_mod._PREV_SEASON_MATCHES_CACHE
+        finally:
+            soccer_mod._fd_get = orig
+            soccer_mod._PREV_SEASON_MATCHES_CACHE.clear()
+        assert len(calls) == 2, "a transient failure must be retried, not cached"
+
+    def test_current_season_failure_is_not_cached_either(self):
+        """The regression codex surfaced: since #209 this list is fetched
+        early for head-to-head, so caching [] on failure would poison the
+        importance simulator that reads the same cache later in the refresh."""
+        soccer_mod._SEASON_MATCHES_CACHE.clear()
+        calls = []
+
+        def boom(url, key, params=None):
+            calls.append(url)
+            raise RuntimeError("429")
+
+        orig = soccer_mod._fd_get
+        soccer_mod._fd_get = boom
+        try:
+            assert soccer_mod._fetch_season_matches_for_code("k", "PL") == []
+            assert "PL" not in soccer_mod._SEASON_MATCHES_CACHE
+            assert soccer_mod._fetch_season_matches_for_code("k", "PL") == []
+        finally:
+            soccer_mod._fd_get = orig
+            soccer_mod._SEASON_MATCHES_CACHE.clear()
+        assert len(calls) == 2
+
+    def test_a_successful_fetch_is_still_cached(self):
+        """Fail on the instrument: if nothing were cached the pacing budget
+        would blow up, so the success path must still short-circuit."""
+        soccer_mod._PREV_SEASON_MATCHES_CACHE.clear()
+        calls = []
+
+        def ok(url, key, params=None):
+            calls.append(url)
+
+            class R:
+                @staticmethod
+                def json():
+                    return {"matches": [_finished("A", "B", 1, 0, "2025-10-01")]}
+            return R()
+
+        orig = soccer_mod._fd_get
+        soccer_mod._fd_get = ok
+        try:
+            soccer_mod._fetch_prev_season_matches_for_code("k", "PL")
+            soccer_mod._fetch_prev_season_matches_for_code("k", "PL")
+        finally:
+            soccer_mod._fd_get = orig
+            soccer_mod._PREV_SEASON_MATCHES_CACHE.clear()
+        assert len(calls) == 1
+
+
+class TestFetchUpcomingEmitsGroundingKeys:
+    """The three standings views and the h2h list must all reach `extra`, or
+    the prompt builder has nothing to prefer over the seeded table."""
+
+    def _run(self, seeded):
+        src = SoccerSource("epl", fd_api_key="fake")
+        current = [
+            {"name": "Arsenal FC", "position": 3, "points": 6, "playedGames": 2},
+            {"name": "Chelsea FC", "position": 4, "points": 6, "playedGames": 2},
+        ]
+        prev = [
+            {"name": "Arsenal FC", "position": 1, "points": 85, "playedGames": 38},
+            {"name": "Chelsea FC", "position": 10, "points": 52, "playedGames": 38},
+        ]
+        bundle = soccer_mod.StandingsBundle(
+            position_by_team={"Arsenal FC": 3, "Chelsea FC": 4},
+            scoring_table=prev if seeded else current,
+            current_table=current,
+            prev_final_table=prev if seeded else [],
+            seeded=seeded,
+        )
+        src._fetch_standings_with_seed = lambda: bundle
+        src._fetch_fixtures = lambda days: [{
+            "id": 1, "matchday": 3, "stage": "REGULAR_SEASON", "status": "TIMED",
+            "utcDate": "2026-09-06T15:30:00Z",
+            "homeTeam": {"name": "Arsenal FC"}, "awayTeam": {"name": "Chelsea FC"},
+        }]
+        src._fetch_closeness = lambda: {}
+        src._all_matches_cache = [_finished("Arsenal FC", "Chelsea FC", 2, 1, "2026-04-12")]
+        soccer_mod._PREV_SEASON_MATCHES_CACHE["PL"] = [
+            _finished("Chelsea FC", "Arsenal FC", 0, 1, "2025-11-30")
+        ]
+        try:
+            return src.fetch_upcoming(7)[0]
+        finally:
+            soccer_mod._PREV_SEASON_MATCHES_CACHE.clear()
+
+    def test_seeded_row_carries_all_three_tables(self):
+        row = self._run(seeded=True)
+        e = row.extra
+        assert e["standings_seeded"] is True
+        # The scoring table stays the seed: ranking behaviour is unchanged.
+        assert e["standings_table"][0]["points"] == 85
+        # ...but the real current table travels alongside it.
+        assert e["standings_table_current"][0]["points"] == 6
+        assert e["standings_prev_final"][0]["points"] == 85
+        # prev_final keeps real played counts; the scoring seed does not.
+        assert e["standings_prev_final"][0]["played"] == 38
+
+    def test_unseeded_row_has_no_prev_table_and_matching_current(self):
+        row = self._run(seeded=False)
+        e = row.extra
+        assert e["standings_seeded"] is False
+        assert e["standings_prev_final"] == []
+        assert e["standings_table"] == e["standings_table_current"]
+
+    def test_h2h_spans_current_season_always_and_last_season_only_when_seeded(self):
+        seeded = self._run(seeded=True).extra
+        seasons = {e["season"] for e in seeded["h2h"]}
+        assert seasons == {"this season", "last season"}
+
+        unseeded = self._run(seeded=False).extra
+        # Mid-season: last season's extra FD.org call is not taken, so only
+        # the free current-season list contributes.
+        assert {e["season"] for e in unseeded["h2h"]} == {"this season"}
+
+
+class TestSharedConstantsHaveOneDefinition:
+    """The seed cutoff and the band-direction predicate are each ONE fact used
+    by both the scoring path and the prose path. Two copies that must agree is
+    the clone class that actually bites (#209 shipped because the prose path
+    disagreed with the scoring path about what the standings meant)."""
+
+    def test_seed_threshold_is_the_util_one(self):
+        from dispatcharr_ranked_matchups import _util
+        from dispatcharr_ranked_matchups import llm_descriptions
+        assert soccer_mod.SEED_PLAYED_THRESHOLD is _util.SEED_PLAYED_THRESHOLD
+        assert llm_descriptions.SEED_PLAYED_THRESHOLD is _util.SEED_PLAYED_THRESHOLD
+
+    def test_soccer_module_does_not_redefine_the_threshold(self):
+        import inspect
+        src = inspect.getsource(soccer_mod)
+        assert "SEED_PLAYED_THRESHOLD = 5" not in src, (
+            "a second definition would silently diverge from _util's"
+        )
+
+    def test_band_direction_predicate_is_shared(self):
+        from dispatcharr_ranked_matchups import _util
+        from dispatcharr_ranked_matchups.sources.soccer import SoccerSource
+        assert SoccerSource._is_bottom_outcome is _util.is_bottom_outcome
+
+    def test_predicate_agrees_on_every_real_band_label(self):
+        """An independent oracle: walk every label the shipped league contexts
+        actually define and assert the two paths classify each identically.
+        Written against the real LEAGUE_CONTEXTS so a new band added later is
+        covered without touching this test."""
+        from dispatcharr_ranked_matchups._util import is_bottom_outcome
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        from dispatcharr_ranked_matchups.sources.soccer import SoccerSource
+        labels = {
+            label
+            for ctx in LEAGUE_CONTEXTS.values()
+            for _cutoff, label, _w in ctx.thresholds
+        }
+        assert labels, "guard must fail on the instrument, not pass vacuously"
+        assert "relegation" in labels, "expected a known bottom band to be present"
+        for label in labels:
+            assert SoccerSource._is_bottom_outcome(label) == is_bottom_outcome(label)
+
+
+class TestH2HCombinedOrderingAndCap:
+    def test_current_season_entries_precede_last_season(self):
+        """The combined list is a concatenation and build_h2h_entries sorts
+        only within each list, so ordering depends on current season being
+        appended first. The prompt tells the model the list is most-recent
+        first."""
+        src = SoccerSource("epl", fd_api_key="fake")
+        bundle = soccer_mod.StandingsBundle(
+            position_by_team={}, scoring_table=[], current_table=[],
+            prev_final_table=[], seeded=True,
+        )
+        src._fetch_standings_with_seed = lambda: bundle
+        src._fetch_fixtures = lambda d: [{
+            "id": 1, "utcDate": "2026-09-06T15:30:00Z",
+            "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"},
+        }]
+        src._fetch_closeness = lambda: {}
+        src._all_matches_cache = [_finished("A", "B", 1, 0, "2026-08-30")]
+        soccer_mod._PREV_SEASON_MATCHES_CACHE["PL"] = [
+            _finished("B", "A", 2, 2, "2026-01-15")
+        ]
+        try:
+            h2h = src.fetch_upcoming(7)[0].extra["h2h"]
+        finally:
+            soccer_mod._PREV_SEASON_MATCHES_CACHE.clear()
+        assert [e["date"] for e in h2h] == ["2026-08-30", "2026-01-15"]
+        assert h2h == sorted(h2h, key=lambda e: e["date"], reverse=True)
+
+    def test_combined_list_is_capped(self):
+        src = SoccerSource("epl", fd_api_key="fake")
+        bundle = soccer_mod.StandingsBundle(
+            position_by_team={}, scoring_table=[], current_table=[],
+            prev_final_table=[], seeded=True,
+        )
+        src._fetch_standings_with_seed = lambda: bundle
+        src._fetch_fixtures = lambda d: [{
+            "id": 1, "utcDate": "2026-09-06T15:30:00Z",
+            "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"},
+        }]
+        src._fetch_closeness = lambda: {}
+        src._all_matches_cache = [
+            _finished("A", "B", 1, 0, f"2026-0{i}-01") for i in range(1, 5)
+        ]
+        soccer_mod._PREV_SEASON_MATCHES_CACHE["PL"] = [
+            _finished("A", "B", 1, 0, f"2025-0{i}-01") for i in range(1, 5)
+        ]
+        try:
+            h2h = src.fetch_upcoming(7)[0].extra["h2h"]
+        finally:
+            soccer_mod._PREV_SEASON_MATCHES_CACHE.clear()
+        assert len(h2h) == soccer_mod._H2H_TOTAL_LIMIT
+
+
+class TestNcaafTeamRecords:
+    """#209: college-football previews had no record, so the only thing the
+    model could say was that both teams were "chasing bowl eligibility" —
+    equally true of every team in week 1. Records are derived from the season
+    payload that `_fetch_raw_season` already caches, so this costs no extra
+    CFBD request."""
+
+    @staticmethod
+    def _game(home, away, hp, ap, completed=True, week=1):
+        return {
+            "id": hash((home, away)) & 0xFFFF, "week": week,
+            "homeTeam": home, "awayTeam": away,
+            "homePoints": hp, "awayPoints": ap, "completed": completed,
+            "startDate": "2026-09-06T20:00:00.000Z",
+        }
+
+    def _src(self, season):
+        src = NcaafSource(api_key="fake")
+        src._raw_season_cache = {src._current_season_year(): season}
+        return src
+
+    def test_wins_and_losses_are_counted_for_both_sides(self):
+        src = self._src([
+            self._game("Washington", "Washington State", 30, 10),
+            self._game("Oregon", "Washington", 21, 14),
+            self._game("Washington", "Oregon State", 28, 7),
+        ])
+        recs = src._team_records(src._current_season_year())
+        assert recs["Washington"] == (2, 1)
+        assert recs["Washington State"] == (0, 1)
+        assert recs["Oregon"] == (1, 0)
+
+    def test_unplayed_games_do_not_count(self):
+        src = self._src([
+            self._game("Washington", "Washington State", None, None, completed=False),
+        ])
+        assert src._team_records(src._current_season_year()) == {}
+
+    def test_uses_the_cached_season_and_makes_no_request(self):
+        """Fail on the instrument: if `_fetch_raw_season` were ever called for
+        real here the test would hit the network, so assert the cache is what
+        answered."""
+        calls = []
+        src = self._src([self._game("A", "B", 10, 3)])
+        orig = src._fetch_raw_season
+
+        def spy(year):
+            calls.append(year)
+            return orig(year)
+
+        src._fetch_raw_season = spy
+        recs = src._team_records(src._current_season_year())
+        assert recs == {"A": (1, 0), "B": (0, 1)}
+        assert calls, "guard is inert if the fetch was never consulted"
+
+    def test_record_dict_serialises_for_the_cache(self):
+        from dispatcharr_ranked_matchups.sources.ncaaf import _record_dict
+        assert _record_dict((5, 4)) == {"wins": 5, "losses": 4}
+        assert _record_dict(None) is None
+        # 0-0 is falsy as a tuple only if empty; a real 0-0 must survive.
+        assert _record_dict((0, 0)) == {"wins": 0, "losses": 0}

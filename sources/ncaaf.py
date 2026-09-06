@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -38,6 +38,15 @@ from .._util import parse_iso_utc
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaaf")
 
 CFBD_BASE = "https://api.collegefootballdata.com"
+
+
+def _record_dict(rec: Optional[Tuple[int, int]]) -> Optional[Dict[str, int]]:
+    """(wins, losses) -> the JSON-safe shape that rides in `GameRow.extra`.
+    None for a team with no completed games yet, which the prompt renders as
+    an explicit season opener rather than as 0-0 of nothing."""
+    if not rec:
+        return None
+    return {"wins": rec[0], "losses": rec[1]}
 
 
 # Classification values CFBD puts on homeClassification / awayClassification.
@@ -135,6 +144,8 @@ class NcaafSource(PointsBasedSportSource):
             return []
 
         spread_by_id = self._fetch_spreads(season_year, games)
+        # Derived from the already-cached season payload: no extra request.
+        records = self._team_records(season_year)
 
         # Ranks come from ONE poll (AP Top 25, an FBS poll), so under the
         # "fbs_fcs" setting FCS teams stay unranked and their games enter as
@@ -168,6 +179,13 @@ class NcaafSource(PointsBasedSportSource):
                 extra={
                     "cfbd_id": g.get("id"),
                     "week": g.get("week"),
+                    # Win-loss record so far. A win-count sport's whole story
+                    # is where a team sits against its win thresholds, and
+                    # without the record the preview could only say a team was
+                    # "chasing bowl eligibility", which is equally true of
+                    # every team in week 1 and therefore says nothing (#209).
+                    "record_home": _record_dict(records.get(home)),
+                    "record_away": _record_dict(records.get(away)),
                     "season": g.get("season"),
                     "neutral": g.get("neutralSite", False),
                     "conference_game": g.get("conferenceGame", False),
@@ -253,6 +271,39 @@ class NcaafSource(PointsBasedSportSource):
             return []
         self._raw_season_cache[year] = data
         return data
+
+    def _team_records(self, year: int) -> Dict[str, Tuple[int, int]]:
+        """{team: (wins, losses)} from completed games in the season payload.
+
+        FREE: `_fetch_raw_season` is already fetched and cached for both the
+        upcoming-window path and the Monte Carlo population, so this adds no
+        CFBD request. Deriving it here rather than calling /records also keeps
+        the record consistent with the universe the simulator scored, which is
+        the same "simulated universe matches emitted universe" guarantee
+        `_fetch_raw_season` exists for.
+
+        Ties are not possible in modern college football (overtime is played
+        to a result), so a two-tuple is complete.
+        """
+        records: Dict[str, Tuple[int, int]] = {}
+
+        def _bump(team: Optional[str], won: bool) -> None:
+            if not team:
+                return
+            w, l = records.get(team, (0, 0))
+            records[team] = (w + 1, l) if won else (w, l + 1)
+
+        for g in self._fetch_raw_season(year):
+            if not g.get("completed"):
+                continue
+            hp, ap = g.get("homePoints"), g.get("awayPoints")
+            if not isinstance(hp, int) or not isinstance(ap, int) or hp == ap:
+                continue
+            home = g.get("homeTeam") or g.get("home_team")
+            away = g.get("awayTeam") or g.get("away_team")
+            _bump(home, hp > ap)
+            _bump(away, ap > hp)
+        return records
 
     def _fetch_games(self, year: int, days_ahead: int) -> List[Dict]:
         now = datetime.now(timezone.utc)

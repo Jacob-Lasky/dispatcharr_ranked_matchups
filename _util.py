@@ -550,3 +550,145 @@ def redact_secrets(value: Any) -> str:
     text = _SECRET_QUERY_PARAM_RE.sub(r"\1***", text)
     text = _SECRET_PATH_SEGMENT_RE.sub(r"\1***", text)
     return text
+
+
+_ORDINAL_SUFFIXES = ("th", "st", "nd", "rd")
+
+
+def ordinal(n: int) -> str:
+    """1 -> '1st', 2 -> '2nd', 4 -> '4th', 11 -> '11th', 23 -> '23rd'.
+
+    DO NOT use `min(n % 10, 3)` to index the suffixes: that clamps 4..9 to
+    "rd", yielding "4rd"/"5rd"/etc. The teen rule (11-13 are "th", not
+    "st"/"nd"/"rd") handles n % 100 in [11..13]; everything else uses the
+    last digit, defaulting to "th" for 0 and 4..9.
+
+    THE canonical copy. plugin.py, honours.py and llm_descriptions.py all
+    render league positions, and three private copies of this is one fact in
+    three places: a fix to one silently leaves the other two wrong.
+    """
+    last_two = n % 100
+    if 11 <= last_two <= 13:
+        return f"{n}th"
+    last = n % 10
+    suffix = _ORDINAL_SUFFIXES[last] if last <= 3 else "th"
+    return f"{n}{suffix}"
+
+
+def current_standings_table(extra: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The table that may honestly be described as "this season".
+
+    Preference order, and the middle case is the whole point of #209:
+
+      1. `standings_table_current` - written since #209, always the real
+         current-season table.
+      2. [] when `standings_seeded` is True - the row predates
+         `standings_table_current` AND its `standings_table` is known to be
+         last season's. There is no honest current table here, so say nothing
+         rather than describe the prior as live.
+      3. [] when `standings_table` HAS the seeded shape, even with no flag.
+         Cache rows written before #209 carry neither `standings_seeded` nor
+         `standings_table_current`, so the flag cannot be relied on: without
+         this case an upgraded install keeps serving the exact falsehood from
+         every `apply` until the next refresh rewrites the cache.
+      4. `standings_table` otherwise - an older cache row from outside a seed
+         window, where the scoring table IS the current table.
+
+    Cases 2 and 3 cost one refresh cycle of thinner prompts on stale cache
+    rows and are strictly better than one cycle of confident falsehoods.
+    """
+    current = extra.get("standings_table_current")
+    if current:
+        return current
+    if extra.get("standings_seeded"):
+        return []
+    table = extra.get("standings_table") or []
+    return [] if looks_seeded(table) else table
+
+
+def looks_seeded(table: List[Dict[str, Any]]) -> bool:
+    """True when `table` has the shape only a seeded (previous-season) table
+    can have: every team on zero games played, yet somebody has points.
+
+    That combination is PHYSICALLY IMPOSSIBLE for a real current table -
+    points come from playing - and it is exactly what
+    `sources.soccer._fetch_standings_with_seed` produces when it zeroes
+    `playedGames` on last season's final standings while keeping the points.
+
+    This exists because the `standings_seeded` flag is only present on rows
+    written since #209. A pre-#209 cache row is indistinguishable by flag and
+    must be caught by shape, or the upgrade serves the old falsehood until the
+    next refresh.
+
+    A genuine pre-season table (everyone on 0 points AND 0 games) is NOT
+    seeded and returns False, so an honest empty table still renders.
+    """
+    if not table:
+        return False
+    any_points = False
+    for row in table:
+        played = row.get("played")
+        if not isinstance(played, int) or played != 0:
+            return False
+        pts = row.get("points")
+        if isinstance(pts, int) and pts > 0:
+            any_points = True
+    return any_points
+
+
+# When the current season's median playedGames falls below this, the soccer
+# source swaps the SCORING table for the previous season's final table
+# (sources.soccer._fetch_standings_with_seed), and the prompt builder flags
+# the table as too young to read as hierarchy (llm_descriptions).
+#
+# THE TWO USES MUST AGREE. If scoring stops trusting the current table at 5
+# but the prose calls the season settled at 3, the description asserts a
+# hierarchy the score has already decided is noise. It lives here rather than
+# in sources/soccer.py because llm_descriptions must not import the soccer
+# module (it pulls `requests` and the whole FD.org client into the apply path).
+#
+# DO NOT raise this above ~5: by MD5 enough matches have played that the
+# current-season position is a stronger signal than the prior year's.
+SEED_PLAYED_THRESHOLD = 5
+
+
+def is_bottom_outcome(label: str) -> bool:
+    """True for an outcome band that fires BELOW its cutoff (relegation,
+    demotion, the drop) rather than at or above it (title, UCL, promotion).
+
+    Callers read `(cutoff, label, weight)` triples where the cutoff's meaning
+    flips on this predicate, so the scoring path and the prose path must agree
+    on the answer for every label. Getting it backwards reports a 6th-placed
+    side as relegation-bound, which is the worst single sentence in #209
+    ("Osasuna sits just two points above the relegation zone" while 6th).
+    """
+    l = (label or "").lower()
+    return "relegat" in l or "demot" in l or "drop" in l
+
+
+def trusted_impact_narratives(extra: Dict[str, Any]) -> List[str]:
+    """Cached "rooting against X" narratives, or [] when the row they were
+    built from cannot be trusted.
+
+    The narratives are PRE-RENDERED at refresh time and stored in the cache
+    row, so fixing their producer does not fix rows already on disk: an
+    upgraded install would keep serving "Manchester City fans: rooting against
+    Arsenal (1 spot and 7 pts ahead)" from a pre-#209 cache, through both the
+    deterministic description and the LLM prompt, until the next refresh.
+    The system-prompt hash change invalidates the LLM's cached OUTPUT but not
+    its cached INPUT, so the false sentence would simply be rewritten.
+
+    A row is trusted when it carries the real current table, or when its
+    scoring table is not a seeded prior. Same test as
+    `current_standings_table`, deliberately: a narrative is a sentence about
+    the standings, so it is exactly as trustworthy as the standings it came
+    from.
+    """
+    narratives = extra.get("impact_narratives") or []
+    if not narratives:
+        return []
+    if extra.get("standings_table_current"):
+        return narratives
+    if extra.get("standings_seeded"):
+        return []
+    return [] if looks_seeded(extra.get("standings_table") or []) else narratives

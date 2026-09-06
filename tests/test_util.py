@@ -541,15 +541,40 @@ class TestNoRawSecretLogging:
             ln for ln in src.split("\n") if not ln.lstrip().startswith("#")
         )
 
+    @staticmethod
+    def _imports_from_util(src, name):
+        r"""True when `src` imports `name` from the package's _util, whatever
+        the formatting.
+
+        Asks the AST rather than matching `from \.\._util import .*<name>`,
+        which only ever described a SINGLE-LINE import: wrapping the same
+        import in parentheses across several lines is identical to Python and
+        invisible to the regex, so the guard failed on correct code while a
+        genuine removal and a reformat looked the same. Checking the parsed
+        import is the fact this test actually cares about.
+        """
+        import ast
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module != "_util":
+                continue
+            if any(alias.name == name for alias in node.names):
+                return True
+        return False
+
     def test_odds_carrying_handlers_redact(self):
         # Every module that passes apiKey as a query param must redact what it
         # logs, because a requests exception carries the full URL.
         import re
+        checked = 0
         for parts in (("sources", "mls.py"), ("sources", "mls_standings.py"),
                       ("sources", "soccer.py")):
-            code = self._code_only(self._src(*parts))
+            raw = self._src(*parts)
+            code = self._code_only(raw)
             if "apiKey" not in code:
                 continue
+            checked += 1
             # An actual CALL, not just the identifier appearing somewhere.
             calls = re.findall(r"redact_secrets\(\s*\w+\s*\)", code)
             assert calls, (
@@ -558,9 +583,13 @@ class TestNoRawSecretLogging:
                 "into the logs"
             )
             # And it must be imported, not just referenced.
-            assert re.search(r"from \.\._util import .*redact_secrets", code), (
+            assert self._imports_from_util(raw, "redact_secrets"), (
                 f"{parts[-1]} references redact_secrets without importing it"
             )
+        # Fail on the instrument first: if the apiKey screen ever stops
+        # matching, every assertion above is skipped and the test passes
+        # vacuously and forever.
+        assert checked, "no module matched the apiKey screen; the guard is inert"
 
     def test_sportsdb_fetch_redacts_its_url(self):
         code = self._code_only(self._src("logos.py"))

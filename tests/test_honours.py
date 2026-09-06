@@ -124,12 +124,12 @@ class TestHonoursLines:
         assert honours._phrase("X", [1, 2, 3, 4, 5, 6], "Foo", False) == "X — 6 titles (most recent 6)"
 
     def test_ordinal(self):
-        assert honours._ordinal(1) == "1st"
-        assert honours._ordinal(2) == "2nd"
-        assert honours._ordinal(3) == "3rd"
-        assert honours._ordinal(4) == "4th"
-        assert honours._ordinal(11) == "11th"
-        assert honours._ordinal(21) == "21st"
+        assert honours.ordinal(1) == "1st"
+        assert honours.ordinal(2) == "2nd"
+        assert honours.ordinal(3) == "3rd"
+        assert honours.ordinal(4) == "4th"
+        assert honours.ordinal(11) == "11th"
+        assert honours.ordinal(21) == "21st"
 
 
 class TestHonoursLoader:
