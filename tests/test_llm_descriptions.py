@@ -1588,3 +1588,126 @@ class TestGuardsApplyToTheCachedPath:
         assert llm.reject_reason(
             "A late-season test.", ctx) == "ungrounded season stage: late-season"
         assert llm.reject_reason("UCLA host Omaha tonight.", ctx) is None
+
+
+class TestConferenceIsSuppliedNotForbidden:
+    """The guard rejected any conference the context did not mention. That was
+    right for a model guessing from stale priors (UCLA joined the Big Ten in
+    2024) and wrong whenever the true answer was sitting in the CFBD payload
+    all along, as it was for Washington State, who really are Pac-12."""
+
+    def _g(self, ch="Big Ten", ca="Pac-12", **extra):
+        e = {"week": 1, "fd_competition_code": "CFB",
+             "conference_home": ch, "conference_away": ca}
+        e.update(extra)
+        return {"home": "Washington", "away": "Washington State",
+                "kickoff_local": "Today", "sport_label": "NCAA Football",
+                "venue": "Husky Stadium", "extra": e}
+
+    def test_cross_conference_names_both(self):
+        ctx = llm.build_llm_context(self._g(), tagline="")
+        assert "Conference: Washington is in the Big Ten, Washington State in the Pac-12." in ctx
+
+    def test_same_conference_says_so_once(self):
+        ctx = llm.build_llm_context(self._g(ch="SEC", ca="SEC"), tagline="")
+        assert "Conference: both teams are in the SEC." in ctx
+
+    def test_a_supplied_conference_passes_the_guard(self):
+        """The whole point: with the fact in the context, naming it is no
+        longer ungrounded."""
+        ctx = llm.build_llm_context(self._g(), tagline="")
+        prose = "Washington State bring a Pac-12 record into a Big Ten stadium."
+        assert llm.names_an_ungrounded_conference(prose, ctx) is None
+
+    def test_an_unsupplied_conference_is_still_caught(self):
+        ctx = llm.build_llm_context(self._g(), tagline="")
+        assert llm.names_an_ungrounded_conference(
+            "An Ivy League atmosphere in Seattle.", ctx) == "ivy league"
+
+    def test_venue_is_surfaced(self):
+        assert "Venue: Husky Stadium." in llm.build_llm_context(self._g(), tagline="")
+
+    def test_neutral_site_names_the_venue_too(self):
+        """Superseded an earlier rule that suppressed the venue on neutral
+        sites. See TestVenueAndRankAccuracy: withholding it made the model
+        invent a location."""
+        ctx = llm.build_llm_context(self._g(neutral=True), tagline="")
+        assert "Neutral site at Husky Stadium: neither team is at home." in ctx
+
+
+class TestRivalryTrophyReachesThePrompt:
+    def test_named_trophy_is_stated(self):
+        g = {"home": "Washington", "away": "Washington State", "kickoff_local": "Today",
+             "sport_label": "NCAA Football",
+             "extra": {"week": 1, "rivalry_trophy": "the Apple Cup"}}
+        ctx = llm.build_llm_context(g, tagline="")
+        assert "This is a rivalry game, played for the Apple Cup." in ctx
+
+    def test_rivalry_without_a_trophy_still_says_rivalry(self):
+        g = {"home": "Army", "away": "Navy", "kickoff_local": "Today",
+             "is_rivalry": True, "sport_label": "NCAA Football", "extra": {"week": 1}}
+        ctx = llm.build_llm_context(g, tagline="")
+        assert "This is a rivalry game." in ctx
+        assert "played for" not in ctx
+
+    def test_no_rivalry_says_nothing(self):
+        g = {"home": "Rutgers", "away": "Vanderbilt", "kickoff_local": "Today",
+             "sport_label": "NCAA Football", "extra": {"week": 1}}
+        assert "rivalry" not in llm.build_llm_context(g, tagline="")
+
+
+class TestVenueAndRankAccuracy:
+    """Both found by reading the live guide after the conference fix landed."""
+
+    def _cfb(self, neutral=True, venue="Nissan Stadium", rh=9, ra=24):
+        return {"home": "Ole Miss", "away": "Louisville", "kickoff_local": "Today",
+                "sport_label": "NCAA Football", "venue": venue,
+                "rank_home": rh, "rank_away": ra, "rank_pool_size": 25,
+                "extra": {"week": 1, "neutral": neutral}}
+
+    def test_neutral_site_still_names_the_venue(self):
+        """Suppressing it left a hole the model filled: a neutral-site game at
+        Nissan Stadium in Nashville was previewed as played "in Oxford", Ole
+        Miss's home town."""
+        ctx = llm.build_llm_context(self._cfb(), tagline="")
+        assert "Neutral site at Nissan Stadium: neither team is at home." in ctx
+
+    def test_neutral_site_without_a_venue_still_says_neutral(self):
+        ctx = llm.build_llm_context(self._cfb(venue=None), tagline="")
+        assert "Neutral site: neither team is at home." in ctx
+
+    def test_home_game_names_the_venue_plainly(self):
+        ctx = llm.build_llm_context(self._cfb(neutral=False, venue="Husky Stadium"), tagline="")
+        assert "Venue: Husky Stadium." in ctx
+
+    def test_prompt_forbids_inventing_a_location(self):
+        assert "Do NOT name a city, stadium or region" in llm.SYSTEM_PROMPT
+        assert "placing it in either team's town is" in llm.SYSTEM_PROMPT
+
+    def test_top_ranked_claim_for_a_number_four_is_caught(self):
+        """"Top-ranked Notre Dame ... carrying a #4 national ranking"
+        contradicts itself inside one sentence."""
+        ctx = llm.build_llm_context(self._cfb(rh=4, ra=None), tagline="")
+        assert llm.claims_a_rank_it_does_not_have(
+            "Top-ranked Notre Dame opens against Wisconsin.", ctx) == "top-ranked"
+
+    def test_top_ranked_is_fine_when_the_team_really_is_first(self):
+        ctx = llm.build_llm_context(self._cfb(rh=1, ra=None), tagline="")
+        assert llm.claims_a_rank_it_does_not_have(
+            "Top-ranked Ole Miss opens the season.", ctx) is None
+
+    def test_no_poll_context_means_no_opinion(self):
+        """A competition with no rankings must be unaffected."""
+        ctx = "Match: A at B\nCompetition: Some League"
+        assert llm.claims_a_rank_it_does_not_have("Top-ranked A visit B.", ctx) is None
+
+    def test_accurate_rank_language_passes(self):
+        ctx = llm.build_llm_context(self._cfb(rh=4, ra=None), tagline="")
+        assert llm.claims_a_rank_it_does_not_have(
+            "Fourth-ranked Notre Dame opens against Wisconsin.", ctx) is None
+
+    def test_it_falls_back(self):
+        assert llm.reject_reason(
+            "Top-ranked Notre Dame opens.",
+            "National poll ranking:\n  - Notre Dame: ranked #4 of 25 in the national poll.",
+        ) == "inflated ranking: top-ranked"

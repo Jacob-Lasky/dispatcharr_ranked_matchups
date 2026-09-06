@@ -51,6 +51,7 @@ from ._util import (
     group_phase_text,
     group_results_lines,
     group_standings_lines,
+    is_bottom_outcome,
     is_field_event,
     ordinal,
     parse_iso_utc,
@@ -2657,10 +2658,15 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # Rivalry detection: source-set is_rivalry takes precedence (no adapter
         # currently does this, but the door is open); otherwise we consult the
         # static rivalries.json list. See #8.
-        from .rivalries import is_rivalry as _is_known_rivalry
-        rivalry_flag = bool(g.is_rivalry) or _is_known_rivalry(
-            g.home, g.away, g.sport_prefix,
-        )
+        from .rivalries import rivalry_name as _rivalry_name
+        _known_trophy = _rivalry_name(g.home, g.away, g.sport_prefix)
+        rivalry_flag = bool(g.is_rivalry) or _known_trophy is not None
+        # "" means a known rivalry with no trophy recorded, so only a real
+        # name is stamped. The description writer may state it; without it a
+        # preview can only call a fixture a rivalry in the abstract, which is
+        # what let "the Apple Cup" go unnamed on a game that IS the Apple Cup.
+        if _known_trophy:
+            g.extra["rivalry_trophy"] = _known_trophy
 
         # A rank is only comparable across sports once you know how many
         # teams carry one. The standings table IS the pool for a league
@@ -3620,6 +3626,93 @@ def _is_catchup_matchday(g: Dict[str, Any]) -> bool:
     return matchday <= league_current - _CATCHUP_MATCHDAY_GAP
 
 
+# Display forms for the eight league-format band labels. The labels
+# themselves are terse identifiers shared with the scoring path and the
+# "Outcome bands in play" line, so they are NOT renamed at the source; this
+# map exists only to render them in a sentence ("2nd to 6th take libertadores"
+# is not something anyone says).
+#
+# A label with no entry falls through unchanged, so adding a band to
+# LEAGUE_CONTEXTS degrades to the raw label rather than breaking.
+_BAND_DISPLAY = {
+    "title": "the title",
+    "UCL": "Champions League places",
+    "Europa/Conference": "Europa or Conference League places",
+    "libertadores": "Libertadores places",
+    "sudamericana": "Sudamericana places",
+    "auto-promotion": "automatic promotion",
+    "playoff": "the promotion playoff",
+}
+
+
+def _band_display(label: str) -> str:
+    return _BAND_DISPLAY.get(label, label)
+
+
+def _boundary_prose(league_ctx: Any, table_size: Optional[int]) -> Optional[str]:
+    """The league's outcome bands as a sentence rather than an arrow legend.
+
+    `boundary_summary` reads "Top 6 -> Libertadores * 7-12 -> Sudamericana *
+    bottom 4 -> relegation", which is a legend: dense, precise, and nothing
+    like a sentence a person would say. Rendered from the same `thresholds`
+    the legend is written from, so the two cannot disagree.
+
+    Returns None for any non-league format (win-count and knockout bands do
+    not describe table positions) and when there are no usable thresholds, in
+    which case the caller falls back to `boundary_summary` unchanged.
+    """
+    if getattr(league_ctx, "format", "league") != "league":
+        return None
+    thresholds = getattr(league_ctx, "thresholds", None) or []
+    tops: List[Tuple[int, str]] = []
+    bottom: Optional[Tuple[int, str]] = None
+    for entry in thresholds:
+        try:
+            cutoff, label, _w = entry
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(cutoff, int):
+            continue
+        if is_bottom_outcome(label):
+            bottom = (cutoff, label)
+        else:
+            tops.append((cutoff, label))
+    tops.sort()
+    clauses: List[str] = []
+    previous = 0
+    for cutoff, label in tops:
+        if cutoff <= previous:
+            continue
+        if previous == 0:
+            clauses.append(f"the top {cutoff} take {_band_display(label)}" if cutoff > 1
+                           else f"the winner takes {_band_display(label)}")
+        elif cutoff == previous + 1:
+            clauses.append(f"{ordinal(cutoff)} takes {_band_display(label)}")
+        else:
+            clauses.append(
+                f"{ordinal(previous + 1)} to {ordinal(cutoff)} take {_band_display(label)}"
+            )
+        previous = cutoff
+    if bottom is not None:
+        if isinstance(table_size, int) and table_size > bottom[0]:
+            clauses.append(f"the bottom {table_size - bottom[0]} go down")
+        else:
+            # Without the table we know the cutoff but not how many sit below
+            # it, so say where the line is rather than guessing how many cross
+            # it. Reached whenever the row has no current standings (a knockout
+            # cache row, or a pre-#209 seeded row the selector suppressed).
+            clauses.append(f"anything below {ordinal(bottom[0])} goes down")
+    if not clauses:
+        return None
+    joined = clauses[0] if len(clauses) == 1 else (
+        ", ".join(clauses[:-1]) + f", and {clauses[-1]}"
+    )
+    # DO NOT use str.capitalize(): it lowercases the REST of the string, which
+    # turns "2nd to 4th take UCL" into "... take ucl". Only the first
+    # character may change.
+    return joined[0].upper() + joined[1:] + "."
+
+
 def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
     """One-line standings summary for league fixtures.
 
@@ -3664,7 +3757,9 @@ def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
         pts = entry.get("points")
         if pos is None or pts is None:
             return None
-        return f"{name} {ordinal(int(pos))}, {int(pts)} pts"
+        # "are 6th on 40 points", not "6th, 40 pts": the line is read by a
+        # person on a TV guide, not scanned in a table.
+        return f"{name} are {ordinal(int(pos))} on {int(pts)} points"
 
     home_str = _format(home_name, home_entry)
     away_str = _format(away_name, away_entry)
@@ -3705,7 +3800,9 @@ def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
         else:
             gap = "level on points"
 
-    return f"{home_str}. {away_str}: {gap}."
+    # One sentence, not three fragments. Was "X 6th, 40 pts. Y 3rd, 46 pts:
+    # 6 pts ahead." which is a table row wearing punctuation.
+    return f"{home_str}, {away_str}, {gap}."
 
 
 def _build_description(
@@ -3835,10 +3932,28 @@ def _build_description(
         # Without the label, an end-of-season "Matchday 40 of 46" reads as
         # if the team has 6 games left when really it's a postponement
         # being replayed late and they have 1.
-        label = "Catch-up matchday" if _is_catchup_matchday(g) else "Matchday"
-        matchday_line_parts.append(f"{label} {matchday} of {matchdays_total}.")
-    if league_ctx and league_ctx.boundary_summary:
-        matchday_line_parts.append(league_ctx.boundary_summary + ".")
+        if _is_catchup_matchday(g):
+            # Keep the explicit label: an end-of-season "Matchday 40 of 46"
+            # reads as six games left when it is a postponement being
+            # replayed late and they have one. See #3.
+            matchday_line_parts.append(
+                f"Catch-up matchday {matchday} of {matchdays_total}."
+            )
+        else:
+            left = matchdays_total - matchday
+            if left > 0:
+                matchday_line_parts.append(
+                    f"{left} matchday{'s' if left != 1 else ''} left after this one."
+                )
+            else:
+                matchday_line_parts.append("The final matchday.")
+    if league_ctx:
+        table_size = len(current_standings_table(extra)) or None
+        prose = _boundary_prose(league_ctx, table_size)
+        if prose:
+            matchday_line_parts.append(prose)
+        elif league_ctx.boundary_summary:
+            matchday_line_parts.append(league_ctx.boundary_summary + ".")
     if matchday_line_parts:
         sections.append(" ".join(matchday_line_parts))
 

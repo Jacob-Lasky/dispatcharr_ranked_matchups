@@ -141,6 +141,14 @@ Hard rules:
   ranking, write about exactly those: who is playing, what the fixture is, and
   what the ranking implies. Two honest sentences beat three padded with
   invented context.
+- Do NOT name a city, stadium or region that is not written above. If a
+  "Venue" or "Neutral site at" line is present, that is where the game is
+  played; if none is present, do not say where it is. A neutral-site game is
+  NOT at either team's home ground, so placing it in either team's town is
+  always wrong.
+- Rank adjectives must match the number. "Top-ranked" and "number one" mean
+  ranked #1 and nothing else; a #4 team is "fourth-ranked" or "a top-five
+  side". Do not inflate a ranking you were given.
 - "Outcome bands in play" lists what is mathematically still reachable, NOT
   what is urgent. Early in a season everything is reachable and naming a band
   says nothing: "both teams chasing bowl eligibility" is true of every team in
@@ -739,16 +747,43 @@ def poll_rank_lines(g: Dict[str, Any], has_standings: bool = False) -> List[str]
 
 
 def venue_context_lines(g: Dict[str, Any]) -> List[str]:
-    """Neutral-site and conference-game facts, both already in `extra` and
-    both previously unused. "Neutral site" in particular changes the framing
-    of a college game entirely and the model was inferring a home crowd that
-    did not exist."""
+    """Venue, conference and rivalry facts, all already in `extra`.
+
+    Conferences are SUPPLIED rather than forbidden. An earlier guard rejected
+    any conference the context did not mention, which was right for a model
+    guessing from stale priors ("Pac-12" on UCLA, which joined the Big Ten in
+    2024) and wrong for the many cases where the true answer was sitting in
+    the CFBD payload all along. Give it the fact and the guard passes.
+    """
     extra = g.get("extra") or {}
     out: List[str] = []
+    home, away = g.get("home"), g.get("away")
+    ch, ca = extra.get("conference_home"), extra.get("conference_away")
+    if ch and ca and home and away:
+        if ch == ca:
+            out.append(f"Conference: both teams are in the {ch}.")
+        else:
+            out.append(f"Conference: {home} is in the {ch}, {away} in the {ca}.")
+    # ALWAYS state the venue when we have it, including for neutral sites.
+    # Suppressing it there left a hole the model filled: a neutral-site game
+    # at Nissan Stadium in Nashville was previewed as being played "in
+    # Oxford", Ole Miss's home town, because "neither team is at home" told it
+    # where the game was NOT and nothing told it where it was.
+    venue = g.get("venue")  # top-level GameRow field, not an `extra` key
     if extra.get("neutral"):
-        out.append("Neutral site: neither team is at home.")
+        if venue:
+            out.append(f"Neutral site at {venue}: neither team is at home.")
+        else:
+            out.append("Neutral site: neither team is at home.")
+    elif venue:
+        out.append(f"Venue: {venue}.")
     if extra.get("conference_game"):
         out.append("This is a conference game.")
+    trophy = extra.get("rivalry_trophy")
+    if trophy:
+        out.append(f"This is a rivalry game, played for {trophy}.")
+    elif g.get("is_rivalry"):
+        out.append("This is a rivalry game.")
     return out
 
 
@@ -1200,6 +1235,33 @@ def looks_like_non_preview(prose: str) -> bool:
     return False
 
 
+# Phrases that assert a team is ranked FIRST. Only usable when a supplied
+# ranking actually says #1.
+_TOP_RANK_CLAIMS = ("top-ranked", "top ranked", "number one", "no. 1", "#1 team")
+
+
+def claims_a_rank_it_does_not_have(prose: str, context: str) -> Optional[str]:
+    """A "top-ranked" claim with no #1 in the supplied rankings, or None.
+
+    Measured on the live guide 2026-09-06: "Top-ranked Notre Dame opens
+    against Wisconsin ... carrying a #4 national ranking", which contradicts
+    itself inside one sentence. The prompt now forbids it; this is what makes
+    it stick.
+
+    Only fires when a poll line was actually supplied, so a preview for a
+    competition with no rankings is unaffected.
+    """
+    if "National poll ranking:" not in context:
+        return None
+    if "ranked #1 " in context or "ranked #1." in context:
+        return None
+    low = prose.lower()
+    for phrase in _TOP_RANK_CLAIMS:
+        if phrase in low:
+            return phrase
+    return None
+
+
 def reject_reason(prose: str, context: str) -> Optional[str]:
     """Why this response must not reach the guide, or None if it may.
 
@@ -1223,6 +1285,9 @@ def reject_reason(prose: str, context: str) -> Optional[str]:
     stage = names_an_ungrounded_season_stage(prose, context)
     if stage:
         return f"ungrounded season stage: {stage}"
+    rank = claims_a_rank_it_does_not_have(prose, context)
+    if rank:
+        return f"inflated ranking: {rank}"
     return None
 
 

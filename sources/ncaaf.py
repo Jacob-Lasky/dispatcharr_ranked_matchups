@@ -186,6 +186,14 @@ class NcaafSource(PointsBasedSportSource):
                     # every team in week 1 and therefore says nothing (#209).
                     "record_home": _record_dict(records.get(home)),
                     "record_away": _record_dict(records.get(away)),
+                    # Conference comes FREE in the /games payload we already
+                    # fetch. Supplying it is strictly better than forbidding
+                    # the model to mention one: membership churns (Washington
+                    # went Pac-12 to Big Ten in 2024 while Washington State
+                    # stayed) and a model working from its own priors gets it
+                    # wrong, but it is right here in the response. See #209.
+                    "conference_home": g.get("homeConference"),
+                    "conference_away": g.get("awayConference"),
                     "season": g.get("season"),
                     "neutral": g.get("neutralSite", False),
                     "conference_game": g.get("conferenceGame", False),

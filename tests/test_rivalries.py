@@ -121,9 +121,11 @@ class TestLoadRivalries:
             if key.startswith("_"):
                 continue
             for pair in pairs:
-                assert isinstance(pair, list) and len(pair) == 2
+                # 2 = a pair; 3 = a pair plus its trophy / game name.
+                assert isinstance(pair, list) and len(pair) in (2, 3), \
+                    f"Bad entry in {key}: {pair}"
                 assert all(isinstance(s, str) and s.strip() for s in pair), \
-                    f"Bad pair in {key}: {pair}"
+                    f"Bad entry in {key}: {pair}"
 
     def test_no_self_rivalries(self):
         # A team can't be its own rival.
@@ -133,6 +135,78 @@ class TestLoadRivalries:
         for key, pairs in raw.items():
             if key.startswith("_"):
                 continue
-            for a, b in pairs:
+            for entry in pairs:
+                a, b = entry[0], entry[1]
                 assert rivalries._normalize(a) != rivalries._normalize(b), \
                     f"Self-rivalry in {key}: {a} / {b}"
+
+
+class TestDisambiguatingTokens:
+    """The substring matcher made every shorter school name match a longer one
+    that starts with it. That is a SCORING bug, because is_rivalry feeds the
+    score: ["Texas", "Texas A&M"] returned True for Texas Tech vs Texas A&M,
+    scoring an ordinary fixture as the Lone Star Showdown."""
+
+    def test_tech_is_a_different_school(self):
+        assert not rivalries.is_rivalry("Texas Tech", "Texas A&M", "CFB")
+
+    def test_state_is_a_different_school(self):
+        # Washington vs Washington State IS a rivalry (the Apple Cup), but it
+        # must match on the real pair, not because "Washington" is a prefix.
+        assert not rivalries._name_matches("washington state", "washington")
+        assert rivalries.is_rivalry("Washington", "Washington State", "CFB")
+
+    def test_mascots_and_club_prefixes_still_match(self):
+        assert rivalries._name_matches("texas longhorns", "texas")
+        assert rivalries._name_matches("olympique de marseille", "marseille")
+        assert rivalries._name_matches("tottenham hotspur fc", "tottenham")
+
+    def test_the_egg_bowl_was_dead_and_is_not_now(self):
+        """rivalries.json said "Mississippi"; CFBD says "Ole Miss", and neither
+        string contains the other, so the Egg Bowl had never been detected."""
+        assert rivalries.is_rivalry("Ole Miss", "Mississippi State", "CFB")
+
+
+class TestRivalryTrophyNames:
+    def test_apple_cup_is_indexed(self):
+        """The fixture that started this: it scored as an ordinary
+        non-conference game because the pair was missing entirely."""
+        assert rivalries.rivalry_name("Washington", "Washington State", "CFB") == "the Apple Cup"
+
+    def test_order_within_the_pair_does_not_matter(self):
+        assert rivalries.rivalry_name("Washington State", "Washington", "CFB") == "the Apple Cup"
+
+    def test_a_rivalry_with_no_trophy_returns_empty_not_none(self):
+        """"" and None mean different things: a known rivalry with no trophy
+        recorded, versus not a rivalry. Collapsing them would either lose the
+        signal or invent a trophy."""
+        assert rivalries.rivalry_name("Army", "Navy", "CFB") == ""
+        assert rivalries.is_rivalry("Army", "Navy", "CFB") is True
+
+    def test_a_non_rivalry_returns_none(self):
+        assert rivalries.rivalry_name("Rutgers", "Vanderbilt", "CFB") is None
+
+    def test_two_element_entries_still_load(self):
+        """Back-compat: every non-CFB sport still uses the 2-element form."""
+        assert rivalries.is_rivalry("Arsenal FC", "Tottenham Hotspur FC", "EPL")
+        assert rivalries.rivalry_name("Arsenal FC", "Tottenham Hotspur FC", "EPL") == ""
+
+    def test_every_cfb_school_name_matches_cfbd_spelling(self):
+        """The Egg Bowl was dead for exactly this reason: an entry spelled the
+        way a human would, not the way the source does. This guard reads the
+        real file, so a future entry with a typo fails here rather than
+        silently never matching.
+        """
+        import json as _json
+        import os as _os
+        path = _os.path.join(REPO_ROOT, "rivalries.json")
+        with open(path, "r", encoding="utf-8") as f:
+            cfb = _json.load(f)["CFB"]
+        assert len(cfb) > 50, "guard is inert if the list is empty or tiny"
+        # A CFBD school name is Title-Cased and never contains a lowercase
+        # connector we would have introduced by hand ("of", "the").
+        for entry in cfb:
+            for name in entry[:2]:
+                assert name == name.strip()
+                assert " of " not in name and " the " not in name, \
+                    f"suspicious school name: {name!r}"

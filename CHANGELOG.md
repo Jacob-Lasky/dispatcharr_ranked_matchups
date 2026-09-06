@@ -214,6 +214,79 @@ inventions the prompt alone had not prevented.
 
 Final live sweep: 24 descriptions, 0 flagged.
 
+### Fixed (fifth round: supply the fact instead of forbidding it)
+
+Jake, on the guard rejecting "Pac-12": *"wdym it invented pac-12?"* He was
+right and the correction matters. The Pac-12 exists with eight members in
+2026 and **Washington State is one of them**; Washington moved to the Big Ten
+in 2024. So that fixture really was Pac-12 vs Big Ten and the guard rejected a
+TRUE statement. (UCLA and California were genuinely wrong, both having left.)
+
+- **Conference is now SUPPLIED, at zero cost.** The `/games` payload the CFB
+  source already fetches carries `homeConference` and `awayConference` per
+  game. Forbidding a fact that was sitting in the response was the wrong shape
+  of fix; with it in the prompt the guard passes on its own, and the model
+  used it correctly on the next run ("against an ACC opponent").
+
+- **Withholding the venue made the model invent one.** Neutral-site games said
+  only "neither team is at home", so a game at Nissan Stadium in Nashville was
+  previewed as played "in Oxford", Ole Miss's home town. The venue is now
+  always stated, neutral or not, and the next run said "a neutral site in
+  Green Bay" off Lambeau Field.
+
+- **"Top-ranked Notre Dame ... carrying a #4 national ranking"**, which
+  contradicts itself inside one sentence. Rank adjectives now have to match
+  the number, enforced by a guard as well as a rule.
+
+### Fixed (rivalries, and two bugs that had been live for a while)
+
+Jake: *"if it's a rivalry game then that should be codified? is there a list
+of cups / rivalries we can see / index / pull from? they don't change very
+often."* Correct on all counts. CFBD has no rivalry endpoint (`/rivalries`
+and `/teams/rivals` both 404), so this is `rivalries.json`, which already
+existed with 20 CFB pairs and no trophy names.
+
+- **20 -> 85 CFB pairs, 78 carrying a trophy name**, seeded from cfblabs.com's
+  trophy index and cross-checked against Wikipedia's rivalry-games list. Every
+  school name is validated against the live CFBD roster by a test, because a
+  name spelled the way a human would is a silently dead entry.
+
+- **The Egg Bowl had never once been detected.** The entry said "Mississippi";
+  CFBD calls that school "Ole Miss", and neither string contains the other.
+
+- **`Texas Tech vs Texas A&M` was scored as the Lone Star Showdown.** The
+  matcher was a substring test, so the ["Texas", "Texas A&M"] entry matched
+  Texas Tech. That is a SCORING bug, not a cosmetic one: `is_rivalry` feeds
+  the score, so an ordinary fixture drew a rivalry bonus. Names are now
+  matched whole, with a short list of tokens that mark a DIFFERENT
+  institution ("State", "Tech", "A&M", directionals) so mascots and club
+  prefixes still match ("Tottenham" / "Tottenham Hotspur FC", "Marseille" /
+  "Olympique de Marseille") while "Texas" no longer matches "Texas Tech".
+
+- The Apple Cup, the fixture that started this, is indexed and named.
+
+### Fixed (the deterministic description read like a spreadsheet)
+
+Jake, on the fallback text: *"yeah, it DOES read like a spreadsheet."*
+
+Before:
+
+    Matchday 26 of 38. Top 6 -> Libertadores * 7-12 -> Sudamericana * bottom 4 -> relegation.
+    Cruzeiro EC 6th, 40 pts. CA Paranaense 3rd, 46 pts: 6 pts ahead.
+
+After:
+
+    12 matchdays left after this one. The winner takes the title, 2nd to 6th
+    take Libertadores places, 7th to 12th take Sudamericana places, and the
+    bottom 4 go down.
+    Cruzeiro EC are 6th on 42 points, CA Paranaense are 3rd on 45 points, 3 pts ahead.
+
+The band sentence is rendered from the same `thresholds` the arrow legend was
+written from, so the two cannot drift; where the table size is unknown it
+states the line ("anything below 17th goes down") rather than guessing how
+many cross it. Matchdays REMAINING replaces the index, keeping the explicit
+"Catch-up matchday" label for a postponement being replayed late (#3).
+
 ### Changed
 
 - `SoccerSource._fetch_standings_with_seed` returns a `StandingsBundle`

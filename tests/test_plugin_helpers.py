@@ -1485,7 +1485,7 @@ class TestBuildDescription:
     def test_matchday_line_uses_explicit_totals(self, plugin):
         g = self._g(extra={"matchday": 7, "matchdays_total": 38})
         out = plugin._build_description(g, "", False)
-        assert "Matchday 7 of 38." in out
+        assert "31 matchdays left after this one." in out
 
     def test_matchday_line_falls_back_to_league_ctx_total(self, plugin):
         # When `matchdays_total` isn't in extra but fd_competition_code
@@ -1493,7 +1493,7 @@ class TestBuildDescription:
         # total fills in. PL is 38.
         g = self._g(extra={"matchday": 5, "fd_competition_code": "PL"})
         out = plugin._build_description(g, "", False)
-        assert "Matchday 5 of 38." in out
+        assert "33 matchdays left after this one." in out
 
     def test_league_boundary_summary_appears(self, plugin):
         # PL's boundary_summary is the threshold mnemonic users see.
@@ -1501,7 +1501,7 @@ class TestBuildDescription:
         out = plugin._build_description(g, "", False)
         # Boundary summary content comes from LEAGUE_CONTEXTS["PL"]
         # ("Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation").
-        assert "UCL" in out and "relegation" in out
+        assert "Champions League places" in out and "goes down" in out
 
     def test_matchday_without_total_omits_line(self, plugin):
         # If neither extra.matchdays_total nor league_ctx.matchdays_total
@@ -1609,7 +1609,8 @@ class TestBuildDescription:
         # Use .find() to pin order: earlier marker must have lower index.
         pos_placeholder = out.find("Channel match pending")
         pos_headline = out.find("A title race")
-        pos_matchday = out.find("Matchday 5")
+        # The matchday block now reports what is LEFT, in prose.
+        pos_matchday = out.find("matchdays left after this one")
         pos_narrative = out.find("Impact narrative here.")
         pos_favorite = out.find("is your favorite")
         pos_source = out.find("Source: ESPN")
@@ -2147,7 +2148,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Manchester City FC 2nd, 70 pts. Manchester United FC 3rd, 69 pts: 1 pt behind."
+        assert line == "Manchester City FC are 2nd on 70 points, Manchester United FC are 3rd on 69 points, 1 pt behind."
 
     def test_both_teams_wide_gap(self, plugin):
         g = {
@@ -2156,7 +2157,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Manchester City FC 2nd, 70 pts. Bournemouth FC 14th, 41 pts: 29 pts behind."
+        assert line == "Manchester City FC are 2nd on 70 points, Bournemouth FC are 14th on 41 points, 29 pts behind."
 
     def test_away_team_ahead(self, plugin):
         # When home team is lower-ranked, away team's gap reads "ahead".
@@ -2166,7 +2167,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Bournemouth FC 14th, 41 pts. Manchester City FC 2nd, 70 pts: 29 pts ahead."
+        assert line == "Bournemouth FC are 14th on 41 points, Manchester City FC are 2nd on 70 points, 29 pts ahead."
 
     def test_tied_on_points_no_gd_cached(self, plugin):
         # Older caches (pre-#10) won't have goal_difference; fall back to
@@ -2177,7 +2178,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points."
+        assert line == "A FC are 1st on 70 points, B FC are 2nd on 70 points, level on points."
 
     def test_tied_on_points_away_gd_better(self, plugin):
         # B has the better GD: reads "... GD ahead" for the away team.
@@ -2187,7 +2188,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points, 7 GD ahead."
+        assert line == "A FC are 1st on 70 points, B FC are 2nd on 70 points, level on points, 7 GD ahead."
 
     def test_tied_on_points_home_gd_better(self, plugin):
         # A (home) has better GD: away reads "behind on GD".
@@ -2197,7 +2198,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points, 7 GD behind."
+        assert line == "A FC are 1st on 70 points, B FC are 2nd on 70 points, level on points, 7 GD behind."
 
     def test_tied_on_everything(self, plugin):
         table = [
@@ -2206,7 +2207,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points and goal difference."
+        assert line == "A FC are 1st on 70 points, B FC are 2nd on 70 points, level on points and goal difference."
 
     def test_one_pt_uses_singular(self, plugin):
         # 1 → "1 pt", not "1 pts".
@@ -2226,7 +2227,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Manchester City FC 2nd, 70 pts."
+        assert line == "Manchester City FC are 2nd on 70 points."
 
     def test_only_away_in_table(self, plugin):
         g = {
@@ -2235,7 +2236,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Manchester City FC 2nd, 70 pts."
+        assert line == "Manchester City FC are 2nd on 70 points."
 
     def test_missing_position_skips_team(self, plugin):
         # Defensive: if FD.org returns an entry with no position, treat as
@@ -2246,7 +2247,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "B FC 2nd, 69 pts."
+        assert line == "B FC are 2nd on 69 points."
 
     def test_missing_home_away_returns_none(self, plugin):
         g = {"home": "", "away": "", "extra": {"standings_table": self._table()}}
@@ -2273,8 +2274,11 @@ class TestBuildStandingsPostureLine:
         sections = desc.split("\n\n")
         # Matchday should precede the standings posture line, which should
         # precede the impact narrative.
-        md_idx = next(i for i, s in enumerate(sections) if s.startswith("Matchday 35"))
-        st_idx = next(i for i, s in enumerate(sections) if "70 pts" in s)
+        md_idx = next(
+            i for i, s in enumerate(sections)
+            if s.startswith("3 matchdays left after this one")
+        )
+        st_idx = next(i for i, s in enumerate(sections) if "70 points" in s)
         nar_idx = next(i for i, s in enumerate(sections) if "clinch the title" in s)
         assert md_idx < st_idx < nar_idx
 
@@ -3939,8 +3943,8 @@ class TestDeterministicPostureUsesCurrentTable:
             },
         }
         line = plugin._build_standings_posture_line(g)
-        assert "3rd, 6 pts" in line
-        assert "85 pts" not in line
+        assert "are 3rd on 6 points" in line
+        assert "85 points" not in line and "85 pts" not in line
 
     def test_seeded_row_without_current_table_renders_no_posture(self, plugin):
         g = {
@@ -4141,3 +4145,104 @@ class TestStatusMarksSeededRanks:
         g = {"extra": {"standings_table": [
             {"name": "A", "position": 1, "points": 9, "played": 3}]}}
         assert plugin._row_ranks_are_seeded(g) is False
+
+
+class TestBoundaryProse:
+    """`boundary_summary` reads "Top 6 -> Libertadores * 7-12 -> Sudamericana
+    * bottom 4 -> relegation", which is a legend, not a sentence. Jake, on
+    reading it off the live guide: "it DOES read like a spreadsheet"."""
+
+    @staticmethod
+    def _ctx(plugin, code):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        return LEAGUE_CONTEXTS[code]
+
+    def test_premier_league_reads_as_a_sentence(self, plugin):
+        out = plugin._boundary_prose(self._ctx(plugin, "PL"), 20)
+        assert out == (
+            "The winner takes the title, 2nd to 4th take Champions League "
+            "places, 5th to 7th take Europa or Conference League places, and "
+            "the bottom 3 go down."
+        )
+
+    def test_labels_keep_their_capitalisation(self, plugin):
+        """str.capitalize() lowercases the REST of the string, which turned
+        "2nd to 4th take UCL" into "... take ucl"."""
+        out = plugin._boundary_prose(self._ctx(plugin, "PL"), 20)
+        assert "Champions League" in out
+        assert "ucl" not in out
+
+    def test_unknown_table_size_states_the_line_instead_of_guessing(self, plugin):
+        """Without the table we know the cutoff but not how many sit below
+        it, so say where the line is rather than inventing a count."""
+        out = plugin._boundary_prose(self._ctx(plugin, "PL"), None)
+        assert "anything below 17th goes down" in out
+        assert "bottom" not in out
+
+    def test_promotion_league_uses_its_own_bands(self, plugin):
+        out = plugin._boundary_prose(self._ctx(plugin, "ELC"), 24)
+        assert out == (
+            "The top 2 take automatic promotion, 3rd to 6th take the "
+            "promotion playoff, and the bottom 3 go down."
+        )
+
+    def test_non_league_formats_get_nothing(self, plugin):
+        """Win-count and knockout bands do not describe table positions, so
+        the caller falls back to boundary_summary unchanged."""
+        assert plugin._boundary_prose(self._ctx(plugin, "CFB"), None) is None
+
+    def test_an_unmapped_label_degrades_to_the_raw_label(self, plugin):
+        """Adding a band to LEAGUE_CONTEXTS must not break the renderer."""
+        class Ctx:
+            format = "league"
+            thresholds = [(4, "cup_spot", 1.0)]
+        assert plugin._boundary_prose(Ctx(), 20) == "The top 4 take cup_spot."
+
+    def test_every_shipped_league_renders(self, plugin):
+        """Fail on the instrument: if the format check ever excluded
+        everything, all the tests above would still pass individually."""
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        rendered = [
+            code for code, ctx in LEAGUE_CONTEXTS.items()
+            if plugin._boundary_prose(ctx, 20) is not None
+        ]
+        assert len(rendered) >= 8, f"only {len(rendered)} leagues rendered"
+
+
+class TestMatchdayReadsAsTimeRemaining:
+    def test_reports_what_is_left_not_the_index(self, plugin):
+        g = {"home": "A FC", "away": "B FC", "sport_prefix": "EPL",
+             "favorites_matched": [], "closeness": None, "spread": None,
+             "extra": {"matchday": 35, "matchdays_total": 38,
+                       "fd_competition_code": "PL"}}
+        out = plugin._build_description(g, tagline="title race", placeholder=False)
+        assert "3 matchdays left after this one." in out
+        assert "Matchday 35 of 38" not in out
+
+    def test_singular_for_one_left(self, plugin):
+        g = {"home": "A FC", "away": "B FC", "sport_prefix": "EPL",
+             "favorites_matched": [], "closeness": None, "spread": None,
+             "extra": {"matchday": 37, "matchdays_total": 38,
+                       "fd_competition_code": "PL"}}
+        assert "1 matchday left after this one." in plugin._build_description(
+            g, tagline="", placeholder=False)
+
+    def test_final_matchday_is_named(self, plugin):
+        g = {"home": "A FC", "away": "B FC", "sport_prefix": "EPL",
+             "favorites_matched": [], "closeness": None, "spread": None,
+             "extra": {"matchday": 38, "matchdays_total": 38,
+                       "fd_competition_code": "PL"}}
+        assert "The final matchday." in plugin._build_description(
+            g, tagline="", placeholder=False)
+
+    def test_catchup_keeps_the_explicit_label(self, plugin):
+        """An end-of-season "Matchday 40 of 46" reads as six games left when
+        it is a postponement being replayed late and they have one (#3)."""
+        g = {"home": "A FC", "away": "B FC", "sport_prefix": "EPL",
+             "favorites_matched": [], "closeness": None, "spread": None,
+             "extra": {"matchday": 35, "matchdays_total": 38,
+                       "fd_competition_code": "PL",
+                       "standings_table_current": [
+                           {"name": "A FC", "position": 1, "points": 80, "played": 37}]}}
+        assert "Catch-up matchday 35 of 38." in plugin._build_description(
+            g, tagline="", placeholder=False)
