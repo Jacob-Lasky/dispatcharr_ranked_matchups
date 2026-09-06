@@ -62,7 +62,7 @@ downstream is sport-agnostic.
 | `sources/mlb.py` | statsapi.mlb.com (official, no key). `MlbRegularSource` uses raw win count (no OT-loss bonus). `MlbPlayoffSource` is a BestOfNSeriesSource with per-stage series lengths (WC=3, LDS=5, LCS=7, WS=7). Same regular-season → playoff strength-sharing pattern as NHL. |
 | `sources/nba.py` | ESPN unofficial API (stats.nba.com is WAF-blocked from most homelab egress). `NbaRegularSource` uses raw win count. `NbaPlayoffSource` is a BestOfNSeriesSource with uniform SERIES_LENGTH=7 (R1 / CSF / CF / FINALS). Stage routing comes from parsing the ESPN headline ("East 1st Round - Game 3" etc.) — the only place ESPN exposes the playoff round. All-Star Tournament games (which ESPN tags `season.type=2` but `competition.type.abbreviation=ALLSTAR`) are filtered out so the regular-season team list stays at 30. |
 | `sources/mls.py` | ESPN unofficial API for the schedule + The Odds API (`soccer_usa_mls`) for closeness. Intentionally thin: `MlsSource` does NOT inherit `PointsBasedSportSource` and `supports_importance=False`. MLS surfaces with favorite + closeness signals only; standings-based importance and the mixed-format MLS Cup bracket (best-of-3 R1 + single-leg subsequent rounds) are tracked in #30. Team-name fuzzy matching reuses `_util.TEAM_SUFFIX_TOKENS` — never add "united" to that list (it's a substantive body word for Atlanta United / D.C. United / Minnesota United). |
-| `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. `SoccerSource` is league-shaped (PL, ELC); `KnockoutSoccerSource` is bracket-shaped (UCL) — multi-inherits from `AggregateLegSource` (bracket state machine) + `SoccerSource` (FD.org fetch / strengths) with the MRO `K → AggregateLegSource → BracketSportSource → SoccerSource → SportSource`. Routed by `LEAGUE_CONTEXTS[fd_code].format`. |
+| `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. `SoccerSource` is league-shaped (PL, ELC); `KnockoutSoccerSource` is bracket-shaped (UCL) — multi-inherits from `AggregateLegSource` (bracket state machine) + `SoccerSource` (FD.org fetch / strengths) with the MRO `K → AggregateLegSource → BracketSportSource → SoccerSource → SportSource`. Routed by `LEAGUE_CONTEXTS[fd_code].format`. `_fetch_standings_with_seed` returns a `StandingsBundle` (position map, scoring table, current table, previous-season final table, seeded flag), never one merged table — see the standings gotcha below. `build_h2h_entries` builds the previous-meetings list; name matching there is EXACT on purpose. |
 | `sources/_espn.py` | Shared ESPN helpers. `extract_espn_scoreboard_event` normalises one scoreboard event (its docstring forbids inlining a fourth copy). `sweep_upcoming_scoreboard` is the whole per-day sweep for UPCOMING-only sources, owning the US-Eastern-bucket lookback (`SCOREBOARD_LOOKBACK_DAYS`), the FINISHED drop, the stale-SCHEDULED floor (`MAX_AGE_AFTER_KICKOFF`) and the id dedupe. Used by `friendlies.py` + `english_cup.py`. Takes `http_get` INJECTED so each source keeps its own patchable `requests` symbol. The bracket sources deliberately do NOT use it: they sweep a fixed calendar window and KEEP finished games because bracket state comes from results already played. |
 | `sources/friendlies.py` | ESPN exhibition soccer: `InternationalFriendliesSource` (`fifa.friendly` / `fifa.friendly.w`, parametrized on gender) and `ClubFriendliesSource` (`club.friendly`). `supports_importance=False` deliberately: no table to simulate. Gated to Favorites by default (`friendlies_favorites_only`) because an exhibition's only claim to a slot is the favorite signal. `CLUBFRIENDLY` is a distinct prefix from `FRIENDLY` and its absence from `rivalries.json` is load-bearing: a pre-season kickabout is not a derby. |
 | `sources/english_cup.py` | EFL (Carabao) Cup + FA Cup via ESPN (`eng.league_cup` / `eng.fa`). Exists because Football-Data.org gates EVERY domestic cup behind a paid plan (FLC=TIER_THREE, FAC=TIER_TWO; verified 403 on the free-tier key), so a `soccer.py::COMPETITIONS` entry would 403 every refresh and contribute zero games silently. Rounds come from `season.slug`; the slug->stage maps are PER-COMPETITION because the two cups' round names overlap at different depths (FA Cup 4th round = R32, EFL Cup 4th round = R16). `supports_importance=False` and ranks always `None` — the latter is what stops a giant-killing tie being penalised for being lopsided. Early rounds score via the `CUP_R*` band in `scoring.py`, ramping to just under the shared `QUARTER_FINALS`. #190. |
@@ -352,6 +352,29 @@ stay in agreement with that one.
   streams attached to BOTH a real channel and one of ours — exactly the curated
   ones. `tools/export_snapshot.py` mirrors the prefix AND the legacy markers,
   or an offline replay disagrees with production about what is curated.
+- **`extra["standings_table"]` is the SCORING table, and early in a season it
+  is LAST season's** (#209). `SoccerSource._fetch_standings_with_seed`
+  deliberately substitutes the previous season's final table as a ranking prior
+  while the current one is younger than `_util.SEED_PLAYED_THRESHOLD`
+  matchdays, so that key is a good prior AND a false statement about the league
+  right now. Anything that writes a sentence a human reads — the LLM prompt,
+  `_build_standings_posture_line`, the impact-on-favorites narrative,
+  `_is_catchup_matchday` — must go through
+  `_util.current_standings_table(extra)`, which prefers the real
+  `extra["standings_table_current"]` and returns `[]` rather than let a prior
+  be described as live. Swapping the scoring path onto the current table is a
+  different change (it re-ranks every early-season game) and is not what this
+  fix did. Two follow-on traps: cache rows written before #209 carry neither
+  `standings_seeded` nor `standings_table_current`, so `_util.looks_seeded`
+  catches them by SHAPE (every team on zero games played while somebody has
+  points, which no real table can be) or an upgraded install keeps serving the
+  old falsehood from every apply until the next refresh; and the "rooting
+  against X" narratives are pre-rendered INTO the cache row, so both consumers
+  read them through `_util.trusted_impact_narratives` (the `prompt_hash` change
+  invalidates the LLM's cached OUTPUT, not its cached INPUT). Facts the scoring
+  path and the prose path must agree on — `SEED_PLAYED_THRESHOLD`,
+  `is_bottom_outcome`, `ordinal` — live in `_util` as single definitions,
+  because #209 shipped precisely because those two paths disagreed.
 - **Postgres connection pool**: long-running plugin code can exhaust the
   default Postgres connection pool. Monitor with `SELECT count(*) FROM
   pg_stat_activity` in the Dispatcharr container if you add worker-heavy
@@ -421,6 +444,16 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)
 - Description includes kickoff time + WHY breakdown
+- LLM descriptions grounded in the CURRENT season (#209): the prompt carries
+  each team's precomputed posture (position, points, which outcome bands they
+  sit in, exact points to the leader and to the relegation line), last season's
+  final table with an explicit "newly promoted" for absent teams, previous
+  meetings, the season phase (opener / early / midseason / run-in) with
+  guidance, and for win-count sports the record plus distance to each still
+  reachable win threshold. The arithmetic is precomputed in
+  `llm_descriptions.py` rather than left to the model, and `SYSTEM_PROMPT`
+  forbids stating any position, record, gap or zone proximity that is not in
+  those lines. `show_status` suffixes a seeded rank pair with `~`
 - Stream-stack ordering and per-group stream policy (#206):
   `language_preferences` (ordered codes, default `en`), `fallback_only_groups`
   (demote but keep playable), `excluded_groups` (never attach), plus

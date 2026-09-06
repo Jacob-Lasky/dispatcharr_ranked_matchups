@@ -70,9 +70,18 @@ LEAGUE_CONTEXTS["PD"] = LeagueContext(
 The `thresholds` list is `(cutoff, label, weight)` triples. For league-
 format contexts (the default), `cutoff` is an integer position (top-side
 labels fire on `pos <= cutoff`; bottom-side labels containing "relegat",
-"demot", or "drop" fire on `pos > cutoff`). `weight` is the cross-sport
-consequence weight from the leverage × consequence calibration
-(relegation/title = 5, UCL = 4, Europa = 2). See TUNING_REPORT.md.
+"demot", or "drop" fire on `pos > cutoff`). That direction test is
+`_util.is_bottom_outcome`, shared by the scoring path and the description
+builder — name a new bottom band so it matches, or the prose will report a
+mid-table side as relegation-bound while the score says otherwise. `weight`
+is the cross-sport consequence weight from the leverage × consequence
+calibration (relegation/title = 5, UCL = 4, Europa = 2). See
+TUNING_REPORT.md.
+
+`matchdays_total` is also the season length the description builder falls
+back to when a source stamps only a week number, so it decides both "week 3
+of 12" and how many games a team has left against its win thresholds. Leave
+it at 0 only for formats with no fixed length (knockouts).
 
 For knockout-format contexts (UCL, Europa League knockouts), set
 `format="knockout"` and use FD.org stage strings as cutoffs:
