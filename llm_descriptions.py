@@ -64,7 +64,16 @@ Hard rules:
   stakes.
 - If a favorite team for this user is playing, that's a "personal interest":
   ground the preview in their angle.
-- Plain text only. No markdown, no asterisks, no bullet points.
+- Plain text only. Output ONLY the preview itself. No markdown, no headings,
+  no asterisks, no bullet points, no lists, no preamble, no sign-off.
+- ALWAYS write the preview. Thin context means write a SIMPLER preview, never
+  a refusal and never a request for more data. Some fixtures legitimately
+  carry nothing but two team names, a competition and a kickoff time, and that
+  is enough for two sentences about the matchup itself. NEVER reply with
+  "I don't have", "I need more information", "Could you provide", or any other
+  message addressed to whoever is running this. There is no one to answer you:
+  your reply is written verbatim into a TV guide that a viewer reads. Silence
+  about a fact you were not given is correct; asking for it is not.
 - GROUND EVERY FACT in the lines above. A team's record, points, group/league
   position, who they have already played, and any prior result must come from
   the standings, results, group, or series lines provided. If a fact is not
@@ -111,9 +120,27 @@ Hard rules:
   It may still have a current-season record, and that record is in the lines
   above and is usable. What you must not do is give it a position or a finish
   for last season, or describe it as having slipped or climbed from one.
-- "Previous meetings" are real results. You may reference them. Do not invent
-  any other past meeting, and do not describe a run of form beyond what is
-  listed.
+- "Previous meetings" are real results, and each one names its winner in
+  brackets. Use that verdict; do not work out who won from the scoreline
+  yourself, and do not reverse it. Do not invent any other past meeting, and
+  do not describe a run of form beyond what is listed.
+- Say NOTHING about last season unless a "Last season" line is present. Not
+  where they finished, not whether they were ranked, not whether they made a
+  postseason. If no such line appears you have no last-season information at
+  all, and stating any is inventing it, however plausible it sounds.
+- NEVER name a conference or division that is not written above. Conference
+  membership changes and you will get it wrong: "Pac-12", "Patriot League" and
+  "Ivy League" were each attached to teams that are in none of them. The
+  competition named at the top of the context is the only competition you may
+  name.
+- Do NOT describe WHERE IN THE SEASON this game falls unless a "Season
+  progress" line is present. With no such line you do not know whether this is
+  the opener or the run-in, so "down the stretch", "the home stretch" and
+  "early season" are all guesses.
+- When the only lines you have are the match, the competition and perhaps a
+  ranking, write about exactly those: who is playing, what the fixture is, and
+  what the ranking implies. Two honest sentences beat three padded with
+  invented context.
 - "Outcome bands in play" lists what is mathematically still reachable, NOT
   what is urgent. Early in a season everything is reachable and naming a band
   says nothing: "both teams chasing bowl eligibility" is true of every team in
@@ -489,6 +516,35 @@ def _gap_text(
     return f"{abs(diff)} pt{'s' if abs(diff) != 1 else ''} {phrase}"
 
 
+def _with_places(gap: Optional[str], other: Optional[Dict[str, Any]], pos: int) -> Optional[str]:
+    """Fold the PLACES gap into a points gap, e.g. "2 pts and 5 places clear
+    of the relegation zone".
+
+    Early in a season the whole table is bunched, so a points gap alone reads
+    as far tighter than the standing is. Measured on the live guide
+    2026-09-06: Marseille sat 11th of 18 and two points clear of the drop
+    zone on matchday 3, and the preview called them "just outside the drop
+    zone". Two points IS small; five places is not, and the second number is
+    what stops the first being misread.
+    """
+    if not gap or other is None:
+        return gap
+    other_pos = other.get("position")
+    if not isinstance(other_pos, int):
+        return gap
+    places = abs(other_pos - pos)
+    if places <= 1:
+        return gap
+    label = f"{places} places"
+    # "2 pts clear of X" -> "2 pts and 5 places clear of X"; a level gap has no
+    # points count to join, so it gets the places clause appended instead.
+    for connector in (" clear of ", " from ", " with "):
+        if connector in gap:
+            head, tail = gap.split(connector, 1)
+            return f"{head} and {label}{connector}{tail}"
+    return f"{gap} ({label})"
+
+
 def team_posture_lines(
     table: List[Dict[str, Any]],
     teams: List[str],
@@ -562,11 +618,13 @@ def team_posture_lines(
                     g = _gap_text(
                         pts, first_releg, "clear of the relegation zone",
                         "level on points with the drop zone")
+                    g = _with_places(g, first_releg, pos)
                     if g:
                         parts.append(g)
             elif last_safe is not None and row is not last_safe:
                 g = _gap_text(pts, last_safe, "from safety",
                               "level on points with safety")
+                g = _with_places(g, last_safe, pos)
                 if g:
                     parts.append(g)
         out.append(". ".join(parts) + ".")
@@ -609,16 +667,32 @@ def prev_season_lines(
 def h2h_lines(entries: List[Dict[str, Any]]) -> List[str]:
     """Prior meetings, one line each, most recent first. Entries come from
     `sources.soccer.build_h2h_entries` and are already filtered to this exact
-    pair and to FINISHED matches with a real scoreline."""
+    pair and to FINISHED matches with a real scoreline.
+
+    THE WINNER IS NAMED EXPLICITLY, and that is not decoration. Measured on the
+    live guide 2026-09-06: given "Santos FC 1-2 SC Internacional" the model
+    wrote "a Santos side that beat them earlier this season", inverting the
+    result. A bare scoreline asks the model to work out who won from which
+    number sits on which side of a hyphen, and it got that wrong on one of the
+    three head-to-head claims in the slate. Same principle as
+    `team_posture_lines`: compute the fact, do not make the model derive it.
+    """
     out: List[str] = []
     for e in entries or []:
         hg, ag = e.get("home_goals"), e.get("away_goals")
         if not isinstance(hg, int) or not isinstance(ag, int):
             continue
+        home, away = e.get("home", "?"), e.get("away", "?")
         date = e.get("date") or "?"
         season = e.get("season")
         when = f"{date} ({season})" if season else date
-        out.append(f"  - {when}: {e.get('home','?')} {hg}-{ag} {e.get('away','?')}")
+        if hg > ag:
+            verdict = f"{home} won"
+        elif ag > hg:
+            verdict = f"{away} won"
+        else:
+            verdict = "a draw"
+        out.append(f"  - {when}: {home} {hg}-{ag} {away} ({verdict})")
     return out
 
 
@@ -992,6 +1066,166 @@ def _call_anthropic(context: str, api_key: str, model: str) -> str:
     raise ValueError("anthropic response had no text block")
 
 
+# Openings and phrases that mean the model addressed the OPERATOR rather than
+# writing the preview. Matched case-insensitively against the response.
+#
+# DO NOT loosen these into single common words. "I need" as a bare substring
+# fires on the legitimate "Milan need a win", which is exactly the prose this
+# feature exists to produce; every entry here is either first-person meta or a
+# direct request, neither of which can occur inside a match preview.
+_NON_PREVIEW_MARKERS = (
+    "i don't have",
+    "i do not have",
+    "i need more information",
+    "i need the actual",
+    "i need to write",
+    "could you provide",
+    "can you provide",
+    "please provide",
+    "i'd be happy to write",
+    "i would be happy to write",
+    "i appreciate you providing",
+    "i can't write",
+    "i cannot write",
+    "to write this preview",
+    "to ground this preview",
+    "to ground the preview",
+    "once i have those",
+)
+
+
+# Conference and division names the model has been observed to invent. Checked
+# against the CONTEXT rather than a fixed allowlist, so naming the Premier
+# League in a Premier League preview is fine while "Pac-12" on a Big Ten team
+# is not.
+#
+# Measured on the live guide 2026-09-06: "Patriot League" on Howard (MEAC) vs
+# Manhattan (MAAC), "Pac-12" on UCLA (Big Ten since 2024) and on California
+# (ACC), "Ivy League" on a Brown vs Saint Peter's (MAAC) fixture. Every one
+# read as authoritative and every one was wrong.
+_CONFERENCE_NAMES = (
+    "pac-12", "pac 12", "big ten", "big 10", "big 12", "big east",
+    "ivy league", "patriot league", "summit league", "horizon league",
+    "sun belt", "conference usa", "american athletic", "mountain west",
+    "atlantic 10", "colonial athletic", "missouri valley",
+    "maac", "meac", "swac", "wcc", "acc", "sec",
+)
+
+
+def names_an_ungrounded_conference(prose: str, context: str) -> Optional[str]:
+    """The first conference name that appears in `prose` but not in `context`,
+    or None.
+
+    Conference affiliation is exactly the kind of fact a model holds with
+    confidence and gets wrong, because it changes between seasons and the
+    training data spans many of them. If the context did not supply it, the
+    preview may not assert it.
+    """
+    low_prose = prose.lower()
+    low_ctx = context.lower()
+    for name in _CONFERENCE_NAMES:
+        if name in low_prose and name not in low_ctx:
+            # Guard the short acronyms against matching inside a word
+            # ("SECond", "ACCra") by requiring a non-letter on each side.
+            if len(name) <= 4:
+                import re as _re
+                if not _re.search(rf"(?<![a-z]){_re.escape(name)}(?![a-z])", low_prose):
+                    continue
+            return name
+    return None
+
+
+# Phrases that place a game somewhere in its season. Only legitimate when a
+# "Season progress" line told the model where the season actually is.
+#
+# Measured on the live guide 2026-09-06: an NCAA soccer fixture whose source
+# supplies no season length ("matchdays_total": None, so no progress line) was
+# previewed as "late-season matches like this can reshape the postseason
+# conversation". It was the 6th of September.
+_SEASON_STAGE_PHRASES = (
+    "late-season", "late season", "down the stretch", "home stretch",
+    "the run-in", "run-in", "final stretch", "closing weeks", "closing stretch",
+    "early season", "early-season", "midseason", "mid-season",
+    "season opener", "opening weekend", "start of the season",
+    "this stage of the season", "business end",
+)
+
+_SEASON_PROGRESS_MARKER = "Season progress:"
+
+
+def names_an_ungrounded_season_stage(prose: str, context: str) -> Optional[str]:
+    """The first season-stage phrase used without a "Season progress" line to
+    justify it, or None.
+
+    When the context carries a progress line the model has been told where the
+    season is and may say so. When it does not, any such phrase is a guess,
+    and a guess about the calendar is as wrong as a guess about the table.
+    """
+    if _SEASON_PROGRESS_MARKER in context:
+        return None
+    low = prose.lower()
+    for phrase in _SEASON_STAGE_PHRASES:
+        if phrase in low:
+            return phrase
+    return None
+
+
+def looks_like_non_preview(prose: str) -> bool:
+    """True when the model answered the operator instead of writing a preview.
+
+    Two shapes, both observed live:
+      - a refusal or a request for data ("I don't have the standings ... I'd
+        need:"), which reads as a bug report in the middle of a TV guide;
+      - markdown structure (a `# heading`, or a bulleted list), which the
+        prompt forbids and which renders as literal `#` and `-` characters in
+        TiviMate, Plex and Jellyfin.
+
+    Deliberately conservative: it only fires on first-person meta phrasing and
+    on structural markdown, never on a word that could appear in real prose
+    about a football match.
+    """
+    if not prose:
+        return True
+    low = prose.lower()
+    if any(marker in low for marker in _NON_PREVIEW_MARKERS):
+        return True
+    stripped = prose.lstrip()
+    if stripped.startswith("#"):
+        return True
+    # A bulleted list: a line starting with "- " or "* " after the first line.
+    for line in prose.split("\n")[1:]:
+        t = line.lstrip()
+        if t.startswith("- ") or t.startswith("* "):
+            return True
+    return False
+
+
+def reject_reason(prose: str, context: str) -> Optional[str]:
+    """Why this response must not reach the guide, or None if it may.
+
+    THE SINGLE GATE. Every check lives here so that the cached path and the
+    fresh path cannot diverge: they used to, and a response that predated a
+    guard was served from cache without ever meeting it.
+
+    A rule the model can decline to follow is not a guarantee for text a
+    viewer reads. The SYSTEM_PROMPT asks for all of this; this function is
+    what makes it true.
+    """
+    if looks_like_non_preview(prose):
+        # Seven NCAA soccer filler games came back as "I don't have the
+        # standings ... I'd need:" and that text went verbatim into the EPG.
+        # Tightening the grounding rules made the model refuse rather than
+        # invent, which is the right instinct pointed at the wrong output.
+        return "not a preview"
+    conference = names_an_ungrounded_conference(prose, context)
+    if conference:
+        return f"ungrounded conference: {conference}"
+    stage = names_an_ungrounded_season_stage(prose, context)
+    if stage:
+        return f"ungrounded season stage: {stage}"
+    return None
+
+
 def llm_describe_or_fallback(
     g: Dict[str, Any],
     tagline: str,
@@ -1017,7 +1251,20 @@ def llm_describe_or_fallback(
     cache_key = f"{marker}|{prompt_hash(context, model)}"
     cached = cache.get(cache_key)
     if cached:
-        return cached
+        reason = reject_reason(cached, context)
+        if reason is None:
+            return cached
+        # A cached response is NOT exempt from the guards. They used to run
+        # only on a fresh call, so prose that predated a guard (or predated a
+        # tightening of one) was served straight from the cache and never
+        # re-examined: "late-season matches like this" survived on the live
+        # guide through a deploy that had already added the check meant to
+        # catch it. Evict and re-ask.
+        logger.warning(
+            "[ranked_matchups] cached description for %s rejected (%s); "
+            "re-requesting", marker or "?", reason,
+        )
+        cache.pop(cache_key, None)
     fn = caller or _call_anthropic
     try:
         prose = fn(context, api_key, model)
@@ -1025,6 +1272,13 @@ def llm_describe_or_fallback(
         logger.warning("[ranked_matchups] LLM describe failed for %s: %s", marker or "?", exc)
         return fallback_description
     if not prose:
+        return fallback_description
+    reason = reject_reason(prose, context)
+    if reason is not None:
+        logger.warning(
+            "[ranked_matchups] LLM response rejected for %s (%s); using the "
+            "deterministic description", marker or "?", reason,
+        )
         return fallback_description
     cache[cache_key] = prose
     return prose

@@ -606,7 +606,7 @@ class TestSeededStandingsNeverPresentedAsCurrent:
             league_context=_FakeLeagueContext(_PL_THRESHOLDS),
         )
         # Arsenal 6 pts, first relegation place (18th, Tottenham) on 1 pt.
-        assert "5 pts clear of the relegation zone" in ctx
+        assert "5 pts and 15 places clear of the relegation zone" in ctx
 
     def test_band_membership_uses_current_position(self):
         ctx = llm.build_llm_context(
@@ -787,7 +787,7 @@ class TestTiedPositionsDoNotHideTheRelegationGap:
             {"name": "Fulham FC", "position": 19, "points": 0, "played": 3},
         ]
         lines = llm.team_posture_lines(table, ["Arsenal FC"], _PL_THRESHOLDS)
-        assert "6 pts clear of the relegation zone" in lines[0]
+        assert "6 pts and 16 places clear of the relegation zone" in lines[0]
 
 
 class TestNestedTopBandsReportOnlyTheTightest:
@@ -919,14 +919,14 @@ class TestRelegationGapDirection:
         table = self._table()
         table[9]["name"] = "Safe FC"  # 10th, 30 pts; 18th has 22
         line = llm.team_posture_lines(table, ["Safe FC"], _PL_THRESHOLDS)[0]
-        assert "8 pts clear of the relegation zone" in line
+        assert "8 pts and 8 places clear of the relegation zone" in line
         assert "from safety" not in line
 
     def test_relegated_team_is_measured_to_safety(self):
         table = self._table()
         table[18]["name"] = "Sinking FC"  # 19th, 21 pts; 17th (last safe) has 23
         line = llm.team_posture_lines(table, ["Sinking FC"], _PL_THRESHOLDS)[0]
-        assert "2 pts from safety" in line
+        assert "2 pts and 2 places from safety" in line
         assert "into the relegation zone" not in line
 
     def test_last_safe_place_is_found_through_a_tie(self):
@@ -940,7 +940,7 @@ class TestRelegationGapDirection:
             {"name": "Sinking FC", "position": 18, "points": 20, "played": 10},
         ]
         line = llm.team_posture_lines(table, ["Sinking FC"], _PL_THRESHOLDS)[0]
-        assert "3 pts from safety" in line
+        assert "3 pts and 2 places from safety" in line
 
     def test_level_on_points_reads_as_level(self):
         table = self._table()
@@ -1237,6 +1237,354 @@ class TestTiedRowsPreferAUsablePointsValue:
         ]
         for table in (base, list(reversed(base))):
             line = llm.team_posture_lines(table, ["Safe"], _PL_THRESHOLDS)[0]
-            assert "1 pt clear of the relegation zone" in line, (
+            assert "1 pt and 2 places clear of the relegation zone" in line, (
                 "output must not depend on payload row order"
             )
+
+
+class TestLiveGuideRegressions:
+    """Three defects found by reading the descriptions back off the live guide
+    after deploying. None was visible to the unit tests, because each was the
+    MODEL misusing a line that was itself correct."""
+
+    def test_head_to_head_names_the_winner(self):
+        """Given "Santos FC 1-2 SC Internacional" the model wrote "a Santos
+        side that beat them earlier this season", inverting the result. One of
+        the three head-to-head claims on the slate, so a 1-in-3 error rate on
+        a brand-new feature. The winner is now stated, not derived."""
+        lines = llm.h2h_lines([
+            {"date": "2026-03-19", "home": "Santos FC", "away": "SC Internacional",
+             "home_goals": 1, "away_goals": 2, "season": "this season"},
+        ])
+        assert lines[0] == (
+            "  - 2026-03-19 (this season): Santos FC 1-2 SC Internacional "
+            "(SC Internacional won)"
+        )
+
+    def test_home_win_and_draw_are_labelled_too(self):
+        lines = llm.h2h_lines([
+            {"date": "2026-03-19", "home": "CR Flamengo", "away": "Clube do Remo",
+             "home_goals": 3, "away_goals": 0, "season": "this season"},
+            {"date": "2026-01-31", "home": "Paris FC", "away": "Olympique de Marseille",
+             "home_goals": 2, "away_goals": 2, "season": "last season"},
+        ])
+        assert "(CR Flamengo won)" in lines[0]
+        assert "(a draw)" in lines[1]
+
+    def test_relegation_gap_carries_the_places_gap(self):
+        """Marseille sat 11th of 18, two points clear of the drop zone on
+        matchday 3, and the preview called them "just outside the drop zone".
+        Two points is small; five places is not, and the second number is what
+        stops the first being misread."""
+        table = [
+            {"name": "Leader", "position": 1, "points": 9, "played": 3},
+            {"name": "Marseille", "position": 11, "points": 3, "played": 3},
+            {"name": "Le Havre", "position": 16, "points": 1, "played": 3},
+            {"name": "Auxerre", "position": 18, "points": 0, "played": 3},
+        ]
+        thresholds = [(1, "title", 5.0), (15, "relegation", 5.0)]
+        line = llm.team_posture_lines(table, ["Marseille"], thresholds)[0]
+        assert "2 pts and 5 places clear of the relegation zone" in line
+
+    def test_adjacent_places_do_not_get_a_redundant_clause(self):
+        """One place away needs no elaboration; the points gap says it."""
+        table = [
+            {"name": "Leader", "position": 1, "points": 9, "played": 3},
+            {"name": "Safe", "position": 15, "points": 3, "played": 3},
+            {"name": "Down", "position": 16, "points": 1, "played": 3},
+        ]
+        thresholds = [(1, "title", 5.0), (15, "relegation", 5.0)]
+        line = llm.team_posture_lines(table, ["Safe"], thresholds)[0]
+        assert "2 pts clear of the relegation zone" in line
+        assert "places" not in line
+
+    def test_places_gap_also_applies_from_inside_the_zone(self):
+        table = [
+            {"name": "Leader", "position": 1, "points": 30, "played": 20},
+            {"name": "Safe", "position": 15, "points": 20, "played": 20},
+            {"name": "Doomed", "position": 20, "points": 12, "played": 20},
+        ]
+        thresholds = [(1, "title", 5.0), (15, "relegation", 5.0)]
+        line = llm.team_posture_lines(table, ["Doomed"], thresholds)[0]
+        assert "8 pts and 5 places from safety" in line
+
+    def test_prompt_forbids_ungrounded_last_season_claims(self):
+        """A college-football preview asserted "Both programs finished last
+        season ranked" with no last-season data anywhere in its prompt."""
+        assert "Say NOTHING about last season unless" in llm.SYSTEM_PROMPT
+        assert "not whether they were ranked" in llm.SYSTEM_PROMPT
+
+    def test_prompt_tells_the_model_to_use_the_bracketed_verdict(self):
+        assert "each one names its winner in" in llm.SYSTEM_PROMPT
+        assert "do not reverse it" in llm.SYSTEM_PROMPT
+
+
+class TestNonPreviewGuard:
+    """Seven NCAA soccer filler games came back as "I don't have the standings
+    ... I'd need:" and that text was written verbatim into Jake's EPG.
+    Tightening the grounding rules made the model refuse rather than invent,
+    which is the right instinct pointed at the wrong output."""
+
+    REAL_REFUSALS = [
+        "I don't have the standings, results, group information, or season "
+        "progress data needed to write this preview. To ground the preview in "
+        "facts rather than invention, I'd need:\n\n- Current standings",
+        "I appreciate you providing all these details, but I need the actual "
+        "standings and results context to write this preview.\n\nCould you provide:",
+        "I need more information to write this preview. Please provide:\n\n"
+        "- Current standings or records for both teams",
+        "I need to write a 2-3 sentence preview for this NCAA Men's Soccer "
+        "match between Chicago State and DePaul. However, I don't have any of "
+        "the required information",
+        "I'd be happy to write a preview, but I need the data lines to ground "
+        "it properly. Could you provide:",
+    ]
+
+    REAL_PREVIEWS = [
+        "Internacional is three points from safety with twelve games left and "
+        "can't afford many more slips. Santos sits comfortably in Sudamericana "
+        "territory but just lost to Internacional earlier this season.",
+        "Paris FC arrive in third place and already staking a claim in the UCL "
+        "zone after three matches, while Marseille sit well back in 11th.",
+        "Old Dominion hosts Bucknell in a non-conference matchup at 1:00 PM "
+        "EDT. This is the season opener for both teams, so there's no form to "
+        "lean on.",
+        # The exact false-positive risk the marker list is written to avoid.
+        "Milan need a win here to stay in the Champions League places, and "
+        "Juventus can't provide them one cheaply.",
+        "Spurs have to provide an answer after a dismal start; they need three "
+        "points and they need them today.",
+    ]
+
+    def test_every_real_refusal_is_caught(self):
+        for text in self.REAL_REFUSALS:
+            assert llm.looks_like_non_preview(text) is True, text[:60]
+
+    def test_no_real_preview_is_rejected(self):
+        for text in self.REAL_PREVIEWS:
+            assert llm.looks_like_non_preview(text) is False, text[:60]
+
+    def test_markdown_heading_is_caught(self):
+        assert llm.looks_like_non_preview("# Michigan at Notre Dame\n\nNotre Dame hosts...")
+
+    def test_bulleted_list_is_caught(self):
+        assert llm.looks_like_non_preview("Preview:\n- one thing\n- another")
+
+    def test_empty_is_caught(self):
+        assert llm.looks_like_non_preview("") is True
+
+    def test_a_hyphen_inside_prose_is_not_a_bullet(self):
+        assert llm.looks_like_non_preview(
+            "Flamengo's perfect record against Remo this season - a dominant "
+            "3-0 win in March - sets up another lopsided affair."
+        ) is False
+
+    def test_a_refusal_falls_back_to_the_deterministic_description(self):
+        cache = {}
+        out = llm.llm_describe_or_fallback(
+            g={"home": "Brown", "away": "Saint Peter's", "extra": {}},
+            tagline="", fallback_description="DETERMINISTIC",
+            api_key="k", model="m", cache=cache, marker="mk",
+            caller=lambda ctx, k, m: "I don't have the current standings.",
+        )
+        assert out == "DETERMINISTIC"
+        assert cache == {}, "a rejected response must not be cached"
+
+    def test_a_good_response_is_still_returned_and_cached(self):
+        """Fail on the instrument: if the guard rejected everything this test
+        would be the only thing to notice."""
+        cache = {}
+        out = llm.llm_describe_or_fallback(
+            g={"home": "Brown", "away": "Saint Peter's", "extra": {}},
+            tagline="", fallback_description="DETERMINISTIC",
+            api_key="k", model="m", cache=cache, marker="mk",
+            # Deliberately free of season-stage phrasing: with no "Season
+            # progress" line in the context, "a season opener" would be
+            # rejected by the season-stage guard and this test would then be
+            # measuring the wrong thing.
+            caller=lambda ctx, k, m: "Brown host Saint Peter's at Stevenson Field.",
+        )
+        assert out == "Brown host Saint Peter's at Stevenson Field."
+        assert len(cache) == 1
+
+    def test_prompt_tells_the_model_never_to_refuse(self):
+        assert "ALWAYS write the preview" in llm.SYSTEM_PROMPT
+        assert "never a request for more data" in llm.SYSTEM_PROMPT
+        assert "There is no one to answer you" in llm.SYSTEM_PROMPT
+
+    def test_prompt_forbids_markdown_structure_explicitly(self):
+        assert "Output ONLY the preview itself" in llm.SYSTEM_PROMPT
+        assert "no headings" in llm.SYSTEM_PROMPT
+
+
+class TestUngroundedConferenceGuard:
+    """Told to always write something and given almost nothing, the model
+    started inventing conference affiliations instead of refusing. All four
+    observed on the live guide 2026-09-06 were wrong."""
+
+    CTX = "Match: Howard at Manhattan, Today 12:00 PM EDT\nCompetition: NCAA Men's Soccer"
+
+    def test_invented_patriot_league_is_caught(self):
+        prose = ("Two teams hunting for ground in the Patriot League dance for "
+                 "position. Howard visits Manhattan.")
+        assert llm.names_an_ungrounded_conference(prose, self.CTX) == "patriot league"
+
+    def test_invented_pac12_is_caught(self):
+        prose = "UCLA's top-12 form faces an unranked Omaha side in a late-night Pac-12 showdown."
+        assert llm.names_an_ungrounded_conference(prose, self.CTX) == "pac-12"
+
+    def test_invented_ivy_league_is_caught(self):
+        prose = "Brown hosts Saint Peter's in an Ivy League clash tonight."
+        assert llm.names_an_ungrounded_conference(prose, self.CTX) == "ivy league"
+
+    def test_a_conference_present_in_the_context_is_allowed(self):
+        ctx = "Match: A at B\nCompetition: Big Ten Conference"
+        prose = "A visits B in a Big Ten clash."
+        assert llm.names_an_ungrounded_conference(prose, ctx) is None
+
+    def test_clean_prose_passes(self):
+        prose = ("Marshall hosts VCU tonight. The Thundering Herd bring top-15 "
+                 "credentials to the pitch.")
+        assert llm.names_an_ungrounded_conference(prose, self.CTX) is None
+
+    def test_short_acronyms_do_not_match_inside_a_word(self):
+        """"SEC" and "ACC" must not fire on "second" or "accelerate"."""
+        prose = ("Milan accelerate in the second half and their defence was "
+                 "impeccable; the access to space was total.")
+        assert llm.names_an_ungrounded_conference(prose, self.CTX) is None
+
+    def test_real_acronym_use_is_still_caught(self):
+        prose = "Two SEC programs meet with bowl positioning on the line."
+        assert llm.names_an_ungrounded_conference(prose, self.CTX) == "sec"
+
+    def test_an_ungrounded_conference_falls_back(self):
+        cache = {}
+        out = llm.llm_describe_or_fallback(
+            g={"home": "Manhattan", "away": "Howard", "extra": {}},
+            tagline="", fallback_description="DETERMINISTIC",
+            api_key="k", model="m", cache=cache, marker="mk",
+            caller=lambda ctx, k, m: "Howard visits Manhattan in a Patriot League clash.",
+        )
+        assert out == "DETERMINISTIC"
+        assert cache == {}
+
+    def test_prompt_forbids_naming_an_unsupplied_conference(self):
+        assert "NEVER name a conference or division that is not written above" in llm.SYSTEM_PROMPT
+
+    def test_prompt_forbids_guessing_the_season_stage(self):
+        assert "Season\n  progress" in llm.SYSTEM_PROMPT or "Season progress" in llm.SYSTEM_PROMPT
+        assert "are all guesses" in llm.SYSTEM_PROMPT
+
+
+class TestUngroundedSeasonStageGuard:
+    """An NCAA soccer fixture whose source supplies no season length got no
+    "Season progress" line, and was previewed as "late-season matches like
+    this can reshape the postseason conversation". It was 6 September."""
+
+    THIN = "Match: Omaha at UCLA, Today 10:00 PM EDT\nCompetition: NCAA Men's Soccer"
+    WITH_PROGRESS = THIN + "\nSeason progress: 3 of 38 matchdays played."
+
+    def test_late_season_without_a_progress_line_is_caught(self):
+        prose = "late-season matches like this can reshape the postseason conversation."
+        assert llm.names_an_ungrounded_season_stage(prose, self.THIN) == "late-season"
+
+    def test_down_the_stretch_is_caught(self):
+        prose = "Both teams are jockeying for position down the stretch."
+        assert llm.names_an_ungrounded_season_stage(prose, self.THIN) == "down the stretch"
+
+    def test_early_season_is_caught_too(self):
+        """Being right by accident is still ungrounded: the model had no way
+        to know, and it said "late" for the same September date elsewhere."""
+        prose = "An early season tuneup for both squads."
+        assert llm.names_an_ungrounded_season_stage(prose, self.THIN) == "early season"
+
+    def test_allowed_when_a_progress_line_justifies_it(self):
+        prose = "An early season clash with plenty still to play for."
+        assert llm.names_an_ungrounded_season_stage(prose, self.WITH_PROGRESS) is None
+
+    def test_clean_thin_preview_passes(self):
+        prose = ("Marshall hosts VCU tonight. The Thundering Herd bring top-15 "
+                 "credentials to the pitch.")
+        assert llm.names_an_ungrounded_season_stage(prose, self.THIN) is None
+
+    def test_it_falls_back(self):
+        cache = {}
+        out = llm.llm_describe_or_fallback(
+            g={"home": "UCLA", "away": "Omaha", "extra": {}},
+            tagline="", fallback_description="DETERMINISTIC",
+            api_key="k", model="m", cache=cache, marker="mk",
+            caller=lambda ctx, k, m: "A late-season test for the Bruins.",
+        )
+        assert out == "DETERMINISTIC"
+        assert cache == {}
+
+    def test_prompt_forbids_placing_the_season_without_grounds(self):
+        assert "unless a \"Season" in llm.SYSTEM_PROMPT
+        assert "are all guesses" in llm.SYSTEM_PROMPT
+
+
+class TestGuardsApplyToTheCachedPath:
+    """The guards ran only on a fresh call, so prose that predated a guard was
+    served straight from cache and never re-examined. Measured on the live
+    guide: "late-season matches like this" survived a deploy that had already
+    added the check meant to catch it, because the prompt hash had not moved
+    and the cached copy short-circuited the whole check."""
+
+    THIN_G = {"home": "UCLA", "away": "Omaha", "sport_label": "NCAA Men's Soccer",
+              "kickoff_local": "Today", "extra": {}}
+
+    def _key(self, model="m"):
+        ctx = llm.build_llm_context(self.THIN_G, "", "")
+        return f"mk|{llm.prompt_hash(ctx, model)}"
+
+    def test_a_poisoned_cache_entry_is_evicted_and_re_asked(self):
+        cache = {self._key(): "A late-season test for the Bruins."}
+        calls = []
+
+        def caller(ctx, k, m):
+            calls.append(1)
+            return "UCLA host Omaha at Wallis Annenberg Stadium."
+
+        out = llm.llm_describe_or_fallback(
+            g=self.THIN_G, tagline="", fallback_description="DETERMINISTIC",
+            api_key="k", model="m", cache=cache, marker="mk", caller=caller,
+        )
+        assert calls, "a rejected cache entry must trigger a fresh request"
+        assert out == "UCLA host Omaha at Wallis Annenberg Stadium."
+        assert cache[self._key()] == out, "the good response replaces the bad one"
+
+    def test_a_poisoned_entry_whose_retry_also_fails_falls_back(self):
+        cache = {self._key(): "A late-season test for the Bruins."}
+        out = llm.llm_describe_or_fallback(
+            g=self.THIN_G, tagline="", fallback_description="DETERMINISTIC",
+            api_key="k", model="m", cache=cache, marker="mk",
+            caller=lambda ctx, k, m: "Another late-season clash.",
+        )
+        assert out == "DETERMINISTIC"
+        assert self._key() not in cache
+
+    def test_a_clean_cache_entry_is_still_served_without_a_call(self):
+        """Fail on the instrument: if eviction fired on everything the cache
+        would be pointless and every apply would re-bill the API."""
+        cache = {self._key(): "UCLA host Omaha at Wallis Annenberg Stadium."}
+        calls = []
+
+        def caller(ctx, k, m):
+            calls.append(1)
+            return "should not be reached"
+
+        out = llm.llm_describe_or_fallback(
+            g=self.THIN_G, tagline="", fallback_description="DETERMINISTIC",
+            api_key="k", model="m", cache=cache, marker="mk", caller=caller,
+        )
+        assert out == "UCLA host Omaha at Wallis Annenberg Stadium."
+        assert calls == [], "a clean cached entry must not trigger a request"
+
+    def test_reject_reason_names_each_class(self):
+        ctx = "Match: Omaha at UCLA\nCompetition: NCAA Men's Soccer"
+        assert llm.reject_reason("I don't have the standings.", ctx) == "not a preview"
+        assert llm.reject_reason(
+            "A Pac-12 showdown tonight.", ctx) == "ungrounded conference: pac-12"
+        assert llm.reject_reason(
+            "A late-season test.", ctx) == "ungrounded season stage: late-season"
+        assert llm.reject_reason("UCLA host Omaha tonight.", ctx) is None

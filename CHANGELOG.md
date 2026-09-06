@@ -148,6 +148,72 @@ itself introduced. All are addressed here.
   rather than relying on its caller, and a season length smaller than the
   games played is treated as unknown instead of printing "20 of 12".
 
+### Fixed (third round, read back off the live guide)
+
+Deployed, ran the pipeline, and read the descriptions off the actual channels.
+Three defects that no unit test could see, because in each case the LINE was
+correct and the model misused it.
+
+- **The model inverted a head-to-head result.** Given
+  "Santos FC 1-2 SC Internacional" it wrote "a Santos side that beat them
+  earlier this season". One of the three head-to-head claims on the slate, so
+  a 1-in-3 error rate on a brand-new feature. A bare scoreline asks the model
+  to work out who won from which number sits on which side of a hyphen; the
+  winner is now named in brackets, and the prompt says to use that verdict
+  rather than derive one.
+
+- **A points gap alone misled while the league was bunched.** Marseille sat
+  11th of 18 and two points clear of the drop zone on matchday 3, and the
+  preview called them "just outside the drop zone". Two points is small; five
+  places is not. Gap lines now carry both.
+
+- **A college-football preview asserted "Both programs finished last season
+  ranked"** with no last-season data anywhere in its prompt. The grounding
+  rules covered records, positions and gaps but never said last season was
+  off-limits when no last-season line is supplied. Now they do.
+
+Everything else on the slate checked out against the live table: Botafogo
+"five points clear of the drop zone" (13th on 30, first relegation place on
+25), Remo "four points from safety", Internacional "three points from safety",
+and Flamengo "level on points with Palmeiras but have played a game more"
+(52 from 26 against 52 from 25).
+
+### Fixed (fourth round, and the reason guards exist)
+
+Tightening the grounding rules moved the failure rather than removing it. Read
+back off the live guide again after each deploy:
+
+- **Seven NCAA soccer previews were the model REFUSING**, written verbatim into
+  the EPG: "I don't have the standings, results, group information, or season
+  progress data needed to write this preview. To ground the preview in facts
+  rather than invention, I'd need:". Two more emitted markdown headings. The
+  right instinct pointed at the wrong output: there is nobody to answer, the
+  reply goes straight to a viewer.
+
+- Told to always write something and given almost nothing, it **invented
+  conference affiliations instead**: "Patriot League" for a MEAC vs MAAC
+  fixture, "Pac-12" for UCLA (Big Ten since 2024) and for California (ACC),
+  "Ivy League" for a Brown vs Saint Peter's tie. Every one read as
+  authoritative and every one was wrong. It also placed a 6 September fixture
+  "late-season".
+
+**A rule the model can decline to follow is not a guarantee for text a viewer
+reads.** The prompt now asks for all of this, and `reject_reason()` is what
+makes it true: a response that is not a preview, that names a conference the
+context never supplied, or that places the season with no "Season progress"
+line to justify it, is treated as a failed call and the deterministic
+description ships instead. On the verification run the guard caught four
+inventions the prompt alone had not prevented.
+
+- **The guards ran only on a fresh call**, so a cached response that predated a
+  guard was served without ever meeting it: "late-season matches like this"
+  survived a deploy that had already added the check meant to catch it,
+  because the prompt hash had not moved and the cache short-circuited the
+  check. All checks now live in one gate applied to the cached path too, which
+  evicts and re-asks.
+
+Final live sweep: 24 descriptions, 0 flagged.
+
 ### Changed
 
 - `SoccerSource._fetch_standings_with_seed` returns a `StandingsBundle`
