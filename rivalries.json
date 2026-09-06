@@ -1,5 +1,5 @@
 {
-  "_comment": "Per-sport-prefix list of known rivalry pairs. Each entry is [team_a, team_b] or [team_a, team_b, trophy_name]. Names are matched WHOLE (case/whitespace normalized, club-type suffix stripped), so spell each one the way its SOURCE spells it: CFBD says 'Ole Miss', not 'Mississippi'. Order within a pair does not matter. The optional third element is the trophy or game name and is surfaced to the description writer as a fact it may state. See #8.",
+  "_comment": "Per-sport-prefix list of known rivalry pairs. Each entry is [team_a, team_b] or [team_a, team_b, trophy_or_derby_name]. Names are matched WHOLE (case/whitespace normalized, club-type suffix stripped, extra words allowed unless they name a DIFFERENT institution), so spell each one the way its SOURCE spells it: CFBD says 'Ole Miss', not 'Mississippi'. tests/test_rivalries.py asserts every entry resolves against a real roster. Order within a pair does not matter. The optional third element is the trophy or derby name and is surfaced to the description writer as a fact it may state. See #8.",
   "CFB": [
     [
       "Alabama",
@@ -464,158 +464,252 @@
   ],
   "EPL": [
     [
-      "Liverpool",
-      "Manchester United"
+      "Arsenal",
+      "Tottenham",
+      "the North London derby"
     ],
     [
-      "Arsenal",
-      "Tottenham"
+      "Liverpool",
+      "Everton",
+      "the Merseyside derby"
     ],
     [
       "Manchester City",
-      "Manchester United"
+      "Manchester United",
+      "the Manchester derby"
+    ],
+    [
+      "Liverpool",
+      "Manchester United",
+      "the North West derby"
+    ],
+    [
+      "Newcastle United",
+      "Sunderland",
+      "the Tyne-Wear derby"
+    ],
+    [
+      "Aston Villa",
+      "Birmingham City",
+      "the Second City derby"
+    ],
+    [
+      "Brighton & Hove Albion",
+      "Crystal Palace",
+      "the M23 derby"
+    ],
+    [
+      "Ipswich Town",
+      "Norwich City",
+      "the East Anglian derby"
+    ],
+    [
+      "Chelsea",
+      "Fulham",
+      "the West London derby"
     ],
     [
       "Chelsea",
       "Tottenham"
     ],
     [
-      "Liverpool",
-      "Everton"
-    ],
-    [
       "Arsenal",
       "Chelsea"
-    ],
-    [
-      "Newcastle",
-      "Sunderland"
-    ],
-    [
-      "Aston Villa",
-      "Birmingham"
     ],
     [
       "West Ham",
       "Tottenham"
     ],
     [
-      "Crystal Palace",
-      "Brighton"
+      "Arsenal",
+      "Manchester United"
     ],
     [
-      "Leeds",
-      "Manchester United"
+      "Liverpool",
+      "Chelsea"
     ]
   ],
   "EFL": [
     [
       "Sheffield United",
-      "Sheffield Wednesday"
+      "Sheffield Wednesday",
+      "the Steel City derby"
     ],
     [
-      "Nottingham Forest",
-      "Derby County"
+      "Portsmouth",
+      "Southampton",
+      "the South Coast derby"
     ],
     [
       "Bristol City",
-      "Bristol Rovers"
+      "Cardiff City",
+      "the Severnside derby"
     ],
     [
-      "Cardiff",
-      "Swansea"
+      "Ipswich Town",
+      "Norwich City",
+      "the East Anglian derby"
     ],
     [
-      "Norwich",
-      "Ipswich"
+      "Birmingham City",
+      "Aston Villa",
+      "the Second City derby"
+    ],
+    [
+      "Derby County",
+      "Nottingham Forest",
+      "the East Midlands derby"
+    ],
+    [
+      "Blackburn Rovers",
+      "Burnley",
+      "the East Lancashire derby"
+    ],
+    [
+      "Leeds United",
+      "Millwall"
+    ],
+    [
+      "Stoke City",
+      "West Bromwich Albion"
     ]
   ],
   "BL1": [
     [
-      "Bayern Munich",
-      "Borussia Dortmund"
+      "FC Bayern München",
+      "Borussia Dortmund",
+      "Der Klassiker"
     ],
     [
       "Borussia Dortmund",
-      "Schalke"
+      "FC Schalke 04",
+      "the Revierderby"
     ],
     [
-      "Hamburger",
-      "Werder Bremen"
+      "1. FC Köln",
+      "Borussia Mönchengladbach",
+      "the Rhineland derby"
     ],
     [
-      "Bayern Munich",
-      "1860 Munich"
+      "Hamburger SV",
+      "SV Werder Bremen",
+      "the Nordderby"
+    ],
+    [
+      "Bayer 04 Leverkusen",
+      "1. FC Köln"
     ]
   ],
   "LaLiga": [
     [
       "Real Madrid",
-      "Barcelona"
+      "FC Barcelona",
+      "El Clásico"
     ],
     [
       "Real Madrid",
-      "Atletico"
+      "Club Atlético de Madrid",
+      "the Madrid derby"
     ],
     [
       "Sevilla",
-      "Real Betis"
-    ],
-    [
-      "Espanyol",
-      "Barcelona"
+      "Real Betis",
+      "the Seville derby"
     ],
     [
       "Athletic Club",
-      "Real Sociedad"
+      "Real Sociedad",
+      "the Basque derby"
+    ],
+    [
+      "FC Barcelona",
+      "RCD Espanyol",
+      "the Barcelona derby"
+    ],
+    [
+      "Valencia",
+      "Levante",
+      "the Valencia derby"
+    ],
+    [
+      "Real Madrid",
+      "Sevilla"
     ]
   ],
   "SerieA": [
     [
-      "Inter",
+      "AC Milan",
+      "FC Internazionale Milano",
+      "the Derby della Madonnina"
+    ],
+    [
+      "Juventus",
+      "FC Internazionale Milano",
+      "the Derby d'Italia"
+    ],
+    [
+      "AS Roma",
+      "SS Lazio",
+      "the Derby della Capitale"
+    ],
+    [
+      "Juventus",
+      "Torino",
+      "the Derby della Mole"
+    ],
+    [
+      "AS Roma",
+      "SSC Napoli",
+      "the Derby del Sole"
+    ],
+    [
+      "Bologna",
+      "ACF Fiorentina",
+      "the Derby dell'Appennino"
+    ],
+    [
+      "Juventus",
       "AC Milan"
     ],
     [
-      "Roma",
-      "Lazio"
-    ],
-    [
-      "Juventus",
-      "Inter"
-    ],
-    [
-      "Juventus",
-      "Torino"
-    ],
-    [
-      "Napoli",
-      "Roma"
-    ],
-    [
-      "Genoa",
-      "Sampdoria"
+      "SSC Napoli",
+      "Juventus"
     ]
   ],
   "Ligue1": [
     [
       "Paris Saint-Germain",
-      "Marseille"
+      "Olympique de Marseille",
+      "Le Classique"
     ],
     [
       "Paris SG",
-      "Marseille"
+      "Olympique de Marseille",
+      "Le Classique"
     ],
     [
-      "Lyon",
-      "Saint-Etienne"
+      "Olympique Lyonnais",
+      "Saint-Etienne",
+      "the Derby du Rhône"
     ],
     [
-      "Lyon",
-      "Marseille"
+      "Olympique de Marseille",
+      "OGC Nice",
+      "the Côte d'Azur derby"
     ],
     [
-      "Lens",
-      "Lille"
+      "Racing Club de Lens",
+      "Lille OSC",
+      "the Derby du Nord"
+    ],
+    [
+      "Paris Saint-Germain",
+      "Olympique Lyonnais"
+    ],
+    [
+      "Paris FC",
+      "Paris Saint-Germain",
+      "the Paris derby"
     ]
   ],
   "NFL": [
@@ -832,6 +926,99 @@
     [
       "Toluca",
       "Club America"
+    ]
+  ],
+  "Eredivisie": [
+    [
+      "AFC Ajax",
+      "Feyenoord",
+      "De Klassieker"
+    ],
+    [
+      "AFC Ajax",
+      "PSV",
+      "the Topper"
+    ],
+    [
+      "Feyenoord",
+      "Sparta Rotterdam",
+      "the Rotterdam derby"
+    ],
+    [
+      "FC Twente",
+      "FC Groningen"
+    ]
+  ],
+  "PrimeiraLiga": [
+    [
+      "Sport Lisboa e Benfica",
+      "FC Porto",
+      "O Clássico"
+    ],
+    [
+      "Sport Lisboa e Benfica",
+      "Sporting Clube de Portugal",
+      "the Derby de Lisboa"
+    ],
+    [
+      "FC Porto",
+      "Sporting Clube de Portugal"
+    ],
+    [
+      "FC Porto",
+      "Vitória SC"
+    ]
+  ],
+  "BSA": [
+    [
+      "CR Flamengo",
+      "Fluminense",
+      "the Fla-Flu"
+    ],
+    [
+      "Grêmio",
+      "SC Internacional",
+      "the Grenal"
+    ],
+    [
+      "SC Corinthians Paulista",
+      "SE Palmeiras",
+      "the Derby Paulista"
+    ],
+    [
+      "SC Corinthians Paulista",
+      "São Paulo",
+      "the Clássico Majestoso"
+    ],
+    [
+      "CA Mineiro",
+      "Cruzeiro",
+      "the Clássico Mineiro"
+    ],
+    [
+      "CR Flamengo",
+      "CR Vasco da Gama",
+      "the Clássico dos Milhões"
+    ],
+    [
+      "SE Palmeiras",
+      "São Paulo",
+      "the Choque-Rei"
+    ],
+    [
+      "CR Flamengo",
+      "Botafogo",
+      "the Clássico da Rivalidade"
+    ],
+    [
+      "Santos",
+      "SE Palmeiras",
+      "the Clássico da Saudade"
+    ],
+    [
+      "Fluminense",
+      "Botafogo",
+      "the Clássico Vovô"
     ]
   ]
 }

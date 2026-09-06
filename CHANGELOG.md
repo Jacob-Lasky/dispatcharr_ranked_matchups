@@ -287,6 +287,44 @@ states the line ("anything below 17th goes down") rather than guessing how
 many cross it. Matchdays REMAINING replaces the index, keeping the explicit
 "Catch-up matchday" label for a postponement being replayed late (#3).
 
+### Added (soccer rivalries, same treatment as CFB)
+
+Named derbies for every soccer competition with a source, verified against
+Wikipedia, ESPN and per-country derby indexes rather than recalled:
+
+| Competition | Pairs | Named |
+| --- | --- | --- |
+| EPL | 14 | 9 |
+| EFL | 9 | 7 |
+| La Liga | 7 | 6 |
+| Serie A | 8 | 6 |
+| Bundesliga | 5 | 4 |
+| Ligue 1 | 7 | 6 |
+| Eredivisie | 4 | 3 |
+| Primeira Liga | 4 | 2 |
+| Campeonato Brasileiro | 10 | 10 |
+
+Brazil, the Eredivisie and the Primeira Liga had sources but NO rivalry
+entries at all, so the Fla-Flu, the Grenal, De Klassieker and O Clássico were
+all scoring as ordinary league fixtures.
+
+- **Diacritics are folded in `_normalize`.** Football-Data.org writes "FC
+  Bayern München", "Grêmio FBPA" and "São Paulo FC"; a human editing this file
+  reaches for the ASCII form. Six freshly-written entries matched nothing for
+  exactly that reason, which is the Egg Bowl failure wearing an umlaut. The
+  entries are ALSO spelled the source's way, because the folding is a safety
+  net for other sources and not a licence to write them wrong here.
+
+- **`tests/fixtures/source_team_names.json`** snapshots every roster as its
+  source spells it (football-data.org and CFBD, 2026-09-06), and a test
+  asserts every rivalries.json name resolves against one. That is the guard
+  the Egg Bowl needed and did not have: a rivalry that never fires looks
+  exactly like a fixture that is not a rivalry, so nothing reported it. The
+  failure message distinguishes the two causes, a spelling that differs from
+  the source versus a club that left every tracked competition, and the
+  second has a two-name allowlist (Sheffield Wednesday, Saint-Étienne) with
+  reasons attached.
+
 ### Changed
 
 - `SoccerSource._fetch_standings_with_seed` returns a `StandingsBundle`

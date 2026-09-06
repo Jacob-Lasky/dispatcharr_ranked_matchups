@@ -187,9 +187,12 @@ class TestRivalryTrophyNames:
         assert rivalries.rivalry_name("Rutgers", "Vanderbilt", "CFB") is None
 
     def test_two_element_entries_still_load(self):
-        """Back-compat: every non-CFB sport still uses the 2-element form."""
-        assert rivalries.is_rivalry("Arsenal FC", "Tottenham Hotspur FC", "EPL")
-        assert rivalries.rivalry_name("Arsenal FC", "Tottenham Hotspur FC", "EPL") == ""
+        """Back-compat: a pair with no derby name recorded still resolves as a
+        rivalry, it just has nothing to call itself. Arsenal vs Chelsea is a
+        real rivalry with no established derby name, unlike Arsenal vs
+        Tottenham, which is the North London derby."""
+        assert rivalries.is_rivalry("Arsenal FC", "Chelsea FC", "EPL")
+        assert rivalries.rivalry_name("Arsenal FC", "Chelsea FC", "EPL") == ""
 
     def test_every_cfb_school_name_matches_cfbd_spelling(self):
         """The Egg Bowl was dead for exactly this reason: an entry spelled the
@@ -210,3 +213,115 @@ class TestRivalryTrophyNames:
                 assert name == name.strip()
                 assert " of " not in name and " the " not in name, \
                     f"suspicious school name: {name!r}"
+
+
+class TestEveryEntryResolvesToARealTeam:
+    """The guard the Egg Bowl needed and did not have.
+
+    ["Mississippi", "Mississippi State"] was written for the Egg Bowl, but the
+    source calls that school "Ole Miss", so the entry matched nothing and the
+    rivalry was never once detected. Nothing reported it: a rivalry that never
+    fires looks exactly like a fixture that is not a rivalry.
+
+    So: every name in rivalries.json must resolve against a real team name as
+    its SOURCE spells it, snapshotted in tests/fixtures/source_team_names.json.
+    """
+
+    # Clubs correctly listed but currently outside every tracked competition.
+    # A name here is a deliberate exemption with a reason, not a typo.
+    KNOWN_ABSENT = {
+        "Sheffield Wednesday",  # below the Championship
+        "Saint-Etienne",        # Ligue 2
+    }
+
+    @staticmethod
+    def _fixture():
+        import json as _json
+        import os as _os
+        path = _os.path.join(REPO_ROOT, "tests", "fixtures", "source_team_names.json")
+        with open(path, "r", encoding="utf-8") as f:
+            return {k: v for k, v in _json.load(f).items() if not k.startswith("_")}
+
+    def test_fixture_is_populated(self):
+        """Fail on the instrument first: an empty fixture would make every
+        assertion below pass vacuously and forever."""
+        rosters = self._fixture()
+        assert len(rosters) >= 9, "expected rosters for the tracked competitions"
+        assert sum(len(v) for v in rosters.values()) > 250
+        assert "Ole Miss" in rosters["CFB"], "the school the Egg Bowl entry got wrong"
+
+    def test_every_entry_resolves_somewhere(self):
+        rosters = self._fixture()
+        everyone = [n for names in rosters.values() for n in names]
+        raw = self._raw()
+        unresolved = []
+        for prefix in rosters:
+            for entry in raw.get(prefix, []):
+                for name in entry[:2]:
+                    if name in self.KNOWN_ABSENT:
+                        continue
+                    if not any(
+                        rivalries._name_matches(
+                            rivalries._normalize(team), rivalries._normalize(name)
+                        )
+                        for team in everyone
+                    ):
+                        unresolved.append(f"{prefix}: {name!r}")
+        assert not unresolved, (
+            "rivalries.json names that match no real team: "
+            + ", ".join(unresolved)
+            + ". Either the spelling differs from the source (the Egg Bowl "
+            "bug: fix the entry), or the club left every tracked competition "
+            "(add it to KNOWN_ABSENT with a reason)."
+        )
+
+    def test_the_guard_actually_fires_on_a_typo(self):
+        """Mutation: the check is worthless unless a wrong name fails it."""
+        rosters = self._fixture()
+        everyone = [n for names in rosters.values() for n in names]
+        assert not any(
+            rivalries._name_matches(
+                rivalries._normalize(t), rivalries._normalize("Mississippi")
+            )
+            for t in everyone
+        ), "the original Egg Bowl spelling must NOT resolve"
+
+    def test_diacritics_fold_both_ways(self):
+        """Six freshly-written entries matched nothing because the source
+        spells them with umlauts, circumflexes and tildes."""
+        for ascii_form, source_form in (
+            ("FC Bayern Munchen", "FC Bayern München"),
+            ("Gremio", "Grêmio FBPA"),
+            ("Sao Paulo", "São Paulo FC"),
+            ("1. FC Koln", "1. FC Köln"),
+        ):
+            assert rivalries._name_matches(
+                rivalries._normalize(source_form), rivalries._normalize(ascii_form)
+            ), f"{ascii_form} should match {source_form}"
+
+    @staticmethod
+    def _raw():
+        import json as _json
+        import os as _os
+        with open(_os.path.join(REPO_ROOT, "rivalries.json"), "r", encoding="utf-8") as f:
+            return _json.load(f)
+
+    def test_named_soccer_derbies_are_indexed(self):
+        """Spot-check the ones Jake would notice were missing."""
+        cases = [
+            ("Liverpool FC", "Everton FC", "EPL", "the Merseyside derby"),
+            ("Arsenal FC", "Tottenham Hotspur FC", "EPL", "the North London derby"),
+            ("Real Madrid CF", "FC Barcelona", "LaLiga", "El Clásico"),
+            ("AC Milan", "FC Internazionale Milano", "SerieA", "the Derby della Madonnina"),
+            ("FC Bayern München", "Borussia Dortmund", "BL1", "Der Klassiker"),
+            ("Paris Saint-Germain FC", "Olympique de Marseille", "Ligue1", "Le Classique"),
+            ("AFC Ajax", "Feyenoord Rotterdam", "Eredivisie", "De Klassieker"),
+            ("Sport Lisboa e Benfica", "FC Porto", "PrimeiraLiga", "O Clássico"),
+            ("Grêmio FBPA", "SC Internacional", "BSA", "the Grenal"),
+            ("CR Flamengo", "Fluminense FC", "BSA", "the Fla-Flu"),
+            ("SC Corinthians Paulista", "SE Palmeiras", "BSA", "the Derby Paulista"),
+        ]
+        for home, away, sport, expected in cases:
+            assert rivalries.rivalry_name(home, away, sport) == expected, (
+                f"{home} vs {away} ({sport})"
+            )

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import unicodedata
 from typing import Dict, List, Optional, Tuple
 
 from ._util import TEAM_SUFFIX_TOKENS
@@ -29,8 +30,18 @@ _RIVALRIES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "riva
 
 
 def _normalize(name: str) -> str:
-    """Lowercase + collapse whitespace. Substring match runs against this form."""
-    return " ".join((name or "").lower().split())
+    """Lowercase, strip diacritics, collapse whitespace.
+
+    Diacritic folding is load-bearing, not cosmetic: Football-Data.org writes
+    "FC Bayern Munchen" with the umlaut, "Gremio FBPA" with the circumflex and
+    "Sao Paulo FC" with the tilde, while other sources and any human editing
+    this file by hand will reach for the ASCII form. Verified 2026-09-06: SIX
+    freshly-written entries matched nothing for exactly this reason, which is
+    the same silently-dead-entry failure as the Egg Bowl.
+    """
+    folded = unicodedata.normalize("NFKD", name or "")
+    ascii_form = "".join(c for c in folded if not unicodedata.combining(c))
+    return " ".join(ascii_form.lower().split())
 
 
 def _load_rivalries() -> Dict[str, List[Tuple[str, str, str]]]:
