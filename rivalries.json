@@ -1,148 +1,1083 @@
 {
-  "_comment": "Per-sport-prefix list of known rivalry pairs. Names match case-insensitive substring against home/away team names from each source, so 'Manchester City' here matches 'Manchester City FC' from Football-Data.org. Order within a pair doesn't matter. See #8.",
+  "_comment": "Per-sport-prefix list of known rivalry pairs. Each entry is [team_a, team_b] or [team_a, team_b, trophy_or_derby_name]. Names are matched WHOLE (case/whitespace normalized, club-type suffix stripped, extra words allowed unless they name a DIFFERENT institution), so spell each one the way its SOURCE spells it: CFBD says 'Ole Miss', not 'Mississippi'. tests/test_rivalries.py asserts every entry resolves against a real roster. Order within a pair does not matter. The optional third element is the trophy or derby name and is surfaced to the description writer as a fact it may state. See #8.",
   "CFB": [
-    ["Alabama", "Auburn"],
-    ["Ohio State", "Michigan"],
-    ["USC", "Notre Dame"],
-    ["Texas", "Oklahoma"],
-    ["Florida", "Georgia"],
-    ["Army", "Navy"],
-    ["Florida", "Florida State"],
-    ["Clemson", "South Carolina"],
-    ["Oregon", "Oregon State"],
-    ["Iowa", "Iowa State"],
-    ["BYU", "Utah"],
-    ["Virginia", "Virginia Tech"],
-    ["NC State", "North Carolina"],
-    ["Penn State", "Pitt"],
-    ["Wisconsin", "Minnesota"],
-    ["Tennessee", "Kentucky"],
-    ["Mississippi", "Mississippi State"],
-    ["Indiana", "Purdue"],
-    ["Cal", "Stanford"],
-    ["Texas", "Texas A&M"]
+    [
+      "Alabama",
+      "Auburn",
+      "the Iron Bowl"
+    ],
+    [
+      "Ohio State",
+      "Michigan",
+      "The Game"
+    ],
+    [
+      "USC",
+      "Notre Dame",
+      "the Jeweled Shillelagh"
+    ],
+    [
+      "Texas",
+      "Oklahoma",
+      "the Golden Hat"
+    ],
+    [
+      "Florida",
+      "Georgia"
+    ],
+    [
+      "Army",
+      "Navy"
+    ],
+    [
+      "Florida",
+      "Florida State"
+    ],
+    [
+      "Clemson",
+      "South Carolina",
+      "the Palmetto Bowl"
+    ],
+    [
+      "Oregon",
+      "Oregon State"
+    ],
+    [
+      "Iowa",
+      "Iowa State",
+      "the Cy-Hawk Trophy"
+    ],
+    [
+      "BYU",
+      "Utah",
+      "the Beehive Boot"
+    ],
+    [
+      "Virginia",
+      "Virginia Tech",
+      "the Commonwealth Cup"
+    ],
+    [
+      "NC State",
+      "North Carolina"
+    ],
+    [
+      "Penn State",
+      "Pittsburgh"
+    ],
+    [
+      "Wisconsin",
+      "Minnesota",
+      "Paul Bunyan's Axe"
+    ],
+    [
+      "Tennessee",
+      "Kentucky"
+    ],
+    [
+      "Ole Miss",
+      "Mississippi State",
+      "the Golden Egg"
+    ],
+    [
+      "Indiana",
+      "Purdue",
+      "the Old Oaken Bucket"
+    ],
+    [
+      "California",
+      "Stanford",
+      "the Axe"
+    ],
+    [
+      "Texas",
+      "Texas A&M",
+      "the Lone Star Showdown"
+    ],
+    [
+      "Washington",
+      "Washington State",
+      "the Apple Cup"
+    ],
+    [
+      "Michigan",
+      "Michigan State",
+      "the Paul Bunyan Trophy"
+    ],
+    [
+      "Oklahoma",
+      "Oklahoma State",
+      "the Bedlam Trophy"
+    ],
+    [
+      "Arizona",
+      "Arizona State",
+      "the Territorial Cup"
+    ],
+    [
+      "Georgia",
+      "Georgia Tech",
+      "the Governor's Cup"
+    ],
+    [
+      "Arkansas",
+      "Missouri",
+      "the Battle Line Trophy"
+    ],
+    [
+      "Arkansas",
+      "LSU",
+      "the Golden Boot"
+    ],
+    [
+      "LSU",
+      "Ole Miss",
+      "the Magnolia Bowl"
+    ],
+    [
+      "Nebraska",
+      "Wisconsin",
+      "the Freedom Trophy"
+    ],
+    [
+      "Iowa",
+      "Nebraska",
+      "the Heroes Trophy"
+    ],
+    [
+      "Iowa",
+      "Minnesota",
+      "Floyd of Rosedale"
+    ],
+    [
+      "Iowa",
+      "Wisconsin",
+      "the Heartland Trophy"
+    ],
+    [
+      "UCLA",
+      "USC",
+      "the Victory Bell"
+    ],
+    [
+      "Michigan",
+      "Minnesota",
+      "the Little Brown Jug"
+    ],
+    [
+      "Michigan",
+      "Northwestern",
+      "the George Jewett Trophy"
+    ],
+    [
+      "Illinois",
+      "Northwestern",
+      "the Land of Lincoln Trophy"
+    ],
+    [
+      "Illinois",
+      "Ohio State",
+      "the Illibuck Trophy"
+    ],
+    [
+      "Illinois",
+      "Purdue",
+      "the Purdue Cannon"
+    ],
+    [
+      "Indiana",
+      "Michigan State",
+      "the Old Brass Spittoon"
+    ],
+    [
+      "Michigan State",
+      "Penn State",
+      "the Land Grant Trophy"
+    ],
+    [
+      "Minnesota",
+      "Penn State",
+      "the Governor's Victory Bell"
+    ],
+    [
+      "Notre Dame",
+      "Michigan State",
+      "the Megaphone Trophy"
+    ],
+    [
+      "Notre Dame",
+      "Purdue",
+      "the Shillelagh Trophy"
+    ],
+    [
+      "Notre Dame",
+      "Stanford",
+      "the Legends Trophy"
+    ],
+    [
+      "Notre Dame",
+      "Navy",
+      "the Rip Miller Trophy"
+    ],
+    [
+      "Boston College",
+      "Notre Dame",
+      "the Ireland Trophy"
+    ],
+    [
+      "Air Force",
+      "Navy",
+      "the Commander-in-Chief's Trophy"
+    ],
+    [
+      "Air Force",
+      "Colorado State",
+      "the Ram-Falcon Trophy"
+    ],
+    [
+      "Colorado",
+      "Colorado State",
+      "the Centennial Cup"
+    ],
+    [
+      "Cincinnati",
+      "Louisville",
+      "the Keg of Nails"
+    ],
+    [
+      "Clemson",
+      "NC State",
+      "the Textile Bowl"
+    ],
+    [
+      "Boston College",
+      "Clemson",
+      "the O'Rourke-McFadden Trophy"
+    ],
+    [
+      "Virginia Tech",
+      "West Virginia",
+      "the Black Diamond Trophy"
+    ],
+    [
+      "Syracuse",
+      "West Virginia",
+      "the Ben Schwartzwalder Trophy"
+    ],
+    [
+      "SMU",
+      "TCU",
+      "the Iron Skillet"
+    ],
+    [
+      "TCU",
+      "Texas Tech",
+      "the Saddle Trophy"
+    ],
+    [
+      "Iowa State",
+      "Missouri",
+      "the Telephone Trophy"
+    ],
+    [
+      "Missouri",
+      "South Carolina",
+      "the Mayor's Cup"
+    ],
+    [
+      "Maryland",
+      "Navy",
+      "the Crab Bowl Trophy"
+    ],
+    [
+      "Navy",
+      "SMU",
+      "the Gansz Trophy"
+    ],
+    [
+      "Houston",
+      "Rice",
+      "the Bayou Bucket"
+    ],
+    [
+      "Rice",
+      "SMU",
+      "the Mayors' Cup"
+    ],
+    [
+      "Nevada",
+      "UNLV",
+      "the Fremont Cannon"
+    ],
+    [
+      "Boise State",
+      "Fresno State",
+      "the Milk Can"
+    ],
+    [
+      "Fresno State",
+      "San Diego State",
+      "the Oil Can"
+    ],
+    [
+      "Fresno State",
+      "San José State",
+      "the Valley Cup"
+    ],
+    [
+      "Utah State",
+      "Wyoming",
+      "the Bridger Rifle"
+    ],
+    [
+      "Colorado State",
+      "Wyoming",
+      "the Bronze Boot"
+    ],
+    [
+      "Hawai'i",
+      "San José State",
+      "the Dick Tomey Legacy Trophy"
+    ],
+    [
+      "Hawai'i",
+      "Wyoming",
+      "the Paniolo Trophy"
+    ],
+    [
+      "Hawai'i",
+      "UNLV",
+      "the Island Showdown Trophy"
+    ],
+    [
+      "Air Force",
+      "Hawai'i",
+      "the Kuter Trophy"
+    ],
+    [
+      "Akron",
+      "Kent State",
+      "the Wagon Wheel"
+    ],
+    [
+      "Ball State",
+      "Northern Illinois",
+      "the Bronze Stalk Trophy"
+    ],
+    [
+      "Bowling Green",
+      "Toledo",
+      "the Battle of I-75"
+    ],
+    [
+      "Eastern Michigan",
+      "Western Michigan",
+      "the Michigan MAC Trophy"
+    ],
+    [
+      "UCF",
+      "South Florida",
+      "the War on I-4 Trophy"
+    ],
+    [
+      "UCF",
+      "UConn",
+      "the Civil ConFLiCT"
+    ],
+    [
+      "Florida Atlantic",
+      "Florida International",
+      "the Don Shula Award"
+    ],
+    [
+      "Southern Miss",
+      "Tulane",
+      "the Bell"
+    ],
+    [
+      "South Alabama",
+      "Troy",
+      "the Belt"
+    ],
+    [
+      "Memphis",
+      "UAB",
+      "the Bones Trophy"
+    ],
+    [
+      "LSU",
+      "Tulane",
+      "the Rag"
+    ],
+    [
+      "New Mexico State",
+      "UTEP",
+      "the Silver Spade"
+    ],
+    [
+      "Buffalo",
+      "Massachusetts",
+      "the Flagship Cup"
+    ]
   ],
   "CBB": [
-    ["Duke", "North Carolina"],
-    ["Kentucky", "Louisville"],
-    ["Kansas", "Kansas State"],
-    ["Indiana", "Purdue"],
-    ["Michigan", "Michigan State"],
-    ["UCLA", "USC"],
-    ["Georgetown", "Syracuse"],
-    ["Cincinnati", "Xavier"],
-    ["Arizona", "Arizona State"],
-    ["Villanova", "Georgetown"]
+    [
+      "Duke",
+      "North Carolina"
+    ],
+    [
+      "Kentucky",
+      "Louisville"
+    ],
+    [
+      "Kansas",
+      "Kansas State"
+    ],
+    [
+      "Indiana",
+      "Purdue"
+    ],
+    [
+      "Michigan",
+      "Michigan State"
+    ],
+    [
+      "UCLA",
+      "USC"
+    ],
+    [
+      "Georgetown",
+      "Syracuse"
+    ],
+    [
+      "Cincinnati",
+      "Xavier"
+    ],
+    [
+      "Arizona",
+      "Arizona State"
+    ],
+    [
+      "Villanova",
+      "Georgetown"
+    ]
   ],
   "EPL": [
-    ["Liverpool", "Manchester United"],
-    ["Arsenal", "Tottenham"],
-    ["Manchester City", "Manchester United"],
-    ["Chelsea", "Tottenham"],
-    ["Liverpool", "Everton"],
-    ["Arsenal", "Chelsea"],
-    ["Newcastle", "Sunderland"],
-    ["Aston Villa", "Birmingham"],
-    ["West Ham", "Tottenham"],
-    ["Crystal Palace", "Brighton"],
-    ["Leeds", "Manchester United"]
+    [
+      "Arsenal",
+      "Tottenham Hotspur",
+      "the North London derby"
+    ],
+    [
+      "Liverpool",
+      "Everton",
+      "the Merseyside derby"
+    ],
+    [
+      "Manchester City",
+      "Manchester United",
+      "the Manchester derby"
+    ],
+    [
+      "Liverpool",
+      "Manchester United",
+      "the North West derby"
+    ],
+    [
+      "Newcastle United",
+      "Sunderland",
+      "the Tyne-Wear derby"
+    ],
+    [
+      "Aston Villa",
+      "Birmingham City",
+      "the Second City derby"
+    ],
+    [
+      "Brighton & Hove Albion",
+      "Crystal Palace",
+      "the M23 derby"
+    ],
+    [
+      "Ipswich Town",
+      "Norwich City",
+      "the East Anglian derby"
+    ],
+    [
+      "Chelsea",
+      "Fulham",
+      "the West London derby"
+    ],
+    [
+      "Chelsea",
+      "Tottenham Hotspur"
+    ],
+    [
+      "Arsenal",
+      "Chelsea"
+    ],
+    [
+      "West Ham United",
+      "Tottenham Hotspur"
+    ],
+    [
+      "Arsenal",
+      "Manchester United"
+    ],
+    [
+      "Liverpool",
+      "Chelsea"
+    ]
   ],
   "EFL": [
-    ["Sheffield United", "Sheffield Wednesday"],
-    ["Nottingham Forest", "Derby County"],
-    ["Bristol City", "Bristol Rovers"],
-    ["Cardiff", "Swansea"],
-    ["Norwich", "Ipswich"]
+    [
+      "Sheffield United",
+      "Sheffield Wednesday",
+      "the Steel City derby"
+    ],
+    [
+      "Portsmouth",
+      "Southampton",
+      "the South Coast derby"
+    ],
+    [
+      "Bristol City",
+      "Cardiff City",
+      "the Severnside derby"
+    ],
+    [
+      "Ipswich Town",
+      "Norwich City",
+      "the East Anglian derby"
+    ],
+    [
+      "Birmingham City",
+      "Aston Villa",
+      "the Second City derby"
+    ],
+    [
+      "Derby County",
+      "Nottingham Forest",
+      "the East Midlands derby"
+    ],
+    [
+      "Blackburn Rovers",
+      "Burnley",
+      "the East Lancashire derby"
+    ],
+    [
+      "Leeds United",
+      "Millwall"
+    ],
+    [
+      "Stoke City",
+      "West Bromwich Albion"
+    ]
   ],
   "BL1": [
-    ["Bayern Munich", "Borussia Dortmund"],
-    ["Borussia Dortmund", "Schalke"],
-    ["Hamburger", "Werder Bremen"],
-    ["Bayern Munich", "1860 Munich"]
+    [
+      "FC Bayern München",
+      "Borussia Dortmund",
+      "Der Klassiker"
+    ],
+    [
+      "Borussia Dortmund",
+      "FC Schalke 04",
+      "the Revierderby"
+    ],
+    [
+      "1. FC Köln",
+      "Borussia Mönchengladbach",
+      "the Rhineland derby"
+    ],
+    [
+      "Hamburger SV",
+      "SV Werder Bremen",
+      "the Nordderby"
+    ],
+    [
+      "Bayer 04 Leverkusen",
+      "1. FC Köln"
+    ]
   ],
   "LaLiga": [
-    ["Real Madrid", "Barcelona"],
-    ["Real Madrid", "Atletico"],
-    ["Sevilla", "Real Betis"],
-    ["Espanyol", "Barcelona"],
-    ["Athletic Club", "Real Sociedad"]
+    [
+      "Real Madrid",
+      "FC Barcelona",
+      "El Clásico"
+    ],
+    [
+      "Real Madrid",
+      "Club Atlético de Madrid",
+      "the Madrid derby"
+    ],
+    [
+      "Sevilla",
+      "Real Betis Balompié",
+      "the Seville derby"
+    ],
+    [
+      "Athletic Club",
+      "Real Sociedad de Fútbol",
+      "the Basque derby"
+    ],
+    [
+      "FC Barcelona",
+      "RCD Espanyol de Barcelona",
+      "the Barcelona derby"
+    ],
+    [
+      "Valencia",
+      "Levante UD",
+      "the Valencia derby"
+    ],
+    [
+      "Real Madrid",
+      "Sevilla"
+    ]
   ],
   "SerieA": [
-    ["Inter", "AC Milan"],
-    ["Roma", "Lazio"],
-    ["Juventus", "Inter"],
-    ["Juventus", "Torino"],
-    ["Napoli", "Roma"],
-    ["Genoa", "Sampdoria"]
+    [
+      "AC Milan",
+      "FC Internazionale Milano",
+      "the Derby della Madonnina"
+    ],
+    [
+      "Juventus",
+      "FC Internazionale Milano",
+      "the Derby d'Italia"
+    ],
+    [
+      "AS Roma",
+      "SS Lazio",
+      "the Derby della Capitale"
+    ],
+    [
+      "Juventus",
+      "Torino",
+      "the Derby della Mole"
+    ],
+    [
+      "AS Roma",
+      "SSC Napoli",
+      "the Derby del Sole"
+    ],
+    [
+      "Bologna FC 1909",
+      "ACF Fiorentina",
+      "the Derby dell'Appennino"
+    ],
+    [
+      "Juventus",
+      "AC Milan"
+    ],
+    [
+      "SSC Napoli",
+      "Juventus"
+    ]
   ],
   "Ligue1": [
-    ["Paris Saint-Germain", "Marseille"],
-    ["Paris SG", "Marseille"],
-    ["Lyon", "Saint-Etienne"],
-    ["Lyon", "Marseille"],
-    ["Lens", "Lille"]
+    [
+      "Paris Saint-Germain",
+      "Olympique de Marseille",
+      "Le Classique"
+    ],
+    [
+      "Paris SG",
+      "Marseille",
+      "Le Classique"
+    ],
+    [
+      "Olympique Lyonnais",
+      "Saint-Etienne",
+      "the Derby du Rhône"
+    ],
+    [
+      "Olympique de Marseille",
+      "OGC Nice",
+      "the Côte d'Azur derby"
+    ],
+    [
+      "Racing Club de Lens",
+      "Lille OSC",
+      "the Derby du Nord"
+    ],
+    [
+      "Paris Saint-Germain",
+      "Olympique Lyonnais"
+    ],
+    [
+      "Paris FC",
+      "Paris Saint-Germain",
+      "the Paris derby"
+    ]
   ],
   "NFL": [
-    ["Green Bay Packers", "Chicago Bears"],
-    ["Pittsburgh Steelers", "Baltimore Ravens"],
-    ["Pittsburgh Steelers", "Cleveland Browns"],
-    ["Dallas Cowboys", "Washington"],
-    ["Dallas Cowboys", "Philadelphia Eagles"],
-    ["New England Patriots", "New York Jets"],
-    ["Kansas City Chiefs", "Las Vegas Raiders"],
-    ["Denver Broncos", "Las Vegas Raiders"],
-    ["Minnesota Vikings", "Green Bay Packers"],
-    ["San Francisco 49ers", "Seattle Seahawks"],
-    ["New York Giants", "Philadelphia Eagles"],
-    ["Cincinnati Bengals", "Cleveland Browns"]
+    [
+      "Green Bay Packers",
+      "Chicago Bears"
+    ],
+    [
+      "Pittsburgh Steelers",
+      "Baltimore Ravens"
+    ],
+    [
+      "Pittsburgh Steelers",
+      "Cleveland Browns"
+    ],
+    [
+      "Dallas Cowboys",
+      "Washington Commanders"
+    ],
+    [
+      "Dallas Cowboys",
+      "Philadelphia Eagles"
+    ],
+    [
+      "New England Patriots",
+      "New York Jets"
+    ],
+    [
+      "Kansas City Chiefs",
+      "Las Vegas Raiders"
+    ],
+    [
+      "Denver Broncos",
+      "Las Vegas Raiders"
+    ],
+    [
+      "Minnesota Vikings",
+      "Green Bay Packers"
+    ],
+    [
+      "San Francisco 49ers",
+      "Seattle Seahawks"
+    ],
+    [
+      "New York Giants",
+      "Philadelphia Eagles"
+    ],
+    [
+      "Cincinnati Bengals",
+      "Cleveland Browns"
+    ]
   ],
   "NBA": [
-    ["Boston Celtics", "Los Angeles Lakers"],
-    ["Golden State Warriors", "Cleveland Cavaliers"],
-    ["Boston Celtics", "Philadelphia 76ers"],
-    ["New York Knicks", "Boston Celtics"],
-    ["Chicago Bulls", "Detroit Pistons"],
-    ["Los Angeles Lakers", "Los Angeles Clippers"],
-    ["Miami Heat", "New York Knicks"],
-    ["San Antonio Spurs", "Houston Rockets"]
+    [
+      "Boston Celtics",
+      "Los Angeles Lakers"
+    ],
+    [
+      "Golden State Warriors",
+      "Cleveland Cavaliers"
+    ],
+    [
+      "Boston Celtics",
+      "Philadelphia 76ers"
+    ],
+    [
+      "New York Knicks",
+      "Boston Celtics"
+    ],
+    [
+      "Chicago Bulls",
+      "Detroit Pistons"
+    ],
+    [
+      "Los Angeles Lakers",
+      "LA Clippers"
+    ],
+    [
+      "Miami Heat",
+      "New York Knicks"
+    ],
+    [
+      "San Antonio Spurs",
+      "Houston Rockets"
+    ]
   ],
   "NHL": [
-    ["Montreal Canadiens", "Boston Bruins"],
-    ["Montreal Canadiens", "Toronto Maple Leafs"],
-    ["New York Rangers", "New York Islanders"],
-    ["New York Rangers", "Philadelphia Flyers"],
-    ["Pittsburgh Penguins", "Philadelphia Flyers"],
-    ["Pittsburgh Penguins", "Washington Capitals"],
-    ["Detroit Red Wings", "Chicago Blackhawks"],
-    ["Detroit Red Wings", "Toronto Maple Leafs"],
-    ["Edmonton Oilers", "Calgary Flames"],
-    ["Vancouver Canucks", "Calgary Flames"]
+    [
+      "Montreal Canadiens",
+      "Boston Bruins"
+    ],
+    [
+      "Montreal Canadiens",
+      "Toronto Maple Leafs"
+    ],
+    [
+      "New York Rangers",
+      "New York Islanders"
+    ],
+    [
+      "New York Rangers",
+      "Philadelphia Flyers"
+    ],
+    [
+      "Pittsburgh Penguins",
+      "Philadelphia Flyers"
+    ],
+    [
+      "Pittsburgh Penguins",
+      "Washington Capitals"
+    ],
+    [
+      "Detroit Red Wings",
+      "Chicago Blackhawks"
+    ],
+    [
+      "Detroit Red Wings",
+      "Toronto Maple Leafs"
+    ],
+    [
+      "Edmonton Oilers",
+      "Calgary Flames",
+      "the Battle of Alberta"
+    ],
+    [
+      "Vancouver Canucks",
+      "Calgary Flames"
+    ],
+    [
+      "Toronto Maple Leafs",
+      "Ottawa Senators",
+      "the Battle of Ontario"
+    ]
   ],
   "MLB": [
-    ["New York Yankees", "Boston Red Sox"],
-    ["Los Angeles Dodgers", "San Francisco Giants"],
-    ["Chicago Cubs", "Chicago White Sox"],
-    ["Chicago Cubs", "St. Louis Cardinals"],
-    ["New York Yankees", "New York Mets"],
-    ["Los Angeles Dodgers", "San Diego Padres"],
-    ["Cleveland Guardians", "Detroit Tigers"],
-    ["Houston Astros", "Texas Rangers"],
-    ["Baltimore Orioles", "Washington Nationals"]
+    [
+      "New York Yankees",
+      "Boston Red Sox"
+    ],
+    [
+      "Los Angeles Dodgers",
+      "San Francisco Giants"
+    ],
+    [
+      "Chicago Cubs",
+      "Chicago White Sox",
+      "the Crosstown Classic"
+    ],
+    [
+      "Chicago Cubs",
+      "St. Louis Cardinals"
+    ],
+    [
+      "New York Yankees",
+      "New York Mets",
+      "the Subway Series"
+    ],
+    [
+      "Los Angeles Dodgers",
+      "San Diego Padres"
+    ],
+    [
+      "Cleveland Guardians",
+      "Detroit Tigers"
+    ],
+    [
+      "Houston Astros",
+      "Texas Rangers"
+    ],
+    [
+      "Baltimore Orioles",
+      "Washington Nationals"
+    ],
+    [
+      "San Francisco Giants",
+      "Athletics",
+      "the Bay Bridge Series"
+    ]
   ],
   "MLS": [
-    ["LA Galaxy", "Los Angeles FC"],
-    ["Seattle Sounders", "Portland Timbers"],
-    ["New York Red Bulls", "New York City FC"],
-    ["DC United", "New York Red Bulls"],
-    ["Atlanta United", "Orlando City"],
-    ["Toronto FC", "Montreal Impact"],
-    ["Sporting Kansas City", "FC Dallas"]
+    [
+      "LA Galaxy",
+      "LAFC",
+      "El Tráfico"
+    ],
+    [
+      "Seattle Sounders",
+      "Portland Timbers"
+    ],
+    [
+      "Red Bull New York",
+      "New York City FC",
+      "the Hudson River Derby"
+    ],
+    [
+      "D.C. United",
+      "Red Bull New York",
+      "the Atlantic Cup"
+    ],
+    [
+      "Atlanta United",
+      "Orlando City"
+    ],
+    [
+      "Toronto FC",
+      "CF Montréal",
+      "the Canadian Classique"
+    ],
+    [
+      "Sporting Kansas City",
+      "FC Dallas"
+    ],
+    [
+      "LA Galaxy",
+      "San Jose Earthquakes",
+      "the California Clásico"
+    ],
+    [
+      "Columbus Crew",
+      "FC Cincinnati",
+      "the Hell Is Real Derby"
+    ],
+    [
+      "FC Dallas",
+      "Houston Dynamo FC",
+      "the Texas Derby"
+    ],
+    [
+      "Chicago Fire FC",
+      "FC Dallas",
+      "the Brimstone Cup"
+    ],
+    [
+      "Colorado Rapids",
+      "Real Salt Lake",
+      "the Rocky Mountain Cup"
+    ],
+    [
+      "Columbus Crew",
+      "Toronto FC",
+      "the Trillium Cup"
+    ],
+    [
+      "San Jose Earthquakes",
+      "Seattle Sounders FC",
+      "the Heritage Cup"
+    ]
   ],
   "LigaMX": [
-    ["Club America", "Chivas"],
-    ["Club America", "Cruz Azul"],
-    ["Pumas", "Cruz Azul"],
-    ["Monterrey", "Tigres"],
-    ["Toluca", "Club America"]
+    [
+      "América",
+      "Guadalajara",
+      "El Súper Clásico"
+    ],
+    [
+      "América",
+      "Cruz Azul"
+    ],
+    [
+      "Pumas UNAM",
+      "Cruz Azul"
+    ],
+    [
+      "Monterrey",
+      "Tigres UANL",
+      "the Clásico Regiomontano"
+    ],
+    [
+      "Toluca",
+      "América"
+    ],
+    [
+      "América",
+      "Pumas UNAM",
+      "the Clásico Capitalino"
+    ]
+  ],
+  "Eredivisie": [
+    [
+      "AFC Ajax",
+      "Feyenoord Rotterdam",
+      "De Klassieker"
+    ],
+    [
+      "AFC Ajax",
+      "PSV",
+      "the Topper"
+    ],
+    [
+      "Feyenoord Rotterdam",
+      "Sparta Rotterdam",
+      "the Rotterdam derby"
+    ],
+    [
+      "FC Twente '65",
+      "FC Groningen"
+    ]
+  ],
+  "PrimeiraLiga": [
+    [
+      "Sport Lisboa e Benfica",
+      "FC Porto",
+      "O Clássico"
+    ],
+    [
+      "Sport Lisboa e Benfica",
+      "Sporting Clube de Portugal",
+      "the Derby de Lisboa"
+    ],
+    [
+      "FC Porto",
+      "Sporting Clube de Portugal"
+    ],
+    [
+      "FC Porto",
+      "Vitória SC"
+    ]
+  ],
+  "BSA": [
+    [
+      "CR Flamengo",
+      "Fluminense FC",
+      "the Fla-Flu"
+    ],
+    [
+      "Grêmio FBPA",
+      "SC Internacional",
+      "the Grenal"
+    ],
+    [
+      "SC Corinthians Paulista",
+      "SE Palmeiras",
+      "the Derby Paulista"
+    ],
+    [
+      "SC Corinthians Paulista",
+      "São Paulo FC",
+      "the Clássico Majestoso"
+    ],
+    [
+      "CA Mineiro",
+      "Cruzeiro EC",
+      "the Clássico Mineiro"
+    ],
+    [
+      "CR Flamengo",
+      "CR Vasco da Gama",
+      "the Clássico dos Milhões"
+    ],
+    [
+      "SE Palmeiras",
+      "São Paulo FC",
+      "the Choque-Rei"
+    ],
+    [
+      "CR Flamengo",
+      "Botafogo FR",
+      "the Clássico da Rivalidade"
+    ],
+    [
+      "Santos FC",
+      "SE Palmeiras",
+      "the Clássico da Saudade"
+    ],
+    [
+      "Fluminense FC",
+      "Botafogo FR",
+      "the Clássico Vovô"
+    ]
   ]
 }

@@ -13,6 +13,7 @@ import types
 from datetime import timezone
 
 import pytest
+from dispatcharr_ranked_matchups._util import current_standings_table
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG_NAME = os.path.basename(REPO_ROOT)
@@ -416,14 +417,28 @@ class TestRankPoolSizeWiring:
     it, in which case every league game silently scores as a 25-team pool,
     which is the exact bug #194 fixed. Pin the wiring, not just the maths."""
 
-    def test_league_pool_comes_from_the_standings_table(self, plugin):
+    def test_league_pool_comes_from_the_scoring_table(self, plugin):
         """A league source's pool is its table length, per competition:
         the Premier League's 20 and the Championship's 24 must stay distinct
-        without a second list to keep in sync."""
+        without a second list to keep in sync.
+
+        It must come from the SCORING table (`extra["standings_table"]`), not
+        the current-season one. Since #209 the two are different objects
+        early in a season, and sourcing the pool from the current table would
+        silently re-rank every early-season game — a scoring change wearing
+        the clothes of a prose fix.
+        """
         import inspect
         src = inspect.getsource(plugin._action_refresh)
-        assert "len(standings_table)" in src, (
-            "refresh no longer derives the rank pool from the standings table"
+        assert "len(scoring_table)" in src, (
+            "refresh no longer derives the rank pool from the scoring table"
+        )
+        assert 'scoring_table = extra.get("standings_table")' in src, (
+            "the rank pool must be derived from the seeded scoring table, not "
+            "from standings_table_current"
+        )
+        assert "len(current_standings_table(" not in src, (
+            "the rank pool must not be derived from the current-season table"
         )
         assert "rank_pool_size=rank_pool" in src, (
             "the derived pool is not being passed into GameSignals"
@@ -1470,7 +1485,7 @@ class TestBuildDescription:
     def test_matchday_line_uses_explicit_totals(self, plugin):
         g = self._g(extra={"matchday": 7, "matchdays_total": 38})
         out = plugin._build_description(g, "", False)
-        assert "Matchday 7 of 38." in out
+        assert "31 matchdays left after this one." in out
 
     def test_matchday_line_falls_back_to_league_ctx_total(self, plugin):
         # When `matchdays_total` isn't in extra but fd_competition_code
@@ -1478,7 +1493,7 @@ class TestBuildDescription:
         # total fills in. PL is 38.
         g = self._g(extra={"matchday": 5, "fd_competition_code": "PL"})
         out = plugin._build_description(g, "", False)
-        assert "Matchday 5 of 38." in out
+        assert "33 matchdays left after this one." in out
 
     def test_league_boundary_summary_appears(self, plugin):
         # PL's boundary_summary is the threshold mnemonic users see.
@@ -1486,7 +1501,7 @@ class TestBuildDescription:
         out = plugin._build_description(g, "", False)
         # Boundary summary content comes from LEAGUE_CONTEXTS["PL"]
         # ("Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation").
-        assert "UCL" in out and "relegation" in out
+        assert "Champions League places" in out and "goes down" in out
 
     def test_matchday_without_total_omits_line(self, plugin):
         # If neither extra.matchdays_total nor league_ctx.matchdays_total
@@ -1594,7 +1609,8 @@ class TestBuildDescription:
         # Use .find() to pin order: earlier marker must have lower index.
         pos_placeholder = out.find("Channel match pending")
         pos_headline = out.find("A title race")
-        pos_matchday = out.find("Matchday 5")
+        # The matchday block now reports what is LEFT, in prose.
+        pos_matchday = out.find("matchdays left after this one")
         pos_narrative = out.find("Impact narrative here.")
         pos_favorite = out.find("is your favorite")
         pos_source = out.find("Source: ESPN")
@@ -2076,32 +2092,32 @@ class TestIsCatchupMatchday:
 
 class TestOrdinal:
     def test_first(self, plugin):
-        assert plugin._ordinal(1) == "1st"
+        assert plugin.ordinal(1) == "1st"
 
     def test_second(self, plugin):
-        assert plugin._ordinal(2) == "2nd"
+        assert plugin.ordinal(2) == "2nd"
 
     def test_third(self, plugin):
-        assert plugin._ordinal(3) == "3rd"
+        assert plugin.ordinal(3) == "3rd"
 
     def test_fourth(self, plugin):
-        assert plugin._ordinal(4) == "4th"
+        assert plugin.ordinal(4) == "4th"
 
     def test_teens_always_th(self, plugin):
         # 11/12/13 break the simple last-digit rule.
-        assert plugin._ordinal(11) == "11th"
-        assert plugin._ordinal(12) == "12th"
-        assert plugin._ordinal(13) == "13th"
+        assert plugin.ordinal(11) == "11th"
+        assert plugin.ordinal(12) == "12th"
+        assert plugin.ordinal(13) == "13th"
 
     def test_twenties(self, plugin):
-        assert plugin._ordinal(21) == "21st"
-        assert plugin._ordinal(22) == "22nd"
-        assert plugin._ordinal(23) == "23rd"
-        assert plugin._ordinal(24) == "24th"
+        assert plugin.ordinal(21) == "21st"
+        assert plugin.ordinal(22) == "22nd"
+        assert plugin.ordinal(23) == "23rd"
+        assert plugin.ordinal(24) == "24th"
 
     def test_typical_league_positions(self, plugin):
         # Cover the full EPL range (20-team league).
-        assert plugin._ordinal(20) == "20th"
+        assert plugin.ordinal(20) == "20th"
 
 
 class TestBuildStandingsPostureLine:
@@ -2132,7 +2148,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Manchester City FC 2nd, 70 pts. Manchester United FC 3rd, 69 pts: 1 pt behind."
+        assert line == "Manchester City FC are 2nd on 70 points, Manchester United FC are 3rd on 69 points, 1 pt behind."
 
     def test_both_teams_wide_gap(self, plugin):
         g = {
@@ -2141,7 +2157,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Manchester City FC 2nd, 70 pts. Bournemouth FC 14th, 41 pts: 29 pts behind."
+        assert line == "Manchester City FC are 2nd on 70 points, Bournemouth FC are 14th on 41 points, 29 pts behind."
 
     def test_away_team_ahead(self, plugin):
         # When home team is lower-ranked, away team's gap reads "ahead".
@@ -2151,7 +2167,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Bournemouth FC 14th, 41 pts. Manchester City FC 2nd, 70 pts: 29 pts ahead."
+        assert line == "Bournemouth FC are 14th on 41 points, Manchester City FC are 2nd on 70 points, 29 pts ahead."
 
     def test_tied_on_points_no_gd_cached(self, plugin):
         # Older caches (pre-#10) won't have goal_difference; fall back to
@@ -2162,7 +2178,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points."
+        assert line == "A FC are 1st on 70 points, B FC are 2nd on 70 points, level on points."
 
     def test_tied_on_points_away_gd_better(self, plugin):
         # B has the better GD: reads "... GD ahead" for the away team.
@@ -2172,7 +2188,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points, 7 GD ahead."
+        assert line == "A FC are 1st on 70 points, B FC are 2nd on 70 points, level on points, 7 GD ahead."
 
     def test_tied_on_points_home_gd_better(self, plugin):
         # A (home) has better GD: away reads "behind on GD".
@@ -2182,7 +2198,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points, 7 GD behind."
+        assert line == "A FC are 1st on 70 points, B FC are 2nd on 70 points, level on points, 7 GD behind."
 
     def test_tied_on_everything(self, plugin):
         table = [
@@ -2191,7 +2207,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "A FC 1st, 70 pts. B FC 2nd, 70 pts: level on points and goal difference."
+        assert line == "A FC are 1st on 70 points, B FC are 2nd on 70 points, level on points and goal difference."
 
     def test_one_pt_uses_singular(self, plugin):
         # 1 → "1 pt", not "1 pts".
@@ -2211,7 +2227,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Manchester City FC 2nd, 70 pts."
+        assert line == "Manchester City FC are 2nd on 70 points."
 
     def test_only_away_in_table(self, plugin):
         g = {
@@ -2220,7 +2236,7 @@ class TestBuildStandingsPostureLine:
             "extra": {"standings_table": self._table()},
         }
         line = plugin._build_standings_posture_line(g)
-        assert line == "Manchester City FC 2nd, 70 pts."
+        assert line == "Manchester City FC are 2nd on 70 points."
 
     def test_missing_position_skips_team(self, plugin):
         # Defensive: if FD.org returns an entry with no position, treat as
@@ -2231,7 +2247,7 @@ class TestBuildStandingsPostureLine:
         ]
         g = {"home": "A FC", "away": "B FC", "extra": {"standings_table": table}}
         line = plugin._build_standings_posture_line(g)
-        assert line == "B FC 2nd, 69 pts."
+        assert line == "B FC are 2nd on 69 points."
 
     def test_missing_home_away_returns_none(self, plugin):
         g = {"home": "", "away": "", "extra": {"standings_table": self._table()}}
@@ -2258,8 +2274,11 @@ class TestBuildStandingsPostureLine:
         sections = desc.split("\n\n")
         # Matchday should precede the standings posture line, which should
         # precede the impact narrative.
-        md_idx = next(i for i, s in enumerate(sections) if s.startswith("Matchday 35"))
-        st_idx = next(i for i, s in enumerate(sections) if "70 pts" in s)
+        md_idx = next(
+            i for i, s in enumerate(sections)
+            if s.startswith("3 matchdays left after this one")
+        )
+        st_idx = next(i for i, s in enumerate(sections) if "70 points" in s)
         nar_idx = next(i for i, s in enumerate(sections) if "clinch the title" in s)
         assert md_idx < st_idx < nar_idx
 
@@ -3874,3 +3893,356 @@ class TestKeptForRecordingChannelsHonourExclusion:
         # `excluded_ids` empty must not issue a query, let alone a delete.
         src = self._src()
         assert "if kept_for_recording and excluded_ids:" in src
+
+
+
+class TestCurrentStandingsTableSelector:
+    """#209: the shared rule for which table may be described as "this
+    season". Lives in _util because both the LLM prompt builder and the
+    deterministic description path need the identical answer."""
+
+    _SEED = [{"name": "Arsenal FC", "position": 1, "points": 85, "played": 0}]
+    _CURRENT = [{"name": "Arsenal FC", "position": 3, "points": 6, "played": 2}]
+
+    def test_prefers_the_explicit_current_table(self):
+        got = current_standings_table({
+            "standings_table": self._SEED,
+            "standings_table_current": self._CURRENT,
+            "standings_seeded": True,
+        })
+        assert got == self._CURRENT
+
+    def test_seeded_legacy_row_yields_nothing_rather_than_the_prior(self):
+        assert current_standings_table({"standings_table": self._SEED, "standings_seeded": True}) == []
+
+    def test_unseeded_legacy_row_falls_back_to_standings_table(self):
+        assert current_standings_table({"standings_table": self._CURRENT}) == self._CURRENT
+
+    def test_missing_everything_is_empty(self):
+        assert current_standings_table({}) == []
+
+
+class TestDeterministicPostureUsesCurrentTable:
+    """The deterministic description is what ships whenever the LLM path is
+    off or fails, so #209's seeded falsehood reached it too."""
+
+    def test_posture_line_reports_current_position_not_the_seed(self, plugin):
+        g = {
+            "home": "Arsenal FC",
+            "away": "Chelsea FC",
+            "extra": {
+                "standings_table": [
+                    {"name": "Arsenal FC", "position": 1, "points": 85, "played": 0},
+                    {"name": "Chelsea FC", "position": 10, "points": 52, "played": 0},
+                ],
+                "standings_table_current": [
+                    {"name": "Arsenal FC", "position": 3, "points": 6, "played": 2},
+                    {"name": "Chelsea FC", "position": 4, "points": 6, "played": 2},
+                ],
+                "standings_seeded": True,
+            },
+        }
+        line = plugin._build_standings_posture_line(g)
+        assert "are 3rd on 6 points" in line
+        assert "85 points" not in line and "85 pts" not in line
+
+    def test_seeded_row_without_current_table_renders_no_posture(self, plugin):
+        g = {
+            "home": "Arsenal FC",
+            "away": "Chelsea FC",
+            "extra": {
+                "standings_table": [
+                    {"name": "Arsenal FC", "position": 1, "points": 85, "played": 0},
+                ],
+                "standings_seeded": True,
+            },
+        }
+        assert plugin._build_standings_posture_line(g) is None
+
+
+class TestCatchupDetectionUsesCurrentTable:
+    def test_seeded_row_still_detects_a_catchup_fixture(self, plugin):
+        """With only the seeded table (every `played` forced to 0) max(played)
+        is 0 and no fixture could ever look like a catch-up. The current table
+        restores the signal."""
+        g = {
+            "extra": {
+                "matchday": 3,
+                "standings_table": [
+                    {"name": "A", "position": 1, "points": 85, "played": 0},
+                ],
+                "standings_table_current": [
+                    {"name": "A", "position": 1, "points": 9, "played": 5},
+                ],
+                "standings_seeded": True,
+            }
+        }
+        assert plugin._is_catchup_matchday(g) is True
+
+
+class TestImpactNarrativesUseCurrentTable:
+    """#209, third location. The "rooting against X" prose fed both the EPG
+    description and the LLM prompt, and inside the seed window it was built
+    from last season's points."""
+
+    _SEED = [
+        {"name": "Arsenal FC", "position": 1, "points": 85, "played": 0},
+        {"name": "Manchester City FC", "position": 2, "points": 78, "played": 0},
+    ]
+    _CURRENT = [
+        {"name": "Manchester City FC", "position": 1, "points": 9, "played": 3},
+        {"name": "Arsenal FC", "position": 3, "points": 6, "played": 2},
+    ]
+
+    @staticmethod
+    def _spy():
+        """Captures the args build_impact_narratives is called with."""
+        seen = {}
+
+        def fake(rank_home, rank_away, home, away, favs, table):
+            seen.update(
+                rank_home=rank_home, rank_away=rank_away,
+                home=home, away=away, favs=favs, table=table,
+            )
+            return ["narrative"]
+
+        return fake, seen
+
+    def test_positions_and_table_come_from_the_current_season(self, plugin):
+        fake, seen = self._spy()
+        out = plugin._impact_narratives_for(
+            {"standings_table": self._SEED,
+             "standings_table_current": self._CURRENT,
+             "standings_seeded": True},
+            "Arsenal FC", "Chelsea FC", ["Manchester City"], fake,
+        )
+        assert out == ["narrative"]
+        # Arsenal are 3rd now, not 1st as the seed claims.
+        assert seen["rank_home"] == 3
+        assert seen["table"] == self._CURRENT
+        # City's points are this season's 9, not last season's 78.
+        assert seen["favs"] == [
+            {"name": "Manchester City FC", "position": 1, "points": 9}
+        ]
+
+    def test_team_absent_from_current_table_gets_no_position(self, plugin):
+        fake, seen = self._spy()
+        plugin._impact_narratives_for(
+            {"standings_table_current": self._CURRENT},
+            "Arsenal FC", "Promoted FC", ["Manchester City"], fake,
+        )
+        assert seen["rank_away"] is None
+
+    def test_no_current_table_yields_no_narrative_rather_than_a_false_one(self, plugin):
+        called = []
+
+        def fake(*a, **k):
+            called.append(a)
+            return ["should not happen"]
+
+        out = plugin._impact_narratives_for(
+            {"standings_table": self._SEED, "standings_seeded": True},
+            "Arsenal FC", "Chelsea FC", ["Manchester City"], fake,
+        )
+        assert out == []
+        assert called == [], "must not build a narrative from the seeded table"
+
+
+class TestLegacyCacheRowsAreCaughtByShape:
+    """The `standings_seeded` flag only exists on rows written since #209. A
+    pre-#209 cache row carries neither flag nor current table, so without a
+    shape check the upgraded plugin keeps serving the exact falsehood from
+    every apply until the next refresh rewrites the cache. Surfaced by an
+    external review (codex) after the flag-based fix looked complete."""
+
+    _LEGACY_SEEDED = [
+        {"name": "Arsenal FC", "position": 1, "points": 85, "played": 0},
+        {"name": "Chelsea FC", "position": 10, "points": 52, "played": 0},
+    ]
+    _REAL_MIDSEASON = [
+        {"name": "Arsenal FC", "position": 3, "points": 6, "played": 2},
+    ]
+    _REAL_PRESEASON = [
+        {"name": "Arsenal FC", "position": 1, "points": 0, "played": 0},
+        {"name": "Chelsea FC", "position": 2, "points": 0, "played": 0},
+    ]
+
+    def test_points_without_games_is_physically_impossible_so_it_is_seeded(self):
+        from dispatcharr_ranked_matchups._util import looks_seeded
+        assert looks_seeded(self._LEGACY_SEEDED) is True
+
+    def test_a_real_current_table_is_not_flagged(self):
+        from dispatcharr_ranked_matchups._util import looks_seeded
+        assert looks_seeded(self._REAL_MIDSEASON) is False
+
+    def test_a_genuine_preseason_table_is_not_flagged(self):
+        """Everyone on zero points AND zero games is an honest pre-season
+        table, not a prior. Flagging it would suppress a truthful table."""
+        from dispatcharr_ranked_matchups._util import looks_seeded
+        assert looks_seeded(self._REAL_PRESEASON) is False
+
+    def test_empty_table_is_not_flagged(self):
+        from dispatcharr_ranked_matchups._util import looks_seeded
+        assert looks_seeded([]) is False
+
+    def test_legacy_row_with_no_flag_yields_no_current_table(self):
+        assert current_standings_table({"standings_table": self._LEGACY_SEEDED}) == []
+
+    def test_legacy_midseason_row_still_works(self):
+        assert current_standings_table(
+            {"standings_table": self._REAL_MIDSEASON}) == self._REAL_MIDSEASON
+
+
+class TestCachedNarrativesFromALegacyRowAreDropped:
+    """The narratives are PRE-RENDERED into the cache row, so fixing their
+    producer does not fix rows already on disk. The prompt-hash change
+    invalidates the LLM's cached OUTPUT but not its cached INPUT, so the false
+    sentence would simply be rewritten. Also surfaced by codex."""
+
+    _FALSE = ["Manchester City fans: rooting against Arsenal (1 spot and 7 pts ahead)."]
+    _SEED = [{"name": "Arsenal FC", "position": 1, "points": 85, "played": 0}]
+    _CURRENT = [{"name": "Arsenal FC", "position": 3, "points": 6, "played": 2}]
+
+    @staticmethod
+    def _sel(extra):
+        from dispatcharr_ranked_matchups._util import trusted_impact_narratives
+        return trusted_impact_narratives(extra)
+
+    def test_dropped_when_the_row_is_flagged_seeded(self):
+        assert self._sel({"impact_narratives": self._FALSE,
+                          "standings_table": self._SEED,
+                          "standings_seeded": True}) == []
+
+    def test_dropped_when_the_row_only_looks_seeded(self):
+        assert self._sel({"impact_narratives": self._FALSE,
+                          "standings_table": self._SEED}) == []
+
+    def test_kept_when_the_row_carries_a_current_table(self):
+        assert self._sel({"impact_narratives": self._FALSE,
+                          "standings_table": self._SEED,
+                          "standings_table_current": self._CURRENT,
+                          "standings_seeded": True}) == self._FALSE
+
+    def test_kept_for_an_ordinary_midseason_legacy_row(self):
+        assert self._sel({"impact_narratives": self._FALSE,
+                          "standings_table": self._CURRENT}) == self._FALSE
+
+    def test_deterministic_description_drops_them(self, plugin):
+        g = {"home": "Arsenal FC", "away": "Chelsea FC", "sport_prefix": "EPL",
+             "extra": {"standings_table": self._SEED,
+                       "impact_narratives": self._FALSE}}
+        out = plugin._build_description(g=g, tagline="", placeholder=False)
+        assert "7 pts ahead" not in out
+
+
+class TestStatusMarksSeededRanks:
+    def test_seeded_row_is_marked(self, plugin):
+        g = {"extra": {"standings_table": [
+            {"name": "A", "position": 1, "points": 85, "played": 0}]}}
+        assert plugin._row_ranks_are_seeded(g) is True
+
+    def test_real_row_is_not_marked(self, plugin):
+        g = {"extra": {"standings_table": [
+            {"name": "A", "position": 1, "points": 9, "played": 3}]}}
+        assert plugin._row_ranks_are_seeded(g) is False
+
+
+class TestBoundaryProse:
+    """`boundary_summary` reads "Top 6 -> Libertadores * 7-12 -> Sudamericana
+    * bottom 4 -> relegation", which is a legend, not a sentence. Jake, on
+    reading it off the live guide: "it DOES read like a spreadsheet"."""
+
+    @staticmethod
+    def _ctx(plugin, code):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        return LEAGUE_CONTEXTS[code]
+
+    def test_premier_league_reads_as_a_sentence(self, plugin):
+        out = plugin._boundary_prose(self._ctx(plugin, "PL"), 20)
+        assert out == (
+            "The winner takes the title, 2nd to 4th take Champions League "
+            "places, 5th to 7th take Europa or Conference League places, and "
+            "the bottom 3 go down."
+        )
+
+    def test_labels_keep_their_capitalisation(self, plugin):
+        """str.capitalize() lowercases the REST of the string, which turned
+        "2nd to 4th take UCL" into "... take ucl"."""
+        out = plugin._boundary_prose(self._ctx(plugin, "PL"), 20)
+        assert "Champions League" in out
+        assert "ucl" not in out
+
+    def test_unknown_table_size_states_the_line_instead_of_guessing(self, plugin):
+        """Without the table we know the cutoff but not how many sit below
+        it, so say where the line is rather than inventing a count."""
+        out = plugin._boundary_prose(self._ctx(plugin, "PL"), None)
+        assert "anything below 17th goes down" in out
+        assert "bottom" not in out
+
+    def test_promotion_league_uses_its_own_bands(self, plugin):
+        out = plugin._boundary_prose(self._ctx(plugin, "ELC"), 24)
+        assert out == (
+            "The top 2 take automatic promotion, 3rd to 6th take the "
+            "promotion playoff, and the bottom 3 go down."
+        )
+
+    def test_non_league_formats_get_nothing(self, plugin):
+        """Win-count and knockout bands do not describe table positions, so
+        the caller falls back to boundary_summary unchanged."""
+        assert plugin._boundary_prose(self._ctx(plugin, "CFB"), None) is None
+
+    def test_an_unmapped_label_degrades_to_the_raw_label(self, plugin):
+        """Adding a band to LEAGUE_CONTEXTS must not break the renderer."""
+        class Ctx:
+            format = "league"
+            thresholds = [(4, "cup_spot", 1.0)]
+        assert plugin._boundary_prose(Ctx(), 20) == "The top 4 take cup_spot."
+
+    def test_every_shipped_league_renders(self, plugin):
+        """Fail on the instrument: if the format check ever excluded
+        everything, all the tests above would still pass individually."""
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        rendered = [
+            code for code, ctx in LEAGUE_CONTEXTS.items()
+            if plugin._boundary_prose(ctx, 20) is not None
+        ]
+        assert len(rendered) >= 8, f"only {len(rendered)} leagues rendered"
+
+
+class TestMatchdayReadsAsTimeRemaining:
+    def test_reports_what_is_left_not_the_index(self, plugin):
+        g = {"home": "A FC", "away": "B FC", "sport_prefix": "EPL",
+             "favorites_matched": [], "closeness": None, "spread": None,
+             "extra": {"matchday": 35, "matchdays_total": 38,
+                       "fd_competition_code": "PL"}}
+        out = plugin._build_description(g, tagline="title race", placeholder=False)
+        assert "3 matchdays left after this one." in out
+        assert "Matchday 35 of 38" not in out
+
+    def test_singular_for_one_left(self, plugin):
+        g = {"home": "A FC", "away": "B FC", "sport_prefix": "EPL",
+             "favorites_matched": [], "closeness": None, "spread": None,
+             "extra": {"matchday": 37, "matchdays_total": 38,
+                       "fd_competition_code": "PL"}}
+        assert "1 matchday left after this one." in plugin._build_description(
+            g, tagline="", placeholder=False)
+
+    def test_final_matchday_is_named(self, plugin):
+        g = {"home": "A FC", "away": "B FC", "sport_prefix": "EPL",
+             "favorites_matched": [], "closeness": None, "spread": None,
+             "extra": {"matchday": 38, "matchdays_total": 38,
+                       "fd_competition_code": "PL"}}
+        assert "The final matchday." in plugin._build_description(
+            g, tagline="", placeholder=False)
+
+    def test_catchup_keeps_the_explicit_label(self, plugin):
+        """An end-of-season "Matchday 40 of 46" reads as six games left when
+        it is a postponement being replayed late and they have one (#3)."""
+        g = {"home": "A FC", "away": "B FC", "sport_prefix": "EPL",
+             "favorites_matched": [], "closeness": None, "spread": None,
+             "extra": {"matchday": 35, "matchdays_total": 38,
+                       "fd_competition_code": "PL",
+                       "standings_table_current": [
+                           {"name": "A FC", "position": 1, "points": 80, "played": 37}]}}
+        assert "Catch-up matchday 35 of 38." in plugin._build_description(
+            g, tagline="", placeholder=False)

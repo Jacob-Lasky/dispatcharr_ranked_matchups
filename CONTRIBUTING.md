@@ -70,9 +70,18 @@ LEAGUE_CONTEXTS["PD"] = LeagueContext(
 The `thresholds` list is `(cutoff, label, weight)` triples. For league-
 format contexts (the default), `cutoff` is an integer position (top-side
 labels fire on `pos <= cutoff`; bottom-side labels containing "relegat",
-"demot", or "drop" fire on `pos > cutoff`). `weight` is the cross-sport
-consequence weight from the leverage × consequence calibration
-(relegation/title = 5, UCL = 4, Europa = 2). See TUNING_REPORT.md.
+"demot", or "drop" fire on `pos > cutoff`). That direction test is
+`_util.is_bottom_outcome`, shared by the scoring path and the description
+builder — name a new bottom band so it matches, or the prose will report a
+mid-table side as relegation-bound while the score says otherwise. `weight`
+is the cross-sport consequence weight from the leverage × consequence
+calibration (relegation/title = 5, UCL = 4, Europa = 2). See
+TUNING_REPORT.md.
+
+`matchdays_total` is also the season length the description builder falls
+back to when a source stamps only a week number, so it decides both "week 3
+of 12" and how many games a team has left against its win thresholds. Leave
+it at 0 only for formats with no fixed length (knockouts).
 
 For knockout-format contexts (UCL, Europa League knockouts), set
 `format="knockout"` and use FD.org stage strings as cutoffs:
@@ -192,9 +201,34 @@ For the score signals to work fully:
 - `extra["stage"]` — `"FINAL"` / `"SEMI_FINALS"` / etc. for knockouts;
   fires the tournament-stage signal.
 - `extra["standings_table"]` — for standings-based sports, full league
-  with `{"name", "position", "points", "played"}`. Needed for the
-  impact-on-favorites narrative ("Wrexham sits #6 (70 pts), 1 spot
-  and 6 pts behind ...").
+  with `{"name", "position", "points", "played"}`. This is the **scoring**
+  table: it feeds the rank pool, the exhaustiveness flag and the
+  favorites-in-league set. Early in a season the soccer source deliberately
+  replaces it with LAST season's final table as a ranking prior
+  (`_fetch_standings_with_seed`), so **it is not a true statement about the
+  league right now**.
+- `extra["standings_table_current"]` — the real current-season table, same
+  shape, always. **Anything that writes a sentence a human reads must use
+  this one**, never `standings_table`: the LLM prompt, the deterministic
+  description, and the impact-on-favorites narrative ("Wrexham sits #6
+  (70 pts), 1 spot and 6 pts behind ..."). Rendering the seeded table as the
+  live one is #209, which put a false claim in 16 of 21 live descriptions.
+- `extra["standings_prev_final"]` — last season's final table, same shape,
+  present only when it was fetched (the seed window). Keeps its real
+  `played` counts because it is only ever rendered under an explicit
+  "last season" label.
+- `extra["standings_seeded"]` — `True` when `standings_table` is the
+  previous-season prior rather than the live table. Read
+  `_util.current_standings_table(extra)` rather than testing this by hand;
+  it is the single place that knows which table may be called "this season".
+- `extra["h2h"]` — prior meetings between exactly these two teams, most
+  recent first, as `{"date", "home", "away", "home_goals", "away_goals",
+  "season"}`. Build it with `sources.soccer.build_h2h_entries`.
+- `extra["record_home"]` / `extra["record_away"]` — for **win-count** sports
+  (`LeagueContext.format == "win_count"`), `{"wins", "losses"}` or `None` if
+  the team has not played. Without it a preview can only say a team is
+  "chasing bowl eligibility", which is true of every team in week 1 and
+  therefore says nothing.
 
 ### If your source reads ESPN's site API
 

@@ -31,7 +31,13 @@ import requests
 
 from .base import GameRow, MatchResult, SoccerTeamRow, SportSource
 from .bracket import AggregateLegSource
-from .._util import parse_iso_utc, poisson_sample as _poisson, redact_secrets
+from .._util import (
+    SEED_PLAYED_THRESHOLD,
+    is_bottom_outcome,
+    parse_iso_utc,
+    poisson_sample as _poisson,
+    redact_secrets,
+)
 
 
 class SoccerLeagueState(TypedDict):
@@ -213,7 +219,7 @@ def _fd_get(
 # WC fixtures fetch returned 429 because earlier league/cup competitions
 # in the iteration burned through the per-minute budget first.
 #
-# Two caches replace the per-source-instance fetch pattern:
+# Three caches replace the per-source-instance fetch pattern:
 #
 #   _TIER_FIXTURES_CACHE : one /v4/matches call returns fixtures for
 #                           every competition on the tier in a single
@@ -225,6 +231,12 @@ def _fd_get(
 #                           Keyed by fd_code so sibling sources
 #                           (wc_groups + wc_knockout) share one fetch
 #                           rather than each instance fetching its own.
+#   _PREV_SEASON_MATCHES_CACHE: LAST season's matches per competition,
+#                           for head-to-head history. Kept separate from
+#                           the current-season cache so a refresh needing
+#                           both does not evict one with the other. Only
+#                           populated inside the seed window; see
+#                           _fetch_prev_season_matches_for_code.
 #
 # Cache lifetime is "until _clear_fd_caches() runs"; plugin._action_
 # refresh calls it at the top of every refresh so each scheduler tick
@@ -232,6 +244,7 @@ def _fd_get(
 # cached responses.
 _TIER_FIXTURES_CACHE: "Optional[Tuple[Tuple[str, str, str], Dict[str, List[Dict]]]]" = None
 _SEASON_MATCHES_CACHE: Dict[str, List[Dict]] = {}
+_PREV_SEASON_MATCHES_CACHE: Dict[str, List[Dict]] = {}
 
 
 # FD.org's /v4/matches endpoint caps each call's window at 10 days
@@ -252,6 +265,7 @@ def _clear_fd_caches() -> None:
     global _TIER_FIXTURES_CACHE
     _TIER_FIXTURES_CACHE = None
     _SEASON_MATCHES_CACHE.clear()
+    _PREV_SEASON_MATCHES_CACHE.clear()
 
 
 def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dict]]:
@@ -347,30 +361,169 @@ def _fetch_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[Dict]:
     if fd_code in _SEASON_MATCHES_CACHE:
         return _SEASON_MATCHES_CACHE[fd_code]
     if not fd_api_key:
-        _SEASON_MATCHES_CACHE[fd_code] = []
         return []
     try:
         r = _fd_get(f"{FD_BASE}/competitions/{fd_code}/matches", fd_api_key)
         data = r.json()
     except Exception as e:
         logger.warning("[soccer:%s] all-matches fetch failed: %s", fd_code, e)
-        _SEASON_MATCHES_CACHE[fd_code] = []
+        # DO NOT cache the failure. This list feeds the Monte Carlo importance
+        # SIMULATOR, and since #209 it is also fetched earlier in the refresh
+        # for head-to-head. Caching [] on a transient 429 would hand the
+        # scorer an empty season it never asked for: importance would read the
+        # cached failure instead of retrying, `initial_state` would have no
+        # teams, and every game in that competition would silently score zero
+        # importance. Same rule the sibling CFBD fetcher states outright
+        # ("DO NOT cache a failure") in sources/ncaaf.py::_fetch_raw_season.
         return []
     matches: List[Dict] = data.get("matches", []) or []
     _SEASON_MATCHES_CACHE[fd_code] = matches
     return matches
 
-# When the current season's median playedGames falls below this number,
-# replace the current standings with the previous season's final table as
-# a "position prior." Without the seed, MD1-3 produces tied scores (no
-# rank_pair signal, no stakes signal) and the algorithm has nothing but
-# favorites + spread to work with. See TUNING_REPORT.md finding #2.
-# DO NOT raise this above ~5: by MD5 enough matches have played that
-# the current-season position is a stronger signal than the prior year's.
-# Public (no underscore) because the sim harness imports it to mirror
-# this exact cutoff in its standings_as_of replay; a divergence would
-# desync the sim's MD1-3 output from production.
-SEED_PLAYED_THRESHOLD = 5
+# SEED_PLAYED_THRESHOLD is imported at the top of this module rather than
+# defined here, which also keeps `sources.soccer.SEED_PLAYED_THRESHOLD`
+# resolving for the external sim harness that imports it from this path to
+# mirror the cutoff in its standings_as_of replay. The single definition lives
+# in _util because llm_descriptions needs it too and must not import this
+# module. See _util.SEED_PLAYED_THRESHOLD for the rationale and the bound.
+
+
+def _serialize_table(table: List[Dict]) -> List[Dict[str, Any]]:
+    """FD.org standings rows → the JSON-safe shape that rides in
+    `GameRow.extra` into cache.json. Single definition so the scoring table,
+    the current table and last season's final table cannot drift into three
+    slightly different shapes.
+    """
+    return [
+        {
+            "name": e["name"],
+            "position": e["position"],
+            "points": e.get("points"),
+            "played": e.get("playedGames"),
+            "goal_difference": e.get("goalDifference"),
+        }
+        for e in table
+    ]
+
+
+class StandingsBundle(NamedTuple):
+    """The three views of a league table, kept deliberately separate.
+
+    `scoring_table` is what the ranking/importance path consumes. Early in a
+    season it is the PREVIOUS season's final table (see
+    `_fetch_standings_with_seed`), which makes it a good prior and a false
+    statement of fact.
+
+    `current_table` is always this season's real table, however empty.
+
+    `prev_final_table` is last season's final table, present only when it was
+    fetched (i.e. during the seed window). It keeps its real `playedGames`
+    because it is only ever rendered under an explicit "last season" label.
+
+    DO NOT feed `scoring_table` to anything that writes a sentence a human
+    reads. That conflation is #209.
+    """
+    position_by_team: Dict[str, int]
+    scoring_table: List[Dict]
+    current_table: List[Dict]
+    prev_final_table: List[Dict]
+    seeded: bool
+
+
+def _fetch_prev_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[Dict]:
+    """Last season's finished matches for one competition, cached by fd_code.
+
+    Costs one extra FD.org call per competition, so callers MUST gate it on
+    actually needing last-season history: `fetch_upcoming` only calls it
+    inside the seed window, where the current season is too young to contain
+    a prior meeting between any two teams. Mid-season the current-season
+    match list already answers the head-to-head question for free.
+    """
+    if fd_code in _PREV_SEASON_MATCHES_CACHE:
+        return _PREV_SEASON_MATCHES_CACHE[fd_code]
+    if not fd_api_key:
+        return []
+    season = _previous_season_start_year()
+    try:
+        r = _fd_get(
+            f"{FD_BASE}/competitions/{fd_code}/matches",
+            fd_api_key,
+            params={"season": season},
+        )
+        data = r.json()
+    except Exception as e:
+        logger.warning("[soccer:%s] prev-season matches fetch failed (season=%s): %s",
+                       fd_code, season, e)
+        # Not cached, for the same reason as the current-season fetch above:
+        # one transient 429 would otherwise drop head-to-head for every
+        # fixture in this competition for the whole refresh. This list feeds
+        # prose only, so a retry is cheap and a wrong answer is not.
+        return []
+    matches: List[Dict] = data.get("matches", []) or []
+    _PREV_SEASON_MATCHES_CACHE[fd_code] = matches
+    return matches
+
+
+def _match_final_score(match: Dict) -> Optional[Tuple[int, int]]:
+    """Full-time (home, away) goals for a FINISHED match, else None.
+
+    Reads `score.fullTime`, which is the result AFTER extra time but BEFORE
+    penalties in FD.org's model. That is the right number for a league
+    head-to-head line; shootouts do not occur in league play.
+    """
+    if (match.get("status") or "").upper() != "FINISHED":
+        return None
+    full = ((match.get("score") or {}).get("fullTime") or {})
+    hg, ag = full.get("home"), full.get("away")
+    if not isinstance(hg, int) or not isinstance(ag, int):
+        return None
+    return hg, ag
+
+
+# Across BOTH seasons. Two league seasons yield at most four meetings, so
+# this is a backstop against a competition with an unusual format (group +
+# knockout in one code) flooding the prompt, not a routine trim.
+_H2H_TOTAL_LIMIT = 4
+
+
+def build_h2h_entries(
+    matches: List[Dict],
+    home: str,
+    away: str,
+    season_label: str,
+    limit: int = 4,
+) -> List[Dict[str, Any]]:
+    """Prior meetings between exactly these two teams, most recent first.
+
+    Returns plain dicts (JSON-safe: these ride in `GameRow.extra` into
+    cache.json) shaped for the prompt renderer:
+    `{date, home, away, home_goals, away_goals, season}`.
+
+    Name matching is EXACT because both the fixture and the match list come
+    from the same FD.org payloads, so the strings agree byte-for-byte. DO NOT
+    add fuzzy matching here: a near-miss would attribute another club's result
+    to this fixture, which is precisely the class of falsehood #209 is about.
+    """
+    pair = {home, away}
+    out: List[Dict[str, Any]] = []
+    for m in matches:
+        mh = (m.get("homeTeam") or {}).get("name")
+        ma = (m.get("awayTeam") or {}).get("name")
+        if not mh or not ma or {mh, ma} != pair:
+            continue
+        score = _match_final_score(m)
+        if score is None:
+            continue
+        out.append({
+            "date": (m.get("utcDate") or "")[:10],
+            "home": mh,
+            "away": ma,
+            "home_goals": score[0],
+            "away_goals": score[1],
+            "season": season_label,
+        })
+    out.sort(key=lambda e: e["date"], reverse=True)
+    return out[:limit]
 
 
 def _h2h_to_closeness(
@@ -603,9 +756,12 @@ class SoccerSource(SportSource):
             logger.warning("[soccer:%s] no Football-Data.org key", self.config.fd_code)
             return []
 
-        position_by_team, table_full = (
-            self._fetch_standings_with_seed() if self.config.use_position_as_rank else ({}, [])
+        bundle = (
+            self._fetch_standings_with_seed() if self.config.use_position_as_rank
+            else StandingsBundle({}, [], [], [], False)
         )
+        position_by_team = bundle.position_by_team
+        table_full = bundle.scoring_table
         fixtures = self._fetch_fixtures(days_ahead)
         if not fixtures:
             logger.info("[soccer:%s] no upcoming fixtures in next %d days",
@@ -617,6 +773,31 @@ class SoccerSource(SportSource):
         # devigged h2h moneyline market; downstream we populate
         # GameRow.closeness (not GameRow.spread).
         closeness_by_pair = self._fetch_closeness()
+
+        # Head-to-head history (#209).
+        #
+        # COST: the current-season list is shared with the Monte Carlo
+        # importance simulator via _SEASON_MATCHES_CACHE, so it is usually
+        # already paid for; when importance is disabled it costs one FD.org
+        # call per competition. Last season's is ALWAYS an extra call, so it
+        # is taken only inside the seed window, which is exactly when the
+        # current season is too young to hold a prior meeting. Both are
+        # per-competition and cached for the whole refresh, and both sit
+        # AFTER the `if not fixtures: return []` early exit above, so a
+        # competition with nothing on the slate pays nothing.
+        #
+        # ORDER IS LOAD-BEARING: entries are concatenated in this order and
+        # `build_h2h_entries` sorts only WITHIN each list, so current season
+        # must come first for the combined list to be genuinely most-recent
+        # first, as the prompt claims it is.
+        h2h_matches: List[Tuple[List[Dict], str]] = [
+            (self._fetch_all_season_matches(), "this season"),
+        ]
+        if bundle.seeded:
+            h2h_matches.append((
+                _fetch_prev_season_matches_for_code(self.fd_api_key, self.config.fd_code),
+                "last season",
+            ))
 
         rows: List[GameRow] = []
         for f in fixtures:
@@ -663,16 +844,24 @@ class SoccerSource(SportSource):
                     # downstream. Points + played are used to build natural-
                     # language narrative ("City sits #2, 1 spot and 3 pts
                     # ahead of Man United").
-                    "standings_table": [
-                        {
-                            "name": e["name"],
-                            "position": e["position"],
-                            "points": e.get("points"),
-                            "played": e.get("playedGames"),
-                            "goal_difference": e.get("goalDifference"),
-                        }
-                        for e in table_full
-                    ],
+                    "standings_table": _serialize_table(table_full),
+                    # The REAL current-season table, always. `standings_table`
+                    # above may be last season's (the ranking prior), so it is
+                    # NOT safe to describe as "this season". Anything writing a
+                    # sentence a human reads must prefer this key. See #209.
+                    "standings_table_current": _serialize_table(bundle.current_table),
+                    # Last season's final table, present only when fetched
+                    # (seed window). Real playedGames retained: it is only ever
+                    # rendered under an explicit "last season" label.
+                    "standings_prev_final": _serialize_table(bundle.prev_final_table),
+                    # True when `standings_table` is the previous season's
+                    # table standing in for a table too young to rank on.
+                    "standings_seeded": bundle.seeded,
+                    "h2h": [
+                        entry
+                        for matches, label in h2h_matches
+                        for entry in build_h2h_entries(matches, home, away, label)
+                    ][:_H2H_TOTAL_LIMIT],
                 },
             ))
         return rows
@@ -717,11 +906,11 @@ class SoccerSource(SportSource):
                 })
         return out, rich
 
-    def _fetch_standings_with_seed(self) -> Tuple[Dict[str, int], List[Dict]]:
+    def _fetch_standings_with_seed(self) -> "StandingsBundle":
         """Current season's table if it has matchdays played; otherwise
-        replace it entirely with the previous season's final standings as
-        a "position prior." Produces sane MD1-3 ranks instead of the
-        all-3.99-tie cold start. See TUNING_REPORT.md finding #2.
+        replace the SCORING table entirely with the previous season's final
+        standings as a "position prior." Produces sane MD1-3 ranks instead of
+        the all-3.99-tie cold start. See TUNING_REPORT.md finding #2.
 
         Trade-off: teams promoted INTO this league won't appear in the
         seed (they were in a different competition last year) and stay
@@ -729,16 +918,37 @@ class SoccerSource(SportSource):
         positional signal anyway. The 17 carry-over teams get realistic
         ranks; the 3 promoted teams fall back to the existing
         one-ranked-one-unranked rank-pair path.
+
+        DO NOT collapse the returned bundle back to a single table. The seeded
+        table is a RANKING PRIOR and is a factually false description of the
+        league right now: it carries last season's points against this
+        season's fixture. Prose that renders it as the live table states
+        outright falsehoods ("Arsenal's seven-point cushion at the top" on
+        matchday 3, when Arsenal are 3rd and 3 points behind). See #209.
+        `scoring_table` feeds ranks; `current_table` is the only one any
+        human-facing sentence may describe as "this season".
         """
         current_by_team, current_table = self._fetch_standings()
         plays = [e.get("playedGames") or 0 for e in current_table]
         median_played = sorted(plays)[len(plays) // 2] if plays else 0
         if median_played >= SEED_PLAYED_THRESHOLD:
-            return current_by_team, current_table
+            return StandingsBundle(
+                position_by_team=current_by_team,
+                scoring_table=current_table,
+                current_table=current_table,
+                prev_final_table=[],
+                seeded=False,
+            )
         prev_year = _previous_season_start_year()
         seed_by_team, seed_table = self._fetch_standings(season=prev_year)
         if not seed_table:
-            return current_by_team, current_table
+            return StandingsBundle(
+                position_by_team=current_by_team,
+                scoring_table=current_table,
+                current_table=current_table,
+                prev_final_table=[],
+                seeded=False,
+            )
         # Reset playedGames to 0: the seed represents a fresh season's
         # prior, not last year's residual. Downstream consumers
         # (build_impact_narratives, the matcher's rank cap) read these
@@ -759,7 +969,15 @@ class SoccerSource(SportSource):
             "[soccer:%s] using previous-season seed (median_played=%d, season=%s)",
             self.config.fd_code, median_played, prev_year,
         )
-        return seed_by_team, fresh_table
+        return StandingsBundle(
+            position_by_team=seed_by_team,
+            scoring_table=fresh_table,
+            current_table=current_table,
+            # Unmodified: this one IS last season, and is labelled as such
+            # everywhere it surfaces, so playedGames stays truthful.
+            prev_final_table=seed_table,
+            seeded=True,
+        )
 
     # ---------- fixtures ----------
 
@@ -899,15 +1117,10 @@ class SoccerSource(SportSource):
             return []
         return [label for _, label, _ in ctx.thresholds]
 
-    @staticmethod
-    def _is_bottom_outcome(label: str) -> bool:
-        """Direction inference for an outcome band. Bottom-side outcomes
-        (relegation, demotion) fire on positions worse than the cutoff;
-        top-side outcomes (title, UCL, Europa, promotion, playoff) fire on
-        positions at or above the cutoff. Detected by label substring.
-        """
-        l = label.lower()
-        return "relegat" in l or "demot" in l or "drop" in l
+    # Direction inference for an outcome band, shared with the prose path.
+    # See _util.is_bottom_outcome: the two MUST agree on every label or the
+    # description contradicts the score.
+    _is_bottom_outcome = staticmethod(is_bottom_outcome)
 
     def estimate_strengths(self) -> Dict[str, Dict[str, float]]:
         """Per-team home/away goal averages from finished matches. Lahvička

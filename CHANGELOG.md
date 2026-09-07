@@ -5,6 +5,458 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.28.0] - 2026-09-06
+
+### Fixed
+
+- **LLM descriptions were largely false: 16 of 21 live previews contained at
+  least one false, checkable claim** (#209). Audited by reproducing the exact
+  production prompt for every described game (21/21 byte-exact `prompt_hash`
+  matches) and checking each claim against live football-data.org standings.
+
+  The dominant cause was not a thin prompt. Early in a season
+  `_fetch_standings_with_seed` deliberately swaps the SCORING table for last
+  season's final table as a ranking prior, and the prompt builder rendered
+  that as the current standings with nothing marking the swap. 14 of 25 games
+  were affected. The model faithfully described what it was told:
+
+  - "Arsenal's seven-point cushion at the top" — Arsenal were 3rd, 3 points
+    behind the leader.
+  - "Manchester United sit third but Everton are scrapping just outside the
+    top four" — United 12th, Everton 10th. Fully inverted.
+  - "Osasuna sits just two points above the relegation zone ... a dogfight to
+    avoid the bottom three" — they were 6th and 5th.
+
+  The seeded table now travels alongside the real one rather than replacing
+  it. `extra["standings_table"]` keeps its scoring meaning and behaviour;
+  `extra["standings_table_current"]` is the real table and is what every
+  human-facing sentence reads, via `_util.current_standings_table`. Fixed in
+  all three places the falsehood reached: the LLM prompt, the deterministic
+  description (`_build_standings_posture_line`), and the impact-on-favorites
+  narrative.
+
+- **Promoted teams had no row anywhere in the prompt** and the model invented
+  a league position for them (Monza, Malaga, Troyes on the audited slate).
+  Absence is now stated: "did not play in this league last season (newly
+  promoted)".
+
+- **Boundary rules without boundary rows.** The prompt gave "bottom 4 →
+  relegation" and a window around each team but never the rows at the line, so
+  every "N points clear of the drop" was a guess. This broke descriptions even
+  where the standings were correct (Remo called "three points above the
+  relegation zone" while 19th, inside it). Each team's exact gaps are now
+  precomputed. Tie-tolerant: FD.org shares a position between tied teams and
+  skips the next, so a real PL table had no row at 18 at all and an exact
+  cutoff lookup silently dropped every relegation line.
+
+- **Nested top bands read as the wrong one.** 3rd place satisfies both the
+  top-4 and top-7 cutoffs, so a UCL-place side was reported as "in the Europa
+  places". Only the tightest satisfied top band is now reported.
+
+- **The table slice was centred on the seeded ranks**, so the Osasuna/Alaves
+  fixture (5th and 6th now, 16th and 14th last season) rendered a window
+  containing neither team.
+
+### Added
+
+- **Last season's final table and previous meetings** in the prompt, both
+  explicitly labelled. Early in a season this is the only real form guide
+  there is. Head-to-head spans the current season always (free: the match list
+  is already fetched for the importance simulator) and last season only inside
+  the seed window (one extra FD.org call per competition, taken exactly when
+  the current season is too young to hold a prior meeting).
+
+- **Season phase, for every sport.** A game is described as at the opener, in
+  the early season, midseason, or the run-in, with guidance attached. The
+  model was framing a week-1 opener as a run-in because nothing told it
+  otherwise.
+
+- **Records and win-threshold distances for win-count sports.** College
+  football previews carried a week number and nothing else, so the only thing
+  the model could say was that both teams were "chasing bowl eligibility",
+  which is equally true of all 130 teams in week 1. Now: "5-4. 3 games left.
+  1 more win for bowl eligible." Unreachable thresholds are omitted rather
+  than dangled. Derived from the season payload `_fetch_raw_season` already
+  caches, so it costs no extra CFBD request.
+
+- **Poll ranks and neutral-site / conference-game facts** in the prompt. The
+  AP ranks were already in every cache row and simply never rendered, so a
+  #9-vs-#24 meeting was previewed as "two programs chasing bowl eligibility".
+
+- **System-prompt guardrails** against stating any position, record, gap or
+  zone proximity not present in the supplied lines, against reading the
+  reachable-outcome band list as urgency, and against describing last season
+  as the current standing. `prompt_hash` folds `SYSTEM_PROMPT`, so every
+  cached description written under the old rules is invalidated automatically.
+
+### Fixed (second review round, external check)
+
+An external review (codex, gpt-5.6-sol) of the fix above found four further
+paths by which the same falsehood survived, plus a scoring regression the fix
+itself introduced. All are addressed here.
+
+- **Cache rows written before this release carried neither the new flag nor
+  the new table**, so the selector fell through and returned the seeded table
+  anyway. Every `apply` between upgrading and the next refresh would have kept
+  serving the original false prose. Now caught by SHAPE: `looks_seeded()`
+  keys on every team being on zero games played while somebody has points,
+  which is physically impossible for a real table and is exactly what the
+  seeding step produces. A genuine pre-season table (zero points AND zero
+  games) is not flagged.
+
+- **The "rooting against X" narratives are pre-rendered INTO the cache row**,
+  so fixing their producer did not fix rows already on disk. The prompt-hash
+  change invalidates the LLM's cached OUTPUT but not its cached INPUT, so the
+  false sentence would simply have been rewritten. Both consumers now read
+  them through `trusted_impact_narratives`, which drops them when the row they
+  came from cannot be trusted.
+
+- **A transient Football-Data.org failure could zero the importance score for
+  a whole competition.** Since this release the current-season match list is
+  fetched early, for head-to-head; it was also cached as `[]` on failure, and
+  the Monte Carlo simulator reads that same cache later in the refresh. A 429
+  during the fetch phase would therefore hand the scorer an empty season even
+  if the provider recovered. Neither match-list fetch caches a failure now,
+  matching the rule the sibling CFBD fetcher already states outright.
+
+- **An unplayed table was rendered as a standing.** FD.org assigns positions
+  before a ball is kicked, so the model could read "Currently in: title" off a
+  team with no games while the opener guidance in the same prompt said nothing
+  had been decided. The table and the posture lines are now suppressed until
+  at least one game has been played.
+
+- **Tied rows made a gap disappear depending on payload order.** Tied teams
+  share a position, and the position-to-row map kept whichever row came last;
+  if that one lacked points, an otherwise computable relegation gap silently
+  vanished. A row with usable points is now preferred.
+
+- **Three system-prompt rules could still license a false claim.** The
+  knockout rule treated the ABSENCE of series lines as permission for "win or
+  go home" framing, which is equally absent on a regular-season league fixture;
+  it now requires positive evidence of a knockout. The run-in rule told the
+  model to be concrete about what a result settles even for two safe mid-table
+  sides; it now requires a posture line putting a band within reach. The
+  promoted-team rule said such a team has "NO record in this league" while the
+  prompt supplied its current-season record; it now says no LAST-SEASON record.
+
+- **The status action displayed seeded ranks unmarked**, so "EPL 1v10" on
+  matchday 3 read as the live table. Seeded rows are now suffixed `~`.
+
+- Guards for inputs that cannot arise from the current producers but would
+  render as fact if they ever did: a 0-0 or negative win-loss record now reads
+  as "has not played yet", `season_phase` rejects a negative count itself
+  rather than relying on its caller, and a season length smaller than the
+  games played is treated as unknown instead of printing "20 of 12".
+
+### Fixed (third round, read back off the live guide)
+
+Deployed, ran the pipeline, and read the descriptions off the actual channels.
+Three defects that no unit test could see, because in each case the LINE was
+correct and the model misused it.
+
+- **The model inverted a head-to-head result.** Given
+  "Santos FC 1-2 SC Internacional" it wrote "a Santos side that beat them
+  earlier this season". One of the three head-to-head claims on the slate, so
+  a 1-in-3 error rate on a brand-new feature. A bare scoreline asks the model
+  to work out who won from which number sits on which side of a hyphen; the
+  winner is now named in brackets, and the prompt says to use that verdict
+  rather than derive one.
+
+- **A points gap alone misled while the league was bunched.** Marseille sat
+  11th of 18 and two points clear of the drop zone on matchday 3, and the
+  preview called them "just outside the drop zone". Two points is small; five
+  places is not. Gap lines now carry both.
+
+- **A college-football preview asserted "Both programs finished last season
+  ranked"** with no last-season data anywhere in its prompt. The grounding
+  rules covered records, positions and gaps but never said last season was
+  off-limits when no last-season line is supplied. Now they do.
+
+Everything else on the slate checked out against the live table: Botafogo
+"five points clear of the drop zone" (13th on 30, first relegation place on
+25), Remo "four points from safety", Internacional "three points from safety",
+and Flamengo "level on points with Palmeiras but have played a game more"
+(52 from 26 against 52 from 25).
+
+### Fixed (fourth round, and the reason guards exist)
+
+Tightening the grounding rules moved the failure rather than removing it. Read
+back off the live guide again after each deploy:
+
+- **Seven NCAA soccer previews were the model REFUSING**, written verbatim into
+  the EPG: "I don't have the standings, results, group information, or season
+  progress data needed to write this preview. To ground the preview in facts
+  rather than invention, I'd need:". Two more emitted markdown headings. The
+  right instinct pointed at the wrong output: there is nobody to answer, the
+  reply goes straight to a viewer.
+
+- Told to always write something and given almost nothing, it **invented
+  conference affiliations instead**: "Patriot League" for a MEAC vs MAAC
+  fixture, "Pac-12" for UCLA (Big Ten since 2024) and for California (ACC),
+  "Ivy League" for a Brown vs Saint Peter's tie. Every one read as
+  authoritative and every one was wrong. It also placed a 6 September fixture
+  "late-season".
+
+**A rule the model can decline to follow is not a guarantee for text a viewer
+reads.** The prompt now asks for all of this, and `reject_reason()` is what
+makes it true: a response that is not a preview, that names a conference the
+context never supplied, or that places the season with no "Season progress"
+line to justify it, is treated as a failed call and the deterministic
+description ships instead. On the verification run the guard caught four
+inventions the prompt alone had not prevented.
+
+- **The guards ran only on a fresh call**, so a cached response that predated a
+  guard was served without ever meeting it: "late-season matches like this"
+  survived a deploy that had already added the check meant to catch it,
+  because the prompt hash had not moved and the cache short-circuited the
+  check. All checks now live in one gate applied to the cached path too, which
+  evicts and re-asks.
+
+Final live sweep: 24 descriptions, 0 flagged.
+
+### Fixed (fifth round: supply the fact instead of forbidding it)
+
+Jake, on the guard rejecting "Pac-12": *"wdym it invented pac-12?"* He was
+right and the correction matters. The Pac-12 exists with eight members in
+2026 and **Washington State is one of them**; Washington moved to the Big Ten
+in 2024. So that fixture really was Pac-12 vs Big Ten and the guard rejected a
+TRUE statement. (UCLA and California were genuinely wrong, both having left.)
+
+- **Conference is now SUPPLIED, at zero cost.** The `/games` payload the CFB
+  source already fetches carries `homeConference` and `awayConference` per
+  game. Forbidding a fact that was sitting in the response was the wrong shape
+  of fix; with it in the prompt the guard passes on its own, and the model
+  used it correctly on the next run ("against an ACC opponent").
+
+- **Withholding the venue made the model invent one.** Neutral-site games said
+  only "neither team is at home", so a game at Nissan Stadium in Nashville was
+  previewed as played "in Oxford", Ole Miss's home town. The venue is now
+  always stated, neutral or not, and the next run said "a neutral site in
+  Green Bay" off Lambeau Field.
+
+- **"Top-ranked Notre Dame ... carrying a #4 national ranking"**, which
+  contradicts itself inside one sentence. Rank adjectives now have to match
+  the number, enforced by a guard as well as a rule.
+
+### Fixed (rivalries, and two bugs that had been live for a while)
+
+Jake: *"if it's a rivalry game then that should be codified? is there a list
+of cups / rivalries we can see / index / pull from? they don't change very
+often."* Correct on all counts. CFBD has no rivalry endpoint (`/rivalries`
+and `/teams/rivals` both 404), so this is `rivalries.json`, which already
+existed with 20 CFB pairs and no trophy names.
+
+- **20 -> 85 CFB pairs, 78 carrying a trophy name**, seeded from cfblabs.com's
+  trophy index and cross-checked against Wikipedia's rivalry-games list. Every
+  school name is validated against the live CFBD roster by a test, because a
+  name spelled the way a human would is a silently dead entry.
+
+- **The Egg Bowl had never once been detected.** The entry said "Mississippi";
+  CFBD calls that school "Ole Miss", and neither string contains the other.
+
+- **`Texas Tech vs Texas A&M` was scored as the Lone Star Showdown.** The
+  matcher was a substring test, so the ["Texas", "Texas A&M"] entry matched
+  Texas Tech. That is a SCORING bug, not a cosmetic one: `is_rivalry` feeds
+  the score, so an ordinary fixture drew a rivalry bonus. Names are now
+  matched whole, with a short list of tokens that mark a DIFFERENT
+  institution ("State", "Tech", "A&M", directionals) so mascots and club
+  prefixes still match ("Tottenham" / "Tottenham Hotspur FC", "Marseille" /
+  "Olympique de Marseille") while "Texas" no longer matches "Texas Tech".
+
+- The Apple Cup, the fixture that started this, is indexed and named.
+
+### Fixed (the deterministic description read like a spreadsheet)
+
+Jake, on the fallback text: *"yeah, it DOES read like a spreadsheet."*
+
+Before:
+
+    Matchday 26 of 38. Top 6 -> Libertadores * 7-12 -> Sudamericana * bottom 4 -> relegation.
+    Cruzeiro EC 6th, 40 pts. CA Paranaense 3rd, 46 pts: 6 pts ahead.
+
+After:
+
+    12 matchdays left after this one. The winner takes the title, 2nd to 6th
+    take Libertadores places, 7th to 12th take Sudamericana places, and the
+    bottom 4 go down.
+    Cruzeiro EC are 6th on 42 points, CA Paranaense are 3rd on 45 points, 3 pts ahead.
+
+The band sentence is rendered from the same `thresholds` the arrow legend was
+written from, so the two cannot drift; where the table size is unknown it
+states the line ("anything below 17th goes down") rather than guessing how
+many cross it. Matchdays REMAINING replaces the index, keeping the explicit
+"Catch-up matchday" label for a postponement being replayed late (#3).
+
+### Fixed (post-refresh read-back)
+
+- **Naming the winner per row was not enough; the model mis-aggregated
+  across rows.** The Manchester derby h2h holds two meetings, one won by each
+  side, and the preview said "last season's derby victories" and attributed
+  them to the club that had won ONE. Reading a row and aggregating several
+  rows are different tasks, and the second is arithmetic, so
+  `h2h_tally_line` now states the record outright ("Across those meetings:
+  one win each for X and Y"). The regenerated description is accurate:
+  "United stunned them on this same ground last January", which is the 2-0
+  exactly.
+
+- **A guard for title counts asserted without an honours line.** Added while
+  investigating a Champions League preview that said Porto "has won the
+  competition twice before". That particular claim turned out to be GROUNDED
+  (the prompt carries "Honours (Champions League): FC Porto - 2 titles"; the
+  probe that suggested otherwise passed `stage=None` when the real value is
+  `LEAGUE_STAGE`). The guard is kept for the case where honours genuinely are
+  absent, and it correctly stays quiet when the line is present.
+
+### Known and accepted
+
+- **Soccer previews can name a stadium that is not in the prompt.** A
+  Manchester derby preview said "Old Trafford"; Football-Data.org publishes no
+  `venue` field at all, so the source cannot ground it. Left as-is: the
+  dangerous variant is a NEUTRAL site, where the home-ground inference is
+  actively wrong, and that is already covered because CFB does supply both the
+  venue and the neutral flag. For an ordinary home fixture the inference
+  follows from the fixture itself.
+
+### Fixed (rivalry sweep across the remaining seven sports)
+
+The soccer and CFB lists had been validated against real rosters; NFL, NBA,
+NHL, MLB, MLS, CBB and LigaMX never had been. Pulling their rosters found
+**16 dead entries out of 61 names**, none of which had ever reported
+anything, because a rivalry that never fires looks exactly like a fixture
+that is not a rivalry:
+
+- "Montreal Impact" (MLS) had been dead since the club was renamed CF
+  Montréal in **2021**.
+- "Los Angeles FC" is "LAFC" to ESPN, "New York Red Bulls" is "Red Bull New
+  York", "DC United" is "D.C. United".
+- "Los Angeles Clippers" is "LA Clippers"; "Washington" (NFL) is "Washington
+  Commanders".
+- Every LigaMX short form was wrong: "Club America" -> "América", "Chivas" ->
+  "Guadalajara", "Pumas" -> "Pumas UNAM", "Tigres" -> "Tigres UANL".
+
+Also **+29 pairs and +21 derby names**, each confirmed against a source
+(Wikipedia's MLS rivalry cups and NHL rivalries lists, ESPN's rivalries
+piece): El Tráfico, the Hudson River Derby, the Atlantic Cup, the Texas
+Derby, the California Clásico, the Trillium Cup, the Brimstone Cup, the Rocky
+Mountain Cup, the Heritage Cup, the Hell Is Real Derby, the Canadian
+Classique, the Subway Series, the Freeway Series, the Crosstown Classic, the
+Bay Bridge Series, the Battle of Alberta, the Battle of Ontario, El Súper
+Clásico, the Clásico Regiomontano, the Clásico Capitalino.
+
+Two things the sweep caught that are worth more than the entries:
+
+- **The NHL entries were RIGHT and my instrument was wrong.** I built the NHL
+  roster from `/v1/standings`, which spells the New York clubs "NY Rangers",
+  and the check condemned three correct entries. `sources/nhl.py` reads
+  `/v1/schedule`, which says "New York Rangers". The fixture is built from
+  the schedule now, and its comment says why. Validating against the wrong
+  endpoint would have broken working code to satisfy a broken test.
+
+- **A global rename map broke the Apple Cup.** Applying
+  "Washington" -> "Washington Commanders" across every sport also rewrote the
+  CFB entry, where "Washington" is the correct CFBD school. The roster check
+  did not catch it because it pooled every roster and accepted a name that
+  resolved SOMEWHERE. It now validates per sport family: soccer prefixes pool
+  (promotion and relegation move clubs between competitions), everything else
+  stands alone, and a test asserts an NFL club does not resolve against the
+  CFB roster.
+
+Coverage is now **224 pairs, 150 named, across 17 competitions**, every name
+validated against the roster its source actually publishes.
+
+### Fixed (the matcher, tightened a second time, to fail closed)
+
+Jake, on the diacritic folding: *"diacritics is interesting for matching.
+Barcelona for example?"* That question landed on a live bug.
+
+**Real Madrid vs Espanyol returned "El Clásico".** The token-subset matcher
+treated "FC Barcelona" as a subset of "RCD Espanyol de Barcelona", so the
+Clásico entry matched a fixture that is not the Clásico. Same class as the
+Texas Tech bug and the same consequence: `is_rivalry` feeds the score, so an
+ordinary league game drew a rivalry bonus.
+
+The lesson is about the SHAPE of the previous fix, not the token list. It
+carried a blocklist of tokens that mark a different institution ("State",
+"Tech", "A&M"), which is **fail-open by construction**: it rejects only what
+someone thought to list, and nobody thinks of a city name shared by two clubs
+until it fires. Matching is now WHOLE-NAME equality after normalizing and
+stripping a club-type suffix. Fail-closed, and the cost, spelling entries out
+in full, is paid once and checked by a test.
+
+Consequences, all applied:
+
+- Fifteen entries expanded to their source spelling ("Tottenham" ->
+  "Tottenham Hotspur", "Real Betis" -> "Real Betis Balompié", "Bologna" ->
+  "Bologna FC 1909", "Feyenoord" -> "Feyenoord Rotterdam").
+- Entries must now be internally consistent: BOTH names from the SAME source.
+  Ligue 1 carried "Paris Saint-Germain" (Football-Data.org) paired with
+  "Marseille" (SportsDB), which half-matched under the loose rule and matches
+  nothing under this one. It is two entries now, one per source.
+- The mascot-form case is gone: CFBD, the only college-football source,
+  reports the bare school name, so "Texas Longhorns" never reaches the
+  matcher and the entries are spelled CFBD's way.
+
+Diacritic folding stays and is doing its own job, which is why the question
+was a good one: it makes "Gremio FBPA" match "Grêmio FBPA" across sources
+that disagree about accents, WITHOUT the fail-open looseness that let a
+shared city name through.
+
+### Added (soccer rivalries, same treatment as CFB)
+
+Named derbies for every soccer competition with a source, verified against
+Wikipedia, ESPN and per-country derby indexes rather than recalled:
+
+| Competition | Pairs | Named |
+| --- | --- | --- |
+| EPL | 14 | 9 |
+| EFL | 9 | 7 |
+| La Liga | 7 | 6 |
+| Serie A | 8 | 6 |
+| Bundesliga | 5 | 4 |
+| Ligue 1 | 7 | 6 |
+| Eredivisie | 4 | 3 |
+| Primeira Liga | 4 | 2 |
+| Campeonato Brasileiro | 10 | 10 |
+
+Brazil, the Eredivisie and the Primeira Liga had sources but NO rivalry
+entries at all, so the Fla-Flu, the Grenal, De Klassieker and O Clássico were
+all scoring as ordinary league fixtures.
+
+- **Diacritics are folded in `_normalize`.** Football-Data.org writes "FC
+  Bayern München", "Grêmio FBPA" and "São Paulo FC"; a human editing this file
+  reaches for the ASCII form. Six freshly-written entries matched nothing for
+  exactly that reason, which is the Egg Bowl failure wearing an umlaut. The
+  entries are ALSO spelled the source's way, because the folding is a safety
+  net for other sources and not a licence to write them wrong here.
+
+- **`tests/fixtures/source_team_names.json`** snapshots every roster as its
+  source spells it (football-data.org and CFBD, 2026-09-06), and a test
+  asserts every rivalries.json name resolves against one. That is the guard
+  the Egg Bowl needed and did not have: a rivalry that never fires looks
+  exactly like a fixture that is not a rivalry, so nothing reported it. The
+  failure message distinguishes the two causes, a spelling that differs from
+  the source versus a club that left every tracked competition, and the
+  second has a two-name allowlist (Sheffield Wednesday, Saint-Étienne) with
+  reasons attached.
+
+### Changed
+
+- `SoccerSource._fetch_standings_with_seed` returns a `StandingsBundle`
+  (position map, scoring table, current table, previous-season final table,
+  seeded flag) instead of a 2-tuple.
+- `SEED_PLAYED_THRESHOLD` and the outcome-band direction predicate
+  (`is_bottom_outcome`) moved to `_util` as single definitions. Both were
+  facts the scoring path and the prose path had to agree on, and #209 shipped
+  precisely because the two paths disagreed about what the standings meant.
+  `sources.soccer.SEED_PLAYED_THRESHOLD` still resolves for the sim harness.
+- `_ordinal` consolidated into `_util.ordinal`; `plugin.py` and `honours.py`
+  each carried a copy.
+- `_is_catchup_matchday` reads the current table. On the seeded table every
+  `played` is forced to 0, so `max(played)` was 0 and no fixture could ever be
+  detected as a catch-up.
+- `test_util`'s redaction guard checks the parsed import rather than matching
+  a single-line regex, which failed on a correct multi-line import.
+
 ## [1.27.1] - 2026-08-31
 
 ### Fixed
