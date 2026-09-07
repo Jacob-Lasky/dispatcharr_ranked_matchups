@@ -1711,3 +1711,84 @@ class TestVenueAndRankAccuracy:
             "Top-ranked Notre Dame opens.",
             "National poll ranking:\n  - Notre Dame: ranked #4 of 25 in the national poll.",
         ) == "inflated ranking: top-ranked"
+
+
+class TestHeadToHeadTally:
+    """Naming the winner on each row was not enough. Given two meetings, one
+    won by each side, the model wrote "last season's derby victories" and
+    attributed them to the club that had won ONE of the two. Reading a row and
+    aggregating rows are different tasks; the second is arithmetic."""
+
+    DERBY = [
+        {"date": "2026-01-17", "home": "Manchester United FC", "away": "Manchester City FC",
+         "home_goals": 2, "away_goals": 0, "season": "last season"},
+        {"date": "2025-09-14", "home": "Manchester City FC", "away": "Manchester United FC",
+         "home_goals": 3, "away_goals": 0, "season": "last season"},
+    ]
+
+    def test_one_win_each_is_stated_plainly(self):
+        out = llm.h2h_tally_line(self.DERBY, "Manchester United FC", "Manchester City FC")
+        assert out == (
+            "Across those meetings: one win each for Manchester United FC and "
+            "Manchester City FC."
+        )
+
+    def test_an_uneven_record_is_counted(self):
+        entries = self.DERBY + [
+            {"date": "2025-03-01", "home": "Manchester United FC",
+             "away": "Manchester City FC", "home_goals": 1, "away_goals": 1,
+             "season": "last season"},
+        ]
+        out = llm.h2h_tally_line(entries, "Manchester United FC", "Manchester City FC")
+        assert out == (
+            "Across those meetings: Manchester United FC 1, Manchester City FC 1, 1 draw."
+        )
+
+    def test_a_single_meeting_needs_no_tally(self):
+        assert llm.h2h_tally_line(self.DERBY[:1], "A", "B") == ""
+
+    def test_the_tally_reaches_the_prompt(self):
+        g = {"home": "Manchester United FC", "away": "Manchester City FC",
+             "kickoff_local": "Today", "sport_label": "English Premier League",
+             "extra": {"h2h": self.DERBY}}
+        ctx = llm.build_llm_context(g, tagline="")
+        assert "one win each for Manchester United FC and Manchester City FC" in ctx
+
+
+class TestUngroundedTitleCount:
+    """A Champions League league-phase preview said Porto "has won the
+    competition twice before". True, and entirely ungrounded: honours_lines
+    fires only on KNOCKOUT games by deliberate scope, so the prompt carried no
+    honours line and the model supplied the number itself."""
+
+    CTX = "Match: Manchester City FC at FC Porto\nCompetition: UEFA Champions League"
+    WITH_HONOURS = CTX + "\nHonours (Champions League): FC Porto — 2 titles."
+
+    def test_the_porto_claim_is_caught(self):
+        assert llm.claims_a_title_count(
+            "a Porto side that has won the competition twice before", self.CTX)
+
+    def test_other_phrasings_are_caught(self):
+        for prose in (
+            "Porto are two-time champions of Europe.",
+            "a win would be their third title",
+            "Madrid have won it five times",
+        ):
+            assert llm.claims_a_title_count(prose, self.CTX), prose
+
+    def test_allowed_when_an_honours_line_supplies_it(self):
+        assert llm.claims_a_title_count(
+            "Porto have won the competition twice before", self.WITH_HONOURS) is None
+
+    def test_ordinary_prose_is_not_caught(self):
+        for prose in (
+            "Manchester City head to Portugal for a Champions League showdown.",
+            "City won the derby 3-0 last September.",
+            "Two wins from three would put them top.",
+        ):
+            assert llm.claims_a_title_count(prose, self.CTX) is None, prose
+
+    def test_it_falls_back(self):
+        assert llm.reject_reason(
+            "Porto have won the competition twice before.", self.CTX
+        ).startswith("ungrounded title count")

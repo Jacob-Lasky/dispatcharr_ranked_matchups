@@ -287,6 +287,36 @@ states the line ("anything below 17th goes down") rather than guessing how
 many cross it. Matchdays REMAINING replaces the index, keeping the explicit
 "Catch-up matchday" label for a postponement being replayed late (#3).
 
+### Fixed (post-refresh read-back)
+
+- **Naming the winner per row was not enough; the model mis-aggregated
+  across rows.** The Manchester derby h2h holds two meetings, one won by each
+  side, and the preview said "last season's derby victories" and attributed
+  them to the club that had won ONE. Reading a row and aggregating several
+  rows are different tasks, and the second is arithmetic, so
+  `h2h_tally_line` now states the record outright ("Across those meetings:
+  one win each for X and Y"). The regenerated description is accurate:
+  "United stunned them on this same ground last January", which is the 2-0
+  exactly.
+
+- **A guard for title counts asserted without an honours line.** Added while
+  investigating a Champions League preview that said Porto "has won the
+  competition twice before". That particular claim turned out to be GROUNDED
+  (the prompt carries "Honours (Champions League): FC Porto - 2 titles"; the
+  probe that suggested otherwise passed `stage=None` when the real value is
+  `LEAGUE_STAGE`). The guard is kept for the case where honours genuinely are
+  absent, and it correctly stays quiet when the line is present.
+
+### Known and accepted
+
+- **Soccer previews can name a stadium that is not in the prompt.** A
+  Manchester derby preview said "Old Trafford"; Football-Data.org publishes no
+  `venue` field at all, so the source cannot ground it. Left as-is: the
+  dangerous variant is a NEUTRAL site, where the home-ground inference is
+  actively wrong, and that is already covered because CFB does supply both the
+  venue and the neutral flag. For an ordinary home fixture the inference
+  follows from the fixture itself.
+
 ### Fixed (rivalry sweep across the remaining seven sports)
 
 The soccer and CFB lists had been validated against real rosters; NFL, NBA,

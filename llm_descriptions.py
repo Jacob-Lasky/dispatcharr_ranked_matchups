@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -672,6 +673,44 @@ def prev_season_lines(
     return out
 
 
+def h2h_tally_line(
+    entries: List[Dict[str, Any]], home: str, away: str
+) -> str:
+    """The head-to-head record across the listed meetings, as one sentence.
+
+    Naming the winner on each row was not enough. Given two meetings, one won
+    by each side, the model still wrote "last season's derby victories" and
+    attributed them to the club that had won ONE of the two. Reading a row is
+    a different task from aggregating several rows, and the second is
+    arithmetic, so it is done here. See #209.
+
+    Returns "" for fewer than two meetings, where the rows already say it.
+    """
+    if len(entries or []) < 2:
+        return ""
+    hw = aw = draws = 0
+    for e in entries:
+        hg, ag = e.get("home_goals"), e.get("away_goals")
+        if not isinstance(hg, int) or not isinstance(ag, int):
+            continue
+        if hg == ag:
+            draws += 1
+            continue
+        winner = e.get("home") if hg > ag else e.get("away")
+        if winner == home:
+            hw += 1
+        elif winner == away:
+            aw += 1
+    if hw + aw + draws < 2:
+        return ""
+    if hw == aw and draws == 0:
+        return f"Across those meetings: one win each for {home} and {away}."
+    parts = [f"{home} {hw}", f"{away} {aw}"]
+    if draws:
+        parts.append(f"{draws} draw{'s' if draws != 1 else ''}")
+    return "Across those meetings: " + ", ".join(parts) + "."
+
+
 def h2h_lines(entries: List[Dict[str, Any]]) -> List[str]:
     """Prior meetings, one line each, most recent first. Entries come from
     `sources.soccer.build_h2h_entries` and are already filtered to this exact
@@ -1009,10 +1048,14 @@ def build_llm_context(
 
     lines.extend(venue_context_lines(g))
 
-    meetings = h2h_lines(extra.get("h2h") or [])
+    h2h_entries = extra.get("h2h") or []
+    meetings = h2h_lines(h2h_entries)
     if meetings:
         lines.append("Previous meetings between these two, most recent first:")
         lines.extend(meetings)
+        tally = h2h_tally_line(h2h_entries, home, away)
+        if tally:
+            lines.append(tally)
 
     favorites_matched = g.get("favorites_matched") or []
     if favorites_matched:
@@ -1262,6 +1305,32 @@ def claims_a_rank_it_does_not_have(prose: str, context: str) -> Optional[str]:
     return None
 
 
+_TITLE_CLAIM_RE = re.compile(
+    r"\b(?:won\s+(?:it|the\s+(?:competition|title|trophy|tournament))\s+"
+    r"(?:once|twice|three|four|five|\d+)"
+    r"|(?:two|three|four|five|six|seven|\d+)[-\s]time\s+(?:champion|winner)s?"
+    r"|their\s+(?:first|second|third|fourth|fifth|\d+(?:st|nd|rd|th))\s+"
+    r"(?:title|crown|trophy))\b",
+    re.IGNORECASE,
+)
+
+
+def claims_a_title_count(prose: str, context: str) -> Optional[str]:
+    """A count of past titles with no "Honours" line to support it, or None.
+
+    Measured on the live guide 2026-09-07: a Champions League league-phase
+    preview said Porto "has won the competition twice before". True, and
+    entirely ungrounded: `honours.honours_lines` fires only on KNOCKOUT games
+    by deliberate scope, so the prompt carried no honours line at all and the
+    model supplied the number from its own knowledge. That is the same class
+    as the invented conferences, and being right by luck is not the standard.
+    """
+    if "Honours (" in context:
+        return None
+    m = _TITLE_CLAIM_RE.search(prose)
+    return m.group(0) if m else None
+
+
 def reject_reason(prose: str, context: str) -> Optional[str]:
     """Why this response must not reach the guide, or None if it may.
 
@@ -1288,6 +1357,9 @@ def reject_reason(prose: str, context: str) -> Optional[str]:
     rank = claims_a_rank_it_does_not_have(prose, context)
     if rank:
         return f"inflated ranking: {rank}"
+    titles = claims_a_title_count(prose, context)
+    if titles:
+        return f"ungrounded title count: {titles}"
     return None
 
 
