@@ -727,7 +727,7 @@
     ],
     [
       "Dallas Cowboys",
-      "Washington"
+      "Washington Commanders"
     ],
     [
       "Dallas Cowboys",
@@ -785,7 +785,7 @@
     ],
     [
       "Los Angeles Lakers",
-      "Los Angeles Clippers"
+      "LA Clippers"
     ],
     [
       "Miami Heat",
@@ -831,11 +831,17 @@
     ],
     [
       "Edmonton Oilers",
-      "Calgary Flames"
+      "Calgary Flames",
+      "the Battle of Alberta"
     ],
     [
       "Vancouver Canucks",
       "Calgary Flames"
+    ],
+    [
+      "Toronto Maple Leafs",
+      "Ottawa Senators",
+      "the Battle of Ontario"
     ]
   ],
   "MLB": [
@@ -849,7 +855,8 @@
     ],
     [
       "Chicago Cubs",
-      "Chicago White Sox"
+      "Chicago White Sox",
+      "the Crosstown Classic"
     ],
     [
       "Chicago Cubs",
@@ -857,7 +864,8 @@
     ],
     [
       "New York Yankees",
-      "New York Mets"
+      "New York Mets",
+      "the Subway Series"
     ],
     [
       "Los Angeles Dodgers",
@@ -874,24 +882,32 @@
     [
       "Baltimore Orioles",
       "Washington Nationals"
+    ],
+    [
+      "San Francisco Giants",
+      "Athletics",
+      "the Bay Bridge Series"
     ]
   ],
   "MLS": [
     [
       "LA Galaxy",
-      "Los Angeles FC"
+      "LAFC",
+      "El Tráfico"
     ],
     [
       "Seattle Sounders",
       "Portland Timbers"
     ],
     [
-      "New York Red Bulls",
-      "New York City FC"
+      "Red Bull New York",
+      "New York City FC",
+      "the Hudson River Derby"
     ],
     [
-      "DC United",
-      "New York Red Bulls"
+      "D.C. United",
+      "Red Bull New York",
+      "the Atlantic Cup"
     ],
     [
       "Atlanta United",
@@ -899,33 +915,76 @@
     ],
     [
       "Toronto FC",
-      "Montreal Impact"
+      "CF Montréal",
+      "the Canadian Classique"
     ],
     [
       "Sporting Kansas City",
       "FC Dallas"
+    ],
+    [
+      "LA Galaxy",
+      "San Jose Earthquakes",
+      "the California Clásico"
+    ],
+    [
+      "Columbus Crew",
+      "FC Cincinnati",
+      "the Hell Is Real Derby"
+    ],
+    [
+      "FC Dallas",
+      "Houston Dynamo FC",
+      "the Texas Derby"
+    ],
+    [
+      "Chicago Fire FC",
+      "FC Dallas",
+      "the Brimstone Cup"
+    ],
+    [
+      "Colorado Rapids",
+      "Real Salt Lake",
+      "the Rocky Mountain Cup"
+    ],
+    [
+      "Columbus Crew",
+      "Toronto FC",
+      "the Trillium Cup"
+    ],
+    [
+      "San Jose Earthquakes",
+      "Seattle Sounders FC",
+      "the Heritage Cup"
     ]
   ],
   "LigaMX": [
     [
-      "Club America",
-      "Chivas"
+      "América",
+      "Guadalajara",
+      "El Súper Clásico"
     ],
     [
-      "Club America",
+      "América",
       "Cruz Azul"
     ],
     [
-      "Pumas",
+      "Pumas UNAM",
       "Cruz Azul"
     ],
     [
       "Monterrey",
-      "Tigres"
+      "Tigres UANL",
+      "the Clásico Regiomontano"
     ],
     [
       "Toluca",
-      "Club America"
+      "América"
+    ],
+    [
+      "América",
+      "Pumas UNAM",
+      "the Clásico Capitalino"
     ]
   ],
   "Eredivisie": [

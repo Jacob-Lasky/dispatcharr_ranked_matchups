@@ -287,6 +287,53 @@ states the line ("anything below 17th goes down") rather than guessing how
 many cross it. Matchdays REMAINING replaces the index, keeping the explicit
 "Catch-up matchday" label for a postponement being replayed late (#3).
 
+### Fixed (rivalry sweep across the remaining seven sports)
+
+The soccer and CFB lists had been validated against real rosters; NFL, NBA,
+NHL, MLB, MLS, CBB and LigaMX never had been. Pulling their rosters found
+**16 dead entries out of 61 names**, none of which had ever reported
+anything, because a rivalry that never fires looks exactly like a fixture
+that is not a rivalry:
+
+- "Montreal Impact" (MLS) had been dead since the club was renamed CF
+  Montréal in **2021**.
+- "Los Angeles FC" is "LAFC" to ESPN, "New York Red Bulls" is "Red Bull New
+  York", "DC United" is "D.C. United".
+- "Los Angeles Clippers" is "LA Clippers"; "Washington" (NFL) is "Washington
+  Commanders".
+- Every LigaMX short form was wrong: "Club America" -> "América", "Chivas" ->
+  "Guadalajara", "Pumas" -> "Pumas UNAM", "Tigres" -> "Tigres UANL".
+
+Also **+29 pairs and +21 derby names**, each confirmed against a source
+(Wikipedia's MLS rivalry cups and NHL rivalries lists, ESPN's rivalries
+piece): El Tráfico, the Hudson River Derby, the Atlantic Cup, the Texas
+Derby, the California Clásico, the Trillium Cup, the Brimstone Cup, the Rocky
+Mountain Cup, the Heritage Cup, the Hell Is Real Derby, the Canadian
+Classique, the Subway Series, the Freeway Series, the Crosstown Classic, the
+Bay Bridge Series, the Battle of Alberta, the Battle of Ontario, El Súper
+Clásico, the Clásico Regiomontano, the Clásico Capitalino.
+
+Two things the sweep caught that are worth more than the entries:
+
+- **The NHL entries were RIGHT and my instrument was wrong.** I built the NHL
+  roster from `/v1/standings`, which spells the New York clubs "NY Rangers",
+  and the check condemned three correct entries. `sources/nhl.py` reads
+  `/v1/schedule`, which says "New York Rangers". The fixture is built from
+  the schedule now, and its comment says why. Validating against the wrong
+  endpoint would have broken working code to satisfy a broken test.
+
+- **A global rename map broke the Apple Cup.** Applying
+  "Washington" -> "Washington Commanders" across every sport also rewrote the
+  CFB entry, where "Washington" is the correct CFBD school. The roster check
+  did not catch it because it pooled every roster and accepted a name that
+  resolved SOMEWHERE. It now validates per sport family: soccer prefixes pool
+  (promotion and relegation move clubs between competitions), everything else
+  stands alone, and a test asserts an NFL club does not resolve against the
+  CFB roster.
+
+Coverage is now **224 pairs, 150 named, across 17 competitions**, every name
+validated against the roster its source actually publishes.
+
 ### Fixed (the matcher, tightened a second time, to fail closed)
 
 Jake, on the diacritic folding: *"diacritics is interesting for matching.

@@ -281,12 +281,27 @@ class TestEveryEntryResolvesToARealTeam:
         assert sum(len(v) for v in rosters.values()) > 250
         assert "Ole Miss" in rosters["CFB"], "the school the Egg Bowl entry got wrong"
 
+    # Rosters a given sport's entries may resolve against. Soccer pools,
+    # because promotion and relegation move a club between competitions and an
+    # EPL derby entry legitimately names a club currently in the Championship.
+    # Everything else stands alone: pooling let an NFL name validate a CFB
+    # entry, which is how a global rename turned the Apple Cup's "Washington"
+    # into "Washington Commanders" and the check said nothing.
+    SOCCER = ("EPL", "EFL", "BL1", "LaLiga", "SerieA", "Ligue1",
+              "BSA", "Eredivisie", "PrimeiraLiga", "MLS", "LigaMX")
+
+    def _candidates(self, prefix, rosters):
+        if prefix in self.SOCCER:
+            return [n for p in self.SOCCER for n in rosters.get(p, [])]
+        return rosters.get(prefix, [])
+
     def test_every_entry_resolves_somewhere(self):
         rosters = self._fixture()
-        everyone = [n for names in rosters.values() for n in names]
         raw = self._raw()
         unresolved = []
         for prefix in rosters:
+            candidates = self._candidates(prefix, rosters)
+            assert candidates, f"no roster to check {prefix} against"
             for entry in raw.get(prefix, []):
                 for name in entry[:2]:
                     if name in self.KNOWN_ABSENT:
@@ -295,7 +310,7 @@ class TestEveryEntryResolvesToARealTeam:
                         rivalries._name_matches(
                             rivalries._normalize(team), rivalries._normalize(name)
                         )
-                        for team in everyone
+                        for team in candidates
                     ):
                         unresolved.append(f"{prefix}: {name!r}")
         assert not unresolved, (
@@ -316,6 +331,25 @@ class TestEveryEntryResolvesToARealTeam:
             )
             for t in everyone
         ), "the original Egg Bowl spelling must NOT resolve"
+
+    def test_a_name_from_another_sport_does_not_validate(self):
+        """The scoping mutation. "Washington Commanders" is a real NFL club,
+        and a global rename put it in the CFB Apple Cup entry; a pooled check
+        accepted it because it resolves SOMEWHERE."""
+        rosters = self._fixture()
+        cfb = self._candidates("CFB", rosters)
+        assert not any(
+            rivalries._name_matches(
+                rivalries._normalize(t), rivalries._normalize("Washington Commanders")
+            )
+            for t in cfb
+        ), "an NFL club must not resolve against the CFB roster"
+        assert any(
+            rivalries._name_matches(
+                rivalries._normalize(t), rivalries._normalize("Washington")
+            )
+            for t in cfb
+        ), "the real CFBD school name must resolve"
 
     def test_diacritics_fold_both_ways(self):
         """Six freshly-written entries matched nothing because the source
