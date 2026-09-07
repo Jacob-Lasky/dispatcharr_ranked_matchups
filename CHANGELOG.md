@@ -287,6 +287,43 @@ states the line ("anything below 17th goes down") rather than guessing how
 many cross it. Matchdays REMAINING replaces the index, keeping the explicit
 "Catch-up matchday" label for a postponement being replayed late (#3).
 
+### Fixed (the matcher, tightened a second time, to fail closed)
+
+Jake, on the diacritic folding: *"diacritics is interesting for matching.
+Barcelona for example?"* That question landed on a live bug.
+
+**Real Madrid vs Espanyol returned "El Clásico".** The token-subset matcher
+treated "FC Barcelona" as a subset of "RCD Espanyol de Barcelona", so the
+Clásico entry matched a fixture that is not the Clásico. Same class as the
+Texas Tech bug and the same consequence: `is_rivalry` feeds the score, so an
+ordinary league game drew a rivalry bonus.
+
+The lesson is about the SHAPE of the previous fix, not the token list. It
+carried a blocklist of tokens that mark a different institution ("State",
+"Tech", "A&M"), which is **fail-open by construction**: it rejects only what
+someone thought to list, and nobody thinks of a city name shared by two clubs
+until it fires. Matching is now WHOLE-NAME equality after normalizing and
+stripping a club-type suffix. Fail-closed, and the cost, spelling entries out
+in full, is paid once and checked by a test.
+
+Consequences, all applied:
+
+- Fifteen entries expanded to their source spelling ("Tottenham" ->
+  "Tottenham Hotspur", "Real Betis" -> "Real Betis Balompié", "Bologna" ->
+  "Bologna FC 1909", "Feyenoord" -> "Feyenoord Rotterdam").
+- Entries must now be internally consistent: BOTH names from the SAME source.
+  Ligue 1 carried "Paris Saint-Germain" (Football-Data.org) paired with
+  "Marseille" (SportsDB), which half-matched under the loose rule and matches
+  nothing under this one. It is two entries now, one per source.
+- The mascot-form case is gone: CFBD, the only college-football source,
+  reports the bare school name, so "Texas Longhorns" never reaches the
+  matcher and the entries are spelled CFBD's way.
+
+Diacritic folding stays and is doing its own job, which is why the question
+was a good one: it makes "Gremio FBPA" match "Grêmio FBPA" across sources
+that disagree about accents, WITHOUT the fail-open looseness that let a
+shared city name through.
+
 ### Added (soccer rivalries, same treatment as CFB)
 
 Named derbies for every soccer competition with a source, verified against

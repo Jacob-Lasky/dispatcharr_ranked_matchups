@@ -124,22 +124,10 @@ def rivalry_name(home: str, away: str, sport_prefix: str) -> Optional[str]:
     return None
 
 
-# Tokens that IDENTIFY A DIFFERENT INSTITUTION rather than decorate the same
-# one. "Texas" and "Texas Tech" are two schools; "Texas" and "Texas Longhorns"
-# are one. Everything hinges on that distinction, so the list is deliberately
-# short and conservative: add a token here only when its presence genuinely
-# changes which team is meant.
-_DISAMBIGUATING_TOKENS = frozenset({
-    "state", "st", "tech", "a&m", "am",
-    "southern", "northern", "eastern", "western", "central",
-    "international", "atlantic", "pacific",
-})
-
-
 def _strip_suffix(name: str) -> str:
     """Drop club-type tokens ('fc', 'afc', 'cf', 'sc') from either end so the
-    Football-Data.org form 'manchester city fc' compares equal to the stored
-    'manchester city'."""
+    Football-Data.org form 'manchester city fc' compares equal to a stored
+    'Manchester City'."""
     parts = [p for p in name.split() if p not in TEAM_SUFFIX_TOKENS]
     return " ".join(parts)
 
@@ -147,35 +135,50 @@ def _strip_suffix(name: str) -> str:
 def _name_matches(team_name: str, rivalry_name: str) -> bool:
     """True when the two names denote the same team.
 
-    One name may carry extra words (a mascot, a club prefix, a longer formal
-    form) as long as none of them is a DISAMBIGUATOR:
+    WHOLE-NAME equality after normalizing and stripping club-type suffixes.
+    Nothing looser. Spell every entry the way its SOURCE spells it; where two
+    sources disagree (SportsDB "Paris SG" vs Football-Data.org "Paris
+    Saint-Germain FC") add BOTH forms as separate entries.
+    `TestEveryEntryResolvesToARealTeam` proves each one resolves against a
+    real roster, so a misspelling fails a test instead of silently never
+    matching.
 
-        'Tottenham'  vs 'Tottenham Hotspur FC'   -> match (mascot/formal)
-        'Marseille'  vs 'Olympique de Marseille' -> match (club prefix)
-        'Texas'      vs 'Texas Longhorns'        -> match (mascot)
-        'Texas'      vs 'Texas Tech'             -> NO, different school
-        'Washington' vs 'Washington State'       -> NO, different school
+    DO NOT loosen this, in either of the two ways it has already been
+    loosened and had to be tightened again. Both were SCORING bugs, because
+    `is_rivalry` feeds the score:
 
-    DO NOT replace this with a plain substring test. It used to be
-    `rivalry in team or team in rivalry`, which made every shorter school name
-    match a longer one starting with it. That is a SCORING bug, not a cosmetic
-    one, because `is_rivalry` feeds the score: verified 2026-09-06 on live
-    data, the ["Texas", "Texas A&M"] entry returned True for Texas Tech vs
-    Texas A&M, scoring an ordinary fixture as the Lone Star Showdown.
+      substring       ["Texas", "Texas A&M"]  matched  Texas Tech vs Texas A&M
+      token-subset    ["Real Madrid", "FC Barcelona"]  matched
+                      Real Madrid vs RCD Espanyol de BARCELONA, returning
+                      "El Clasico" for a fixture that is not one
 
-    Nor should it become a strict equality test. That looks safer and silently
-    breaks the cases the loose test existed for: Arsenal vs Tottenham Hotspur
-    FC, Paris SG vs Olympique de Marseille, Texas Longhorns vs Oklahoma
-    Sooners all stop matching, because sources spell the SAME team at
-    different lengths.
+    The second is the instructive one. It had a blocklist of tokens that mark
+    a different institution ("State", "Tech", "A&M"), which is FAIL-OPEN by
+    construction: it rejects only what someone thought to list, and nobody
+    thinks of a city name shared by two clubs until it fires. Whole-name
+    equality is fail-closed, and the cost, spelling entries out in full, is
+    paid once and checked by a test.
     """
-    a = set(_strip_suffix(team_name).split())
-    b = set(_strip_suffix(rivalry_name).split())
-    if not a or not b:
-        return False
-    if a == b:
-        return True
-    smaller, larger = (a, b) if len(a) < len(b) else (b, a)
-    if not smaller.issubset(larger):
-        return False
-    return not (larger - smaller) & _DISAMBIGUATING_TOKENS
+    return _strip_suffix(team_name) == _strip_suffix(rivalry_name)
+
+
+def rivalry_name(home: str, away: str, sport_prefix: str) -> Optional[str]:
+    """The trophy or game name for this fixture, "" for a rivalry with no
+    trophy recorded, or None when it is not a known rivalry.
+
+    The three-way return matters: "" and None mean different things, and
+    collapsing them would either lose the rivalry signal for the ~7 pairs with
+    no trophy or invent a trophy for them. Callers that only need the boolean
+    use `is_rivalry`.
+    """
+    pairs = _RIVALRIES_BY_SPORT.get(sport_prefix)
+    if not pairs or not home or not away:
+        return None
+    h, a = _normalize(home), _normalize(away)
+    for rival_a, rival_b, trophy in pairs:
+        # Order in the JSON pair is incidental: match against both orderings.
+        if (_name_matches(h, rival_a) and _name_matches(a, rival_b)) or (
+            _name_matches(h, rival_b) and _name_matches(a, rival_a)
+        ):
+            return trophy
+    return None

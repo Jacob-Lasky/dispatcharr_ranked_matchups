@@ -86,8 +86,13 @@ class TestIsRivalry:
     def test_paris_sg_abbreviation(self):
         # SportsDB returns "Paris SG"; FD.org returns "Paris Saint-Germain FC".
         # JSON has both forms: both should match Marseille.
-        assert rivalries.is_rivalry("Paris SG", "Olympique de Marseille", "Ligue1")
-        assert rivalries.is_rivalry("Paris Saint-Germain FC", "Marseille", "Ligue1")
+        # One entry per SOURCE spelling: Football-Data.org says
+        # "Paris Saint-Germain FC" / "Olympique de Marseille", SportsDB says
+        # "Paris SG" / "Marseille". Mixing the two halves in one entry
+        # half-matched under the old loose rule and matches nothing now.
+        assert rivalries.is_rivalry("Paris SG", "Marseille", "Ligue1")
+        assert rivalries.is_rivalry(
+            "Paris Saint-Germain FC", "Olympique de Marseille", "Ligue1")
 
     def test_cross_sport_no_false_positive(self):
         # Liverpool isn't a rivalry in MLS even if a "Liverpool" entry existed.
@@ -99,7 +104,10 @@ class TestIsRivalry:
         # but the JSON entries are exact-bare so they only match teams
         # whose name actually contains "Texas".
         assert rivalries.is_rivalry("Texas", "Oklahoma", "CFB")
-        assert rivalries.is_rivalry("Texas Longhorns", "Oklahoma Sooners", "CFB")
+        # CFBD, the only CFB source, reports the bare school name, so the
+        # mascot form never reaches the matcher. Entries are spelled its way.
+        assert rivalries.is_rivalry("Texas", "Oklahoma", "CFB")
+        assert not rivalries.is_rivalry("Texas Longhorns", "Oklahoma Sooners", "CFB")
 
 
 class TestLoadRivalries:
@@ -156,10 +164,28 @@ class TestDisambiguatingTokens:
         assert not rivalries._name_matches("washington state", "washington")
         assert rivalries.is_rivalry("Washington", "Washington State", "CFB")
 
-    def test_mascots_and_club_prefixes_still_match(self):
-        assert rivalries._name_matches("texas longhorns", "texas")
-        assert rivalries._name_matches("olympique de marseille", "marseille")
-        assert rivalries._name_matches("tottenham hotspur fc", "tottenham")
+    def test_a_shorter_name_no_longer_half_matches(self):
+        """Superseded: the matcher is whole-name now. Spell entries in full
+        and let TestEveryEntryResolvesToARealTeam prove they resolve."""
+        assert not rivalries._name_matches("texas longhorns", "texas")
+        assert not rivalries._name_matches("olympique de marseille", "marseille")
+        assert not rivalries._name_matches("tottenham hotspur fc", "tottenham")
+        # ...while the club-type suffix is still stripped.
+        assert rivalries._name_matches("tottenham hotspur fc", "Tottenham Hotspur".lower())
+
+    def test_a_city_shared_by_two_clubs_does_not_collide(self):
+        """The bug Jake's "Barcelona for example?" landed on. A token-subset
+        matcher made "FC Barcelona" match "RCD Espanyol de Barcelona", so
+        Real Madrid vs Espanyol returned El Clasico. That is a SCORING bug:
+        is_rivalry feeds the score."""
+        assert not rivalries._name_matches(
+            "rcd espanyol de barcelona", "fc barcelona")
+        assert rivalries.rivalry_name(
+            "Real Madrid CF", "RCD Espanyol de Barcelona", "LaLiga") is None
+        assert rivalries.rivalry_name(
+            "Real Madrid CF", "FC Barcelona", "LaLiga") == "El Clásico"
+        assert rivalries.rivalry_name(
+            "FC Barcelona", "RCD Espanyol de Barcelona", "LaLiga") == "the Barcelona derby"
 
     def test_the_egg_bowl_was_dead_and_is_not_now(self):
         """rivalries.json said "Mississippi"; CFBD says "Ole Miss", and neither
@@ -227,11 +253,16 @@ class TestEveryEntryResolvesToARealTeam:
     its SOURCE spells it, snapshotted in tests/fixtures/source_team_names.json.
     """
 
-    # Clubs correctly listed but currently outside every tracked competition.
-    # A name here is a deliberate exemption with a reason, not a typo.
+    # Names the fixture cannot confirm, each for a stated reason. A name here
+    # is a deliberate exemption; anything else that fails is a typo.
     KNOWN_ABSENT = {
-        "Sheffield Wednesday",  # below the Championship
+        "Sheffield Wednesday",  # below the Championship, so in no tracked roster
         "Saint-Etienne",        # Ligue 2
+        # SportsDB's spelling of Paris Saint-Germain, kept as a second entry
+        # because that source and Football-Data.org disagree. The fixture
+        # holds only Football-Data.org names, so it cannot confirm this one.
+        "Paris SG",
+        "Marseille",  # SportsDB's short form, same reason as Paris SG
     }
 
     @staticmethod
@@ -291,9 +322,10 @@ class TestEveryEntryResolvesToARealTeam:
         spells them with umlauts, circumflexes and tildes."""
         for ascii_form, source_form in (
             ("FC Bayern Munchen", "FC Bayern München"),
-            ("Gremio", "Grêmio FBPA"),
-            ("Sao Paulo", "São Paulo FC"),
+            ("Gremio FBPA", "Grêmio FBPA"),
+            ("Sao Paulo FC", "São Paulo FC"),
             ("1. FC Koln", "1. FC Köln"),
+            ("Vitoria SC", "Vitória SC"),
         ):
             assert rivalries._name_matches(
                 rivalries._normalize(source_form), rivalries._normalize(ascii_form)

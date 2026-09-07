@@ -465,7 +465,7 @@
   "EPL": [
     [
       "Arsenal",
-      "Tottenham",
+      "Tottenham Hotspur",
       "the North London derby"
     ],
     [
@@ -510,15 +510,15 @@
     ],
     [
       "Chelsea",
-      "Tottenham"
+      "Tottenham Hotspur"
     ],
     [
       "Arsenal",
       "Chelsea"
     ],
     [
-      "West Ham",
-      "Tottenham"
+      "West Ham United",
+      "Tottenham Hotspur"
     ],
     [
       "Arsenal",
@@ -613,22 +613,22 @@
     ],
     [
       "Sevilla",
-      "Real Betis",
+      "Real Betis Balompié",
       "the Seville derby"
     ],
     [
       "Athletic Club",
-      "Real Sociedad",
+      "Real Sociedad de Fútbol",
       "the Basque derby"
     ],
     [
       "FC Barcelona",
-      "RCD Espanyol",
+      "RCD Espanyol de Barcelona",
       "the Barcelona derby"
     ],
     [
       "Valencia",
-      "Levante",
+      "Levante UD",
       "the Valencia derby"
     ],
     [
@@ -663,7 +663,7 @@
       "the Derby del Sole"
     ],
     [
-      "Bologna",
+      "Bologna FC 1909",
       "ACF Fiorentina",
       "the Derby dell'Appennino"
     ],
@@ -684,7 +684,7 @@
     ],
     [
       "Paris SG",
-      "Olympique de Marseille",
+      "Marseille",
       "Le Classique"
     ],
     [
@@ -931,7 +931,7 @@
   "Eredivisie": [
     [
       "AFC Ajax",
-      "Feyenoord",
+      "Feyenoord Rotterdam",
       "De Klassieker"
     ],
     [
@@ -940,12 +940,12 @@
       "the Topper"
     ],
     [
-      "Feyenoord",
+      "Feyenoord Rotterdam",
       "Sparta Rotterdam",
       "the Rotterdam derby"
     ],
     [
-      "FC Twente",
+      "FC Twente '65",
       "FC Groningen"
     ]
   ],
@@ -972,11 +972,11 @@
   "BSA": [
     [
       "CR Flamengo",
-      "Fluminense",
+      "Fluminense FC",
       "the Fla-Flu"
     ],
     [
-      "Grêmio",
+      "Grêmio FBPA",
       "SC Internacional",
       "the Grenal"
     ],
@@ -987,12 +987,12 @@
     ],
     [
       "SC Corinthians Paulista",
-      "São Paulo",
+      "São Paulo FC",
       "the Clássico Majestoso"
     ],
     [
       "CA Mineiro",
-      "Cruzeiro",
+      "Cruzeiro EC",
       "the Clássico Mineiro"
     ],
     [
@@ -1002,22 +1002,22 @@
     ],
     [
       "SE Palmeiras",
-      "São Paulo",
+      "São Paulo FC",
       "the Choque-Rei"
     ],
     [
       "CR Flamengo",
-      "Botafogo",
+      "Botafogo FR",
       "the Clássico da Rivalidade"
     ],
     [
-      "Santos",
+      "Santos FC",
       "SE Palmeiras",
       "the Clássico da Saudade"
     ],
     [
-      "Fluminense",
-      "Botafogo",
+      "Fluminense FC",
+      "Botafogo FR",
       "the Clássico Vovô"
     ]
   ]
