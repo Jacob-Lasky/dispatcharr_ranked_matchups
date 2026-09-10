@@ -11,16 +11,30 @@ name: Auto-Document PR
 # forgeable-author / force-push / --output=file escape hatches a git-capable
 # agent would have are structurally absent.
 #
-# The push uses the job's GITHUB_TOKEN, and GITHUB_TOKEN pushes do not
-# trigger workflows: no self-retrigger loop, and no CI re-run on the
-# markdown-only docs commit.
+# The push uses the job's GITHUB_TOKEN. That prevents a self-retrigger LOOP,
+# and it does not prevent a run being CREATED. Measured on PR #48, 2026-09-03:
+# the docs commit produced `test` and `docker-publish` runs at its own sha,
+# both sitting in `action_required` with `triggering_actor: github-actions[bot]`
+# and neither executing until approved.
+#
+# The consequence is worth knowing before you merge: the last CI that actually
+# RAN is against the sha BEFORE the docs commit, so a PR that looks green is
+# green for the code and unverified for the head commit. Since this job only
+# ever writes markdown that is a fine risk to take, but approve the runs (or
+# re-run them) rather than reading the stale green as covering the head:
+#
+#   gh api -X POST repos/<owner>/<repo>/actions/runs/<id>/approve
 #
 # Runs once per PR lifecycle event (opened / ready_for_review / reopened),
 # not on every push. To refresh docs after later pushes, use "Re-run jobs":
 # checkout is by branch name, so a re-run diffs the CURRENT branch tip.
 #
-# Actions are pinned to reviewed commit SHAs (claude-code-action v1.0.199,
-# checkout v6) because a moving tag is incompatible with a hard boundary.
+# Actions are pinned to reviewed commit SHAs (claude-code-action v1.0.216,
+# checkout v7.0.1) because a moving tag is incompatible with a hard boundary.
+# DO NOT swap either SHA for a tag (`@v1`, `@v7`, `@main`): the boundary below
+# is only as strong as the exact code that was reviewed, and an upstream owner
+# can repoint a tag at any time. Bump SHA to SHA, and update the version numbers
+# in this comment in the same edit so it cannot go stale.
 
 on:
   pull_request:
@@ -45,8 +59,15 @@ jobs:
       issues: write
       id-token: write
     steps:
+      # checkout v7 REFUSES to check out fork PR code without
+      # `allow-unsafe-pr-checkout: true`, but that gate is only evaluated for
+      # `pull_request_target` and `workflow_run` events. This workflow is
+      # `pull_request` and the job `if` above already rejects fork PRs, so the
+      # gate is never reached. DO NOT retrigger this workflow on
+      # `pull_request_target`: it would run fork-authored code against this
+      # job's `contents: write` token and `CLAUDE_CODE_OAUTH_TOKEN`.
       - name: Checkout PR branch
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
@@ -62,7 +83,7 @@ jobs:
           wc -c "$RUNNER_TEMP/pr.diff"
 
       - name: Update documentation with Claude
-        uses: anthropics/claude-code-action@dcb57747bfceeaa1fa72638cae52295d1d853d4a # v1.0.199
+        uses: anthropics/claude-code-action@d75b94d5ad426cb8546e6628b6f5f19b84e5cce1 # v1.0.216
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
@@ -72,7 +93,9 @@ jobs:
 
             Determine whether any documentation in this repository is now stale
             or missing given those changes: README.md, CLAUDE.md, anything under
-            docs/, and skill files (skills/**, SKILL.md).
+            docs/, and skill files (skills/**, .claude/skills/**/SKILL.md,
+            or a root SKILL.md). Preserve and review documentation newly added
+            by the PR; do not delete it merely because it is new.
 
             - Edit ONLY markdown (.md) files. You have no shell and no git in
               this session: do not attempt to run commands, stage, commit, or
