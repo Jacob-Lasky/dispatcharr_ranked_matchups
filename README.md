@@ -74,7 +74,7 @@ implementation and testing are done by AI.
               rank_pair: +7.92
               close_game: +3.38
               importance: +17.0
-            Source channel: Manchester United
+            Source: Manchester United
 
 #5550642  EFL ⭐★10.0 · Middlesbrough at Wrexham · playoff / auto-promotion race
           — both top-10 (#4 vs #6), favorite (Wrexham),
@@ -191,7 +191,8 @@ form will collect everything needed to scope it.
      right
    - Tune signal **Weights** if any feel under/over-weighted
 
-4. Run **Refresh + apply now** to populate.
+4. Turn off **Dry run on Apply** (on by default; it prevents channel creation),
+   then run **Refresh + apply now** to populate.
 
 5. **Load the M3U/EPG URLs (or connect via Xtream Codes) in your client.** On
    the Channels page, use the **M3U** and **EPG** buttons (or point your client
@@ -215,12 +216,25 @@ form will collect everything needed to scope it.
    > them stable and integer-clean (Xtream Codes requires integer channel
    > numbers and floors fractional ones, which would scramble the order).
 
+## FAQ
+
+### Do I have to add streams as channels first?
+
+No. Streams must already be in Dispatcharr, usually through a refreshed M3U
+account, but they do not need to be added as channels first!
+
+### How does it find and map streams?
+
+The plugin matches EPG listings, channel names, and stream names, then links
+eligible streams to its virtual channels! If a stream is not on a channel, its
+own name must identify the matchup or event for the plugin to find it.
+
 ## Pipeline
 
 | Action | What it does | Writes |
 |---|---|---|
-| `refresh` | Pull upcoming games from each enabled sport, score each, run EPG-to-channel matching, save curated list. | `cache.json` |
-| `apply` | Create / update virtual channels in the target group, link to source-channel streams, write `ProgramData` descriptions, delete stale ones. | DB (honors `dry_run`) |
+| `refresh` | Pull upcoming games from each enabled sport, score each, match them to EPG listings, channels and streams, save curated list. | `cache.json` |
+| `apply` | Create / update virtual channels in the target group, link matched streams, write `ProgramData` descriptions, delete stale ones. | DB (honors `dry_run`) |
 | | *Waits for the result and shows the real summary. Runs in a separate process so it cannot stall the web worker, which costs a second or two of startup.* | |
 | `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand. | Both |
 | `show_status` | Print the current curated list with per-game score breakdown. No writes. | — |
@@ -350,12 +364,14 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   `{league_short} {favorite_star}★{score} · {away_team}{ (rank_away)} at {home_team}{ (rank_home)}{ · tagline}`).
   Plain text is literal; a `{group}` collapses entirely when its variable is
   blank. Set your own under "Channel Naming"; preview with `preview_names`.
-- Streams: cloned via `ChannelStream` from the matched source channel, so
-  playback works. Some providers bundle dedicated per-matchup feeds onto one
-  channel, so when a matched channel's stream names mention teams, only the
-  streams naming *this* game are attached. A plain broadcaster channel whose
-  streams name no team at all (`MLB Network HD`, `MLB Network FHD`) contributes
-  every stream, unchanged
+- Streams: existing Dispatcharr streams are linked through `ChannelStream`.
+  An EPG or channel-name match contributes eligible streams from that channel.
+  For team games, if one of its streams names either team, named streams that
+  mention neither team are dropped. A feed naming one team and a different
+  opponent can still remain. A direct stream-name match contributes just that
+  stream, even if it has no source channel. A broadcaster channel with generic
+  stream names (`MLB Network HD`, `MLB Network FHD`) may contribute all of them,
+  subject to stream-group exclusions. Field events skip the team-name filter.
 - EPG: an inactive `xmltv` `EPGSource` (auto-created with the same name as the
   group) holds one `EPGData` row per virtual channel, with a `ProgramData` entry
   whose `description` shows the full WHY breakdown — TiviMate, Plex, and
