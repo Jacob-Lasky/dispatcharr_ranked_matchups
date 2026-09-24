@@ -537,7 +537,7 @@ Importance notes (top 3):
   Brentford UCL: 0.65 leverage × 4.0 = 2.60
   Manchester United UCL: 0.58 leverage × 4.0 = 2.32
   Brentford title: 0.40 leverage × 5.0 = 2.00
-Source channel: Manchester United
+Source: Manchester United
 ```
 
 - **Score: 8.4/10**: the final ★ rating after compression.
@@ -547,9 +547,8 @@ Source channel: Manchester United
   the highest leverage. Each line is `team outcome: leverage × weight
   = contribution`. Leverage is `|tau_c|` from the Monte Carlo loop;
   weight is the consequence weight from the league context.
-- **Source channel**: what the game matched — the broadcast channel the
-  virtual matchup channel pulls its streams from, or, when the match came
-  from a stream name rather than a channel or its EPG, that stream.
+- **Source**: the primary match, either a broadcast channel whose eligible
+  streams feed the virtual channel or a directly matched stream.
 
 If a game scored unexpectedly low: scan the breakdown. Common
 patterns:

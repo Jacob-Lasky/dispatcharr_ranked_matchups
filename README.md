@@ -74,7 +74,7 @@ implementation and testing are done by AI.
               rank_pair: +7.92
               close_game: +3.38
               importance: +17.0
-            Source channel: Manchester United
+            Source: Manchester United
 
 #5550642  EFL ⭐★10.0 · Middlesbrough at Wrexham · playoff / auto-promotion race
           — both top-10 (#4 vs #6), favorite (Wrexham),
@@ -373,11 +373,12 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   blank. Set your own under "Channel Naming"; preview with `preview_names`.
 - Streams: existing Dispatcharr streams are linked through `ChannelStream`.
   An EPG or channel-name match contributes eligible streams from that channel.
-  When its stream names identify different games, only the ones for *this* game
-  are attached. A direct stream-name match contributes just that stream, even
-  if it has no source channel. A broadcaster channel with generic stream names
-  (`MLB Network HD`, `MLB Network FHD`) may contribute all of them, subject to
-  stream-group exclusions.
+  For team games, if one of its streams names either team, named streams that
+  mention neither team are dropped. A feed naming one team and a different
+  opponent can still remain. A direct stream-name match contributes just that
+  stream, even if it has no source channel. A broadcaster channel with generic
+  stream names (`MLB Network HD`, `MLB Network FHD`) may contribute all of them,
+  subject to stream-group exclusions. Field events skip the team-name filter.
 - EPG: an inactive `xmltv` `EPGSource` (auto-created with the same name as the
   group) holds one `EPGData` row per virtual channel, with a `ProgramData` entry
   whose `description` shows the full WHY breakdown — TiviMate, Plex, and

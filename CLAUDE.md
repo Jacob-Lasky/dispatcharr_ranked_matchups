@@ -35,10 +35,10 @@ List[GameRow]     ← {sport_prefix, home, away, rank_home, rank_away, start_tim
   ↓ scored by
 scoring.py        ← GameSignals + score_game + per-signal weight contributions
   ↓ matched by
-matcher.py        ← EPG-title / channel-name / stream-name candidates, resolved
+matcher.py        ← EPG-programme / channel-name / stream-name candidates, resolved
                     by regex tiers + Claude fallback when ambiguous
   ↓ written by
-plugin.py         ← creates virtual Channels + dummy EPGSource + ProgramData
+plugin.py         ← creates virtual Channels + inactive XMLTV EPGSource + ProgramData
 ```
 
 **Adding a new sport is a new file in `sources/`** — implement
@@ -50,11 +50,11 @@ downstream is sport-agnostic.
 | File | What it does |
 |---|---|
 | `plugin.json` | Manifest: settings (sports toggles, weights, favorites, schedule), actions. Read by Dispatcharr loader. |
-| `plugin.py` | Plugin class + 5 actions: `refresh`, `apply`, `auto_pipeline`, `show_status`, `preview_names` (renders the name template against sample games). Daemon scheduler. EPG lookup closure. Channel cloning + dummy EPGSource management. |
+| `plugin.py` | Plugin class and action handlers. Daemon scheduler, EPG lookup closure, virtual-channel and stream linking, and inactive XMLTV EPG source management. |
 | `scoring.py` | `GameSignals`, `Weights`, `GameScore`. `score_game()` sums per-signal contributions, `_compress_to_10()` does the tanh squash. Helpers: `match_favorites`, `compute_match_importance` (Lahvička Monte Carlo), `format_channel_name` (delegates to `naming`), `render_importance_tagline` + `STAGE_BANDS` (bracket-band prettify), `tournament_stage_label`. League thresholds in `LEAGUE_CONTEXTS` dict (position, label, consequence_weight). |
 | `naming.py` | Channel-name templating (Sonarr/Radarr `{group}`-collapse convention). `render_name`, `validate_template`, `build_context`, `preview_lines`, `DEFAULT_NAME_TEMPLATE`, `TOKENS`. Pure: no Django, no `scoring` import. |
 | `simulation.py` | Sport-agnostic Monte Carlo importance per Lahvička (2012). `monte_carlo_importance()` for single (team, outcome); `monte_carlo_importance_batch()` shares one set of N season simulations across K queries. `kendall_tau_c()` is the ordinal-association measure. |
-| `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` → Dispatcharr channels AND streams. `_build_epg_lookup` (plugin.py) supplies three candidate paths — A: EPG `ProgramData` title (whole-channel), B: channel name (whole-channel), C: stream name (stream-granular, so a stream need not be on a channel at all). Three tiers: `regex_strict` (channel or stream name names both teams, merging Tier-2 title matches behind it) → `regex_unique` (exactly one non-preview programme title) → Claude batched fallback / first candidate. `_partition_attach_targets` splits the result into `channel_ids` + `stream_ids`. |
+| `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` to Dispatcharr channels and streams. `_build_epg_lookup` (plugin.py) supplies three candidate paths: A, EPG `ProgramData` title, sub-title or description (whole-channel); B, channel name (whole-channel); C, stream name (stream-granular, so a stream need not be on a channel at all). Three tiers: `regex_strict` (channel or stream name names both teams, merging Tier-2 programme matches behind it), `regex_unique` (exactly one non-preview programme match), then Claude batched fallback or first candidate. `_partition_attach_targets` splits the result into `channel_ids` and `stream_ids`. |
 | `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Monte Carlo importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. |
 | `sources/bracket.py` | `BracketSportSource` shared state machine for all knockout/playoff sports (bracket inference, `_round_reached`, `terminal_outcomes` cascade). Three concrete tie shapes: `AggregateLegSource` (two-leg, used by `KnockoutSoccerSource`), `BestOfNSeriesSource` (best-of-N series, used by `NhlPlayoffSource`, `MlbPlayoffSource`, `NcaaBaseballPlayoffSource`, `NcaaSoftballPlayoffSource` for their Super Regional + Finals stages), and `DoubleEliminationSource` (4-team double-elim base class for NCAA Baseball / Softball Regional + 8-team MCWS/WCWS bracket; plumbing into the sport sources is tracked in #43). `BestOfNSeriesSource._series_length_for_stage(stage)` hook lets each sport map stages to series lengths — NHL uses uniform 7; MLB uses 3/5/7/7 (WC/LDS/LCS/WS). |
 | `sources/points_based.py` | Shared Monte Carlo for round-robin point-scoring sports (NCAAF, NCAAM, NHL regular, MLB regular). Subclasses set `_count_field` to choose between `"wins"` (CFB/CBB/MLB) and `"standings_points"` (NHL) for terminal_outcomes bucketing. |
