@@ -232,6 +232,10 @@ streams as playback fallbacks. It does not find or import streams from outside
 your Dispatcharr instance. A feed with no matchup in its stream name, channel
 name, or EPG may not match.
 
+The three matching paths, and the settings that decide which of the matched
+streams get used and in what order, are covered in
+[How games are matched to your lineup](#how-games-are-matched-to-your-lineup).
+
 ## Pipeline
 
 | Action | What it does | Writes |

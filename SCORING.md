@@ -547,8 +547,9 @@ Source channel: Manchester United
   the highest leverage. Each line is `team outcome: leverage × weight
   = contribution`. Leverage is `|tau_c|` from the Monte Carlo loop;
   weight is the consequence weight from the league context.
-- **Source channel**: the EPG-matched broadcast channel the virtual
-  matchup channel pulls its stream from.
+- **Source channel**: what the game matched — the broadcast channel the
+  virtual matchup channel pulls its streams from, or, when the match came
+  from a stream name rather than a channel or its EPG, that stream.
 
 If a game scored unexpectedly low: scan the breakdown. Common
 patterns:
