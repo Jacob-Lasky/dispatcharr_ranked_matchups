@@ -218,23 +218,16 @@ form will collect everything needed to scope it.
 
 ## FAQ
 
-### How does it find streams? Do I need to add them as channels first?
+### Do I have to add streams as channels first?
 
-No. The streams need to exist in Dispatcharr, typically after you add and
-refresh your provider's M3U account, but you do not have to turn each stream
-into a channel. The plugin matches upcoming games against EPG programme titles,
-sub-titles and descriptions, channel names, and stream names. When a channel or
-its EPG matches, the plugin uses eligible streams from that channel. When a
-stream name matches directly, it attaches just that stream, even if it is not
-on a channel. With **Dry run on Apply** turned off, it creates virtual channels
-in the target group (Top Matchups by default) and can stack multiple matching
-streams as playback fallbacks. It does not find or import streams from outside
-your Dispatcharr instance. A feed with no matchup in its stream name, channel
-name, or EPG may not match.
+No. Streams must already be in Dispatcharr, usually through a refreshed M3U
+account, but they do not need to be added as channels first!
 
-The three matching paths, and the settings that decide which of the matched
-streams get used and in what order, are covered in
-[How games are matched to your lineup](#how-games-are-matched-to-your-lineup).
+### How does it find and map streams?
+
+The plugin matches EPG listings, channel names, and stream names, then links
+eligible streams to its virtual channels! If a stream is not on a channel, its
+own name must identify the matchup or event for the plugin to find it.
 
 ## Pipeline
 
