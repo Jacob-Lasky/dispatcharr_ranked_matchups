@@ -328,6 +328,25 @@ stay in agreement with that one.
   recording) still carries its `EPGData` under the OLD marker. The re-key
   refuses to guess: an ambiguous legacy hash (two TBD-vs-TBD slots at one
   kickoff) is left to the normal stale path, which preserves recordings.
+- **A recording that has already STARTED may be neither cut nor stretched**
+  (#216 phase B). Dispatcharr ignores a shorter `end_time` on a recording in
+  progress, so planning a yield or an interruption for a `held` marker would
+  promise the guide a handoff that never happens (the live timer that could
+  stop one is phase C). The symmetric half is easy to miss: a recording cut on
+  the previous apply comes back as `held` with the SHORT end, so
+  `plan_recordings` must extend it only when the extra time still fits the
+  budget once everything else is placed — extending unconditionally overbooks
+  the slot its taker already holds. A whole attempt to free capacity is rolled
+  back when it does not free enough, and any cut the new game turned out not to
+  need is undone (post-roll yields first), so nobody loses recording time for
+  no capacity gain.
+- **Apply re-derives `recorded_matched`, it does not trust the cache** (#221).
+  Refresh stamps the match into each cached row, so an edit to **Recorded
+  teams** would otherwise sit inert until the next scheduled refresh hours
+  later. `_rematch_recorded_teams` runs at the top of `_action_apply`, BEFORE
+  `_autorecord_prepare`, through the same `scoring.match_favorites` refresh
+  uses so the two cannot disagree. A team whose games are not cached at all
+  still needs a refresh to fetch them.
 - **CFBD `/games` carries EVERY NCAA division**, not just Division I:
   `homeClassification` / `awayClassification` are `fbs` / `fcs` / `ii` /
   `iii`, and are occasionally absent entirely. A time-window filter alone
@@ -493,8 +512,17 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   in Dispatcharr's DVR over the Live block plus `recording_post_roll_minutes`,
   inside a stream budget (`resolve_slot_budget`: tightest active M3U
   `max_streams` minus `recording_stream_reserve`). Policy in `recording.py`,
-  ORM in `_autorecord_*`. Ranked-game slots, preferences and mid-game handoffs
-  are phases B and C
+  ORM in `_autorecord_*`
+- Ranked games in spare recording slots (#216, phase B): `record_ranked_games`
+  (off by default) plus `record_leagues` (league codes in priority order, blank
+  = every league) make a stream-matched ranked game a slot candidate
+  (`_ranked_eligible`; a favorite is preferred, never eligible). Slots still
+  fill in kickoff order; `recording_preference` (`earliest` default,
+  `favorites` / `league` / `rating`) decides what happens when a game kicks off
+  with every slot full, via `priority_key` / `can_interrupt`. Every handoff is
+  PLANNED (`Plan.handoffs`, written into the guide line by
+  `description_line(until=, taker=)`); cutting a recording that has already
+  started is phase C
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)
