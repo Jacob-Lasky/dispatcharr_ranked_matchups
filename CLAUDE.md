@@ -67,7 +67,7 @@ downstream is sport-agnostic.
 | `sources/_espn.py` | Shared ESPN helpers. `extract_espn_scoreboard_event` normalises one scoreboard event (its docstring forbids inlining a fourth copy). `sweep_upcoming_scoreboard` is the whole per-day sweep for UPCOMING-only sources, owning the US-Eastern-bucket lookback (`SCOREBOARD_LOOKBACK_DAYS`), the FINISHED drop, the stale-SCHEDULED floor (`MAX_AGE_AFTER_KICKOFF`) and the id dedupe. Used by `friendlies.py` + `english_cup.py`. Takes `http_get` INJECTED so each source keeps its own patchable `requests` symbol. The bracket sources deliberately do NOT use it: they sweep a fixed calendar window and KEEP finished games because bracket state comes from results already played. |
 | `sources/friendlies.py` | ESPN exhibition soccer: `InternationalFriendliesSource` (`fifa.friendly` / `fifa.friendly.w`, parametrized on gender) and `ClubFriendliesSource` (`club.friendly`). `supports_importance=False` deliberately: no table to simulate. Gated to Favorites by default (`friendlies_favorites_only`) because an exhibition's only claim to a slot is the favorite signal. `CLUBFRIENDLY` is a distinct prefix from `FRIENDLY` and its absence from `rivalries.json` is load-bearing: a pre-season kickabout is not a derby. |
 | `sources/english_cup.py` | EFL (Carabao) Cup + FA Cup via ESPN (`eng.league_cup` / `eng.fa`). Exists because Football-Data.org gates EVERY domestic cup behind a paid plan (FLC=TIER_THREE, FAC=TIER_TWO; verified 403 on the free-tier key), so a `soccer.py::COMPETITIONS` entry would 403 every refresh and contribute zero games silently. Rounds come from `season.slug`; the slug->stage maps are PER-COMPETITION because the two cups' round names overlap at different depths (FA Cup 4th round = R32, EFL Cup 4th round = R16). `supports_importance=False` and ranks always `None` — the latter is what stops a giant-killing tie being penalised for being lopsided. Early rounds score via the `CUP_R*` band in `scoring.py`, ramping to just under the shared `QUARTER_FINALS`. #190. |
-| `recording.py` | Auto-record policy (#216), pure and ORM-free: `resolve_slot_budget` (tightest positive M3U `max_streams` minus reserve), `plan_recordings` (kickoff order, capacity checked as concurrency; busy = other recordings, held = ours in progress, never displaced or cut, extended when the game runs later; post-roll yield and tier-1/tier-2 interruption via `priority_key` / `can_interrupt`, both PLANNED as `Plan.handoffs` by moving the earlier recording's end before it starts, rolled back when they cannot free enough), `classify_existing` (user-deleted -> tombstone, user-edited or terminal -> hands off), `decide` (create / full-save update / extend-only while recording), `cancellable`, `covered_by_user`, `recording_over` (the 🔴, read from real rows), and the `recordings_state.json` load/save/prune. `MARKER_KEY` in `Recording.custom_properties` is the only "ours" test. The ORM around it is `_autorecord_*` in plugin.py, which writes with `.create()` / FULL `.save()` on purpose (the Recording signals are wanted; `.update()` or a narrow `update_fields` leaves the capture task stale). |
+| `recording.py` | Auto-record policy (#216), pure and ORM-free: `resolve_slot_budget` (tightest positive M3U `max_streams` minus reserve), `plan_recordings` (capacity checked as concurrency, earliest kickoff first; busy = other recordings, held = ours in progress, never displaced, extended when the game runs later), `classify_existing` (user-deleted -> tombstone, user-edited or terminal -> hands off), `decide` (create / full-save update / extend-only while recording), `cancellable`, `covered_by_user`, `recording_over` (the 🔴, read from real rows), and the `recordings_state.json` load/save/prune. `MARKER_KEY` in `Recording.custom_properties` is the only "ours" test. The ORM around it is `_autorecord_*` in plugin.py, which writes with `.create()` / FULL `.save()` on purpose (the Recording signals are wanted; `.update()` or a narrow `update_fields` leaves the capture task stale). |
 | `logos.py` | TheSportsDB matchup-thumbnail resolver. Looks up the curated game via `searchevents.php` (team-name pair, date-tolerance ±2 days, sport-hint disambiguation), downloads the 960x540 graphic to `/data/logos/ranked_matchups_<sha1>.jpg`, and registers a `Logo` row pointing at it. Persistent per-marker cache (`sportsdb_thumb_cache.json`, 14d positive TTL / 1d negative TTL) means apply only HTTP-probes each fixture once. Field-event sources (`away=="Field"`) and dry_run short-circuit the lookup. Stale-file sweep at the end of each apply prunes JPGs whose marker isn't in the live set. Also resolves the league/tournament BADGE fallback (#102): `SPORTSDB_LEAGUE_IDS` (`sport_prefix` -> verified league id), `league_id_for`, `resolve_league_badge_url` (`lookupleague.php` -> `strBadge`), cached as `ranked_matchups_badge_<id>.png` (distinct prefix the sweep skips). |
 
 State (gitignored, lives in `<plugin_dir>/`):
@@ -328,6 +328,25 @@ stay in agreement with that one.
   recording) still carries its `EPGData` under the OLD marker. The re-key
   refuses to guess: an ambiguous legacy hash (two TBD-vs-TBD slots at one
   kickoff) is left to the normal stale path, which preserves recordings.
+- **A recording that has already STARTED may be neither cut nor stretched**
+  (#216 phase B). Dispatcharr ignores a shorter `end_time` on a recording in
+  progress, so planning a yield or an interruption for a `held` marker would
+  promise the guide a handoff that never happens (the live timer that could
+  stop one is phase C). The symmetric half is easy to miss: a recording cut on
+  the previous apply comes back as `held` with the SHORT end, so
+  `plan_recordings` must extend it only when the extra time still fits the
+  budget once everything else is placed — extending unconditionally overbooks
+  the slot its taker already holds. A whole attempt to free capacity is rolled
+  back when it does not free enough, and any cut the new game turned out not to
+  need is undone (post-roll yields first), so nobody loses recording time for
+  no capacity gain.
+- **Apply re-derives `recorded_matched`, it does not trust the cache** (#221).
+  Refresh stamps the match into each cached row, so an edit to **Recorded
+  teams** would otherwise sit inert until the next scheduled refresh hours
+  later. `_rematch_recorded_teams` runs at the top of `_action_apply`, BEFORE
+  `_autorecord_prepare`, through the same `scoring.match_favorites` refresh
+  uses so the two cannot disagree. A team whose games are not cached at all
+  still needs a refresh to fetch them.
 - **CFBD `/games` carries EVERY NCAA division**, not just Division I:
   `homeClassification` / `awayClassification` are `fbs` / `fcs` / `ii` /
   `iii`, and are occasionally absent entirely. A time-window filter alone
@@ -493,8 +512,17 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   in Dispatcharr's DVR over the Live block plus `recording_post_roll_minutes`,
   inside a stream budget (`resolve_slot_budget`: tightest active M3U
   `max_streams` minus `recording_stream_reserve`). Policy in `recording.py`,
-  ORM in `_autorecord_*`. Ranked-game slots, preferences and mid-game handoffs
-  are phases B and C
+  ORM in `_autorecord_*`
+- Ranked games in spare recording slots (#216, phase B): `record_ranked_games`
+  (off by default) plus `record_leagues` (league codes in priority order, blank
+  = every league) make a stream-matched ranked game a slot candidate
+  (`_ranked_eligible`; a favorite is preferred, never eligible). Slots still
+  fill in kickoff order; `recording_preference` (`earliest` default,
+  `favorites` / `league` / `rating`) decides what happens when a game kicks off
+  with every slot full, via `priority_key` / `can_interrupt`. Every handoff is
+  PLANNED (`Plan.handoffs`, written into the guide line by
+  `description_line(until=, taker=)`); cutting a recording that has already
+  started is phase C
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)
