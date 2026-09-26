@@ -212,12 +212,13 @@ form will collect everything needed to scope it.
    > number moves. The one exception is a rescheduled game: it moves to its new
    > time slot, on the same channel. A DVR recording on it stays on that channel
    > rather than being stranded on a stale one, but it keeps the time window it
-   > was scheduled with; moving that window with the game is #216. Because the number is stable, the guide binds to the right game even
-   > though clients cache the EPG separately from the channel list, in both the
-   > default output and the Xtream Codes API (both bind by the integer channel
-   > number). The numbers are large (time-encoded) by design; that is what keeps
-   > them stable and integer-clean (Xtream Codes requires integer channel
-   > numbers and floors fractional ones, which would scramble the order).
+   > was scheduled with; moving that window with the game is #216. Because the
+   > number is stable, the guide binds to the right game even though clients
+   > cache the EPG separately from the channel list, in both the default output
+   > and the Xtream Codes API (both bind by the integer channel number). The
+   > numbers are large (time-encoded) by design; that is what keeps them stable
+   > and integer-clean (Xtream Codes requires integer channel numbers and floors
+   > fractional ones, which would scramble the order).
 
 ## FAQ
 
@@ -397,10 +398,10 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   own instance. Leave the field blank and no request is made to anyone
 - Channel number: two schemes, picked by the "Channel numbering" setting.
   **Kickoff time** (default) derives the number from the game's start time, so
-  the list sorts soonest-first and a game's number only changes if the game is rescheduled. The numbers
-  are large, around 7 digits. **Compact range** keeps every channel inside a
-  band you name, e.g. 400-424, provided that stretch of your lineup is free —
-  see "Channel numbering" below
+  the list sorts soonest-first and a game's number only changes if the game is
+  rescheduled. The numbers are large, around 7 digits. **Compact range** keeps
+  every channel inside a band you name, e.g. 400-424, provided that stretch of
+  your lineup is free — see "Channel numbering" below
 - Channel Profiles: the channels are enabled in every Channel Profile by
   default. Narrow that with "Channel Profiles to enable" (see below)
 
@@ -419,9 +420,10 @@ a game's number is fixed while its kickoff time holds, so a number is only ever
 handed on between games kicking off in the same minute. A rescheduled game moves
 to its new time slot on the same channel: channels are identified by the source's
 own event id (for every source that publishes one), not by kickoff time, so a
-reschedule does not create a second channel. The cost is that the numbers are large, around 7 digits, and the **Starting channel
-number** setting is only a floor: the time-based term is in the millions, so
-setting it to 400 lands you near 5,548,000 rather than at 400.
+reschedule does not create a second channel. The cost is that the numbers are
+large, around 7 digits, and the **Starting channel number** setting is only a
+floor: the time-based term is in the millions, so setting it to 400 lands you
+near 5,548,000 rather than at 400.
 
 **Compact range** keeps every channel inside a band you name. Set **Starting
 channel number** to 400 and the group runs 400, 401, 402 and up. **Compact range
