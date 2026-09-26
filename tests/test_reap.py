@@ -353,7 +353,11 @@ class TestReapWiringContracts:
         import inspect
         src = inspect.getsource(plugin._action_refresh)
         assert '"bench": bench_payload' in src
-        assert "games_payload[:max_games]" in src
+        # The split goes through _split_applied, which applies the first
+        # max_games rows PLUS every forced row (favorite / recorded team, #216).
+        # A bare slice benched forced games; see its tests in test_autorecord.py.
+        assert "_split_applied(games_payload, max_games)" in src
+        assert "games_payload[:max_games]" not in src
 
     def test_stop_tears_down_the_reaper(self, plugin):
         import inspect

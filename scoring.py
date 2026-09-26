@@ -1614,6 +1614,7 @@ def format_channel_name(
     venue: Optional[str] = None,
     start_dt: Optional[datetime] = None,
     tz=None,
+    recording: bool = False,
 ) -> str:
     """Render the Dispatcharr channel name from a (user-customizable) template.
 
@@ -1642,6 +1643,7 @@ def format_channel_name(
         rank_source=rank_source,
         score_final=score.final,
         favorite=bool(signals.favorite_match),
+        recording=bool(recording),
         tagline=tagline,
         tournament=tournament_stage_label(getattr(signals, "tournament_stage", None)),
         venue=venue,

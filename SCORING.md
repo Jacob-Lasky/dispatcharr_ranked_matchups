@@ -511,7 +511,9 @@ After every game has a ★ score:
 2. **Sort across days**: tomorrow's games follow today's; day-after-
    tomorrow follows; etc. Within each day, ★ ordering.
 3. **Cap**: `max_games` setting limits the total number of curated
-   channels (default 25). Beyond that, games drop off the bottom.
+   channels (default 25). Beyond that, games drop off the bottom —
+   except games involving a favorite or a recorded team, which are
+   applied however far down the sorted list they land.
 4. **Names**: channel names follow the template `<SPORT> <RANKS>
    <FAV?> ★<SCORE>: <AWAY> at <HOME>`, e.g. `EPL 3v9 ⭐ ★8.4:
    Brentford at Manchester United`. ⭐ marks games with a favorite.
@@ -549,6 +551,10 @@ Source: Manchester United
   weight is the consequence weight from the league context.
 - **Source**: the primary match, either a broadcast channel whose eligible
   streams feed the virtual channel or a directly matched stream.
+- **`Recording (slot 1 of 3).`**: prepended to the Upcoming and Live
+  entries when the channel has a recording scheduled over the game.
+  Those two titles also carry a 🔴. See "Recording your teams" in the
+  README.
 
 If a game scored unexpectedly low: scan the breakdown. Common
 patterns:
@@ -630,7 +636,7 @@ or wait for the next scheduled refresh, to see the new ordering.
 | **Importance feels too dominant** | `weight_importance` 3 → 1 | The Monte Carlo signal scales linearly with this knob; thirding it lets rank, closeness, and favorites compete on a more even footing. |
 | **Early-season weeks feel flat / late-season everything is ★10** | turn ON `adaptive_scoring` | Switches compression from a fixed curve to a per-refresh one keyed off the batch median, so the top games of any week always read as top games. |
 | **More games on the guide, including smaller stakes** | `curation_preset` → `high_coverage` (or on `manual`, raise `max_games`) | `high_coverage` widens the cap to ~50 and softens the weights so lower-leverage games clear the bar. |
-| **Same curation, just a different list length** | on `manual`, change only `max_games` | `max_games` is the only list-length lever; it trims from the bottom of the sorted list without changing how anything is scored. |
+| **Same curation, just a different list length** | on `manual`, change only `max_games` | `max_games` is the only list-length lever; it trims from the bottom of the sorted list without changing how anything is scored. Games involving a favorite or a recorded team are never trimmed, so the list can run slightly longer than the cap. |
 
 A note on "fewer games": the only length control is `max_games` (or a
 tighter preset). There is intentionally no "hide games below score N"

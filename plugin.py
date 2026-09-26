@@ -75,6 +75,8 @@ from ._util import (
 # live in the uwsgi worker process and write progress to a Redis key the
 # show_status action reads.
 from . import tasks  # noqa: F401, E402
+# Pure auto-record policy (#216); the ORM calls around it live in this file.
+from . import recording as recording_policy  # noqa: E402
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -327,6 +329,10 @@ _FAVORITES_ONLY_ACTIVE_MODES = frozenset({
 })
 
 CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
+# Auto-record bookkeeping (#216): which recordings the plugin created, and
+# tombstones for ones the user deleted so they are not re-created. A file, not
+# the DB, because the tombstone must outlive the Recording row it describes.
+RECORDING_STATE_PATH = os.path.join(PLUGIN_DIR, "recordings_state.json")
 # Sidecar cache for LLM-rewritten descriptions. Separate from cache.json so the
 # main cache file stays purely deterministic (score, breakdown, score_notes
 # unchanged) and the LLM cache can be safely deleted to force regen without
@@ -612,6 +618,220 @@ def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled
         rehome_rec_ids.extend(r.id for r in recs)
         reapable.append(ch)
     return reapable, kept, rehome_rec_ids
+
+
+# ---------- Auto-record (#216) ----------
+#
+# The policy lives in recording.py (pure, unit-tested). These functions are the
+# ORM around it: read the recordings, plan, write, and report. Recording rows
+# are written with .create() / FULL .save() ON PURPOSE, the opposite of the
+# Channel.epg_data rule: apps/channels/signals.py pre_save revokes the old
+# capture task when start/end/channel change and post_save schedules a new one,
+# which is exactly the behaviour wanted. DO NOT switch these writes to a
+# queryset .update() (skips both signals, the old task keeps firing at the old
+# time) or to save(update_fields=[...]) limited to custom_properties / task_id /
+# end_time (post_save returns early, so the revoked task is never replaced and
+# the recording silently never fires).
+
+RECORDING_POST_ROLL_SETTING = "recording_post_roll_minutes"
+RECORDING_SLOTS_SETTING = "recording_slots"
+RECORDING_RESERVE_SETTING = "recording_stream_reserve"
+DEFAULT_RECORDING_POST_ROLL_MINUTES = 120
+
+
+def _int_setting(settings: Dict[str, Any], key: str, default: int) -> int:
+    try:
+        return int(float(settings.get(key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+class _AutoRecord:
+    """Per-apply auto-record context: the plan plus what the writes did."""
+
+    def __init__(self):
+        self.enabled = False
+        self.plan = recording_policy.Plan(slots=None)
+        self.ours: Dict[str, Any] = {}
+        self.state: Dict[str, Dict[str, Any]] = {"created": {}, "tombstones": {}}
+        self.new_tombstones: List[str] = []
+        self.created = self.updated = self.cancelled = 0
+        self.failed: List[str] = []
+        self.names: Dict[str, str] = {}
+
+    def will_record(self, marker: str) -> bool:
+        return marker in self.plan.planned
+
+
+def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any]) -> "_AutoRecord":
+    """Read-only: build the plan before apply writes anything.
+
+    Runs even when the Recorded teams list is empty IF the plugin still has
+    recordings of its own, so clearing the list cancels them (the design's
+    "removing a team cancels its future recordings")."""
+    from apps.channels.models import Recording
+
+    ar = _AutoRecord()
+    now = datetime.now(timezone.utc)
+    recorded_rows = [g for g in games if g.get("recorded_matched")]
+    ours_rows = list(Recording.objects.filter(
+        custom_properties__has_key=recording_policy.MARKER_KEY,
+        end_time__gt=now - recording_policy.STATE_RETENTION,
+    ))
+    if not recorded_rows and not ours_rows:
+        return ar
+    ar.enabled = True
+    ar.state = recording_policy.load_state(RECORDING_STATE_PATH)
+    from apps.m3u.models import M3UAccount
+
+    post_roll = timedelta(minutes=max(0, _int_setting(
+        settings, RECORDING_POST_ROLL_SETTING, DEFAULT_RECORDING_POST_ROLL_MINUTES)))
+    candidates = []
+    for g in recorded_rows:
+        start_dt = parse_iso_utc(g.get("start_time_utc"))
+        if start_dt is None:
+            continue
+        live_start, live_end = _live_window(g, start_dt)
+        m = _build_marker_key(g)
+        ar.names[m] = _format_matchup(g.get("home", ""), g.get("away", ""))
+        candidates.append(recording_policy.Candidate(
+            marker=m, kickoff=start_dt, start=live_start, end=live_end + post_roll,
+        ))
+
+    ar.ours, skip = recording_policy.classify_existing(
+        ours_rows, ar.state, [c.marker for c in candidates])
+    ar.new_tombstones = [m for m, why in skip.items()
+                         if why == "deleted by you" and m not in ar.state["tombstones"]]
+    live_rows = list(Recording.objects.filter(end_time__gt=now))
+    busy = [
+        (r.start_time, r.end_time)
+        for r in live_rows
+        if not recording_policy.rec_marker(r) and recording_policy.occupies_stream(r, now)
+    ]
+    from apps.channels.models import Channel
+    chan_by_marker = dict(Channel.objects.filter(
+        tvg_id__in=[c.marker for c in candidates]).values_list("tvg_id", "id"))
+    for c in candidates:
+        ch_id = chan_by_marker.get(c.marker)
+        if (c.marker not in skip and c.marker not in ar.ours and ch_id is not None
+                and recording_policy.covered_by_user(live_rows, ch_id, c.start, c.end)):
+            skip[c.marker] = "you are already recording it"
+    held = {m: (r.start_time, r.end_time) for m, r in ar.ours.items()
+            if recording_policy.is_in_progress(r)}
+    limits = list(M3UAccount.objects.filter(is_active=True).values_list("max_streams", flat=True))
+    slots = recording_policy.resolve_slot_budget(
+        settings.get(RECORDING_SLOTS_SETTING, 0), limits,
+        settings.get(RECORDING_RESERVE_SETTING, 1),
+    )
+    ar.plan = recording_policy.plan_recordings(candidates, slots, busy, held, skip)
+    return ar
+
+
+def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool) -> None:
+    """Delete our not-yet-started recordings that the plan no longer wants.
+    instance.delete() fires Dispatcharr's revoke_task_on_delete, which cancels
+    the scheduled capture. Only rows carrying our marker are ever considered."""
+    if not ar.enabled:
+        return
+    for rec in recording_policy.cancellable(ar.ours, ar.plan):
+        m = recording_policy.rec_marker(rec)
+        ar.cancelled += 1
+        if dry_run:
+            continue
+        rec.delete()
+        # We removed it, so its absence next time is not the user's doing.
+        ar.state["created"].pop(m, None)
+        ar.ours.pop(m, None)
+
+
+def _autorecord_for_game(ar: "_AutoRecord", marker: str, channel, title: str,
+                         description: str, dry_run: bool) -> None:
+    """Create or move this game's recording to match the plan."""
+    if not ar.enabled or channel is None:
+        return
+    planned = ar.plan.planned.get(marker)
+    existing = ar.ours.get(marker)
+    action = recording_policy.decide(planned, existing, channel.id)
+    if action in (recording_policy.KEEP, recording_policy.SKIP) or dry_run:
+        if action == recording_policy.CREATE:
+            ar.created += 1
+        elif action in (recording_policy.UPDATE, recording_policy.EXTEND):
+            ar.updated += 1
+        return
+    from apps.channels.models import Recording
+    start, end, _slot = planned
+    try:
+        if action == recording_policy.CREATE:
+            # .create() on purpose: post_save schedules the capture task.
+            rec = Recording.objects.create(
+                channel=channel, start_time=start, end_time=end,
+                custom_properties={
+                    recording_policy.MARKER_KEY: marker,
+                    "status": "scheduled",
+                    "description": description,
+                    "program": {
+                        "title": title,
+                        "description": description,
+                        "start_time": start.isoformat(),
+                        "end_time": end.isoformat(),
+                    },
+                },
+            )
+            ar.state["created"][marker] = recording_policy.written_record(
+                rec.id, start, end, channel.id, datetime.now(timezone.utc))
+            ar.ours[marker] = rec
+            ar.created += 1
+        elif action == recording_policy.UPDATE:
+            existing.start_time, existing.end_time = start, end
+            existing.channel = channel
+            existing.save()  # FULL save: pre_save revokes, post_save reschedules
+            ar.state["created"][marker] = recording_policy.written_record(
+                existing.id, start, end, channel.id, datetime.now(timezone.utc))
+            ar.updated += 1
+        elif action == recording_policy.EXTEND:
+            # In progress: run_recording re-reads end_time and honours a later
+            # one; pre_save does not revoke a recording mid-capture.
+            existing.end_time = end
+            existing.save()
+            ar.state["created"][marker] = recording_policy.written_record(
+                existing.id, existing.start_time, end, channel.id, datetime.now(timezone.utc))
+            ar.updated += 1
+    except Exception:
+        logger.exception("[ranked_matchups] auto-record %s failed for %s", action, marker)
+        ar.failed.append(marker)
+
+
+def _autorecord_dot(channel_id, start: datetime, end: datetime) -> bool:
+    """Whether the guide should show the 🔴 for this window: read from the
+    channel's actual Recording rows, after the writes, so a failed write never
+    shows a dot and a recording the user made by hand does."""
+    from apps.channels.models import Recording
+    rows = Recording.objects.filter(channel_id=channel_id, end_time__gt=start, start_time__lt=end)
+    return recording_policy.recording_over(rows, start, end)
+
+
+def _autorecord_finish(ar: "_AutoRecord", games: List[Dict[str, Any]], dry_run: bool) -> str:
+    """Persist state and return the short toast fragment (empty when unused)."""
+    if not ar.enabled:
+        return ""
+    now = datetime.now(timezone.utc)
+    if not dry_run:
+        for m in ar.new_tombstones:
+            ar.state["tombstones"][m] = now.isoformat()
+            ar.state["created"].pop(m, None)
+        live = {_build_marker_key(g) for g in games}
+        recording_policy.save_state(
+            RECORDING_STATE_PATH, recording_policy.prune_state(ar.state, live, now))
+    parts = [f"{len(ar.plan.planned)} set to record"]
+    if ar.created or ar.updated or ar.cancelled:
+        parts.append(f"{ar.created} new, {ar.updated} moved, {ar.cancelled} cancelled")
+    if ar.plan.no_slot:
+        names = [ar.names.get(m, m) for m in ar.plan.no_slot]
+        more = f" +{len(names) - 2} more" if len(names) > 2 else ""
+        parts.append("no free slot: " + ", ".join(names[:2]) + more)
+    if ar.failed:
+        parts.append(f"{len(ar.failed)} failed (see logs)")
+    return " Recording: " + "; ".join(parts) + "."
 
 
 def _first_free_number(used, start: int) -> int:
@@ -1581,10 +1801,47 @@ def _format_matchup(home: str, away: str) -> str:
 _PAST_SLOT_DEFAULT_DURATION = timedelta(hours=12)
 
 
-def _build_program_title(state: str, matchup: str, kickoff_local: str) -> str:
+def _live_window(g: Dict[str, Any], start_dt: datetime) -> Tuple[datetime, datetime]:
+    """The game's "Live" EPG block: kickoff minus EPG_PRE_MIN through the game's
+    estimated end. ONE definition shared by the EPG writer and the auto-record
+    window (#216), so the recording can never cover a different span than the
+    block the guide calls live (recording the Upcoming block instead is #145).
+    """
+    prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
+    # DO NOT compute this as start_dt + EPG_POST_HOURS. That is a flat
+    # 4h for every sport, while the reaper dates a game's end with the
+    # PER-SPORT window (_game_end_utc -> _epg_match_window: 2.5h for
+    # soccer, 24h for boxing). The two disagreed, so a soccer channel
+    # was reaped at start+2.5h+remove_after while its own live programme
+    # still claimed the match ran to start+4h: exactly the failure
+    # _game_end_utc's docstring warns about, and a second duration table
+    # of the kind that docstring forbids. Deriving it from the same
+    # function makes them incapable of drifting.
+    # Bounded by BOTH: the per-sport end estimate the reaper uses, and
+    # the display default. Taking the minimum satisfies the invariant
+    # this whole thing rests on (prog_end <= reap_at, since
+    # reap_at = _game_end_utc + a non-negative delay) WITHOUT importing
+    # the match window's generosity into a user-facing duration.
+    # _epg_match_window is a MATCH-RECALL prefilter: boxing's +24h
+    # absorbs a feed whose start times can be a day off, and using it
+    # raw here would label a card "live" for 24 hours. Soccer's 2.5h is
+    # genuinely shorter than the 4h default, so the min still fixes the
+    # soccer case that motivated this (a channel reaped 30 minutes
+    # before its own live row ended).
+    _display_end = start_dt + timedelta(hours=EPG_POST_HOURS)
+    _sport_end = _game_end_utc(g)
+    prog_end = min(_sport_end, _display_end) if _sport_end else _display_end
+    return prog_start, prog_end
+
+
+def _build_program_title(state: str, matchup: str, kickoff_local: str, recording: bool = False) -> str:
     """ProgramData.title for one of the three EPG windows on a virtual
     channel. `state` is `"upcoming"` / `"live"` / `"past"`. Truncates
-    to 255 chars (the ProgramData column width) with ellipsis."""
+    to 255 chars (the ProgramData column width) with ellipsis.
+
+    `recording` prefixes the 🔴 on the Upcoming and Live blocks (#216). Never
+    on Past: by then the recording is over, and a dot there reads as "will
+    record". The caller derives it from the channel's actual Recording rows."""
     if state == "upcoming":
         title = f"Upcoming: {matchup}, {kickoff_local}" if kickoff_local else f"Upcoming: {matchup}"
     elif state == "live":
@@ -1593,6 +1850,8 @@ def _build_program_title(state: str, matchup: str, kickoff_local: str) -> str:
         title = f"Past: {matchup}"
     else:
         raise ValueError(f"unknown EPG window state: {state!r}")
+    if recording and state in ("upcoming", "live"):
+        title = f"{recording_policy.DOT} {title}"
     if len(title) > 255:
         title = title[:252] + "..."
     return title
@@ -1788,6 +2047,43 @@ def _dedup_series_games(games: List[Any], sources: List[Any]) -> Tuple[List[Any]
     deduped_games = [games[i] for i in keep_indices]
     deduped_sources = [sources[i] for i in keep_indices]
     return deduped_games, deduped_sources, len(games) - len(deduped_games)
+
+
+RECORDED_TEAMS_SETTING = "recorded_teams"
+
+
+def _dedup_names(names: List[str]) -> List[str]:
+    """Order-preserving, case-insensitive dedupe of a team-name list."""
+    seen, out = set(), []
+    for n in names:
+        k = n.casefold()
+        if k not in seen:
+            seen.add(k)
+            out.append(n)
+    return out
+
+
+def _is_forced_row(row: Dict[str, Any]) -> bool:
+    """A cached game that must be applied whatever the cap: a favorite, or a
+    recorded team (#216)."""
+    return bool(row.get("favorites_matched")) or bool(row.get("recorded_matched"))
+
+
+def _split_applied(payload: List[Dict[str, Any]], max_games: int) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split the scored, sorted payload into (applied, bench).
+
+    The first `max_games` rows are applied, PLUS every forced row beyond them.
+    DO NOT go back to a plain `payload[:max_games]` slice. The refresh cap keeps
+    favorites past `retain`, but the slice then benched any favorite that sorted
+    below `max_games` (the sort is today-first, so a favorite playing tomorrow
+    lands after a full slate of today's games) and it got no channel at all,
+    despite the Favorites help text promising it is always shown. A recorded
+    team benched the same way would never be recorded. Order is preserved.
+    """
+    applied, bench = [], []
+    for i, row in enumerate(payload):
+        (applied if i < max_games or _is_forced_row(row) else bench).append(row)
+    return applied, bench
 
 
 def _parse_favorites(raw: str) -> List[str]:
@@ -1996,7 +2292,7 @@ def _is_postseason_game(game: Any) -> bool:
     return str(stage).strip().upper() not in _NON_POSTSEASON_STAGES
 
 
-def _filter_favorites_only(games, sources, favorites, mode):
+def _filter_favorites_only(games, sources, favorites, mode, always_keep=()):
     """Apply the favorites-only curation gate, returning (games, sources,
     dropped_count) filtered in lockstep so the parallel game/source association
     survives. No-op (returns inputs unchanged, dropped=0) when the mode is off,
@@ -2006,7 +2302,9 @@ def _filter_favorites_only(games, sources, favorites, mode):
     favorite SCORING signal agree on what "involves a favorite" means (same
     word-boundary + soccer-qualifier rules); a divergence would drop a game the
     score still treats as a favorite. In 'postseason' mode a non-favorite game
-    is rescued iff `_is_postseason_game` is true."""
+    is rescued iff `_is_postseason_game` is true. A game involving a team in
+    `always_keep` (the Recorded teams list, #216) always survives: being
+    recorded implies being on the list."""
     if mode not in _FAVORITES_ONLY_ACTIVE_MODES:
         return games, sources, 0
     if not favorites:
@@ -2020,7 +2318,9 @@ def _filter_favorites_only(games, sources, favorites, mode):
 
     kept_games, kept_sources, dropped = [], [], 0
     for g, src in zip(games, sources):
-        keep = bool(match_favorites(g.home, g.away, favorites))
+        keep = bool(match_favorites(g.home, g.away, favorites)) or bool(
+            always_keep and match_favorites(g.home, g.away, list(always_keep))
+        )
         if (
             not keep
             and mode == _FAVORITES_ONLY_POSTSEASON
@@ -2144,7 +2444,13 @@ def _build_sources(settings: Dict[str, Any]):
     # its own. ONE setting drives all three deliberately, because the rationale
     # doesn't differ by flavour. The source does the matching (reusing
     # scoring.match_favorites) so we just hand it the favorites and the toggle.
-    friendlies_favorites = _parse_favorites(settings.get("favorites", ""))
+    # Recorded teams (#216) ride the same gate: a recorded team's friendly must
+    # reach the list, or it cannot be recorded. The sources only use this list
+    # to gate, never to score, so the union changes nothing else.
+    friendlies_favorites = _dedup_names(
+        _parse_favorites(settings.get("favorites", ""))
+        + _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, ""))
+    )
     friendlies_favorites_only_setting = bool(settings.get("friendlies_favorites_only", True))
     if settings.get("enable_intl_friendlies", False):
         sources.append(InternationalFriendliesSource(
@@ -2476,6 +2782,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     _clear_fd_caches()
 
     favorites = _parse_favorites(settings.get("favorites", ""))
+    recorded_teams = _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, ""))
     weights = _build_weights(settings)
     lookahead = int(settings.get("lookahead_days", 7))
     max_games = _resolve_max_games(settings)
@@ -2546,6 +2853,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     else:
         all_games, game_sources, fav_dropped = _filter_favorites_only(
             all_games, game_sources, favorites, fav_only_mode,
+            always_keep=recorded_teams,
         )
         if fav_dropped:
             postseason_note = (
@@ -2750,11 +3058,23 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # been fetched, scored and Monte-Carlo simulated at full cost.
     bench_size = _bench_size(settings)
     retain = max_games + bench_size
+    from .scoring import match_favorites as _match_names
+    recorded_by_game = {
+        id(g): (_match_names(g.home, g.away, recorded_teams) if recorded_teams else [])
+        for g, _sig, _sc in scored
+    }
+
+    def _forced(item) -> bool:
+        # Favorites and recorded teams (#216) are never capped away. A recorded
+        # team is NOT a favorite: it gets no score weight and no favorites-first
+        # sort slot, only the guarantee of being on the list.
+        return bool(item[1].favorite_match) or bool(recorded_by_game.get(id(item[0])))
+
     if len(scored) > retain:
-        favs = [s for s in scored if s[1].favorite_match]
-        non_favs = [s for s in scored if not s[1].favorite_match]
-        keep_non_favs = non_favs[: max(0, retain - len(favs))]
-        scored = sorted(favs + keep_non_favs, key=_sort_key)
+        forced = [s for s in scored if _forced(s)]
+        rest = [s for s in scored if not _forced(s)]
+        keep_rest = rest[: max(0, retain - len(forced))]
+        scored = sorted(forced + keep_rest, key=_sort_key)
 
     # 4. EPG match each game to a Dispatcharr channel.
     # _build_epg_lookup excludes ALL our virtual channels by tvg_id prefix:
@@ -2814,6 +3134,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "score_breakdown": score.breakdown,
             "score_notes": score.notes,
             "favorites_matched": signals.favorite_match,
+            "recorded_matched": recorded_by_game.get(id(game), []),
             "is_rivalry": signals.is_rivalry,
             "tournament_stage": signals.tournament_stage,
             "importance_points": signals.importance_points,
@@ -2833,8 +3154,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # scored, kept in sort order for the reaper to promote from. Splitting
     # here rather than tagging rows means _action_apply needs no change at
     # all: it still applies exactly the list it is given.
-    applied_payload = games_payload[:max_games]
-    bench_payload = games_payload[max_games:]
+    applied_payload, bench_payload = _split_applied(games_payload, max_games)
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
@@ -4464,6 +4784,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             "[ranked_matchups] apply: dropped %d cached game(s) sharing a marker "
             "with a higher-ranked one (same source event listed twice)", dup_dropped,
         )
+    # Auto-record plan (#216). Read-only; the writes happen per game below.
+    autorec = _autorecord_prepare(games, settings)
 
     group_name = settings.get("channel_profile_name", DEFAULT_GROUP_NAME)
     # Archive group for preserved DVR recordings (#146). Blank falls back to the
@@ -5102,7 +5424,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # in the DB. See the comment on the pool build.
         if not source_streams:
             score_val = float(g.get("score", 0.0))
-            if score_val >= placeholder_threshold:
+            # A recorded team always gets its channel (#216): providers often
+            # publish an event feed only hours before kickoff, and the recording
+            # has to exist on the channel before then. The next apply that
+            # matches a stream attaches it to this same row (same marker).
+            if score_val >= placeholder_threshold or g.get("recorded_matched"):
                 placeholder = True
                 placeholder_channels_created += 1
             else:
@@ -5152,6 +5478,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             venue=g.get("venue"),
             start_dt=start_dt,
             tz=apply_tz,
+            recording=autorec.will_record(marker),
         )
 
         description = _build_description(g=g, tagline=tagline, placeholder=placeholder)
@@ -5205,6 +5532,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     profile_stats: Optional[Dict[str, Any]] = None
 
     with transaction.atomic():
+        # Auto-record (#216): drop our not-yet-started recordings the plan no
+        # longer wants BEFORE the stale reap looks at recordings, so a game
+        # whose team was removed can have its channel reaped this same run.
+        _autorecord_cancel(autorec, dry_run)
+
         # Persist the #217 re-key. Queryset .update(), not ch.save(): only the
         # tvg_id moves, and staying off save() keeps every Channel post_save
         # receiver out of it (see the epg_data signal trap further down). The
@@ -5280,30 +5612,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             if target_chnum is None:
                 continue
             written_numbers.add(target_chnum)
-            prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
-            # DO NOT compute this as start_dt + EPG_POST_HOURS. That is a flat
-            # 4h for every sport, while the reaper dates a game's end with the
-            # PER-SPORT window (_game_end_utc -> _epg_match_window: 2.5h for
-            # soccer, 24h for boxing). The two disagreed, so a soccer channel
-            # was reaped at start+2.5h+remove_after while its own live programme
-            # still claimed the match ran to start+4h: exactly the failure
-            # _game_end_utc's docstring warns about, and a second duration table
-            # of the kind that docstring forbids. Deriving it from the same
-            # function makes them incapable of drifting.
-            # Bounded by BOTH: the per-sport end estimate the reaper uses, and
-            # the display default. Taking the minimum satisfies the invariant
-            # this whole thing rests on (prog_end <= reap_at, since
-            # reap_at = _game_end_utc + a non-negative delay) WITHOUT importing
-            # the match window's generosity into a user-facing duration.
-            # _epg_match_window is a MATCH-RECALL prefilter: boxing's +24h
-            # absorbs a feed whose start times can be a day off, and using it
-            # raw here would label a card "live" for 24 hours. Soccer's 2.5h is
-            # genuinely shorter than the 4h default, so the min still fixes the
-            # soccer case that motivated this (a channel reaped 30 minutes
-            # before its own live row ended).
-            _display_end = start_dt + timedelta(hours=EPG_POST_HOURS)
-            _sport_end = _game_end_utc(g)
-            prog_end = min(_sport_end, _display_end) if _sport_end else _display_end
+            prog_start, prog_end = _live_window(g, start_dt)
             existing = existing_virtuals.get(marker)
 
             if existing:
@@ -5358,6 +5667,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         )
                     created += 1
 
+            # Auto-record this game (#216). Outside the EPG block on purpose: a
+            # recording is scheduled whether or not an EPG source exists.
+            _autorecord_for_game(
+                autorec, marker, vc, _format_matchup(g["home"], g["away"]),
+                description, dry_run,
+            )
+
             # 4. EPG: get-or-create EPGData + replace ProgramData. Two
             # programs per channel:
             #   (a) pre-game filler: now → kickoff-30min, "Up next: ..."
@@ -5389,6 +5705,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     vc.epg_data_id = epg_data.id  # keep in-memory mirror in sync
                 ProgramData.objects.filter(epg=epg_data).delete()
 
+                # Read the 🔴 back from the channel's real Recording rows, after
+                # the auto-record write above (#216).
+                rec_dot = _autorecord_dot(vc.id, prog_start, prog_end)
+                live_description = description
+                if rec_dot:
+                    _planned = autorec.plan.planned.get(marker)
+                    live_description = (
+                        recording_policy.description_line(
+                            _planned[2] if _planned else None, autorec.plan.slots)
+                        + " " + description
+                    )
+
                 now = datetime.now(timezone.utc)
                 pregame_lead = (prog_start - now).total_seconds()
                 # ProgramData title shape mirrors how real broadcast EPGs
@@ -5400,8 +5728,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 # not a debug breadcrumb.
                 matchup = _format_matchup(g["home"], g["away"])
                 kickoff_local = g.get("kickoff_local", "")
-                upnext_title = _build_program_title("upcoming", matchup, kickoff_local)
-                live_title = _build_program_title("live", matchup, kickoff_local)
+                upnext_title = _build_program_title("upcoming", matchup, kickoff_local, recording=rec_dot)
+                live_title = _build_program_title("live", matchup, kickoff_local, recording=rec_dot)
                 past_title = _build_program_title("past", matchup, kickoff_local)
                 # Reaping OFF means nothing deletes this channel, so there is
                 # no deadline to clamp to and the row must run to the next
@@ -5424,7 +5752,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         end_time=prog_start,
                         title=upnext_title,
                         sub_title=subtitle,
-                        description=description,
+                        description=live_description,
                         tvg_id=marker,
                     )
                 ProgramData.objects.create(
@@ -5433,7 +5761,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     end_time=prog_end,
                     title=live_title,
                     sub_title=subtitle,
-                    description=description,
+                    description=live_description,
                     tvg_id=marker,
                 )
                 # Past slot: bridges the final whistle to the apply that drops
@@ -5665,6 +5993,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         foreign_msg += (
             f" Excluded-group streams skipped: {len(policy_dropped_stream_ids)}."
         )
+    autorec_msg = _autorecord_finish(autorec, games, dry_run)
     rec_msg = ""
     if rehomed_recordings or kept_for_recording_n:
         rec_msg = (
@@ -5676,7 +6005,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         f"(placeholders={placeholder_channels_created} included), "
         f"stale_deleted={deleted_stale}, "
         f"orphan_epg_deleted={orphan_epg_deleted if 'orphan_epg_deleted' in locals() else 0}, "
-        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{rec_msg}{llm_msg}{logo_msg}{foreign_msg}"
+        f"unmatched_skipped={skipped_unmatched}.{rename_msg}{rec_msg}{autorec_msg}{llm_msg}{logo_msg}{foreign_msg}"
         f"{profile_msg} "
         f"WHY descriptions written to EPG source."
     )
@@ -6760,7 +7089,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.28.1"
+    version = "1.29.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

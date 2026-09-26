@@ -45,6 +45,7 @@ TOKENS: Dict[str, str] = {
     "rank_pair": "Compact rank pair, e.g. 1v5 (blank unless both poll-ranked)",
     "score": "Interestingness score 0-10, e.g. 8.5",
     "favorite_star": "A star when one of your favorites is playing, else blank",
+    "recording_dot": "A red dot when this game is set to record, else blank",
     "tagline": "Editorial tagline, e.g. top-5 showdown / title race / Final Four",
     "tournament": "Tournament stage only, e.g. Round of 16 (blank if none)",
     "venue": "Venue name (blank if unknown)",
@@ -56,6 +57,9 @@ TOKENS: Dict[str, str] = {
 KNOWN_TOKENS = set(TOKENS)
 
 _FAVORITE_STAR = "⭐"
+# Same glyph the programme titles carry (recording.DOT); kept as a literal here
+# so naming.py stays import-free of the recording policy module.
+_RECORDING_DOT = "\U0001F534"
 
 _GROUP_RE = re.compile(r"\{([^{}]*)\}")
 # Longest-first matching so a token never loses to a shorter token that is a
@@ -178,6 +182,7 @@ def build_context(
     rank_source: str = "poll",
     score_final: Optional[float] = None,
     favorite: bool = False,
+    recording: bool = False,
     tagline: str = "",
     tournament: str = "",
     venue: Optional[str] = None,
@@ -218,6 +223,7 @@ def build_context(
         "rank_pair": rank_pair,
         "score": f"{score_final:.1f}" if score_final is not None else "",
         "favorite_star": _FAVORITE_STAR if favorite else "",
+        "recording_dot": _RECORDING_DOT if recording else "",
         "tagline": tagline or "",
         "tournament": tournament or "",
         "venue": venue or "",

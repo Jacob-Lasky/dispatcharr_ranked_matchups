@@ -52,7 +52,7 @@ downstream is sport-agnostic.
 | `plugin.json` | Manifest: settings (sports toggles, weights, favorites, schedule), actions. Read by Dispatcharr loader. |
 | `plugin.py` | Plugin class and action handlers. Daemon scheduler, EPG lookup closure, virtual-channel and stream linking, and inactive XMLTV EPG source management. |
 | `scoring.py` | `GameSignals`, `Weights`, `GameScore`. `score_game()` sums per-signal contributions, `_compress_to_10()` does the tanh squash. Helpers: `match_favorites`, `compute_match_importance` (Lahvička Monte Carlo), `format_channel_name` (delegates to `naming`), `render_importance_tagline` + `STAGE_BANDS` (bracket-band prettify), `tournament_stage_label`. League thresholds in `LEAGUE_CONTEXTS` dict (position, label, consequence_weight). |
-| `naming.py` | Channel-name templating (Sonarr/Radarr `{group}`-collapse convention). `render_name`, `validate_template`, `build_context`, `preview_lines`, `DEFAULT_NAME_TEMPLATE`, `TOKENS`. Pure: no Django, no `scoring` import. |
+| `naming.py` | Channel-name templating (Sonarr/Radarr `{group}`-collapse convention). `render_name`, `validate_template`, `build_context`, `preview_lines`, `DEFAULT_NAME_TEMPLATE`, `TOKENS`. Pure: no Django, no `scoring` import — which is why `_RECORDING_DOT` is a literal here rather than an import of `recording.DOT`; the two must stay the same glyph (`tests/test_autorecord.py` pins it). `{recording_dot}` is deliberately absent from `DEFAULT_NAME_TEMPLATE`. |
 | `simulation.py` | Sport-agnostic Monte Carlo importance per Lahvička (2012). `monte_carlo_importance()` for single (team, outcome); `monte_carlo_importance_batch()` shares one set of N season simulations across K queries. `kendall_tau_c()` is the ordinal-association measure. |
 | `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` to Dispatcharr channels and streams. `_build_epg_lookup` (plugin.py) supplies three candidate paths: A, EPG `ProgramData` title, sub-title or description (whole-channel); B, channel name (whole-channel); C, stream name (stream-granular, so a stream need not be on a channel at all). Three tiers: `regex_strict` (channel or stream name names both teams, merging Tier-2 programme matches behind it), `regex_unique` (exactly one non-preview programme match), then Claude batched fallback or first candidate. `_partition_attach_targets` splits the result into `channel_ids` and `stream_ids`. |
 | `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Monte Carlo importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. |
@@ -67,10 +67,12 @@ downstream is sport-agnostic.
 | `sources/_espn.py` | Shared ESPN helpers. `extract_espn_scoreboard_event` normalises one scoreboard event (its docstring forbids inlining a fourth copy). `sweep_upcoming_scoreboard` is the whole per-day sweep for UPCOMING-only sources, owning the US-Eastern-bucket lookback (`SCOREBOARD_LOOKBACK_DAYS`), the FINISHED drop, the stale-SCHEDULED floor (`MAX_AGE_AFTER_KICKOFF`) and the id dedupe. Used by `friendlies.py` + `english_cup.py`. Takes `http_get` INJECTED so each source keeps its own patchable `requests` symbol. The bracket sources deliberately do NOT use it: they sweep a fixed calendar window and KEEP finished games because bracket state comes from results already played. |
 | `sources/friendlies.py` | ESPN exhibition soccer: `InternationalFriendliesSource` (`fifa.friendly` / `fifa.friendly.w`, parametrized on gender) and `ClubFriendliesSource` (`club.friendly`). `supports_importance=False` deliberately: no table to simulate. Gated to Favorites by default (`friendlies_favorites_only`) because an exhibition's only claim to a slot is the favorite signal. `CLUBFRIENDLY` is a distinct prefix from `FRIENDLY` and its absence from `rivalries.json` is load-bearing: a pre-season kickabout is not a derby. |
 | `sources/english_cup.py` | EFL (Carabao) Cup + FA Cup via ESPN (`eng.league_cup` / `eng.fa`). Exists because Football-Data.org gates EVERY domestic cup behind a paid plan (FLC=TIER_THREE, FAC=TIER_TWO; verified 403 on the free-tier key), so a `soccer.py::COMPETITIONS` entry would 403 every refresh and contribute zero games silently. Rounds come from `season.slug`; the slug->stage maps are PER-COMPETITION because the two cups' round names overlap at different depths (FA Cup 4th round = R32, EFL Cup 4th round = R16). `supports_importance=False` and ranks always `None` — the latter is what stops a giant-killing tie being penalised for being lopsided. Early rounds score via the `CUP_R*` band in `scoring.py`, ramping to just under the shared `QUARTER_FINALS`. #190. |
+| `recording.py` | Auto-record policy (#216), pure and ORM-free: `resolve_slot_budget` (tightest positive M3U `max_streams` minus reserve), `plan_recordings` (capacity checked as concurrency, earliest kickoff first; busy = other recordings, held = ours in progress, never displaced, extended when the game runs later), `classify_existing` (user-deleted -> tombstone, user-edited or terminal -> hands off), `decide` (create / full-save update / extend-only while recording), `cancellable`, `covered_by_user`, `recording_over` (the 🔴, read from real rows), and the `recordings_state.json` load/save/prune. `MARKER_KEY` in `Recording.custom_properties` is the only "ours" test. The ORM around it is `_autorecord_*` in plugin.py, which writes with `.create()` / FULL `.save()` on purpose (the Recording signals are wanted; `.update()` or a narrow `update_fields` leaves the capture task stale). |
 | `logos.py` | TheSportsDB matchup-thumbnail resolver. Looks up the curated game via `searchevents.php` (team-name pair, date-tolerance ±2 days, sport-hint disambiguation), downloads the 960x540 graphic to `/data/logos/ranked_matchups_<sha1>.jpg`, and registers a `Logo` row pointing at it. Persistent per-marker cache (`sportsdb_thumb_cache.json`, 14d positive TTL / 1d negative TTL) means apply only HTTP-probes each fixture once. Field-event sources (`away=="Field"`) and dry_run short-circuit the lookup. Stale-file sweep at the end of each apply prunes JPGs whose marker isn't in the live set. Also resolves the league/tournament BADGE fallback (#102): `SPORTSDB_LEAGUE_IDS` (`sport_prefix` -> verified league id), `league_id_for`, `resolve_league_badge_url` (`lookupleague.php` -> `strBadge`), cached as `ranked_matchups_badge_<id>.png` (distinct prefix the sweep skips). |
 
 State (gitignored, lives in `<plugin_dir>/`):
 - `cache.json` — last refresh result (curated game list with score breakdowns)
+- `recordings_state.json` — auto-record bookkeeping (#216): what the plugin last wrote for each recording it created (so a user edit is recognised and left alone), and tombstones for ones the user deleted so they are not re-created
 - `cfbd_api_key`, `football_data_api_key`, `odds_api_key`, `anthropic_api_key` — file fallback when settings field is blank.
 
 ## How channels are produced
@@ -256,6 +258,15 @@ reaper promotes from as games finish (#197). Splitting them at write time
 rather than tagging rows is deliberate: `_action_apply` needs no knowledge of
 the bench at all, it still applies exactly the list it is handed.
 
+`_split_applied` is what does the split, and it is NOT a `payload[:max_games]`
+slice. The first `max_games` rows go on air PLUS every **forced** row past them
+(`_is_forced_row`: a favorite or a recorded team). The refresh cap already kept
+favorites past `retain`, but the slice then benched any favorite that sorted
+below `max_games` — the sort is today-first, so a favorite playing tomorrow
+lands after a full slate of today's games — and it got no channel at all,
+contradicting the Favorites help text. A recorded team benched that way would
+never be recorded.
+
 `reap_apply_pending` is a third key. The reaper rewrites the cache BEFORE
 calling apply, so a failed apply leaves the desired state published and the DB
 behind it. The flag is how the next tick knows to re-apply; without it the
@@ -280,7 +291,11 @@ stay in agreement with that one.
   end is `min(_game_end_utc, start + EPG_POST_HOURS)`: the match window is a
   match-RECALL tolerance, not a duration, so using it raw would label a boxing
   card live for a day. Taking the minimum also preserves the invariant
-  everything below rests on, `prog_end <= reap_at`.
+  everything below rests on, `prog_end <= reap_at`. That whole computation is
+  `_live_window(g, start_dt)`, ONE definition shared by the EPG writer and the
+  auto-record window (#216), so a recording can never cover a different span
+  than the block the guide calls live. Recording the Upcoming block instead is
+  #145.
 - **No programme we publish may outlive the channel it describes** (#204).
   The post-game "Final: ..." row bridges the whistle to the apply that drops the
   channel, and `_compute_past_slot_end` clamps it to the reap deadline (floored
@@ -471,7 +486,15 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   tournament-stage, optional LLM narrative)
 - Today-first sort + channel renumbering, with auto / fixed virtual base and
   either numbering mode (`kickoff` default, `compact` band)
-- Placeholder channels for unmatched-high-scoring games
+- Placeholder channels for unmatched-high-scoring games, and for every game
+  involving a recorded team whatever its score
+- Auto-record for the **Recorded teams** list (#216, phase A): those games are
+  force-included past `max_games` and the favorites-only gates, and scheduled
+  in Dispatcharr's DVR over the Live block plus `recording_post_roll_minutes`,
+  inside a stream budget (`resolve_slot_budget`: tightest active M3U
+  `max_streams` minus `recording_stream_reserve`). Policy in `recording.py`,
+  ORM in `_autorecord_*`. Ranked-game slots, preferences and mid-game handoffs
+  are phases B and C
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)

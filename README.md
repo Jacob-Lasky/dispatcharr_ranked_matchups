@@ -187,6 +187,8 @@ form will collect everything needed to scope it.
    in the plugin's settings:
    - Toggle which sports you want under **Sport Sources**
    - Set your **Favorite teams** (comma-separated) under **Curation**
+   - Optionally list **Recorded teams** to have their games recorded
+     automatically (see [Recording your teams](#recording-your-teams))
    - Pick your **Local timezone** so "today" classification + EPG dates are
      right
    - Tune signal **Weights** if any feel under/over-weighted
@@ -211,8 +213,10 @@ form will collect everything needed to scope it.
    > own, which looks like "renumbering every refresh" but no existing game's
    > number moves. The one exception is a rescheduled game: it moves to its new
    > time slot, on the same channel. A DVR recording on it stays on that channel
-   > rather than being stranded on a stale one, but it keeps the time window it
-   > was scheduled with; moving that window with the game is #216. Because the
+   > rather than being stranded on a stale one. A recording the plugin made for
+   > one of your [recorded teams](#recording-your-teams) follows the game to its
+   > new window; one you scheduled (or edited) by hand is left exactly as you set
+   > it, window included, because the plugin never touches it. Because the
    > number is stable, the guide binds to the right game even though clients
    > cache the EPG separately from the channel list, in both the default output
    > and the Xtream Codes API (both bind by the integer channel number). The
@@ -238,7 +242,7 @@ own name must identify the matchup or event for the plugin to find it.
 | Action | What it does | Writes |
 |---|---|---|
 | `refresh` | Pull upcoming games from each enabled sport, score each, match them to EPG listings, channels and streams, save curated list. | `cache.json` |
-| `apply` | Create / update virtual channels in the target group, link matched streams, write `ProgramData` descriptions, delete stale ones. | DB (honors `dry_run`) |
+| `apply` | Create / update virtual channels in the target group, link matched streams, write `ProgramData` descriptions, schedule or cancel recordings for your [recorded teams](#recording-your-teams), delete stale ones. | DB (honors `dry_run`) |
 | | *Waits for the result and shows the real summary. Runs in a separate process so it cannot stall the web worker, which costs a second or two of startup.* | |
 | `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand. | Both |
 | `show_status` | Print the current curated list with per-game score breakdown. No writes. | — |
@@ -481,11 +485,43 @@ Only channels the plugin owns (tvg_id marker `ranked_matchups:`) are touched,
 including ones created by earlier versions, so an existing install fixes itself
 on the first apply after upgrading.
 
+## Recording your teams
+
+List teams under **Recorded teams** and every game involving one of them is
+put in Top Matchups and set to record in Dispatcharr's DVR. A recorded team
+does not have to be a Favorite, and listing it does not change its score.
+
+- **What gets recorded.** The game itself: from 30 minutes before kickoff to
+  the game's expected end, plus **Keep recording after the scheduled end**
+  (default 120 minutes, for overtime and delays). Never the "Upcoming" block
+  that sits in the guide before the game.
+- **How many at once.** **Recordings at once** defaults to automatic: your
+  tightest M3U account limit (Max Streams) minus **Streams kept free for live
+  TV** (default 1). When more games overlap than there are slots, the earliest
+  kickoff wins and the apply result names the games that got no slot. Watching
+  a game that is also recording shares one stream.
+- **What you see.** Games set to record carry a red dot (🔴) on their
+  Upcoming and Live guide entries, and the description says which slot, e.g.
+  `Recording (slot 1 of 3).` The dot is read from Dispatcharr's actual
+  recordings, so a recording you schedule by hand on a matchups channel shows
+  it too. Add `{recording_dot}` to the channel name template to show it in
+  channel names as well. TV apps download the guide on their own schedule, so a
+  change can take a few hours to show there.
+- **Changing your mind.** Removing a team cancels its recordings that have not
+  started. A recording you delete from the DVR tab stays deleted, and one you
+  stop is not restarted. A game with no stream yet still gets its channel and
+  its recording, so a feed the provider adds shortly before kickoff is
+  recorded once the next refresh attaches it.
+- **Motorsport, golf, tennis, UFC.** The plugin sees the event, not the
+  people in it, so enter an event name (`Monaco`, `Masters`) rather than a
+  driver or player.
+
 ## Placeholder channels
 
-Games scoring above `placeholder_min_score` (default 5.0) get a virtual
-channel **even if no Dispatcharr channel currently has an EPG entry for the
-game**. The description marks it `[NOTE] No EPG match found yet — this is a
+Games scoring above `placeholder_min_score` (default 5.0), and every game
+involving a recorded team whatever its score, get a virtual channel **even if
+no Dispatcharr channel currently has an EPG entry for the game**. The
+description marks it `[NOTE] No EPG match found yet — this is a
 placeholder channel`. When the provider EPG eventually publishes the
 broadcast info, the next refresh adds streams to the virtual channel and it
 becomes playable.
