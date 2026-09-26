@@ -192,6 +192,13 @@ def monte_carlo_importance(
 # a "remaining" match, and the contingency table is built from a season the
 # recorded W/D/L row does not describe. Nothing raises; the importance
 # number is simply wrong. See #65.
+#
+# NOT the same list as plugin._MARKER_ID_KEYS, deliberately. This one compares
+# a scored row against the simulator's own fixture pool, whose rows carry only
+# fd_id / game_id (and game_id is synthetic on some pool rows, which is fine
+# here because both sides come from the same source). The marker is a CHANNEL
+# identity across refreshes and must exclude bare game_id for exactly that
+# reason. Merging the two would break one or the other (#217).
 _MATCH_ID_KEYS = ("fd_id", "game_id")
 
 

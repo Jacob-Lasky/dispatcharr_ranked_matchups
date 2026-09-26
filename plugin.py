@@ -60,6 +60,7 @@ from ._util import (
     series_result_lines,
     looks_seeded,
     stable_channel_number,
+    CHANNEL_NUMBER_TIEBREAK_SLOTS,
     trusted_impact_narratives,
     allocate_compact_numbers,
     stable_hash_int,
@@ -866,9 +867,12 @@ _AUTO_BASE_FALLBACK = 9000
 #
 # KICKOFF is the default and encodes the game's start time into the number
 # (see _util.stable_channel_number). Numbers run to ~7 digits, but a game's
-# number is a pure function of its immutable kickoff time, so it NEVER moves.
-# That is what makes the #117 guide mismatch impossible rather than merely
-# rare, and it is why this stays the default.
+# number is a pure function of its kickoff time, so it does not move while the
+# kickoff holds, whatever else changes in the slate. That is what makes the #117
+# guide mismatch structurally rare rather than routine, and it is why this stays
+# the default. A reschedule DOES move the number, to the new kickoff's minute,
+# on the same Channel row since #217; the vacated number can only be reused by
+# another game kicking off in that same minute.
 #
 # COMPACT keeps every number inside a fixed band the user names, which is what
 # people actually ask for ("put my games at 400-424"). It cannot make the
@@ -3174,16 +3178,64 @@ def _game_reap_at_utc(
     return end + timedelta(minutes=max(0, int(remove_after_minutes)))
 
 
-def _build_marker_key(game: Dict[str, Any]) -> str:
-    """Stable identifier per game so reruns find existing virtual channels.
+# Source event ids that identify ONE game for its whole life, in precedence
+# order, each with the tag it carries in the marker. The first present, non-blank
+# one becomes the game's identity (#217).
+#
+# DO NOT fall through to the kickoff-time hash when a source publishes an id.
+# The marker is the channel's tvg_id and the key apply uses to find the game's
+# existing Channel row, so a marker that includes the kickoff time changes when
+# the game is rescheduled (flexed NFL games, weather, TV-slot moves, a feed
+# correcting its time). Apply then creates a SECOND channel for the same game,
+# and any Recording on the first row fires at the old time on a channel nobody
+# maintains. The same holds for team names: a bracket slot published as TBD and
+# filled in later is the same event.
+#
+# DO NOT add bare "game_id": it is the simulator's identity key (#181) and is
+# synthetic on some pool rows (nhl.py / mlb.py stamp -(100000 + matchday)).
+# tests/test_marker_identity.py fails if a source stamps an *_id key that is
+# neither listed here nor exempted there.
+#
+# DO NOT reorder these, and DO NOT insert a key above one a source already
+# stamps. Precedence is part of every existing channel's identity: a row that
+# carries two keys would get a new marker, and _rekey_legacy_virtuals only
+# migrates from the pre-#217 hash, not between id keys, so the channel would be
+# recreated (recordings lost). New keys go at the END. The order is pinned by
+# tests/test_marker_identity.py.
+#
+# cfbd_id (untagged) and fd_id ("fd_") keep the formats they had before #217 so
+# those channels' tvg_ids did not move on upgrade. Tags keep id spaces apart:
+# espn 42 and cbb 42 are different games.
+#
+# Not to be merged with simulation._MATCH_ID_KEYS: that list is the simulator's
+# row-vs-fixture-pool identity and needs bare game_id; see its comment.
+_MARKER_ID_KEYS: Tuple[Tuple[str, str], ...] = (
+    ("cfbd_id", ""),
+    ("fd_id", "fd_"),
+    ("espn_event_id", "espn_"),
+    ("nfl_game_id", "nfl_"),
+    ("nba_game_id", "nba_"),
+    ("nhl_game_id", "nhl_"),
+    ("mlb_game_id", "mlb_"),
+    ("wnba_game_id", "wnba_"),
+    ("ncaaw_game_id", "ncaaw_"),
+    ("ncaasbl_game_id", "ncaasbl_"),
+    ("cbb_id", "cbb_"),
+    ("boxing_event_id", "boxing_"),
+)
 
-    Format: ranked_matchups:<sport>:<source-id-or-fallback>
 
-    The fallback hash MUST be process-stable: Python's builtin hash() is
-    salted by PYTHONHASHSEED so it changes between restarts. That would
-    cause every soccer match (no cfbd_id) to look like a different game on
-    each refresh, which spuriously deletes-and-recreates the virtual
-    channel every run. Use stable_hash_int instead.
+def _legacy_marker_key(game: Dict[str, Any]) -> str:
+    """The pre-#217 marker: cfbd_id, fd_id, else a hash of teams + kickoff.
+
+    Kept for two jobs only: it is still the fallback for a row with no source
+    id, and `_rekey_legacy_virtuals` uses it to find a channel created before
+    the upgrade. Do not use it anywhere else.
+
+    The hash MUST be process-stable: Python's builtin hash() is salted by
+    PYTHONHASHSEED so it changes between restarts, which would make every game
+    look new on each refresh and delete-and-recreate its channel every run. Use
+    stable_hash_int instead.
     """
     sport = game.get("sport_prefix", "?")
     extra = game.get("extra") or {}
@@ -3195,6 +3247,83 @@ def _build_marker_key(game: Dict[str, Any]) -> str:
         return f"{TVG_ID_PREFIX}{sport}:fd_{fd_id}"
     fallback = f"{game.get('away','')}|{game.get('home','')}|{game.get('start_time_utc','')}"
     return f"{TVG_ID_PREFIX}{sport}:{stable_hash_int(fallback)}"
+
+
+def _build_marker_key(game: Dict[str, Any]) -> str:
+    """Stable identifier per game so reruns find existing virtual channels.
+
+    Format: ranked_matchups:<sport>:<tag><source-id>, from the first key in
+    _MARKER_ID_KEYS the row carries. A row with no source id falls back to the
+    legacy teams + kickoff hash, which does NOT survive a reschedule; see
+    _MARKER_ID_KEYS for why every id-bearing source must be listed there.
+    """
+    sport = game.get("sport_prefix", "?")
+    extra = game.get("extra") or {}
+    for key, tag in _MARKER_ID_KEYS:
+        val = extra.get(key)
+        if val is not None and str(val).strip() != "":
+            return f"{TVG_ID_PREFIX}{sport}:{tag}{str(val).strip()}"
+    return _legacy_marker_key(game)
+
+
+def _unique_by_marker(games) -> Tuple[List[Any], int]:
+    """Keep the first game per marker, in order; return (games, n_dropped).
+
+    DO NOT let apply see two games with one marker. The write loop would create
+    two channels with the same tvg_id and the same channel number, and the
+    unique (channel_group, channel_number) constraint then fails the whole
+    apply transaction. Since #217 a marker is a source event id, so the same
+    event listed by two sources (or twice by one) collapses here even when the
+    team names differ. The cache is in rank order, so the first is the best.
+    """
+    seen: set = set()
+    out: List[Any] = []
+    for g in games:
+        m = _build_marker_key(g)
+        if m in seen:
+            continue
+        seen.add(m)
+        out.append(g)
+    return out, len(games) - len(out)
+
+
+def _rekey_legacy_virtuals(existing_virtuals: Dict[str, Any], games) -> List[Tuple[Any, str, str]]:
+    """Re-key channels created under a pre-#217 marker to the game's new one.
+
+    Mutates `existing_virtuals` (marker -> Channel) in place so the rest of
+    apply finds the old row under the new marker and updates it, instead of
+    creating a new channel and reaping the old one. DO NOT let that recreate
+    happen: Recording.channel is on_delete=CASCADE, so replacing the row would
+    drop the user's scheduled recordings.
+
+    Returns [(channel, old_marker, new_marker)] for the caller to persist. Pure
+    (no ORM) so it is unit-testable. Two cases are deliberately left to the
+    normal stale path, which preserves recordings, instead of guessed at here:
+      - the new marker already has a channel;
+      - the legacy marker is AMBIGUOUS: two games in this slate hash to it (two
+        TBD-vs-TBD bracket slots at one kickoff), so the old channel cannot be
+        attributed to either, and handing it to the wrong one would move its
+        recording onto the wrong game.
+    A game rescheduled between the last pre-#217 apply and the first one after
+    it is not found either (the hash uses the CURRENT kickoff); that game gets a
+    new channel once, exactly as every reschedule did before #217.
+    """
+    legacy_counts: Dict[str, int] = {}
+    for g in games:
+        lm = _legacy_marker_key(g)
+        legacy_counts[lm] = legacy_counts.get(lm, 0) + 1
+    renames: List[Tuple[Any, str, str]] = []
+    for g in games:
+        new = _build_marker_key(g)
+        legacy = _legacy_marker_key(g)
+        if new == legacy or new in existing_virtuals or legacy not in existing_virtuals:
+            continue
+        if legacy_counts[legacy] > 1:
+            continue
+        ch = existing_virtuals.pop(legacy)
+        existing_virtuals[new] = ch
+        renames.append((ch, legacy, new))
+    return renames
 
 
 def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) -> int:
@@ -3297,8 +3426,11 @@ def _assign_channel_numbers(
     Two schemes, selected by `mode` (see the NUMBERING_MODE_* constants):
 
     KICKOFF (default) takes numbers from `stable_channel_number`, a pure function
-    of kickoff time + marker, so a given game keeps the same integer for its whole
-    life regardless of how the slate is ranked or which other games are present.
+    of kickoff time + marker, so a given game keeps the same integer while its
+    kickoff holds, regardless of how the slate is ranked or which other games are
+    present. `existing_numbers` is honoured within the kickoff minute: a game
+    whose channel already holds a slot in its own minute's block keeps that slot
+    even if the marker hash now points elsewhere (#217).
     That stability is what lets both the default M3U/XMLTV output and the Xtream
     Codes API bind the EPG correctly with no client setting (#121), while the
     numbers still increase with kickoff time so the list sorts soonest-first.
@@ -3354,19 +3486,39 @@ def _assign_channel_numbers(
             )
         return assigned
 
-    pairs: List[Tuple[str, int]] = []
+    # A game whose channel already holds a number inside its OWN kickoff
+    # minute's block keeps it, even when the tiebreak hash would now pick a
+    # different slot. The hash is of the marker, so without this the #217
+    # marker migration would shuffle same-minute games between slots, and a
+    # number vacated by one game could be handed to another: the #117
+    # wrong-programme binding. A reschedule changes the minute, so the old
+    # number falls outside the new block and is released, as it should be.
+    slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
+    held = existing_numbers or {}
+    pairs: List[Tuple[str, int, int]] = []  # (marker, number, 0 if kept else 1)
     for g in games:
         start_dt = parse_iso_utc(g.get("start_time_utc"))
         if start_dt is None:
             continue
         marker = _build_marker_key(g)
-        pairs.append((marker, stable_channel_number(virtual_base, start_dt, marker, tz)))
+        number = stable_channel_number(virtual_base, start_dt, marker, tz)
+        block = number - (number - virtual_base) % slots
+        prior = held.get(marker)
+        if prior is not None and block <= int(prior) < block + slots:
+            pairs.append((marker, int(prior), 0))
+        else:
+            pairs.append((marker, number, 1))
 
-    pairs.sort(key=lambda mn: (mn[1], mn[0]))
+    # Kept numbers are placed BEFORE any fresh one, not merely sorted ahead of
+    # it at equal value: a fresh game nudged +1 off a neighbour could otherwise
+    # land on a slot a later kept game holds, and push that kept game out of
+    # its minute's block. Kept numbers are distinct (they are live channel
+    # numbers in one group), so placing them first never collides.
+    pairs.sort(key=lambda p: (p[2], p[1], p[0]))
     assigned: Dict[str, int] = {}
     used: set = set()
     collisions = 0
-    for marker, number in pairs:
+    for marker, number, _kept in pairs:
         free = _first_free_number(used, number)
         collisions += free - number  # == number of +1 nudges taken
         used.add(free)
@@ -4304,9 +4456,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from .scoring import format_channel_name
 
     cache = _read_cache()
-    games = cache.get("games", [])
+    games, dup_dropped = _unique_by_marker(cache.get("games", []))
     if not games:
         return {"status": "ok", "message": "Cache empty; run refresh first."}
+    if dup_dropped:
+        logger.warning(
+            "[ranked_matchups] apply: dropped %d cached game(s) sharing a marker "
+            "with a higher-ranked one (same source event listed twice)", dup_dropped,
+        )
 
     group_name = settings.get("channel_profile_name", DEFAULT_GROUP_NAME)
     # Archive group for preserved DVR recordings (#146). Blank falls back to the
@@ -4519,6 +4676,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             _owned_tvg_id_q(), channel_group=target_group,
         )
     }
+    # Channels made before #217 carry a marker that hashed the kickoff time.
+    # Re-key them to the game's source-id marker HERE, before numbering, so
+    # every later step (numbers, updates, the stale reap) sees the old row as
+    # this game's channel. The DB write happens inside the transaction below.
+    marker_renames = _rekey_legacy_virtuals(existing_virtuals, games)
 
     # Resolve the virtual channel base. In auto mode we slot in just after
     # the user's highest real channel (excluding our own virtuals) so we
@@ -5043,6 +5205,28 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     profile_stats: Optional[Dict[str, Any]] = None
 
     with transaction.atomic():
+        # Persist the #217 re-key. Queryset .update(), not ch.save(): only the
+        # tvg_id moves, and staying off save() keeps every Channel post_save
+        # receiver out of it (see the epg_data signal trap further down). The
+        # EPG follows on its own: step 4 get_or_creates EPGData under the new
+        # marker and repoints the channel, and step 6 drops the old EPGData as
+        # an orphan.
+        for ch, old_marker, new_marker in marker_renames:
+            if dry_run:
+                logger.info("[ranked_matchups] [dry] would re-key channel id=%s %s -> %s",
+                            ch.id, old_marker, new_marker)
+                continue
+            if Channel.objects.filter(pk=ch.pk, tvg_id=old_marker).update(tvg_id=new_marker):
+                ch.tvg_id = new_marker
+            else:
+                # The row changed under us. Harmless: the next apply finds it
+                # under whatever tvg_id it now has and re-keys it then.
+                logger.warning("[ranked_matchups] re-key skipped for channel id=%s: "
+                               "tvg_id is no longer %s", ch.id, old_marker)
+        if marker_renames and not dry_run:
+            logger.info("[ranked_matchups] re-keyed %d channel(s) to source-id markers (#217)",
+                        len(marker_renames))
+
         # Phase 0: park existing virtual channels in a high temporary number
         # range so we can renumber based on cache order without colliding with
         # the unique (channel_group, channel_number) constraint. park_base is
@@ -5369,14 +5553,23 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # runs / migrations).
         orphan_epg_deleted = 0
         if not dry_run and epg_source is not None:
-            kept_markers = seen_markers | {
-                ch.tvg_id for ch in Channel.objects.filter(
-                    _owned_tvg_id_q(), channel_group=target_group,
-                )
+            live_owned = Channel.objects.filter(
+                _owned_tvg_id_q(), channel_group=target_group,
+            )
+            kept_markers = seen_markers | {ch.tvg_id for ch in live_owned}
+            # Also keep any EPGData a surviving channel still POINTS at. The
+            # tvg_id test alone is not enough since #217: a channel re-keyed
+            # this run but skipped by the write loop (kept for an active
+            # recording, unmatched, no compact slot) still carries its EPGData
+            # under the OLD marker, and deleting it would blank the guide
+            # mid-recording. The next apply that writes the game repoints the
+            # channel and this rule then lets the old row go.
+            attached_ids = {
+                i for i in live_owned.values_list("epg_data_id", flat=True) if i is not None
             }
             orphans = EPGData.objects.filter(
                 _owned_tvg_id_q(), epg_source=epg_source,
-            ).exclude(tvg_id__in=kept_markers)
+            ).exclude(tvg_id__in=kept_markers).exclude(id__in=attached_ids)
             orphan_epg_deleted, _ = orphans.delete()
 
         # 7. Archive hygiene (#146): the recordings group/channel exists only
@@ -6567,7 +6760,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.28.0"
+    version = "1.28.1"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

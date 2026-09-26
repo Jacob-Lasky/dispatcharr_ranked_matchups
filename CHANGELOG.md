@@ -5,6 +5,68 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.28.1] - 2026-09-26
+
+### Fixed
+
+- **A rescheduled game no longer gets a second channel** (#217). A game's
+  channel identity (its `tvg_id`, and the key apply uses to find the game's
+  existing channel) hashed `away|home|kickoff` for every game without a
+  `cfbd_id` or `fd_id`: NFL, NBA, NHL, MLB, WNBA, ESPN-sourced soccer, the cups,
+  friendlies, field events, boxing and most NCAA sports. When the kickoff moved
+  (a flexed NFL game, weather, a feed correcting its time) the next apply made a
+  new channel and left the old one to be reaped, so the game sat in the guide
+  twice. A bracket slot that went from TBD to real teams churned the same way.
+  It also blocks auto-recording (#216): a DVR recording on the old channel
+  would fire at the old time on a channel nobody maintained.
+
+  Identity now comes from the source's own event id (`_MARKER_ID_KEYS`:
+  ESPN event id, `<sport>_game_id`, `cbb_id`, `boxing_event_id`), tagged per id
+  space. `cfbd_id` and `fd_id` markers keep their exact old format. The
+  teams + kickoff hash remains only for a row with no id. A contract test fails
+  if a source stamps an `*_id` key that is neither an identity key nor exempt.
+
+- **Upgrading renames existing channels in place.** The first apply after
+  upgrading re-keys each channel made under the old marker to its new one
+  (queryset `.update(tvg_id=...)` inside the apply transaction), so no channel
+  is recreated and no recording is CASCADE-deleted. The guide follows on its
+  own: the next EPG write lands under the new marker and the old EPG row is
+  cleaned up as an orphan. Replayed against the live instance's channels: 2 of
+  8 renamed, 0 recreated. The LLM description cache and the logo files are also
+  keyed by marker, so each renamed game costs one fresh description and one
+  logo fetch on that apply; the old entries are pruned by the existing sweeps.
+
+- **Kickoff numbering keeps a slot a channel already holds in its minute.**
+  The per-minute tiebreak hashes the marker, so the re-key alone would have
+  moved both renamed channels to a different number (replayed: 6337135 to
+  6337146 and 6267065 to 6267059) and could hand a vacated number to another
+  same-minute game, the #117 wrong-programme binding. A game whose existing
+  number is inside its kickoff minute's block now keeps it; a reschedule
+  changes the minute, so the old number is released as before. Held numbers
+  are placed before any fresh one, so a fresh game nudged off a neighbour can
+  never push a held channel out of its block.
+
+- **Apply drops a cached game whose marker repeats a higher-ranked one.** Two
+  rows for one event (two sources listing it, or one source listing it twice)
+  used to reach the write loop, which would create two channels with one
+  `tvg_id` and one number and fail the whole apply on the unique
+  `(channel_group, channel_number)` constraint. Id-based markers make that
+  collapse more likely (names can differ, the event id does not), so apply now
+  keeps the first per marker and logs the rest.
+
+- **The upgrade re-key refuses to guess.** A legacy hash shared by two games
+  in the slate (two TBD-vs-TBD bracket slots at one kickoff) is not re-keyed,
+  since handing the old channel to the wrong game would move its recording
+  onto the wrong match; that channel takes the normal stale path, which keeps
+  recordings safe. A game rescheduled between the last old apply and the first
+  new one is not found by the hash either and gets a new channel once, as
+  every reschedule did before this release.
+
+- **Orphan EPG cleanup keeps a row a live channel still points at.** It used
+  to decide by `tvg_id` alone, so a channel re-keyed on the upgrade apply but
+  skipped by the write loop (kept for an active recording, say) would have
+  lost its guide mid-recording: its EPG row still carries the old marker.
+
 ## [1.28.0] - 2026-09-06
 
 ### Fixed

@@ -79,11 +79,17 @@ Source channels are **never modified**. Apply creates virtual channels in a
 target `ChannelGroup` (default `Top Matchups` — user has it as `!Top Matchups`
 to sort to the top of group lists):
 
-- `tvg_id` = `ranked_matchups:<SPORT>:<source_id>` — used for cleanup detection
-  on next apply (any channel with this prefix in any group is "ours")
+- `tvg_id` = `ranked_matchups:<SPORT>:<tag><source_id>` (`_build_marker_key`,
+  first key present in `_MARKER_ID_KEYS`) — the game's channel identity, and
+  used for cleanup detection on next apply (any channel with this prefix in any
+  group is "ours"). It MUST NOT include the kickoff time: a rescheduled game
+  would get a second channel (#217). Only a row with no source id falls back to
+  the legacy teams+kickoff hash; `_rekey_legacy_virtuals` renames pre-#217
+  channels in place on the first apply after upgrade
 - `channel_number` — TWO schemes, `channel_numbering_mode`. Default `kickoff`:
   `base + minutes-since-CHANNEL_NUMBER_ORIGIN × SLOTS + hash%SLOTS`, so a game's
-  number never moves (#121) and the list sorts by start time. `compact`:
+  number does not move while its kickoff holds (#121; a slot already held in the
+  kickoff minute is kept, #217) and the list sorts by start time. `compact`:
   `allocate_compact_numbers` keeps every number inside
   `[base, base+compact_band_size)`, holds a published game on its slot, and
   allocates new games ABOVE the highest in use. Handing a freed number to the
@@ -149,7 +155,7 @@ enable narrative without explicit user buy-in.
 
 ## Sport adapter extension contract
 
-Three steps, using NCAAM (College Basketball) as the worked example.
+Four steps, using NCAAM (College Basketball) as the worked example.
 NOTE: NCAAM already ships as `sources/ncaam.py`, so read that file as the
 reference implementation rather than writing it; the shape below is what
 a NEW sport needs.
@@ -170,6 +176,14 @@ a NEW sport needs.
 3. Add an `enable_<sport>` toggle to `plugin.json` and wire it in
    `_build_sources(settings)` in `plugin.py`. Every toggle must be wired
    in both places or the setting renders but does nothing.
+
+4. If your feed publishes a per-game id, stamp it into `extra` and add that
+   key + a tag to `_MARKER_ID_KEYS` in `plugin.py` (#217) — that id is the
+   channel's identity, so a source that skips this silently falls back to the
+   teams+kickoff hash and gets a second channel whenever a game is
+   rescheduled. Append at the END; the order is part of every live channel's
+   tvg_id. `tests/test_marker_identity.py` fails if a source stamps an `*_id`
+   key that is neither listed there nor exempted in the test.
 
 Shared CFBD key already covers basketball (same Bearer token).
 
@@ -282,6 +296,23 @@ stay in agreement with that one.
   the setting every tick, so lowering it would otherwise delete a channel out
   from under its own live guide entry. This invariant is what makes compact
   number reuse safe.
+- **A marker is a channel identity, so nothing mutable may go into it** (#217).
+  `_build_marker_key` takes the first id in `_MARKER_ID_KEYS`; bare `game_id` is
+  deliberately absent (it is `simulation._MATCH_ID_KEYS`' key and is synthetic
+  on some pool rows), and the two lists must NOT be merged. Three consequences
+  live in `_action_apply` and have to stay: `_unique_by_marker` runs before
+  anything else, because two cached rows for one event (two sources listing it,
+  names differing) would otherwise create two channels on one number and fail
+  the whole transaction on the unique constraint; `_rekey_legacy_virtuals` runs
+  after `existing_virtuals` is built and BEFORE numbering, and persists via
+  queryset `.update(tvg_id=...)` (never `ch.save()`, see the `post_save` trap
+  below) so an upgraded install renames its channels instead of recreating them
+  — `Recording.channel` is `on_delete=CASCADE`, so a recreate loses the user's
+  recordings; and orphan-EPG cleanup excludes rows a live channel still POINTS
+  at, since a re-keyed channel the write loop skipped (held for an active
+  recording) still carries its `EPGData` under the OLD marker. The re-key
+  refuses to guess: an ambiguous legacy hash (two TBD-vs-TBD slots at one
+  kickoff) is left to the normal stale path, which preserves recordings.
 - **CFBD `/games` carries EVERY NCAA division**, not just Division I:
   `homeClassification` / `awayClassification` are `fbs` / `fcs` / `ii` /
   `iii`, and are occasionally absent entirely. A time-window filter alone

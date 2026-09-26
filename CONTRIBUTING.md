@@ -193,6 +193,18 @@ optional spread, and an `extra` dict for sport-specific metadata.
 
 For the score signals to work fully:
 
+- **The source's own per-game id**, if the feed publishes one — e.g.
+  `extra["espn_event_id"]`, `extra["<sport>_game_id"]`. That id is the game's
+  channel identity: `plugin._build_marker_key` turns the first key listed in
+  `plugin._MARKER_ID_KEYS` into the channel's `tvg_id` (#217). **Add your key
+  to the END of `_MARKER_ID_KEYS`** with a tag that keeps its id space apart
+  (`("nba_game_id", "nba_")`); never insert above an existing key, since the
+  order is part of every live channel's identity. Skip this and the marker
+  falls back to a hash of teams + kickoff, so a rescheduled game gets a second
+  channel and any DVR recording is stranded on the old one.
+  `tests/test_marker_identity.py` fails if a source stamps an `*_id` key that
+  is neither listed there nor exempted in the test (bare `game_id` is exempt:
+  it is the simulator's key and is synthetic on some rows).
 - `extra["rank_source"]` — `"poll"` or `"standings"`, see above.
 - `extra["fd_competition_code"]` — set if you want the `importance` signal.
   Maps to a `LEAGUE_CONTEXTS` entry in `scoring.py` (matchday count +
