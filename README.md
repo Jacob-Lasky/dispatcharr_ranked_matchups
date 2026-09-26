@@ -213,8 +213,10 @@ form will collect everything needed to scope it.
    > own, which looks like "renumbering every refresh" but no existing game's
    > number moves. The one exception is a rescheduled game: it moves to its new
    > time slot, on the same channel. A DVR recording on it stays on that channel
-   > rather than being stranded on a stale one, but it keeps the time window it
-   > was scheduled with; moving that window with the game is #216. Because the
+   > rather than being stranded on a stale one. A recording the plugin made for
+   > one of your [recorded teams](#recording-your-teams) follows the game to its
+   > new window; one you scheduled (or edited) by hand is left exactly as you set
+   > it, window included, because the plugin never touches it. Because the
    > number is stable, the guide binds to the right game even though clients
    > cache the EPG separately from the channel list, in both the default output
    > and the Xtream Codes API (both bind by the integer channel number). The
@@ -240,7 +242,7 @@ own name must identify the matchup or event for the plugin to find it.
 | Action | What it does | Writes |
 |---|---|---|
 | `refresh` | Pull upcoming games from each enabled sport, score each, match them to EPG listings, channels and streams, save curated list. | `cache.json` |
-| `apply` | Create / update virtual channels in the target group, link matched streams, write `ProgramData` descriptions, delete stale ones. | DB (honors `dry_run`) |
+| `apply` | Create / update virtual channels in the target group, link matched streams, write `ProgramData` descriptions, schedule or cancel recordings for your [recorded teams](#recording-your-teams), delete stale ones. | DB (honors `dry_run`) |
 | | *Waits for the result and shows the real summary. Runs in a separate process so it cannot stall the web worker, which costs a second or two of startup.* | |
 | `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand. | Both |
 | `show_status` | Print the current curated list with per-game score breakdown. No writes. | — |
@@ -518,7 +520,8 @@ does not have to be a Favorite, and listing it does not change its score.
 
 Games scoring above `placeholder_min_score` (default 5.0), and every game
 involving a recorded team whatever its score, get a virtual channel **even if
-no Dispatcharr channel currently has an EPG entry for the game**. The description marks it `[NOTE] No EPG match found yet — this is a
+no Dispatcharr channel currently has an EPG entry for the game**. The
+description marks it `[NOTE] No EPG match found yet — this is a
 placeholder channel`. When the provider EPG eventually publishes the
 broadcast info, the next refresh adds streams to the virtual channel and it
 becomes playable.
