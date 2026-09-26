@@ -79,11 +79,17 @@ Source channels are **never modified**. Apply creates virtual channels in a
 target `ChannelGroup` (default `Top Matchups` — user has it as `!Top Matchups`
 to sort to the top of group lists):
 
-- `tvg_id` = `ranked_matchups:<SPORT>:<source_id>` — used for cleanup detection
-  on next apply (any channel with this prefix in any group is "ours")
+- `tvg_id` = `ranked_matchups:<SPORT>:<tag><source_id>` (`_build_marker_key`,
+  first key present in `_MARKER_ID_KEYS`) — the game's channel identity, and
+  used for cleanup detection on next apply (any channel with this prefix in any
+  group is "ours"). It MUST NOT include the kickoff time: a rescheduled game
+  would get a second channel (#217). Only a row with no source id falls back to
+  the legacy teams+kickoff hash; `_rekey_legacy_virtuals` renames pre-#217
+  channels in place on the first apply after upgrade
 - `channel_number` — TWO schemes, `channel_numbering_mode`. Default `kickoff`:
   `base + minutes-since-CHANNEL_NUMBER_ORIGIN × SLOTS + hash%SLOTS`, so a game's
-  number never moves (#121) and the list sorts by start time. `compact`:
+  number does not move while its kickoff holds (#121; a slot already held in the
+  kickoff minute is kept, #217) and the list sorts by start time. `compact`:
   `allocate_compact_numbers` keeps every number inside
   `[base, base+compact_band_size)`, holds a published game on its slot, and
   allocates new games ABOVE the highest in use. Handing a freed number to the

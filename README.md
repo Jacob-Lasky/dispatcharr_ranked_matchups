@@ -206,10 +206,13 @@ form will collect everything needed to scope it.
    > *number* is derived from its kickoff time: `virtual_base + minutes-since-a-
    > fixed-origin × slots + a small per-game tiebreak`. So the list sorts
    > strictly by day then start time (live/upcoming games first), and — crucially
-   > — every game keeps the **same number for its whole life**. Finished games
-   > drop off and new games slot into their time-position on their own, which
-   > looks like "renumbering every refresh" but no existing game's number ever
-   > moves. Because the number is stable, the guide binds to the right game even
+   > — a game keeps the **same number for as long as its kickoff time holds**.
+   > Finished games drop off and new games slot into their time-position on their
+   > own, which looks like "renumbering every refresh" but no existing game's
+   > number moves. The one exception is a rescheduled game: it moves to its new
+   > time slot, on the same channel. A DVR recording on it stays on that channel
+   > rather than being stranded on a stale one, but it keeps the time window it
+   > was scheduled with; moving that window with the game is #216. Because the number is stable, the guide binds to the right game even
    > though clients cache the EPG separately from the channel list, in both the
    > default output and the Xtream Codes API (both bind by the integer channel
    > number). The numbers are large (time-encoded) by design; that is what keeps
@@ -394,7 +397,7 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   own instance. Leave the field blank and no request is made to anyone
 - Channel number: two schemes, picked by the "Channel numbering" setting.
   **Kickoff time** (default) derives the number from the game's start time, so
-  the list sorts soonest-first and no game's number ever changes. The numbers
+  the list sorts soonest-first and a game's number only changes if the game is rescheduled. The numbers
   are large, around 7 digits. **Compact range** keeps every channel inside a
   band you name, e.g. 400-424, provided that stretch of your lineup is free —
   see "Channel numbering" below
@@ -412,8 +415,11 @@ differs is what the numbers look like and how much of your lineup they need.
 **Kickoff time** (default) builds the number out of the game's start time:
 `starting number + minutes-since-a-fixed-origin × slots + a small per-game
 tiebreak`. Two consequences. The list sorts strictly by day then start time, and
-a game's number is fixed for its entire life, so no number is ever handed on. The
-cost is that the numbers are large, around 7 digits, and the **Starting channel
+a game's number is fixed while its kickoff time holds, so a number is only ever
+handed on between games kicking off in the same minute. A rescheduled game moves
+to its new time slot on the same channel: channels are identified by the source's
+own event id (for every source that publishes one), not by kickoff time, so a
+reschedule does not create a second channel. The cost is that the numbers are large, around 7 digits, and the **Starting channel
 number** setting is only a floor: the time-based term is in the millions, so
 setting it to 400 lands you near 5,548,000 rather than at 400.
 

@@ -60,9 +60,11 @@ def stable_channel_number(
 ) -> int:
     """Stable, chronological channel number for a virtual game channel.
 
-    PURE FUNCTION of the game's immutable kickoff time and its `marker`: the
-    SAME game always maps to the SAME integer for its whole life, regardless of
-    how the slate is ranked or which other games are present. That stability is
+    PURE FUNCTION of the game's kickoff time and its `marker`: the SAME game
+    maps to the SAME integer for as long as its kickoff holds, regardless of how
+    the slate is ranked or which other games are present. (A rescheduled game
+    gets its new minute's number; `_assign_channel_numbers` also keeps a slot a
+    channel already holds within its minute, see #217.) That stability is
     the whole point. Both Dispatcharr's default M3U/XMLTV output AND the Xtream
     Codes API bind the EPG to a channel BY its (integer) channel number, so a
     number that MOVES pairs the wrong programme with a channel after the slate

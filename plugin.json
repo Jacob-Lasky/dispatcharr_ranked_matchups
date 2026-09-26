@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.28.0",
+  "version": "1.28.1",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -11,7 +11,7 @@
       "id": "_section_client_setup",
       "type": "info",
       "label": "Guide binding & sorting: no client setup needed",
-      "description": "Load the M3U/EPG URLs (or connect via Xtream Codes) as-is; no special TVG-ID Source is required. Each channel's number is derived from its kickoff time, so the list sorts strictly by day then start time (soonest games first) and every game keeps the same number for its whole life. Because the number never moves, the guide binds to the right game in both the default output and the Xtream Codes API. Channel numbers are large (time-encoded, e.g. 235000+) by design; that is what keeps them stable and integer-clean for Xtream Codes."
+      "description": "Load the M3U/EPG URLs (or connect via Xtream Codes) as-is; no special TVG-ID Source is required. Each channel's number is derived from its kickoff time, so the list sorts strictly by day then start time (soonest games first) and a game keeps the same number for as long as its kickoff time holds (a rescheduled game moves to its new time slot on the same channel). Because the number does not move, the guide binds to the right game in both the default output and the Xtream Codes API. Channel numbers are large (time-encoded, e.g. 235000+) by design; that is what keeps them stable and integer-clean for Xtream Codes."
     },
     {
       "id": "_section_sources",
