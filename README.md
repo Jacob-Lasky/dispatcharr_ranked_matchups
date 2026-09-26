@@ -498,7 +498,8 @@ does not have to be a Favorite, and listing it does not change its score.
 - **How many at once.** **Recordings at once** defaults to automatic: your
   tightest M3U account limit (Max Streams) minus **Streams kept free for live
   TV** (default 1). When more games overlap than there are slots, the earliest
-  kickoff wins and the apply result names the games that got no slot. Watching
+  kickoff wins (unless **Recording preference** says otherwise, below) and the
+  apply result names the games that got no slot. Watching
   a game that is also recording shares one stream.
 - **What you see.** Games set to record carry a red dot (🔴) on their
   Upcoming and Live guide entries, and the description says which slot, e.g.
@@ -507,7 +508,30 @@ does not have to be a Favorite, and listing it does not change its score.
   it too. Add `{recording_dot}` to the channel name template to show it in
   channel names as well. TV apps download the guide on their own schedule, so a
   change can take a few hours to show there.
-- **Changing your mind.** Removing a team cancels its recordings that have not
+- **Ranked games in spare slots.** Turn on **Also record top-ranked games in
+  spare slots** and slots your recorded teams do not need go to the best games
+  on the list, from **Leagues to record** (league codes as they appear at the
+  start of channel names, e.g. `CFB, EPL, NFL`; blank means every league). A
+  ranked game is only recorded once a stream has been matched for it.
+- **Who wins a slot.** Slots always fill in kickoff order. **Recording
+  preference** decides what happens when a game kicks off and every slot is
+  full:
+  - *Earliest kickoff*: first come, first recorded.
+  - *Prefer favorites*, *Prefer league order* (earlier in **Leagues to record**
+    wins), *Prefer higher rating*: the new game takes the slot of the
+    lowest-priority ranked game recording at that moment, if it wins on that
+    preference. The interrupted recording keeps what it captured, and the guide
+    says `Recording until 3:00 PM, then <game> takes the slot.` Ties never
+    interrupt, so two similar games do not keep swapping.
+  - In every mode, a recorded team can take a ranked game's slot (never the
+    other way round), and a recording that is only in its post-roll padding
+    gives its slot to a game kicking off.
+  - Handoffs are planned before the earlier recording starts. A recording that
+    has already started is not cut short yet; that needs a live handoff timer,
+    which is the next piece of work.
+- **Changing your mind.** Adding or removing a team takes effect on the next
+  Apply (a team whose games are not on the list yet needs a Refresh to fetch
+  them). Removing a team cancels its recordings that have not
   started. A recording you delete from the DVR tab stays deleted, and one you
   stop is not restarted. A game with no stream yet still gets its channel and
   its recording, so a feed the provider adds shortly before kickoff is

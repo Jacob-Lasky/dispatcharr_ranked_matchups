@@ -187,15 +187,36 @@ def occupies_stream(rec: Any, now: datetime) -> bool:
 
 # ------------------------------------------------------------------- plan ---
 
+PREF_EARLIEST = "earliest"
+PREF_FAVORITES = "favorites"
+PREF_LEAGUE = "league"
+PREF_RATING = "rating"
+PREFERENCES = (PREF_EARLIEST, PREF_FAVORITES, PREF_LEAGUE, PREF_RATING)
+
+# A recording cut shorter than this by a handoff is not worth keeping: drop it
+# and give the slot away whole instead of saving a few minutes of pre-game.
+MIN_USEFUL_RECORDING = timedelta(minutes=15)
+
+
 @dataclass(frozen=True)
 class Candidate:
     """A game the plugin wants recorded. ``start``/``end`` is the full
     recording window: Live-block start (kickoff minus the pre-roll) through the
-    scheduled end plus post-roll. NOT the Upcoming block (#145)."""
+    scheduled end plus post-roll. NOT the Upcoming block (#145).
+
+    ``sched_end`` is the game's scheduled end WITHOUT the post-roll; past it the
+    recording is padding and its slot may be taken by a new game (post-roll
+    yield). ``recorded`` is tier 1 (a Recorded team); the rest feed the
+    preference key."""
     marker: str
     kickoff: datetime
     start: datetime
     end: datetime
+    sched_end: Optional[datetime] = None
+    recorded: bool = True
+    favorite: bool = False
+    league_pos: int = 0
+    rating: float = 0.0
 
 
 @dataclass
@@ -204,6 +225,7 @@ class Plan:
     planned: Dict[str, Tuple[datetime, datetime, int]] = field(default_factory=dict)  # marker -> (start, end, slot)
     no_slot: List[str] = field(default_factory=list)   # markers that wanted a slot and got none
     skipped: Dict[str, str] = field(default_factory=dict)  # marker -> reason (tombstoned, finished)
+    handoffs: Dict[str, Tuple[str, datetime]] = field(default_factory=dict)  # cut marker -> (taker, at)
 
 
 def _overlaps(a0: datetime, a1: datetime, b0: datetime, b1: datetime) -> bool:
@@ -216,65 +238,195 @@ def _max_concurrent(intervals: Sequence[Tuple[datetime, datetime]], s: datetime,
     return max((sum(1 for a, b in intervals if a <= t < b) for t in points), default=0)
 
 
+def _tier2(c: Candidate, pref: str):
+    if pref == PREF_FAVORITES:
+        return 0 if c.favorite else 1
+    if pref == PREF_LEAGUE:
+        return c.league_pos
+    if pref == PREF_RATING:
+        return -c.rating
+    return 0
+
+
+def priority_key(c: Candidate, pref: str) -> tuple:
+    """Lower is better. Tier 1: recorded team. Tier 2: the chosen preference.
+    Tier 3, tie-breaks in fixed order: favorite, league position, rating,
+    earlier kickoff (then marker, for determinism)."""
+    return (0 if c.recorded else 1, _tier2(c, pref),
+            0 if c.favorite else 1, c.league_pos, -c.rating, c.kickoff, c.marker)
+
+
+def can_interrupt(taker: Candidate, holder: Candidate, pref: str) -> bool:
+    """Whether ``taker`` may take ``holder``'s slot. Only tiers 1 and 2 ever
+    interrupt: a recorded team beats a ranked game in every mode, and in a
+    non-earliest mode a strictly better tier-2 value wins. Tie-breaks never
+    interrupt on their own, or two near-equal games would keep swapping slots
+    across applies. ``earliest`` never interrupts between ranked games because
+    its tier-2 value is the same constant for every game (see _tier2), so no
+    game is ever strictly better on it; there is deliberately no separate
+    branch for it."""
+    if taker.recorded != holder.recorded:
+        return taker.recorded
+    return _tier2(taker, pref) < _tier2(holder, pref)
+
+
 def plan_recordings(
     candidates: Sequence[Candidate],
     slots: Optional[int],
     busy: Sequence[Tuple[datetime, datetime]] = (),
     held: Optional[Dict[str, Tuple[datetime, datetime]]] = None,
     skip: Optional[Dict[str, str]] = None,
+    preference: str = PREF_EARLIEST,
 ) -> Plan:
-    """Assign recording slots, earliest kickoff first.
+    """Assign recording slots, walking games in kickoff order.
 
     ``busy``: windows of recordings that are not ours but hold a stream (the
     user's own, series rules). They count against capacity and are never moved.
-    ``held``: OUR recordings already in progress, by marker. They keep running
-    whatever else is planned: a started recording is never displaced. When the
-    game's window has grown (it runs later now), the plan carries the later end
-    so apply extends the running recording; it never shortens one.
+    ``held``: OUR recordings already in progress, by marker. They are never
+    displaced or cut here (cutting a running recording needs the live handoff
+    timer, phase C). When the game's window has grown, the plan carries the
+    later end so apply extends it, but ONLY if the extra time fits the budget
+    once everything else is placed. DO NOT extend unconditionally: a recording
+    cut for a later game on the previous apply comes back here as held with the
+    SHORT end, and stretching it to the full window would overbook the slot the
+    taker already has. It never shortens one.
     ``skip``: markers that must not be planned, with the reason.
 
-    Capacity is checked as CONCURRENCY: a game fits only when fewer than
-    ``slots`` recordings overlap every instant of its window. DO NOT go back to
-    checking capacity by fitting windows into lanes: a busy window that did not
-    fit a lane (the user already overbooked) was silently dropped and the plan
-    then overbooked further. Lanes are kept only to number our slots for the
-    guide ("slot 1 of 3"). With ``slots=None`` every candidate is planned.
+    When a game kicks off with no capacity left, two things can free a slot,
+    and both are PLANNED handoffs: the earlier recording's end is moved to the
+    new game's start (``Plan.handoffs``) so apply writes it before it starts.
+      1. Post-roll yield (every mode): a recording already past its game's
+         scheduled end is only padding, so the new game takes the slot.
+      2. Interruption (``can_interrupt``): the new game beats the worst-keyed
+         holder on tier 1 or 2; the holder keeps its partial recording.
+    If neither frees enough capacity, nothing is changed and the game gets no
+    slot. Capacity is checked as CONCURRENCY. DO NOT go back to fitting windows
+    into lanes: a busy window that did not fit a lane was silently dropped and
+    the plan overbooked. Lanes only number our slots for the guide.
     """
+    if preference not in PREFERENCES:
+        preference = PREF_EARLIEST
     held = {m: (_aware(a), _aware(b)) for m, (a, b) in (held or {}).items()}
     skip = dict(skip or {})
     plan = Plan(slots=slots, skipped=dict(skip))
-    occupied: List[Tuple[datetime, datetime]] = [(_aware(a), _aware(b)) for a, b in busy]
-    lanes: List[List[Tuple[datetime, datetime]]] = []
-
-    def _lane(s: datetime, e: datetime) -> int:
-        for i, lane in enumerate(lanes):
-            if all(not _overlaps(s, e, a, b) for a, b in lane):
-                lane.append((s, e))
-                return i + 1
-        lanes.append([(s, e)])
-        return len(lanes)
-
+    fixed: List[Tuple[datetime, datetime]] = [(_aware(a), _aware(b)) for a, b in busy]
     ordered = sorted(candidates, key=lambda c: (c.kickoff, c.marker))
     by_marker = {c.marker: c for c in ordered}
-    for marker, (s, e) in sorted(held.items(), key=lambda kv: (kv[1][0], kv[0])):
+    # marker -> [start, end, candidate or None, is_held]
+    live: Dict[str, list] = {}
+
+    for marker, (s, e) in held.items():
         c = by_marker.get(marker)
-        if c is not None and c.end > e:
-            e = c.end
-        occupied.append((s, e))
         if c is None:
-            # Still running for a game that is no longer wanted (team removed
-            # mid-game). Never cut short here, so it holds a stream like any
-            # other busy window, but it is not "planned".
+            # Running for a game no longer wanted (team removed mid-game). Never
+            # cut here, so it holds a stream, but it is not "planned".
+            fixed.append((s, e))
             continue
-        plan.planned[marker] = (s, e, _lane(s, e))
+        live[marker] = [s, e, c, True]
+
+    def _intervals():
+        return fixed + [(v[0], v[1]) for v in live.values()]
+
+    def _fits(c: Candidate) -> bool:
+        return slots is None or _max_concurrent(_intervals(), c.start, c.end) < slots
+
     for c in ordered:
-        if c.marker in skip or c.marker in plan.planned:
+        if c.marker in skip or c.marker in live:
             continue
-        if slots is not None and _max_concurrent(occupied, c.start, c.end) >= slots:
+        if _fits(c):
+            live[c.marker] = [c.start, c.end, c, False]
+            continue
+        saved = {m: list(v) for m, v in live.items()}
+        cut: Dict[str, str] = {}
+        # 1. Post-roll yield: cut only as many post-rolls as the new game
+        # needs, the one whose game ended first going first.
+        in_post_roll = sorted(
+            (m for m, v in live.items()
+             if not v[3] and v[0] < c.start < v[1] and c.start >= (v[2].sched_end or v[2].end)),
+            key=lambda m: (live[m][2].sched_end or live[m][2].end, m),
+        )
+        for m in in_post_roll:
+            if _fits(c):
+                break
+            live[m][1] = c.start
+            cut[m] = "yield"
+        # 2. Interruption, worst-keyed holder first.
+        while not _fits(c):
+            victims = [m for m, v in live.items()
+                       if not v[3] and _overlaps(v[0], v[1], c.start, c.end)
+                       and can_interrupt(c, v[2], preference)]
+            if not victims:
+                break
+            worst = max(victims, key=lambda m: priority_key(live[m][2], preference))
+            v = live[worst]
+            if c.start - v[0] >= MIN_USEFUL_RECORDING:
+                v[1] = c.start
+                cut[worst] = "interrupt"
+            else:
+                del live[worst]
+                cut[worst] = "dropped"
+                # A holder cut earlier FOR the one just dropped now hands its
+                # slot to whoever dropped it, at the new taker's start: it keeps
+                # recording until then instead of ending for a game that is no
+                # longer planned. Keeps the guide line and the window truthful.
+                for m2, (taker, _t_at) in list(plan.handoffs.items()):
+                    if taker == worst and m2 in live:
+                        live[m2][1] = max(live[m2][1], c.start)
+                        plan.handoffs[m2] = (c.marker, c.start)
+        if not _fits(c):
+            live = saved
             plan.no_slot.append(c.marker)
             continue
-        occupied.append((c.start, c.end))
-        plan.planned[c.marker] = (c.start, c.end, _lane(c.start, c.end))
+        # Undo any cut the new game turned out not to need, post-roll yields
+        # first (a later interruption can make an earlier yield pointless), so
+        # nobody loses recording time for no capacity gain.
+        for m in sorted(cut, key=lambda m: (cut[m] != "yield", m)):
+            orig = saved.get(m)
+            if orig is None:
+                continue
+            if cut[m] == "dropped":
+                live[m] = list(orig)
+                if _fits(c):
+                    del cut[m]
+                else:
+                    del live[m]
+                continue
+            shortened = live[m][1]
+            live[m][1] = orig[1]
+            if _fits(c):
+                del cut[m]
+            else:
+                live[m][1] = shortened
+        live[c.marker] = [c.start, c.end, c, False]
+        for m, how in cut.items():
+            if how == "dropped":
+                plan.no_slot.append(m)
+                plan.handoffs.pop(m, None)
+            else:
+                plan.handoffs[m] = (c.marker, c.start)
+
+    # Extend a running recording whose game now runs later, where the budget
+    # allows (see the held note in the docstring).
+    for marker, v in live.items():
+        if not v[3] or v[2] is None or v[2].end <= v[1]:
+            continue
+        others = fixed + [(o[0], o[1]) for m2, o in live.items() if m2 != marker]
+        if slots is None or _max_concurrent(others, v[1], v[2].end) < slots:
+            v[1] = v[2].end
+
+    # Number the slots from the final windows, first-fit by start time.
+    lanes: List[List[Tuple[datetime, datetime]]] = []
+    for m, v in sorted(live.items(), key=lambda kv: (kv[1][0], kv[0])):
+        s0, e0 = v[0], v[1]
+        for i, lane in enumerate(lanes):
+            if all(not _overlaps(s0, e0, a, b) for a, b in lane):
+                lane.append((s0, e0))
+                slot = i + 1
+                break
+        else:
+            lanes.append([(s0, e0)])
+            slot = len(lanes)
+        plan.planned[m] = (s0, e0, slot)
     return plan
 
 
@@ -408,9 +560,13 @@ def recording_over(recs: Iterable[Any], start: datetime, end: datetime) -> bool:
     )
 
 
-def description_line(slot: Optional[int], slots: Optional[int]) -> str:
+def description_line(slot: Optional[int], slots: Optional[int],
+                     until: Optional[str] = None, taker: Optional[str] = None) -> str:
     """One short line for the programme description. The title carries the dot;
-    this says which slot, so a user can read the plan."""
+    this says which slot, and for a planned handoff when the recording stops
+    and who takes the slot, so a user can read the plan."""
+    if until and taker:
+        return f"Recording until {until}, then {taker} takes the slot."
     if slot and slots:
         return f"Recording (slot {slot} of {slots})."
     return "Recording."
