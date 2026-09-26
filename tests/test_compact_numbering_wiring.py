@@ -333,7 +333,7 @@ class TestReviewFindings:
     def test_written_numbers_is_populated_where_a_channel_is_actually_numbered(self):
         src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
         i = src.index("target_chnum = chnum_by_marker.get(marker)")
-        j = src.index("prog_start =", i)
+        j = src.index("prog_start, prog_end = _live_window(g, start_dt)", i)
         assert "written_numbers.add(target_chnum)" in src[i:j]
 
     def test_the_full_band_error_does_not_claim_nothing_changed(self):

@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.28.1",
+  "version": "1.29.0",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -405,6 +405,13 @@
       "help_text": "Substring-matched against home/away team names (with team-qualifier whitelist for soccer suffixes like 'FC', 'AFC', 'City', 'United'). Always shown regardless of rank, with a flat score boost. Teams in playoff races still get the 'impact-on-favorite' signal automatically when they sit near a favorite's position."
     },
     {
+      "id": "recorded_teams",
+      "type": "string",
+      "label": "Recorded teams (comma-separated)",
+      "default": "",
+      "help_text": "Every game involving one of these teams is always added to Top Matchups and set to record in Dispatcharr's DVR, covering the game itself (from 30 minutes before kickoff to the end, plus the post-roll below), never the Upcoming block. They do not need to be Favorites, and listing one here does not raise its score. Matching works like Favorites. For F1, NASCAR, golf, tennis and UFC the plugin sees the event name, not the drivers or players, so enter an event name (Monaco, Masters) rather than a person. Games set to record show a red dot in the guide (TV apps download the guide on their own schedule, so a change can take a few hours to appear there). Removing a team cancels its recordings that have not started; a recording you delete from the DVR tab stays deleted."
+    },
+    {
       "id": "favorites_only",
       "type": "select",
       "label": "Favorites only",
@@ -710,6 +717,33 @@
       "default": "",
       "placeholder": "Adult | XXX, Latino | Sports",
       "help_text": "Comma-separated channel-group names whose streams are never attached to a matchup channel at all. Stronger than 'Demote stream groups' above and worth reaching for only when you never want the group: an excluded stream is not available as a fallback either, so a game your providers only carry in that group will have no stream. Prefer demoting unless you mean it."
+    },
+    {
+      "id": "_section_recording",
+      "type": "info",
+      "label": "Recording",
+      "description": "Auto-recording for the Recorded teams list."
+    },
+    {
+      "id": "recording_post_roll_minutes",
+      "type": "number",
+      "label": "Keep recording after the scheduled end (minutes)",
+      "default": 120,
+      "help_text": "Padding after a game's scheduled end, for extra time, overtime, extra innings and delays. A recording that runs long costs disk; one that stops early loses the ending, so the default is generous."
+    },
+    {
+      "id": "recording_slots",
+      "type": "number",
+      "label": "Recordings at once (0 = automatic)",
+      "default": 0,
+      "help_text": "The most recordings the plugin runs at the same time. Automatic uses your tightest M3U account limit (Max Streams) minus the reserve below. A number here can lower that, never raise it. When there are more games to record than slots, the earliest kickoff wins and the apply result names the games that got no slot."
+    },
+    {
+      "id": "recording_stream_reserve",
+      "type": "number",
+      "label": "Streams kept free for live TV",
+      "default": 1,
+      "help_text": "How many of your provider's streams automatic mode leaves unused, so a recording never takes the last stream someone needs to watch something else. Watching a game that is also recording shares one stream."
     },
     {
       "id": "_section_schedule",

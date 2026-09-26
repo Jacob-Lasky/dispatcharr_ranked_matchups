@@ -5,6 +5,52 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.29.0] - 2026-09-26
+
+### Added
+
+- **Recorded teams: automatic DVR recording** (#216, phase A). A new
+  **Recorded teams** list, under Favorites. Every game involving one of them is
+  force-included in Top Matchups (past `max_games` and the favorites-only
+  gates, including the friendlies gate) and scheduled in Dispatcharr's DVR for
+  the Live block plus a post-roll (**Keep recording after the scheduled end**,
+  default 120 minutes). Never the Upcoming block (#145). A recorded team is not
+  a favorite: no score weight, no favorites-first sort slot.
+  - **Stream budget.** **Recordings at once** (0 = automatic: the tightest
+    active M3U account's Max Streams minus **Streams kept free for live TV**,
+    default 1). A configured value can lower the budget, never raise it. The
+    user's own scheduled recordings take capacity first, a recording already
+    running is never displaced, and when games overflow the slots the earliest
+    kickoff wins; the apply result names the ones that got no slot.
+  - **Provenance and idempotency.** Every recording carries
+    `custom_properties["ranked_matchups_marker"]`, the game's channel marker
+    (stable across reschedules since #217). Each apply updates its own rows in
+    place with a full `.save()`, so Dispatcharr's signals revoke and reschedule
+    the capture task; a running recording is only ever extended. Rows without
+    the marker are never touched.
+  - **Changing your mind.** Removing a team cancels its not-yet-started
+    recordings. A recording deleted from the DVR tab is tombstoned in
+    `recordings_state.json` and not re-created; one the user stopped is not
+    restarted.
+  - **The 🔴.** Upcoming and Live guide titles carry a red dot when the channel
+    has a live recording over the window, read from the actual Recording rows
+    after the writes, and the description gains `Recording (slot N of M).`. A
+    new `{recording_dot}` channel-name token (not in the default template).
+  - **No stream yet.** A recorded team's game always gets its channel, as a
+    placeholder if needed, and its recording, so a feed that appears before
+    kickoff is picked up when the next refresh attaches it.
+  - Ranked-game slots, preferences and mid-game handoffs are phases B and C.
+
+### Fixed
+
+- **A favorite that is not playing today could be left off the list.** The
+  refresh kept favorites past the cap, but the list apply publishes was then
+  cut at exactly `max_games` (the #197 bench split). The sort is today-first,
+  so a favorite playing tomorrow landed after a full slate of today's games and
+  went to the bench with no channel, despite the Favorites help text promising
+  it is always shown. `_split_applied` now applies every favorite (and recorded
+  team) beyond the cap.
+
 ## [1.28.1] - 2026-09-26
 
 ### Fixed
