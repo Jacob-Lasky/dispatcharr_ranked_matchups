@@ -13,7 +13,6 @@ background thread is mocked. End-to-end behavior (thread acquires lock,
 runs work, clears inflight) is verified live against the running
 Dispatcharr container during deploy."""
 
-import importlib.util
 import json
 import os
 import sys
@@ -415,7 +414,7 @@ class TestSchedulerLockOwnership:
         assert len(token) >= 16
 
     def test_two_acquires_get_different_tokens(self, plugin_mod, monkeypatch):
-        store = self._fake_redis(plugin_mod, monkeypatch)
+        self._fake_redis(plugin_mod, monkeypatch)
         a = plugin_mod._try_acquire_scheduler_lock()
         plugin_mod._release_scheduler_lock(a)
         b = plugin_mod._try_acquire_scheduler_lock()

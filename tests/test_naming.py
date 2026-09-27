@@ -4,7 +4,7 @@ Django, no network."""
 
 import json
 import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 import pytest
 

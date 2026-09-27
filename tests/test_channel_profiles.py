@@ -17,7 +17,6 @@ Confirmed on a live instance before the fix: 24 plugin channels, 19 profiles,
 """
 
 import ast
-import importlib.util
 import logging
 import os
 import sys

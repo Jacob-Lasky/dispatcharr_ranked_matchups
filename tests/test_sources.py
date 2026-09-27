@@ -1098,7 +1098,7 @@ class TestSoccerSeedFromPreviousSeason:
             return ({"Veteran 1": 1}, seed_table)
         src._fetch_standings = fake_fetch
         bundle = src._fetch_standings_with_seed()
-        by_team, table = bundle.position_by_team, bundle.scoring_table
+        table = bundle.scoring_table
         # Note: empty current → median is 0 (the `or [0]` fallback inside),
         # so the seed fires and we get the previous-season table.
         assert any(r["name"] == "Veteran 1" for r in table)
@@ -1228,7 +1228,7 @@ class TestSoccerImportanceInterface:
 
     def test_estimate_strengths_caches(self):
         src = self._make_source()
-        first = src.estimate_strengths()
+        src.estimate_strengths()  # primes the cache
         # Mutate the cache to verify the second call returns the cached object.
         src._strengths_cache["MARKER"] = {"sh": 9.9, "ch": 9.9, "sa": 9.9, "ca": 9.9}
         second = src.estimate_strengths()
@@ -4007,7 +4007,6 @@ class TestNhlCupFinalPlaceholder:
         src._bracket_games_cache = bracket_games
         state = src.initial_state()
         # Apply 4 wins to Colorado vs Vegas (CF series 0): 4-0 sweep.
-        remaining = src.remaining_matches(state)
         for _ in range(4):
             target = next(
                 g for g in src.remaining_matches(state)
@@ -8446,7 +8445,6 @@ class TestDoubleEliminationSource:
         # When grouping_key resolves, use it even if a different
         # tie_meta's team set happens to contain both teams (defensive
         # against future bracket reshape).
-        from dispatcharr_ranked_matchups.sources.base import GameRow
         games = [
             self._game("g1", "BSB_REG", "Site1", "A", "B", (5, 2), matchday=1),
             self._game("g2", "BSB_REG", "Site2", "A", "B", (4, 1), matchday=1),
@@ -9771,7 +9769,6 @@ class TestGroupStageBestThirdPlace:
         assert len(thirds_eliminated) == 4
         # Specifically: 4 lowest groups (I/J/K/L) are eliminated 3rd-placers.
         for low_gi in range(8, 12):
-            grp_letter = chr(ord('A') + low_gi)
             assert f"team_{low_gi}_3rd" in [t for t, o in outcomes.items() if o == ["eliminated"]]
 
     def test_euro_promotes_top_4_third_place(self):
@@ -9875,7 +9872,6 @@ class TestGroupStageBestThirdPlace:
     def test_no_3rd_place_promotion_when_count_zero(self):
         # Custom group-stage entry with best_third_place_count=0 keeps
         # current strict top-2 behavior. Use a synthetic context.
-        from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
         from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, LeagueContext
 
         # Temporarily install a 0-count context.

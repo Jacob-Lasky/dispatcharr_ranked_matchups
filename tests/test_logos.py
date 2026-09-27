@@ -151,9 +151,8 @@ class TestHintMatches:
         assert logos._hint_matches(ev, "NHL")
 
     def test_mismatch_rejected(self):
-        ev = {"strLeague": "NCAA Division I Basketball Mens", "strSport": "Basketball"}
-        # CFB hint requires "NCAA" in league: basketball league DOES contain
-        # "NCAA", so it would pass. The date filter is the real discriminator.
+        # CFB hint requires "NCAA" in league, so an NCAA basketball league
+        # would pass it; the date filter is the real discriminator there.
         # Use a non-NCAA league to confirm rejection.
         ev2 = {"strLeague": "MLB", "strSport": "Baseball"}
         assert not logos._hint_matches(ev2, "CFB")

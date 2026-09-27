@@ -7,7 +7,6 @@ actual wire shape (naive datetimes, the '(Cancelled)' marker, the broadcast
 country array) rather than an invented one.
 """
 
-import pytest
 
 from dispatcharr_ranked_matchups.sources import BoxingSource
 from dispatcharr_ranked_matchups.sources.base import SportSource
