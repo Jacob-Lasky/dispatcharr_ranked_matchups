@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.30.1",
+  "version": "1.31.0",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -783,7 +783,7 @@
           "label": "Prefer higher rating"
         }
       ],
-      "help_text": "What happens when a game kicks off and every slot is full. Earliest: first come, first recorded. Prefer favorites / league order / higher rating: the new game takes the slot of the lowest-priority ranked game recording at that moment if it wins on that preference, and the interrupted recording keeps what it captured. Ties never interrupt. In every mode a recorded team can take a ranked game's slot, and a recording that is only in its post-roll padding gives its slot to a new game. Handoffs are planned ahead; stopping a recording that has already started is not supported yet."
+      "help_text": "What happens when a game kicks off and every slot is full. Earliest: first come, first recorded. Prefer favorites / league order / higher rating: the new game takes the slot of the lowest-priority ranked game recording at that moment if it wins on that preference, and the interrupted recording keeps what it captured. Ties never interrupt. In every mode a recorded team can take a ranked game's slot, and a recording that is only in its post-roll padding gives its slot to a new game. A recording that has already started is stopped at the handoff moment and keeps what it captured; if the game taking over has no stream yet, it keeps recording instead."
     },
     {
       "id": "_section_schedule",

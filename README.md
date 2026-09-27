@@ -526,9 +526,13 @@ does not have to be a Favorite, and listing it does not change its score.
   - In every mode, a recorded team can take a ranked game's slot (never the
     other way round), and a recording that is only in its post-roll padding
     gives its slot to a game kicking off.
-  - Handoffs are planned before the earlier recording starts. A recording that
-    has already started is not cut short yet; that needs a live handoff timer,
-    which is the next piece of work.
+  - Handoffs are planned at Apply time. A recording that has not started yet
+    simply gets an earlier end. One that is already recording is stopped at
+    the handoff moment by the plugin's background timer, the same way the DVR
+    tab's Stop button does it, so it keeps what it captured and its guide entry
+    changes to `Recorded until 3:00 PM; the slot went to <game>.` If the game
+    taking over still has no stream at that moment, the current recording keeps
+    its slot instead.
 - **Outages do not cost recordings.** If a source briefly returns nothing and
   a game drops off the list, its recording is kept as long as the reason for
   it (the team, or ranked recording for that league) still holds.

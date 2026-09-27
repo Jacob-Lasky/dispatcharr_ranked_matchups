@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -241,6 +242,10 @@ class Plan:
     no_slot: List[str] = field(default_factory=list)   # markers that wanted a slot and got none
     skipped: Dict[str, str] = field(default_factory=dict)  # marker -> reason (tombstoned, finished)
     handoffs: Dict[str, Tuple[str, datetime]] = field(default_factory=dict)  # cut marker -> (taker, at)
+    # Running recordings the plan cuts: marker -> when to stop it. Dispatcharr
+    # ignores a shorter end_time on a recording in progress, so these are not
+    # written as an end; the live handoff timer stops them (phase C).
+    stops: Dict[str, datetime] = field(default_factory=dict)
 
 
 def _overlaps(a0: datetime, a1: datetime, b0: datetime, b1: datetime) -> bool:
@@ -292,14 +297,21 @@ def plan_recordings(
     held: Optional[Dict[str, Tuple[datetime, datetime]]] = None,
     skip: Optional[Dict[str, str]] = None,
     preference: str = PREF_EARLIEST,
+    live_stops: bool = False,
 ) -> Plan:
     """Assign recording slots, walking games in kickoff order.
 
+    ``live_stops``: when True (the live handoff timer is running), a held
+    recording may be cut too, by yield or interruption, exactly like a
+    not-started one; the cut is returned in ``Plan.stops`` for the timer to
+    execute instead of as a shorter end. A held recording is never dropped
+    whole: it is already recording, so it keeps what it has up to the stop.
+
     ``busy``: windows of recordings that are not ours but hold a stream (the
     user's own, series rules). They count against capacity and are never moved.
-    ``held``: OUR recordings already in progress, by marker. They are never
-    displaced or cut here (cutting a running recording needs the live handoff
-    timer, phase C). When the game's window has grown, the plan carries the
+    ``held``: OUR recordings already in progress, by marker. Without
+    ``live_stops`` they are never displaced or cut; with it they can be cut
+    only as a STOP (``Plan.stops``). When the game's window has grown, the plan carries the
     later end so apply extends it, but ONLY if the extra time fits the budget
     once everything else is placed. DO NOT extend unconditionally: a recording
     cut for a later game on the previous apply comes back here as held with the
@@ -357,7 +369,8 @@ def plan_recordings(
         # needs, the one whose game ended first going first.
         in_post_roll = sorted(
             (m for m, v in live.items()
-             if not v[3] and v[0] < c.start < v[1] and c.start >= (v[2].sched_end or v[2].end)),
+             if (not v[3] or (live_stops and c.start >= v[0])) and v[0] < c.start < v[1]
+             and c.start >= (v[2].sched_end or v[2].end)),
             key=lambda m: (live[m][2].sched_end or live[m][2].end, m),
         )
         for m in in_post_roll:
@@ -368,13 +381,14 @@ def plan_recordings(
         # 2. Interruption, worst-keyed holder first.
         while not _fits(c):
             victims = [m for m, v in live.items()
-                       if not v[3] and _overlaps(v[0], v[1], c.start, c.end)
+                       if (not v[3] or (live_stops and c.start >= v[0]))
+                       and _overlaps(v[0], v[1], c.start, c.end)
                        and can_interrupt(c, v[2], preference)]
             if not victims:
                 break
             worst = max(victims, key=lambda m: priority_key(live[m][2], preference))
             v = live[worst]
-            if c.start - v[0] >= MIN_USEFUL_RECORDING:
+            if v[3] or c.start - v[0] >= MIN_USEFUL_RECORDING:
                 v[1] = c.start
                 cut[worst] = "interrupt"
             else:
@@ -417,11 +431,16 @@ def plan_recordings(
             if how == "dropped":
                 plan.no_slot.append(m)
                 plan.handoffs.pop(m, None)
+                plan.stops.pop(m, None)
             else:
                 plan.handoffs[m] = (c.marker, c.start)
+                if live[m][3]:
+                    plan.stops[m] = c.start
 
     # Extend a running recording whose game now runs later, where the budget
-    # allows (see the held note in the docstring).
+    # allows (see the held note in the docstring). A recording stopped for a
+    # taker is never extended here, and needs no separate check: the taker
+    # occupies the slot from the stop onwards, so the capacity test refuses it.
     for marker, v in live.items():
         if not v[3] or v[2] is None or v[2].end <= v[1]:
             continue
@@ -624,6 +643,110 @@ def cancellable(ours_by_marker: Dict[str, Any], plan: Plan,
                 continue
         out.append(r)
     return out
+
+
+# ------------------------------------------------------------ live stops ---
+#
+# Phase C: stopping one of OUR recordings that is already running, at the
+# moment a higher-priority game takes its slot. apply writes the plan's stops
+# to a file (whole replace, under the scheduler lock); the timer in the reaper
+# loop only READS it and acts on the DB, so it never races apply's writes.
+
+# Stops older than this are not executed: the moment has passed and a very
+# late stop would cut a recording the user is now counting on.
+STOP_GRACE = timedelta(minutes=10)
+
+
+def stop_entries(plan: Plan, ours_by_marker: Dict[str, Any], names: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
+    """The stops file content for this plan: recording id -> what to do."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for marker, at in plan.stops.items():
+        rec = ours_by_marker.get(marker)
+        if rec is None:
+            continue
+        taker = plan.handoffs.get(marker, (None, at))[0]
+        out[str(rec.id)] = {
+            "at": _aware(at).isoformat(), "marker": marker,
+            "taker": taker, "taker_name": names.get(taker, taker or ""),
+        }
+    return out
+
+
+def _entry_at(entry: Dict[str, Any]) -> Optional[datetime]:
+    try:
+        return _aware(datetime.fromisoformat(str(entry.get("at"))))
+    except ValueError:
+        return None
+
+
+def due_stops(entries: Dict[str, Dict[str, Any]], now: datetime) -> List[Tuple[str, Dict[str, Any]]]:
+    """Entries whose time has come, and not so long ago that acting now would
+    cut a recording at a surprising moment (STOP_GRACE)."""
+    now = _aware(now)
+    out = []
+    for rid, e in entries.items():
+        at = _entry_at(e)
+        if at is not None and now - STOP_GRACE <= at <= now:
+            out.append((rid, e))
+    return sorted(out, key=lambda kv: (kv[1].get("at"), kv[0]))
+
+
+# While a stop is inside its grace window it is retried this often: it may have
+# been skipped because the taker had no stream yet, and one can appear minutes
+# later. Without this the next look is the 5-minute recheck, and a stream that
+# arrives just after it misses the whole grace window.
+STOP_RETRY = timedelta(seconds=60)
+
+
+def next_stop_delay(entries: Dict[str, Dict[str, Any]], now: datetime) -> Optional[float]:
+    """Seconds until the timer should next look: the next future stop, or
+    STOP_RETRY while any stop is still inside its grace window. None when
+    there is nothing to wait for."""
+    now = _aware(now)
+    ats = [at for at in (_entry_at(e) for e in entries.values()) if at is not None]
+    future = [at for at in ats if at > now]
+    delays = [(min(future) - now).total_seconds()] if future else []
+    if any(now - STOP_GRACE <= at <= now for at in ats):
+        delays.append(STOP_RETRY.total_seconds())
+    return min(delays) if delays else None
+
+
+def stopped_properties(cp: Optional[Dict[str, Any]], now: datetime, taker: str = "") -> Optional[Dict[str, Any]]:
+    """custom_properties for stopping a running recording, or None when it is
+    not ours or not running. Mirrors Dispatcharr's own Stop action
+    (apps/channels/api_views.py ``stop``): status "stopped" plus stopped_at;
+    run_recording sees it within ~2 s, sends ffmpeg SIGINT and KEEPS the
+    partial file. DO NOT delete the row instead, which drops it from the DVR
+    tab, and DO NOT shorten end_time, which a running capture ignores."""
+    cp = dict(cp or {})
+    if not cp.get(MARKER_KEY) or cp.get("status") != STATUS_RECORDING:
+        return None
+    cp["status"] = "stopped"
+    cp["stopped_at"] = str(_aware(now))
+    if taker:
+        cp["ranked_matchups_stopped_for"] = taker
+    return cp
+
+
+_RECORDING_LINE_RE = re.compile(
+    r"Recording(?: until .*? takes the slot\.| \(slot \d+ of \d+\)\.|\.)\s*")
+
+
+def strip_dot(title: str) -> str:
+    """A guide title without the recording dot."""
+    prefix = DOT + " "
+    return title[len(prefix):] if title.startswith(prefix) else title
+
+
+def stopped_description(desc: str, until: str, taker_name: str) -> str:
+    """Replace the leading recording line of a guide description once the
+    recording has been stopped for another game."""
+    line = f"Recorded until {until}; the slot went to {taker_name}."
+    # Match the recording line by its exact forms (description_line), NOT by
+    # the first ". ": a team like "St. John's" puts a period inside it.
+    m = _RECORDING_LINE_RE.match(desc)
+    rest = desc[m.end():] if m else desc
+    return f"{line} {rest}".strip()
 
 
 # ------------------------------------------------------------------- dot ---
