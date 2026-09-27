@@ -5,6 +5,37 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.30.0] - 2026-09-26
+
+### Added
+
+- **Ranked games fill spare recording slots** (#216, phase B). **Also record
+  top-ranked games in spare slots** (off by default) plus **Leagues to record**
+  (league codes, in priority order; blank = every league). A ranked game is a
+  candidate only once a stream is matched and only if its league is listed;
+  favorites make a game preferred, never eligible.
+- **Recording preference**: `earliest` (default, never interrupts),
+  `favorites`, `league`, `rating`. Slots fill in kickoff order; when a game
+  kicks off with every slot full it takes the worst-keyed ranked holder's slot
+  only if it wins on tier 1 (recorded team, every mode) or tier 2 (the chosen
+  preference). Tie-breaks (favorite, league position, rating, kickoff) never
+  interrupt. A holder that would keep under 15 minutes is dropped whole.
+- **Post-roll yield**, every mode: a recording past its game's scheduled end
+  gives its slot to a game kicking off, cutting only as many post-rolls as the
+  new game needs.
+- Handoffs are planned: the earlier recording's end is written before it
+  starts, and the guide says `Recording until <time>, then <game> takes the
+  slot.` A running recording is never cut or yielded (Dispatcharr ignores a
+  shorter end on a recording in progress; the live handoff timer is phase C).
+  A failed attempt to make room changes nothing.
+
+### Fixed
+
+- **Recorded teams changes take effect on the next Apply** (#221). Apply
+  re-matches every cached game against the current setting instead of trusting
+  the value the last refresh stored, so adding or removing a team no longer
+  waits for the next scheduled refresh.
+
 ## [1.29.0] - 2026-09-26
 
 ### Added

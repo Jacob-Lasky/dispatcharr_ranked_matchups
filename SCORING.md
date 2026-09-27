@@ -553,8 +553,10 @@ Source: Manchester United
   streams feed the virtual channel or a directly matched stream.
 - **`Recording (slot 1 of 3).`**: prepended to the Upcoming and Live
   entries when the channel has a recording scheduled over the game.
-  Those two titles also carry a 🔴. See "Recording your teams" in the
-  README.
+  Those two titles also carry a 🔴. When the slot is handed to a
+  higher-priority game part-way through, the line reads
+  `Recording until 3:00 PM, then <game> takes the slot.` instead. See
+  "Recording your teams" in the README.
 
 If a game scored unexpectedly low: scan the breakdown. Common
 patterns:

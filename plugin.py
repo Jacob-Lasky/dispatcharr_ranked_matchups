@@ -634,6 +634,9 @@ def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled
 # the recording silently never fires).
 
 RECORDING_POST_ROLL_SETTING = "recording_post_roll_minutes"
+RECORD_RANKED_SETTING = "record_ranked_games"
+RECORD_LEAGUES_SETTING = "record_leagues"
+RECORDING_PREFERENCE_SETTING = "recording_preference"
 RECORDING_SLOTS_SETTING = "recording_slots"
 RECORDING_RESERVE_SETTING = "recording_stream_reserve"
 DEFAULT_RECORDING_POST_ROLL_MINUTES = 120
@@ -663,6 +666,39 @@ class _AutoRecord:
         return marker in self.plan.planned
 
 
+def _rematch_recorded_teams(games: List[Dict[str, Any]], settings: Dict[str, Any]) -> None:
+    """Re-derive each cached game's `recorded_matched` from the CURRENT setting.
+
+    Refresh stores it in the cache, but apply must not trust that copy: a team
+    added or removed since the last refresh would otherwise only take effect at
+    the next refresh, hours later (#221). Same test refresh uses
+    (scoring.match_favorites), so the two cannot disagree. A team whose games
+    are not in the cache at all still needs a refresh to fetch them."""
+    from .scoring import match_favorites
+    teams = _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, ""))
+    for g in games:
+        g["recorded_matched"] = (
+            match_favorites(g.get("home", ""), g.get("away", ""), teams) if teams else []
+        )
+
+
+def _record_leagues(settings: Dict[str, Any]) -> List[str]:
+    """`record_leagues`, casefolded, in the user's order (the order is the
+    `league` preference's priority)."""
+    return [x.casefold() for x in _parse_favorites(settings.get(RECORD_LEAGUES_SETTING, ""))]
+
+
+def _ranked_eligible(g: Dict[str, Any], leagues: List[str]) -> bool:
+    """A ranked (non-recorded-team) game may take a slot only when it has a
+    matched stream NOW and its league is listed (blank list = every league).
+    A stream-less ranked game would hold a slot it cannot use and push a
+    playable game out; it becomes a candidate on the first apply that matches
+    a stream. Favorites make a game preferred, never eligible, by design."""
+    has_stream = bool(g.get("channel_id") or g.get("channel_ids") or g.get("stream_ids"))
+    in_league = not leagues or str(g.get("sport_prefix", "")).casefold() in leagues
+    return has_stream and in_league
+
+
 def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any]) -> "_AutoRecord":
     """Read-only: build the plan before apply writes anything.
 
@@ -673,7 +709,12 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any]) -
 
     ar = _AutoRecord()
     now = datetime.now(timezone.utc)
-    recorded_rows = [g for g in games if g.get("recorded_matched")]
+    leagues = _record_leagues(settings)
+    record_ranked = bool(settings.get(RECORD_RANKED_SETTING, False))
+    recorded_rows = [
+        g for g in games
+        if g.get("recorded_matched") or (record_ranked and _ranked_eligible(g, leagues))
+    ]
     ours_rows = list(Recording.objects.filter(
         custom_properties__has_key=recording_policy.MARKER_KEY,
         end_time__gt=now - recording_policy.STATE_RETENTION,
@@ -694,8 +735,14 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any]) -
         live_start, live_end = _live_window(g, start_dt)
         m = _build_marker_key(g)
         ar.names[m] = _format_matchup(g.get("home", ""), g.get("away", ""))
+        prefix = str(g.get("sport_prefix", "")).casefold()
         candidates.append(recording_policy.Candidate(
             marker=m, kickoff=start_dt, start=live_start, end=live_end + post_roll,
+            sched_end=live_end,
+            recorded=bool(g.get("recorded_matched")),
+            favorite=bool(g.get("favorites_matched")),
+            league_pos=leagues.index(prefix) if prefix in leagues else len(leagues),
+            rating=float(g.get("score") or 0.0),
         ))
 
     ar.ours, skip = recording_policy.classify_existing(
@@ -723,7 +770,11 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any]) -
         settings.get(RECORDING_SLOTS_SETTING, 0), limits,
         settings.get(RECORDING_RESERVE_SETTING, 1),
     )
-    ar.plan = recording_policy.plan_recordings(candidates, slots, busy, held, skip)
+    ar.plan = recording_policy.plan_recordings(
+        candidates, slots, busy, held, skip,
+        preference=str(settings.get(RECORDING_PREFERENCE_SETTING, recording_policy.PREF_EARLIEST)
+                       or recording_policy.PREF_EARLIEST).lower(),
+    )
     return ar
 
 
@@ -823,6 +874,8 @@ def _autorecord_finish(ar: "_AutoRecord", games: List[Dict[str, Any]], dry_run: 
         recording_policy.save_state(
             RECORDING_STATE_PATH, recording_policy.prune_state(ar.state, live, now))
     parts = [f"{len(ar.plan.planned)} set to record"]
+    if ar.plan.handoffs:
+        parts.append(f"{len(ar.plan.handoffs)} handing over to a higher-priority game")
     if ar.created or ar.updated or ar.cancelled:
         parts.append(f"{ar.created} new, {ar.updated} moved, {ar.cancelled} cancelled")
     if ar.plan.no_slot:
@@ -4785,6 +4838,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             "with a higher-ranked one (same source event listed twice)", dup_dropped,
         )
     # Auto-record plan (#216). Read-only; the writes happen per game below.
+    # Recorded teams are re-matched against the CURRENT setting first, so an
+    # edit takes effect on this apply rather than the next refresh (#221).
+    _rematch_recorded_teams(games, settings)
     autorec = _autorecord_prepare(games, settings)
 
     group_name = settings.get("channel_profile_name", DEFAULT_GROUP_NAME)
@@ -5711,9 +5767,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 live_description = description
                 if rec_dot:
                     _planned = autorec.plan.planned.get(marker)
+                    _handoff = autorec.plan.handoffs.get(marker)
                     live_description = (
                         recording_policy.description_line(
-                            _planned[2] if _planned else None, autorec.plan.slots)
+                            _planned[2] if _planned else None, autorec.plan.slots,
+                            until=(_handoff[1].astimezone(apply_tz).strftime("%-I:%M %p")
+                                   if _handoff else None),
+                            taker=(autorec.names.get(_handoff[0]) if _handoff else None),
+                        )
                         + " " + description
                     )
 
@@ -7089,7 +7150,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.29.0"
+    version = "1.30.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.29.0",
+  "version": "1.30.0",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -409,7 +409,7 @@
       "type": "string",
       "label": "Recorded teams (comma-separated)",
       "default": "",
-      "help_text": "Every game involving one of these teams is always added to Top Matchups and set to record in Dispatcharr's DVR, covering the game itself (from 30 minutes before kickoff to the end, plus the post-roll below), never the Upcoming block. They do not need to be Favorites, and listing one here does not raise its score. Matching works like Favorites. For F1, NASCAR, golf, tennis and UFC the plugin sees the event name, not the drivers or players, so enter an event name (Monaco, Masters) rather than a person. Games set to record show a red dot in the guide (TV apps download the guide on their own schedule, so a change can take a few hours to appear there). Removing a team cancels its recordings that have not started; a recording you delete from the DVR tab stays deleted."
+      "help_text": "Every game involving one of these teams is always added to Top Matchups and set to record in Dispatcharr's DVR, covering the game itself (from 30 minutes before kickoff to the end, plus the post-roll below), never the Upcoming block. They do not need to be Favorites, and listing one here does not raise its score. Matching works like Favorites. For F1, NASCAR, golf, tennis and UFC the plugin sees the event name, not the drivers or players, so enter an event name (Monaco, Masters) rather than a person. Games set to record show a red dot in the guide (TV apps download the guide on their own schedule, so a change can take a few hours to appear there). Adding or removing a team takes effect on the next Apply (a team whose games are not listed yet needs a Refresh to fetch them); removing one cancels its recordings that have not started; a recording you delete from the DVR tab stays deleted."
     },
     {
       "id": "favorites_only",
@@ -722,7 +722,7 @@
       "id": "_section_recording",
       "type": "info",
       "label": "Recording",
-      "description": "Auto-recording for the Recorded teams list."
+      "description": "Auto-recording: your Recorded teams first, then the best ranked games in any spare slots."
     },
     {
       "id": "recording_post_roll_minutes",
@@ -736,7 +736,7 @@
       "type": "number",
       "label": "Recordings at once (0 = automatic)",
       "default": 0,
-      "help_text": "The most recordings the plugin runs at the same time. Automatic uses your tightest M3U account limit (Max Streams) minus the reserve below. A number here can lower that, never raise it. When there are more games to record than slots, the earliest kickoff wins and the apply result names the games that got no slot."
+      "help_text": "The most recordings the plugin runs at the same time. Automatic uses your tightest M3U account limit (Max Streams) minus the reserve below. A number here can lower that, never raise it. Slots fill in kickoff order; what happens when a game kicks off and every slot is full is set by Recording preference. The apply result names any game that got no slot."
     },
     {
       "id": "recording_stream_reserve",
@@ -744,6 +744,46 @@
       "label": "Streams kept free for live TV",
       "default": 1,
       "help_text": "How many of your provider's streams automatic mode leaves unused, so a recording never takes the last stream someone needs to watch something else. Watching a game that is also recording shares one stream."
+    },
+    {
+      "id": "record_ranked_games",
+      "type": "boolean",
+      "label": "Also record top-ranked games in spare slots",
+      "default": false,
+      "help_text": "When on, slots your Recorded teams do not need go to the best ranked games on the list, from the leagues below. A ranked game is only recorded once a stream has been matched for it. Recorded teams always come first and are never interrupted by a ranked game."
+    },
+    {
+      "id": "record_leagues",
+      "type": "string",
+      "label": "Leagues to record (comma-separated, in priority order)",
+      "default": "",
+      "placeholder": "CFB, EPL, NFL",
+      "help_text": "Which leagues' ranked games may be recorded, using the league code at the start of each channel name (CFB, EPL, NFL, NHL, UCL...). Blank means every league. The order is the priority used by the League preference: earlier beats later. Recorded teams are recorded whatever their league."
+    },
+    {
+      "id": "recording_preference",
+      "type": "select",
+      "label": "Recording preference",
+      "default": "earliest",
+      "options": [
+        {
+          "value": "earliest",
+          "label": "Earliest kickoff (never interrupt)"
+        },
+        {
+          "value": "favorites",
+          "label": "Prefer favorites"
+        },
+        {
+          "value": "league",
+          "label": "Prefer league order"
+        },
+        {
+          "value": "rating",
+          "label": "Prefer higher rating"
+        }
+      ],
+      "help_text": "What happens when a game kicks off and every slot is full. Earliest: first come, first recorded. Prefer favorites / league order / higher rating: the new game takes the slot of the lowest-priority ranked game recording at that moment if it wins on that preference, and the interrupted recording keeps what it captured. Ties never interrupt. In every mode a recorded team can take a ranked game's slot, and a recording that is only in its post-roll padding gives its slot to a new game. Handoffs are planned ahead; stopping a recording that has already started is not supported yet."
     },
     {
       "id": "_section_schedule",
