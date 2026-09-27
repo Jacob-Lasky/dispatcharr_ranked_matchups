@@ -333,6 +333,10 @@ CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
 # tombstones for ones the user deleted so they are not re-created. A file, not
 # the DB, because the tombstone must outlive the Recording row it describes.
 RECORDING_STATE_PATH = os.path.join(PLUGIN_DIR, "recordings_state.json")
+# Planned stops of RUNNING recordings (#216 phase C). Written whole by apply
+# under the scheduler lock, only ever READ by the live handoff timer, so the
+# timer never races apply's writes. A separate file from the state on purpose.
+RECORDING_STOPS_PATH = os.path.join(PLUGIN_DIR, "recording_stops.json")
 # Sidecar cache for LLM-rewritten descriptions. Separate from cache.json so the
 # main cache file stays purely deterministic (score, breakdown, score_notes
 # unchanged) and the LLM cache can be safely deleted to force regen without
@@ -787,6 +791,7 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
     )
     ar.plan = recording_policy.plan_recordings(
         candidates, slots, busy, held, skip,
+        live_stops=True,
         preference=str(settings.get(RECORDING_PREFERENCE_SETTING, recording_policy.PREF_EARLIEST)
                        or recording_policy.PREF_EARLIEST).lower(),
     )
@@ -935,8 +940,24 @@ def _autorecord_dot(channel_id, start: datetime, end: datetime) -> bool:
     return recording_policy.recording_over(rows, start, end)
 
 
+def _read_stops() -> Dict[str, Dict[str, Any]]:
+    """The planned live stops; a missing or corrupt file means none."""
+    try:
+        with open(RECORDING_STOPS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _autorecord_finish(ar: "_AutoRecord", games: List[Dict[str, Any]], dry_run: bool) -> str:
     """Persist state and return the short toast fragment (empty when unused)."""
+    if not dry_run:
+        # Rewrite the stops file on EVERY real apply, empty when auto-record is
+        # unused, so a stop planned earlier and no longer wanted never fires.
+        recording_policy.save_state(
+            RECORDING_STOPS_PATH,
+            recording_policy.stop_entries(ar.plan, ar.ours, ar.names) if ar.enabled else {})
     if not ar.enabled:
         return ""
     now = datetime.now(timezone.utc)
@@ -950,6 +971,8 @@ def _autorecord_finish(ar: "_AutoRecord", games: List[Dict[str, Any]], dry_run: 
     parts = [f"{len(ar.plan.planned)} set to record"]
     if ar.plan.handoffs:
         parts.append(f"{len(ar.plan.handoffs)} handing over to a higher-priority game")
+    if ar.plan.stops:
+        parts.append(f"{len(ar.plan.stops)} running recording(s) will stop for it")
     if ar.created or ar.updated or ar.cancelled:
         parts.append(f"{ar.created} new, {ar.updated} moved, {ar.cancelled} cancelled")
     if ar.plan.no_slot:
@@ -7070,6 +7093,88 @@ def _next_reap_delay(settings: Dict[str, Any]) -> float:
     return max(1.0, min((soonest - now).total_seconds(), _REAPER_MAX_SLEEP_SECONDS))
 
 
+# How often the reaper loop wakes at the latest, so a stop planned by an apply
+# in another worker is noticed well before its time (the loop otherwise sleeps
+# until the next reap, which can be hours away).
+_HANDOFF_RECHECK_SECONDS = 300
+
+
+def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> int:
+    """Stop our running recordings whose planned handoff time has come (#216
+    phase C). Every worker's reaper loop runs this; each stop is a locked,
+    idempotent write, so the first worker stops it and the rest find a
+    recording that is no longer "recording" and skip it.
+
+    The taker's channel must have a stream: if it still has none, the holder
+    keeps recording rather than handing its slot to a game that cannot be
+    recorded. Only I/O, so it is safe on the gevent hub (no subprocess)."""
+    now = now or datetime.now(timezone.utc)
+    due = recording_policy.due_stops(_read_stops(), now)
+    if not due:
+        return 0
+    from django.db import transaction
+    from apps.channels.models import Channel, ChannelStream, Recording
+    from apps.epg.models import ProgramData
+    tz = _resolve_tz(settings.get("local_timezone", "UTC"))
+    done = 0
+    for rid, entry in due:
+        try:
+            with transaction.atomic():
+                rec = Recording.objects.select_for_update().filter(pk=int(rid)).first()
+                if rec is None or recording_policy.rec_marker(rec) != entry.get("marker"):
+                    continue
+                # Re-read the entry now that the row is locked: an apply may have
+                # replaced the stops file since this pass read it.
+                if _read_stops().get(rid) != entry:
+                    continue
+                if not recording_policy.is_in_progress(rec):
+                    continue
+                taker = entry.get("taker") or ""
+                taker_ch = Channel.objects.filter(tvg_id=taker).first() if taker else None
+                if taker_ch is None or not ChannelStream.objects.filter(channel=taker_ch).exists():
+                    logger.warning(
+                        "[ranked_matchups] handoff for recording %s skipped: %s has no "
+                        "stream yet, so the current recording keeps its slot", rid,
+                        entry.get("taker_name") or taker or "?")
+                    continue
+                # The taker must still be set to record: a stops entry can
+                # outlive its plan (an apply that failed before rewriting the
+                # file), and stopping for a game that will not record just
+                # loses the rest of this one.
+                taker_recs = Recording.objects.filter(
+                    **{f"custom_properties__{recording_policy.MARKER_KEY}": taker})
+                if not any(not recording_policy.is_terminal(r) for r in taker_recs):
+                    logger.warning(
+                        "[ranked_matchups] handoff for recording %s skipped: %s is no "
+                        "longer set to record", rid, entry.get("taker_name") or taker)
+                    continue
+                cp = recording_policy.stopped_properties(rec.custom_properties, now, taker)
+                if cp is None:
+                    continue
+                rec.custom_properties = cp
+                # The same write Dispatcharr's own Stop makes; update_fields is
+                # right here (no time change, nothing to reschedule).
+                rec.save(update_fields=["custom_properties"])
+                ch = rec.channel
+                if ch is not None and ch.epg_data_id:
+                    until = now.astimezone(tz).strftime("%-I:%M %p")
+                    for p in ProgramData.objects.filter(epg_id=ch.epg_data_id, end_time__gt=now,
+                                                        title__startswith=recording_policy.DOT):
+                        ProgramData.objects.filter(pk=p.pk).update(
+                            title=recording_policy.strip_dot(p.title),
+                            description=recording_policy.stopped_description(
+                                p.description or "", until, entry.get("taker_name") or taker),
+                        )
+                done += 1
+                logger.info("[ranked_matchups] handoff: stopped recording %s for %s",
+                            rid, entry.get("taker_name") or taker)
+        except Exception:
+            logger.exception("[ranked_matchups] handoff for recording %s failed", rid)
+    if done:
+        _invalidate_epg_output_cache()
+    return done
+
+
 def _reaper_loop(plugin_ref, stop_event):
     """Remove finished games from the guide between refreshes (#196).
 
@@ -7089,17 +7194,27 @@ def _reaper_loop(plugin_ref, stop_event):
         while not stop_event.is_set():
             try:
                 settings = plugin_ref.get_current_settings()
-                if _reap_settings(settings) <= 0:
-                    if _scheduler_sleep(stop_event, 300):
-                        return
-                    continue
-                delay = _next_reap_delay(settings)
-                logger.debug(
-                    "[ranked_matchups] reaper sleeping %.0fs until next expiry", delay,
-                )
+                reap_on = _reap_settings(settings) > 0
+                now = datetime.now(timezone.utc)
+                # Wake for whichever comes first: the next reap, the next
+                # planned live stop (#216 phase C), or the recheck that picks up
+                # stops planned since this loop last looked.
+                delays = [float(_HANDOFF_RECHECK_SECONDS)]
+                reap_delay = _next_reap_delay(settings) if reap_on else None
+                if reap_delay is not None:
+                    delays.append(reap_delay)
+                stop_delay = recording_policy.next_stop_delay(_read_stops(), now)
+                if stop_delay is not None:
+                    delays.append(stop_delay)
+                delay = max(1.0, min(delays))
+                logger.debug("[ranked_matchups] reaper sleeping %.0fs", delay)
                 if _scheduler_sleep(stop_event, delay):
                     return
-                result = _action_reap_locked(plugin_ref.get_current_settings())
+                settings = plugin_ref.get_current_settings()
+                _run_due_stops(settings)
+                if reap_delay is None or delay + 1 < reap_delay:
+                    continue
+                result = _action_reap_locked(settings)
                 if result.get("reaped") or result.get("promoted"):
                     logger.info(
                         "[ranked_matchups] reaper: %s", result.get("message", ""),
@@ -7231,7 +7346,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.30.1"
+    version = "1.31.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

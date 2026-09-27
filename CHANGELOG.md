@@ -5,6 +5,37 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.31.0] - 2026-09-27
+
+### Added
+
+- **Live handoffs: a running recording can give up its slot** (#216, phase
+  C, the last piece). Until now a higher-priority game (a Recorded team, or
+  the chosen Recording preference) could only take a slot from a recording
+  that had not started, because Dispatcharr ignores a shorter end on a
+  capture in progress. The plan may now also cut a running recording, by
+  post-roll yield or interruption, as a STOP at the taker's Live-block start.
+  - Apply writes the planned stops to `recording_stops.json` (whole replace,
+    under the scheduler lock). The reaper loop wakes for the next stop (and at
+    least every 5 minutes to pick up new plans) and makes the same write as
+    the DVR tab's Stop: status `stopped`, so the partial file is kept.
+  - Every worker's loop may run it; each stop is a locked, idempotent write
+    (`select_for_update`, only a row still `recording`), so exactly one stop
+    happens. A stop more than 10 minutes late is not executed.
+  - If the taker's channel still has no stream at the handoff moment, the
+    current recording keeps its slot rather than handing it to a game that
+    cannot be recorded.
+  - The stopped game's guide entries lose the 🔴 and read `Recorded until
+    <time>; the slot went to <game>.`
+  - A running recording is never dropped whole (it already has a file), only
+    gives way to a game that starts after it did, and a ranked game still
+    never stops a Recorded team's recording.
+  - The taker must still be set to record at the handoff moment, and the stop
+    entry is re-read after the row is locked, so a stale plan (an apply that
+    failed before rewriting the file) cannot stop a recording for nothing. A
+    stop skipped for "no stream yet" is retried every minute within its grace
+    window.
+
 ## [1.30.1] - 2026-09-26
 
 ### Fixed
