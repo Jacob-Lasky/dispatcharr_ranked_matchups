@@ -67,7 +67,7 @@ downstream is sport-agnostic.
 | `sources/_espn.py` | Shared ESPN helpers. `extract_espn_scoreboard_event` normalises one scoreboard event (its docstring forbids inlining a fourth copy). `sweep_upcoming_scoreboard` is the whole per-day sweep for UPCOMING-only sources, owning the US-Eastern-bucket lookback (`SCOREBOARD_LOOKBACK_DAYS`), the FINISHED drop, the stale-SCHEDULED floor (`MAX_AGE_AFTER_KICKOFF`) and the id dedupe. Used by `friendlies.py` + `english_cup.py`. Takes `http_get` INJECTED so each source keeps its own patchable `requests` symbol. The bracket sources deliberately do NOT use it: they sweep a fixed calendar window and KEEP finished games because bracket state comes from results already played. |
 | `sources/friendlies.py` | ESPN exhibition soccer: `InternationalFriendliesSource` (`fifa.friendly` / `fifa.friendly.w`, parametrized on gender) and `ClubFriendliesSource` (`club.friendly`). `supports_importance=False` deliberately: no table to simulate. Gated to Favorites by default (`friendlies_favorites_only`) because an exhibition's only claim to a slot is the favorite signal. `CLUBFRIENDLY` is a distinct prefix from `FRIENDLY` and its absence from `rivalries.json` is load-bearing: a pre-season kickabout is not a derby. |
 | `sources/english_cup.py` | EFL (Carabao) Cup + FA Cup via ESPN (`eng.league_cup` / `eng.fa`). Exists because Football-Data.org gates EVERY domestic cup behind a paid plan (FLC=TIER_THREE, FAC=TIER_TWO; verified 403 on the free-tier key), so a `soccer.py::COMPETITIONS` entry would 403 every refresh and contribute zero games silently. Rounds come from `season.slug`; the slug->stage maps are PER-COMPETITION because the two cups' round names overlap at different depths (FA Cup 4th round = R32, EFL Cup 4th round = R16). `supports_importance=False` and ranks always `None` — the latter is what stops a giant-killing tie being penalised for being lopsided. Early rounds score via the `CUP_R*` band in `scoring.py`, ramping to just under the shared `QUARTER_FINALS`. #190. |
-| `recording.py` | Auto-record policy (#216), pure and ORM-free: `resolve_slot_budget` (tightest positive M3U `max_streams` minus reserve), `plan_recordings` (kickoff order, capacity checked as concurrency; busy = other recordings, held = ours in progress, never displaced or cut, extended only when the budget allows; post-roll yield and tier-1/tier-2 interruption via `priority_key` / `can_interrupt`, both PLANNED as `Plan.handoffs` by moving the earlier recording's end before it starts, keeping only the cuts the new game needs and rolling back an attempt that cannot free enough), `classify_existing` (user-deleted -> tombstone, user-edited or terminal -> hands off), `decide` (create / full-save update / extend-only while recording), `cancellable`, `covered_by_user`, `recording_over` (the 🔴, read from real rows), `description_line`, and the `recordings_state.json` load/save/prune. `MARKER_KEY` in `Recording.custom_properties` is the only "ours" test. The ORM around it is `_autorecord_*` in plugin.py, which writes with `.create()` / FULL `.save()` on purpose (the Recording signals are wanted; `.update()` or a narrow `update_fields` leaves the capture task stale). |
+| `recording.py` | Auto-record policy (#216), pure and ORM-free: `resolve_slot_budget` (tightest positive M3U `max_streams` minus reserve), `plan_recordings` (kickoff order, capacity checked as concurrency; busy = other recordings, held = ours in progress, never displaced or cut, extended only when the budget allows; post-roll yield and tier-1/tier-2 interruption via `priority_key` / `can_interrupt`, both PLANNED as `Plan.handoffs` by moving the earlier recording's end before it starts, keeping only the cuts the new game needs and rolling back an attempt that cannot free enough), `classify_existing` (user-deleted -> tombstone, user-edited or terminal -> hands off), `decide` (create / full-save update / extend-only while recording), `cancellable` (takes the cache `slate` + a `reason_holds` predicate, #224), `covered_by_user`, `recording_over` (the 🔴, read from real rows), `description_line`, the WHY-we-recorded keys (`REASON_KEY` / `TEAMS_KEY` / `LEAGUE_KEY` / `GAME_KEY`) with `reason_properties` / `reason_changed` / `reason_checker`, and the `recordings_state.json` load/save/prune. `MARKER_KEY` in `Recording.custom_properties` is the only "ours" test. The ORM around it is `_autorecord_*` in plugin.py, which writes with `.create()` / FULL `.save()` on purpose (the Recording signals are wanted; `.update()` or a narrow `update_fields` leaves the capture task stale) — the ONE exception is `_backfill_reason`, which stamps the reason with `save(update_fields=["custom_properties"])` precisely because no time changed and nothing needs rescheduling. |
 | `logos.py` | TheSportsDB matchup-thumbnail resolver. Looks up the curated game via `searchevents.php` (team-name pair, date-tolerance ±2 days, sport-hint disambiguation), downloads the 960x540 graphic to `/data/logos/ranked_matchups_<sha1>.jpg`, and registers a `Logo` row pointing at it. Persistent per-marker cache (`sportsdb_thumb_cache.json`, 14d positive TTL / 1d negative TTL) means apply only HTTP-probes each fixture once. Field-event sources (`away=="Field"`) and dry_run short-circuit the lookup. Stale-file sweep at the end of each apply prunes JPGs whose marker isn't in the live set. Also resolves the league/tournament BADGE fallback (#102): `SPORTSDB_LEAGUE_IDS` (`sport_prefix` -> verified league id), `league_id_for`, `resolve_league_badge_url` (`lookupleague.php` -> `strBadge`), cached as `ranked_matchups_badge_<id>.png` (distinct prefix the sweep skips). |
 
 State (gitignored, lives in `<plugin_dir>/`):
@@ -251,12 +251,24 @@ thread actually died. Clearing a slot whose thread is still alive (the reaper
 can be parked on a subprocess well past the 5s join) makes the next
 `__init__` spawn a duplicate.
 
+**Settings read before a sleep are not settings** (#223). `_scheduler_loop`
+reads settings at the top of the loop to work out WHEN to fire, then sleeps
+until the next `scheduled_times` slot — hours. It must re-read
+(`plugin_ref.get_current_settings()`, and re-check `auto_refresh_enabled`)
+AFTER `_scheduler_sleep` returns and before handing settings to
+`tasks.run_scheduled_pipeline`. Measured 2026-09-26: Recorded teams added at
+5:48 PM were invisible to the 7 PM run, which then cancelled a scheduled
+recording. Anything else that sleeps and then acts on a snapshot has the same
+hazard.
+
 ### cache.json has TWO lists: `games` and `bench`
 
 `games` is what apply puts on air; `bench` is scored-but-not-applied stock the
 reaper promotes from as games finish (#197). Splitting them at write time
-rather than tagging rows is deliberate: `_action_apply` needs no knowledge of
-the bench at all, it still applies exactly the list it is handed.
+rather than tagging rows is deliberate: `_action_apply` still applies exactly
+the list it is handed. It reads the bench for exactly one thing — the
+auto-record *slate* (`_autorecord_prepare(..., bench=...)`, #224), which is the
+set of markers the cache knows about at all; nothing on the bench is published.
 
 `_split_applied` is what does the split, and it is NOT a `payload[:max_games]`
 slice. The first `max_games` rows go on air PLUS every **forced** row past them
@@ -340,6 +352,31 @@ stay in agreement with that one.
   back when it does not free enough, and any cut the new game turned out not to
   need is undone (post-roll yields first), so nobody loses recording time for
   no capacity gain.
+- **A game missing from the cache is not evidence that its recording is
+  unwanted** (#224). A source can return zero games from one failed call, and
+  reading "absent from the slate" as "no longer wanted" then deletes scheduled
+  recordings for a whole sport (measured 2026-09-26: one CFBD failure, one
+  cancelled Recorded-team recording). So every recording stores WHY it exists
+  in its own `custom_properties` — `REASON_TEAM` with the matched teams and the
+  game's `[home, away]`, or `REASON_RANKED` with its league — and `cancellable`
+  drops a marker missing from the slate only when `reason_checker` says that
+  reason no longer holds under the CURRENT settings. A marker still IN the
+  slate but unplanned is cancelled as before: that is real evidence. Three
+  things this rests on: the slate is games **plus bench**, or a demoted game
+  would read as vanished; the team question is re-asked through
+  `scoring.match_favorites` against the stored game rather than by comparing
+  stored list entries, so fixing a typo in **Recorded teams** does not look
+  like removing the team; and a row with no stored reason (written by 1.29.0 /
+  1.30.0) answers **keep** — `_backfill_reason` stamps it on the next apply,
+  but only on a row that has not started, because `run_recording` owns
+  `custom_properties` on a recording in progress.
+- **Re-read the Recording row, locked, before writing or cancelling it.** The
+  rows in `ar.ours` were loaded when the plan was built, and apply's LLM / logo
+  pre-pass can take minutes; a recording that started in between would be
+  decided as "scheduled" and saved back with its live `status` overwritten.
+  `_autorecord_for_game` and `_autorecord_cancel` both re-fetch via
+  `select_for_update()` inside apply's transaction (a plain re-read only
+  narrows the race) and re-check `is_in_progress` / `is_terminal`.
 - **Apply re-derives `recorded_matched`, it does not trust the cache** (#221).
   Refresh stamps the match into each cached row, so an edit to **Recorded
   teams** would otherwise sit inert until the next scheduled refresh hours
@@ -523,6 +560,9 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   PLANNED (`Plan.handoffs`, written into the guide line by
   `description_line(until=, taker=)`); cutting a recording that has already
   started is phase C
+- Recordings survive a source outage (#224): each one stores why it exists, and
+  a game that vanished from the whole cache is only cancelled once that reason
+  stops holding under the current settings
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)
@@ -613,8 +653,9 @@ the Dispatcharr Discord plugins channel
 
 ### When the upstream version bumps
 
-- Bump `version` in `plugin.json` AND `__version__` in `__init__.py`
-  (must stay in sync).
+- Bump `version` in `plugin.json`, `__version__` in `__init__.py` AND
+  `Plugin.version` in `plugin.py` — all three must stay in sync
+  (`tests/test_version_consistency.py` enforces the three-way match).
 - Tag the release in this repo (`git tag v0.2.0 && git push --tags`).
 - Open a PR against the upstream `Plugins` repo bumping the version
   reference for our plugin.
