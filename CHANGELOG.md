@@ -5,6 +5,34 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.30.1] - 2026-09-26
+
+### Fixed
+
+- **A source outage no longer cancels scheduled recordings** (#224). Measured
+  on the live instance: one refresh got `NCAA Football: 0 games` from a
+  one-off CFBD failure, every CFB game left the cache, and the next apply
+  cancelled a scheduled recording of a Recorded team's game. A recording whose
+  game is missing from the whole cache (applied games and bench) is now
+  cancelled only when its stored reason no longer holds: each recording
+  carries why it exists (`ranked_matchups_reason` = `team` with the matched
+  teams, or `ranked` with its league), checked against the current settings.
+  A game still in the cache but no longer planned is cancelled as before.
+  Rows made by 1.29.0 / 1.30.0 get the reason backfilled on the next apply
+  (not-yet-started rows only); until then, no evidence means keep.
+- **The scheduled pipeline uses current settings** (#223). The scheduler read
+  settings at the top of its loop, slept until the next `scheduled_times`
+  slot (hours), then ran with that snapshot, so any setting saved during the
+  sleep was ignored by the next run. Measured: Recorded teams added at 5:48 PM
+  was ignored by the 7 PM run, which cancelled a scheduled recording. It now
+  re-reads settings after waking.
+- **Recording writes re-read the row first.** The row was loaded when the
+  plan was built, and apply's pre-pass can take minutes; a recording that
+  started in between could have had its live status overwritten.
+
+1.30.0 (#222, ranked-game slots) was deployed to the maintainer's instance
+but not published; this release carries it.
+
 ## [1.30.0] - 2026-09-26
 
 ### Added

@@ -264,7 +264,7 @@ class TestWiring:
 
     def test_rematch_runs_before_the_plan(self, src):
         body = self._body(src, "_action_apply")
-        assert body.index("_rematch_recorded_teams(games, settings)") < body.index("_autorecord_prepare(games, settings)")
+        assert body.index("_rematch_recorded_teams(games, settings)") < body.index("_autorecord_prepare(games, settings")
 
     def test_prepare_passes_the_preference_and_ranked_eligibility(self, src):
         body = self._body(src, "_autorecord_prepare")

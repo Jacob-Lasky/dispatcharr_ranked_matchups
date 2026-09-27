@@ -284,7 +284,7 @@ class TestApplyWiring:
 
     def test_prepare_runs_after_dedupe_and_before_the_prepass(self, src):
         body = self._body(src, "_action_apply")
-        assert body.index("_unique_by_marker(") < body.index("autorec = _autorecord_prepare(games, settings)") \
+        assert body.index("_unique_by_marker(") < body.index("autorec = _autorecord_prepare(games, settings") \
             < body.index("seen_markers.add(marker)")
 
     def test_cancel_runs_inside_the_transaction_before_the_stale_reap(self, src):
