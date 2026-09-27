@@ -5,10 +5,8 @@ __init__.py (which imports Plugin → starts the scheduler thread → imports
 Django models). The conftest registers the package without exec-ing
 __init__.py."""
 
-import importlib.util
 import os
 import re
-import sys
 import types
 from datetime import timezone
 
@@ -2322,7 +2320,6 @@ class TestPluginStopTeardown:
         # has to be isolated here too: it is a second daemon thread started by
         # the same __init__, so without this a spawned reaper survives the test
         # that created it.
-        import threading
         reg = plugin._scheduler_registry()
         rreg = plugin._reaper_registry()
         saved = (reg.thread, reg.stop_event, rreg.thread, rreg.stop_event)

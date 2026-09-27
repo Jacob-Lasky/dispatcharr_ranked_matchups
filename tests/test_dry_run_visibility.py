@@ -21,7 +21,6 @@ remedy, and show_status reports the setting.
 """
 
 import ast
-import importlib.util
 import json
 import logging
 import os

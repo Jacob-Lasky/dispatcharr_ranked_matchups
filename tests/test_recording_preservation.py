@@ -11,13 +11,10 @@ the running container in the PR's live-verification section.
 """
 
 import ast
-import importlib.util
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-import pytest
 
 PLUGIN_PY = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "plugin.py"))
 

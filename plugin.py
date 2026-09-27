@@ -661,6 +661,9 @@ class _AutoRecord:
         self.created = self.updated = self.cancelled = 0
         self.failed: List[str] = []
         self.names: Dict[str, str] = {}
+        self.slate: Optional[set] = None        # every marker in the cache (#224)
+        self.reason_holds = None                # rec -> still wanted? (#224)
+        self.meta: Dict[str, Tuple[Any, List[str], str, List[str]]] = {}  # marker -> (candidate, teams, league, [home, away])
 
     def will_record(self, marker: str) -> bool:
         return marker in self.plan.planned
@@ -699,7 +702,8 @@ def _ranked_eligible(g: Dict[str, Any], leagues: List[str]) -> bool:
     return has_stream and in_league
 
 
-def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any]) -> "_AutoRecord":
+def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
+                        bench: Optional[List[Dict[str, Any]]] = None) -> "_AutoRecord":
     """Read-only: build the plan before apply writes anything.
 
     Runs even when the Recorded teams list is empty IF the plugin still has
@@ -723,6 +727,14 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any]) -
         return ar
     ar.enabled = True
     ar.state = recording_policy.load_state(RECORDING_STATE_PATH)
+    # The slate is EVERYTHING the cache knows about, bench included: a game that
+    # dropped to the bench is known and unplanned (cancel), a game missing from
+    # both is unknown and may just be a source outage (keep, #224).
+    ar.slate = {_build_marker_key(g) for g in list(games) + list(bench or [])}
+    from .scoring import match_favorites
+    ar.reason_holds = recording_policy.reason_checker(
+        _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, "")), record_ranked,
+        _record_leagues(settings), matcher=match_favorites)
     from apps.m3u.models import M3UAccount
 
     post_roll = timedelta(minutes=max(0, _int_setting(
@@ -736,14 +748,17 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any]) -
         m = _build_marker_key(g)
         ar.names[m] = _format_matchup(g.get("home", ""), g.get("away", ""))
         prefix = str(g.get("sport_prefix", "")).casefold()
-        candidates.append(recording_policy.Candidate(
+        cand = recording_policy.Candidate(
             marker=m, kickoff=start_dt, start=live_start, end=live_end + post_roll,
             sched_end=live_end,
             recorded=bool(g.get("recorded_matched")),
             favorite=bool(g.get("favorites_matched")),
             league_pos=leagues.index(prefix) if prefix in leagues else len(leagues),
             rating=float(g.get("score") or 0.0),
-        ))
+        )
+        candidates.append(cand)
+        ar.meta[m] = (cand, list(g.get("recorded_matched") or []), str(g.get("sport_prefix", "")),
+                      [str(g.get("home", "")), str(g.get("away", ""))])
 
     ar.ours, skip = recording_policy.classify_existing(
         ours_rows, ar.state, [c.marker for c in candidates])
@@ -784,8 +799,16 @@ def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool) -> None:
     the scheduled capture. Only rows carrying our marker are ever considered."""
     if not ar.enabled:
         return
-    for rec in recording_policy.cancellable(ar.ours, ar.plan):
+    from apps.channels.models import Recording
+    for rec in recording_policy.cancellable(ar.ours, ar.plan, ar.slate, ar.reason_holds):
         m = recording_policy.rec_marker(rec)
+        if not dry_run:
+            # Re-check a LOCKED fresh copy: the row in ar.ours was loaded when
+            # the plan was built, and a recording that has started since must
+            # never be deleted here.
+            rec = Recording.objects.select_for_update().filter(pk=rec.pk).first()
+            if rec is None or recording_policy.is_in_progress(rec) or recording_policy.is_terminal(rec):
+                continue
         ar.cancelled += 1
         if dry_run:
             continue
@@ -795,21 +818,70 @@ def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool) -> None:
         ar.ours.pop(m, None)
 
 
+def _reason_props(ar: "_AutoRecord", marker: str) -> Dict[str, Any]:
+    """Why this recording exists, for the #224 cancel check on a later apply.
+    Goes through recording_policy.reason_properties so the keys it writes are
+    the keys reason_checker reads."""
+    meta = ar.meta.get(marker)
+    if meta is None:
+        return {}
+    cand, teams, league, game = meta
+    return recording_policy.reason_properties(cand, teams, league, game)
+
+
+def _backfill_reason(ar: "_AutoRecord", marker: str, existing) -> None:
+    """Keep the #224 reason on one of our rows current: stamp it onto rows that
+    predate it (made by 1.29.0 / 1.30.0) and refresh it when it has gone stale
+    (a ranked recording whose team has since been added), so a later source
+    outage judges the recording by why it exists NOW. Only for a row that has not started: DO NOT write custom_properties
+    on a recording in progress, run_recording owns its status there.
+    save(update_fields=["custom_properties"]) is correct HERE (no time change,
+    so nothing needs rescheduling, and post_save's early return is wanted)."""
+    if existing is None:
+        return
+    if recording_policy.is_terminal(existing) or recording_policy.is_in_progress(existing):
+        return
+    props = _reason_props(ar, marker)
+    if not props or not recording_policy.reason_changed(existing, props):
+        return
+    existing.custom_properties = {**(existing.custom_properties or {}), **props}
+    existing.save(update_fields=["custom_properties"])
+
+
 def _autorecord_for_game(ar: "_AutoRecord", marker: str, channel, title: str,
                          description: str, dry_run: bool) -> None:
     """Create or move this game's recording to match the plan."""
     if not ar.enabled or channel is None:
         return
+    from apps.channels.models import Recording
     planned = ar.plan.planned.get(marker)
     existing = ar.ours.get(marker)
+    if existing is not None and not dry_run:
+        # Re-read NOW. The row was loaded when the plan was built, and apply's
+        # LLM / logo pre-pass can take minutes; a recording that started in
+        # between would otherwise be decided as "scheduled" and saved back with
+        # its live custom_properties["status"] overwritten by the stale copy.
+        # select_for_update: apply runs inside transaction.atomic, so this
+        # holds the row until commit and the DVR's own status write waits for
+        # us instead of being overwritten by our save (a plain re-read only
+        # narrows that race).
+        existing = Recording.objects.select_for_update().filter(pk=existing.pk).first()
+        if existing is None:
+            ar.ours.pop(marker, None)
+        else:
+            ar.ours[marker] = existing
     action = recording_policy.decide(planned, existing, channel.id)
-    if action in (recording_policy.KEEP, recording_policy.SKIP) or dry_run:
+    if dry_run:
         if action == recording_policy.CREATE:
             ar.created += 1
         elif action in (recording_policy.UPDATE, recording_policy.EXTEND):
             ar.updated += 1
         return
-    from apps.channels.models import Recording
+    if action == recording_policy.KEEP:
+        _backfill_reason(ar, marker, existing)
+        return
+    if action == recording_policy.SKIP:
+        return
     start, end, _slot = planned
     try:
         if action == recording_policy.CREATE:
@@ -818,6 +890,7 @@ def _autorecord_for_game(ar: "_AutoRecord", marker: str, channel, title: str,
                 channel=channel, start_time=start, end_time=end,
                 custom_properties={
                     recording_policy.MARKER_KEY: marker,
+                    **_reason_props(ar, marker),
                     "status": "scheduled",
                     "description": description,
                     "program": {
@@ -835,6 +908,7 @@ def _autorecord_for_game(ar: "_AutoRecord", marker: str, channel, title: str,
         elif action == recording_policy.UPDATE:
             existing.start_time, existing.end_time = start, end
             existing.channel = channel
+            existing.custom_properties = {**(existing.custom_properties or {}), **_reason_props(ar, marker)}
             existing.save()  # FULL save: pre_save revokes, post_save reschedules
             ar.state["created"][marker] = recording_policy.written_record(
                 existing.id, start, end, channel.id, datetime.now(timezone.utc))
@@ -4841,7 +4915,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # Recorded teams are re-matched against the CURRENT setting first, so an
     # edit takes effect on this apply rather than the next refresh (#221).
     _rematch_recorded_teams(games, settings)
-    autorec = _autorecord_prepare(games, settings)
+    autorec = _autorecord_prepare(games, settings, bench=cache.get("bench") or [])
 
     group_name = settings.get("channel_profile_name", DEFAULT_GROUP_NAME)
     # Archive group for preserved DVR recordings (#146). Blank falls back to the
@@ -6860,6 +6934,13 @@ def _scheduler_loop(plugin_ref, stop_event):
                 )
                 if _scheduler_sleep(stop_event, sleep_s):
                     return
+                # Re-read AFTER waking. DO NOT reuse the snapshot from before the
+                # sleep: it can be hours old, and a setting saved in between
+                # (measured 2026-09-26: Recorded teams added mid-sleep) was then
+                # ignored by the run, which cancelled a scheduled recording (#223).
+                settings = plugin_ref.get_current_settings()
+                if not settings.get("auto_refresh_enabled", False):
+                    continue
                 logger.info("[ranked_matchups] scheduler firing auto_pipeline")
                 # Delegates to the shared lock/inflight/subprocess path so the
                 # scheduler runs the work OUT OF PROCESS (the Monte Carlo scoring
@@ -7150,7 +7231,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.30.0"
+    version = "1.30.1"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

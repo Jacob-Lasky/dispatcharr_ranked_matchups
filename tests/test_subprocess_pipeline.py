@@ -14,7 +14,6 @@ interpreter so the work runs in its own GIL. These tests pin:
 The child interpreter itself (_pipeline_runner.py) needs Django and is
 exercised live against the running container during deploy, not here."""
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -22,7 +21,6 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG_NAME = "dispatcharr_ranked_matchups"

@@ -27,6 +27,21 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 # makes the plugin create a duplicate and stop managing the old recording.
 MARKER_KEY = "ranked_matchups_marker"
 
+# WHY the plugin created a recording, stored alongside the marker so a later
+# apply can tell whether it is still wanted even when its game is missing from
+# the cache (#224). "team": a Recorded team matched (TEAMS_KEY holds which);
+# "ranked": it won a spare slot as a ranked game (LEAGUE_KEY holds its league).
+REASON_KEY = "ranked_matchups_reason"
+TEAMS_KEY = "ranked_matchups_teams"
+LEAGUE_KEY = "ranked_matchups_league"
+# The game's [home, away], so "is this team still recorded?" can be re-asked
+# with the same matcher refresh uses rather than by comparing stored list
+# entries: fixing a typo in the Recorded teams list must not look like removing
+# the team.
+GAME_KEY = "ranked_matchups_game"
+REASON_TEAM = "team"
+REASON_RANKED = "ranked"
+
 # Recording.custom_properties["status"] values Dispatcharr writes
 # (apps/channels/tasks.py run_recording and api_views.stop). A recording in a
 # terminal state is finished business: never re-created, never moved, and it
@@ -534,16 +549,79 @@ def covered_by_user(rows: Iterable[Any], channel_id: Any, start: datetime, end: 
     )
 
 
-def cancellable(ours_by_marker: Dict[str, Any], plan: Plan) -> List[Any]:
-    """Our recordings that are no longer planned and have not started: the
-    team was removed from the list, or the game left the slate. A started or
-    finished recording is never cancelled here."""
+def reason_properties(c: Candidate, teams: Sequence[str], league: str,
+                      game: Sequence[str] = ()) -> Dict[str, Any]:
+    """The custom_properties that record WHY we are recording this game."""
+    return {
+        REASON_KEY: REASON_TEAM if c.recorded else REASON_RANKED,
+        TEAMS_KEY: list(teams) if c.recorded else [],
+        LEAGUE_KEY: league,
+        GAME_KEY: list(game),
+    }
+
+
+def reason_changed(rec: Any, props: Dict[str, Any]) -> bool:
+    """True when the row's stored reason differs from ``props`` (missing, or
+    stale: a ranked recording whose team has since been added, say)."""
+    cp = getattr(rec, "custom_properties", None) or {}
+    return any(cp.get(k) != v for k, v in props.items())
+
+
+def reason_checker(teams: Sequence[str], record_ranked: bool, leagues: Sequence[str],
+                   matcher=None):
+    """Return rec -> bool: does this recording's stored reason still hold under
+    the CURRENT settings? A row with no stored reason (made before this was
+    recorded) answers True: with no evidence either way, keep it.
+
+    ``matcher(home, away, teams)`` is the team matcher refresh uses
+    (scoring.match_favorites). When the row stores its game, the question is
+    re-asked through it, so a renamed or corrected list entry that still
+    matches the game keeps the recording. Without a stored game, the stored
+    list entries are compared case-insensitively."""
+    team_list = list(teams)
+    team_set = {t.casefold() for t in team_list}
+    league_set = {x.casefold() for x in leagues}
+
+    def holds(rec: Any) -> bool:
+        cp = getattr(rec, "custom_properties", None) or {}
+        reason = cp.get(REASON_KEY)
+        if reason == REASON_TEAM:
+            game = cp.get(GAME_KEY) or []
+            if matcher is not None and len(game) == 2 and team_list:
+                return bool(matcher(str(game[0]), str(game[1]), team_list))
+            return any(str(t).casefold() in team_set for t in (cp.get(TEAMS_KEY) or []))
+        if reason == REASON_RANKED:
+            return bool(record_ranked) and (
+                not league_set or str(cp.get(LEAGUE_KEY) or "").casefold() in league_set)
+        return True
+
+    return holds
+
+
+def cancellable(ours_by_marker: Dict[str, Any], plan: Plan,
+                slate: Optional[Iterable[str]] = None, reason_holds=None) -> List[Any]:
+    """Our not-yet-started recordings that are no longer wanted.
+
+    A game that is IN the slate (the whole cache: applied games and bench) but
+    no longer planned is cancelled: the team was removed or it lost its slot.
+    A game MISSING from the slate is cancelled only when ``reason_holds`` says
+    its stored reason no longer holds. DO NOT treat "missing from the slate" as
+    "not wanted": a one-off source failure (measured 2026-09-26, CFBD returned
+    0 games on one refresh) empties a whole sport, and that deleted a scheduled
+    recording of a Recorded team's game (#224). ``slate=None`` keeps the old
+    everything-is-evidence behaviour for callers that have no slate.
+
+    A started or finished recording is never cancelled here."""
+    slate_set = None if slate is None else set(slate)
     out = []
     for m, r in ours_by_marker.items():
         if m in plan.planned or m in plan.skipped:
             continue
         if is_terminal(r) or is_in_progress(r):
             continue
+        if slate_set is not None and m not in slate_set:
+            if reason_holds is None or reason_holds(r):
+                continue
         out.append(r)
     return out
 

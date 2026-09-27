@@ -375,7 +375,6 @@ class TestReaperLifecycle:
 
     @pytest.fixture(autouse=True)
     def _isolate(self, plugin):
-        import threading
         reg, rreg = plugin._scheduler_registry(), plugin._reaper_registry()
         saved = (reg.thread, reg.stop_event, rreg.thread, rreg.stop_event)
         reg.thread = reg.stop_event = None

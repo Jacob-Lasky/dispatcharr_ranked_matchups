@@ -22,12 +22,9 @@ two-letter tokens so a future code has decoys to trip on, and the measured
 false-positive shapes above.
 """
 
-import importlib.util
 import json
 import os
 import re
-import sys
-import types
 
 import pytest
 
