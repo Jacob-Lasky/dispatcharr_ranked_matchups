@@ -240,6 +240,14 @@ has that asymmetry.
 reaper (removes finished games between refreshes, #196). They have SEPARATE
 reload-stable registries and must both be torn down in `stop()`.
 
+The reaper loop does double duty since #216 phase C: it also runs the live
+handoff timer (`_run_due_stops`). So it must NOT early-return when reaping is
+off — it sleeps until whichever comes first, the next expiry, the next planned
+stop (`next_stop_delay`), or `_HANDOFF_RECHECK_SECONDS`, runs the due stops on
+every wake, and only calls `_action_reap_locked` when it woke for a reap.
+Every worker runs this loop; each stop is a locked, idempotent write, so
+exactly one of them stops a given recording.
+
 **The trap that already bit once: `_start_reaper()` must not sit behind the
 scheduler's early return.** `__init__` returns early when a live scheduler is
 already in the registry, and that is the COMMON path, because the loader
