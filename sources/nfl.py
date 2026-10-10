@@ -266,8 +266,13 @@ class NflRegularSource(PointsBasedSportSource):
         ).date()
         # Regular season ends first week of January. Pad to Jan 15.
         regular_end = datetime(self.season_end_year, 1, 15, tzinfo=timezone.utc).date()
-        now = datetime.now(timezone.utc).date()
-        end = min(now + timedelta(days=7), regular_end)
+        # Walk to the END of the season, never to now + lookahead (#229). This
+        # list is the simulator's whole season: the fixtures still to play are
+        # what decide who finishes where. Capping it at next week made the
+        # season end next week, so no team could change band and importance
+        # read 0 (every NFL game, measured 2026-10-10). Same bug #65 fixed for
+        # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
+        end = regular_end
         if end < season_start:
             return []
         day = season_start
