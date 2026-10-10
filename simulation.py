@@ -431,9 +431,9 @@ def monte_carlo_importance_shared(
     per-game path. DO NOT call this for a source that has not opted in.
 
     Returns one entry per target: `{(team, outcome): |tau_c|}`, or None when
-    that target never appeared in the simulated season (not in the source's
-    remaining pool). The caller must fall back to the per-game path for a
-    None; it is NOT a zero.
+    that target was not played in every simulated season (absent from the
+    source's remaining pool, or reachable only on some bracket paths). The
+    caller must fall back to the per-game path for a None; it is NOT a zero.
     """
     if not getattr(source, "shared_season_importance", False):
         raise ValueError(
@@ -447,30 +447,40 @@ def monte_carlo_importance_shared(
     tables: List[Dict[Tuple[str, str], List[List[int]]]] = [
         {q: [[0, 0], [0, 0], [0, 0]] for q in qs} for qs in queries
     ]
-    seen = [False] * len(targets)
-    # Map a pool row to its target index once per distinct row identity.
-    # remaining_matches builds fresh GameRows every call, so identity is
-    # decided by _same_match (ids first, then home/away/kickoff), exactly as
-    # the per-game simulator decides which pool row IS the target.
+    appearances = [0] * len(targets)
+
+    # Which target (if any) a pool row IS. remaining_matches builds fresh
+    # GameRows every call, so identity is decided by _same_match, exactly as
+    # the per-game simulator decides it. Candidates come from every id the
+    # row carries AND from its (home, away) pair: an id match must not be
+    # missed because the scored row spells a team differently from the season
+    # feed. The memo is keyed by ALL of the row's ids plus teams and kickoff,
+    # never by one id: _same_match compares the first key BOTH rows carry, so
+    # two pool rows sharing one id can still be different targets.
+    by_id: Dict[Tuple[str, Any], List[int]] = {}
     by_pair: Dict[Tuple[str, str], List[int]] = {}
     for i, t in enumerate(targets):
+        t_extra = t.extra if isinstance(t.extra, dict) else {}
+        for k in _MATCH_ID_KEYS:
+            if t_extra.get(k) is not None:
+                by_id.setdefault((k, t_extra[k]), []).append(i)
         by_pair.setdefault((t.home, t.away), []).append(i)
     resolved: Dict[Any, Optional[int]] = {}
 
     def target_index(m: "GameRow") -> Optional[int]:
-        candidates = by_pair.get((m.home, m.away))
-        if not candidates:
-            return None
         extra = m.extra if isinstance(m.extra, dict) else {}
-        key = next(
-            ((k, extra[k]) for k in _MATCH_ID_KEYS if extra.get(k) is not None),
-            (m.home, m.away, m.start_time),
-        )
-        if key not in resolved:
-            resolved[key] = next(
-                (i for i in candidates if _same_match(m, targets[i])), None,
+        ids = tuple((k, extra.get(k)) for k in _MATCH_ID_KEYS)
+        memo_key = (ids, m.home, m.away, m.start_time)
+        if memo_key not in resolved:
+            candidates: List[int] = []
+            for k, v in ids:
+                if v is not None:
+                    candidates += by_id.get((k, v), [])
+            candidates += by_pair.get((m.home, m.away), [])
+            resolved[memo_key] = next(
+                (i for i in dict.fromkeys(candidates) if _same_match(m, targets[i])), None,
             )
-        return resolved[key]
+        return resolved[memo_key]
 
     for _ in range(n_sims):
         state = base_state
@@ -483,21 +493,33 @@ def monte_carlo_importance_shared(
             if not rem:
                 break
             for m in rem:
-                r = source.sample_result(state, m, strengths, rng)
                 ti = target_index(m)
+                if ti is not None and ti in results:
+                    # A repeated copy of a target already played this season.
+                    # The per-game simulator excludes every copy of its target
+                    # after sampling it once; sampling the copy here would give
+                    # one team an extra game the old path never played.
+                    continue
+                r = source.sample_result(state, m, strengths, rng)
                 if ti is not None:
                     results[ti] = r
                 state = source.apply_result(state, m, r)
         outcomes = source.terminal_outcomes(state)
         for ti, r in results.items():
-            seen[ti] = True
+            appearances[ti] += 1
             target = targets[ti]
             for team, outcome in queries[ti]:
                 row = _RESULT_ROW[_classify_target_result(r, team, target.home, target.away)]
                 col = 0 if outcome in outcomes.get(team, []) else 1
                 tables[ti][(team, outcome)][row][col] += 1
 
+    # Only a target played in EVERY simulated season has an unconditional
+    # table. One that appears in some seasons only (a bracket fixture that
+    # exists only if a feeder tie went one way) would be measured conditional
+    # on reaching it, while the per-game simulator forces it into every
+    # season: return None so the caller falls back to that path.
     return [
-        {q: abs(kendall_tau_c(t)) for q, t in tables[i].items()} if seen[i] else None
+        {q: abs(kendall_tau_c(t)) for q, t in tables[i].items()}
+        if n_sims > 0 and appearances[i] == n_sims else None
         for i in range(len(targets))
     ]

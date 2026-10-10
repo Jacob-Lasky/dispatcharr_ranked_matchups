@@ -311,3 +311,82 @@ class TestCostScalesWithSeasonsNotGames:
         assert plugin.PER_GAME_IMPORTANCE_SIMS == 500
         src = inspect.getsource(plugin._action_refresh)
         assert "n_sims=PER_GAME_IMPORTANCE_SIMS" in src
+
+
+class TestIdentityAndAppearanceEdges:
+    """Edges an outside review (gpt-6-sol) probed, each verified by building
+    the case it described."""
+
+    ctx = scoring.LEAGUE_CONTEXTS["CFB"]
+
+    def _shared(self, src, targets, n=400, seed=5):
+        return scoring.compute_league_importance(src, targets, self.ctx, n_sims=n, rng=random.Random(seed))
+
+    def _per_game(self, src, t, n=400, seed=6):
+        return scoring.compute_match_importance(src, t, self.ctx, n_sims=n, rng=random.Random(seed))[0]
+
+    def test_two_rows_sharing_one_id_are_still_two_targets(self):
+        # Pool rows {fd_id: 99, game_id: g1} and {fd_id: 99, game_id: g2};
+        # targets carry only game_id. _same_match compares game_id (the only
+        # key BOTH carry), so each pool row is its own target. A memo keyed by
+        # the row's FIRST id (fd_id) collapsed both onto target 1.
+        games = _season()
+        targets = _targets(games, 2)
+        ids = {t.extra["game_id"] for t in targets}
+
+        class Shared(_League):
+            def remaining_matches(self, state):
+                rows = super().remaining_matches(state)
+                for r in rows:
+                    if r.extra.get("game_id") in ids:
+                        r.extra["fd_id"] = 99
+                return rows
+        src = Shared(games)
+        out = self._shared(src, targets)
+        assert out[0] is not None and out[1] is not None
+        for t, res in zip(targets, out):
+            assert res[0] == pytest.approx(self._per_game(src, t), abs=0.8)
+
+    def test_a_repeated_target_row_is_played_once_per_season(self):
+        games = _season()
+        (target,) = _targets(games, 1)
+        dup = next(g for g in games if g["id"] == target.extra["game_id"])
+        src = _League(games + [dict(dup)])  # the feed repeats one scheduled row
+        calls = {"n": 0}
+        real = src.sample_result
+
+        def counting(state, m, *a, **k):
+            if m.extra.get("game_id") == dup["id"]:
+                calls["n"] += 1
+            return real(state, m, *a, **k)
+        src.sample_result = counting
+        self._shared(src, [target], n=30)
+        assert calls["n"] == 30  # once per season, not twice
+
+    def test_a_target_reachable_only_on_some_paths_falls_back(self):
+        # A "final" that exists only if T9 won its last scheduled game: the
+        # shared table would be conditional on reaching it, so it must not
+        # answer. (Per-game forces the target into every season.)
+        games = _season()
+        final = GameRow(sport_prefix="TST", sport_label="Test League", home="T9", away="T8",
+                        rank_home=None, rank_away=None,
+                        start_time=datetime(2027, 1, 1, tzinfo=timezone.utc), extra={"game_id": 10_000})
+
+        class Bracket(_League):
+            def remaining_matches(self, state):
+                rows = super().remaining_matches(state)
+                if rows or 10_000 in state.get("_applied", frozenset()):
+                    return rows
+                if state["_teams"]["T9"]["wins"] % 2 == 0:
+                    return [final]
+                return []
+        assert self._shared(Bracket(games), [final], n=60) == [None]
+
+    def test_an_id_match_is_found_even_when_a_name_differs(self):
+        games = _season()
+        (target,) = _targets(games, 1)
+        renamed = GameRow(sport_prefix="TST", sport_label="Test League", home="The " + target.home,
+                          away=target.away, rank_home=None, rank_away=None,
+                          start_time=target.start_time, extra=dict(target.extra))
+        (res,) = self._shared(_League(games), [renamed], n=50)
+        assert res is not None
