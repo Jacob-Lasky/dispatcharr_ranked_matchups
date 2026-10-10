@@ -6870,6 +6870,24 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
     return [(name, title, ann) for _, name, title, ann in rows]
 
 
+def _late_feed_note(cache: Dict[str, Any], settings: Dict[str, Any]) -> str:
+    """Diagnose's verdict when the matching feed arrived after our refresh:
+    an M3U account refreshed after cache.refreshed_at. Empty string otherwise."""
+    refreshed = parse_iso_utc(cache.get("refreshed_at"))
+    if refreshed is None:
+        return ""
+    stamp = _latest_m3u_refresh()
+    if stamp is None or stamp <= refreshed:
+        return ""
+    tz = _resolve_tz(settings.get("local_timezone", "UTC"))
+    note = (f"Its feed arrived with the M3U update at {_fmt_run_time(stamp.isoformat(), tz)}, "
+            f"after the last refresh at {_fmt_run_time(refreshed.isoformat(), tz)}. "
+            "Click 'Refresh + apply now' to attach it")
+    if settings.get("auto_refresh_enabled", False):
+        note += " (auto-refresh also does this within a few minutes when the game is near)"
+    return note + "."
+
+
 def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Diagnose why games aren't matching, in two views (#128).
 
@@ -7009,7 +7027,19 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
                 cands, home, None if field else away) if cands else []
             chan_name_match = [c for c in name_match if c.stream_id is None]
             stream_name_match = [c for c in name_match if c.stream_id is not None]
-            if chan_name_match:
+            # A name that matches now but did not at refresh time is usually
+            # not a matcher bug: the feed arrived (or a reused slot was renamed)
+            # in an M3U refresh AFTER our last refresh. Say that, and what to
+            # do, instead of "unexpected; please send us this" (2026-10-10).
+            late_feed = ""
+            if chan_name_match or stream_name_match:
+                try:
+                    late_feed = _late_feed_note(cache, settings)
+                except Exception:  # diagnostic must never raise
+                    late_feed = ""
+            if late_feed:
+                verdict = late_feed
+            elif chan_name_match:
                 verdict = (("A channel name has the event but it didn't match - "
                             if field else
                             "A channel name has both teams but it didn't match - ")
@@ -7266,14 +7296,111 @@ def _scheduler_loop(plugin_ref, stop_event):
                 # scheduler runs the work OUT OF PROCESS (the Monte Carlo scoring
                 # holds the GIL and would freeze this gevent worker's hub if run
                 # inline) and can't drift out of sync with the HTTP launchers.
-                # run_scheduled_pipeline acquires the cross-worker lock itself and
-                # no-ops if another worker holds it. See tasks.py header.
-                tasks.run_scheduled_pipeline(settings)
+                # _run_scheduled_slot claims the slot for ONE worker, then
+                # retries the cross-worker lock until it frees. See its docstring.
+                if _run_scheduled_slot(plugin_ref, stop_event, settings, target, times, tz):
+                    return
             except Exception:
                 logger.exception("[ranked_matchups] scheduler loop crashed; sleeping 10m")
                 _scheduler_sleep(stop_event, 600)
     finally:
         _scheduler_close_db()
+
+
+# ---------- scheduled-slot ownership and retry ----------
+#
+# Every uwsgi worker runs its own scheduler thread, and they all wake at the
+# same scheduled time. Before this, each fired, the cross-worker lock let one
+# through, and the rest logged "skipping". That is fine while nothing else
+# holds the lock, but when ANYTHING else does at that second (the reaper's
+# re-apply, a manual run), every copy skipped and the slot was lost until the
+# next one, hours later. Measured 2026-10-10: the reaper took the lock at
+# 13:00:00 for 8 seconds, all eight schedulers skipped, and feeds the provider
+# posted at 12:22 for a live noon game stayed unattached until 16:00.
+#
+# So a slot is now CLAIMED by exactly one worker (a Redis SET NX keyed by the
+# slot time), and that worker retries the lock until the holder is done. The
+# claim, not the lock, is what keeps the other seven from each running the
+# pipeline once the lock frees. DO NOT drop the claim and simply retry in
+# every worker: that runs the pipeline up to eight times back to back, which
+# is exactly the apply hammering that wedges Dispatcharr's login worker.
+_SCHEDULER_SLOT_KEY_PREFIX = f"plugins:{PLUGIN_KEY}:scheduler:slot:"
+# Long enough that no worker can re-claim a slot it already ran, short
+# enough that the keys clean themselves up.
+_SCHEDULER_SLOT_CLAIM_TTL_SECONDS = 24 * 3600
+_SCHEDULED_RETRY_SECONDS = 60
+# How long the slot's owner keeps retrying before giving up and recording
+# the skip. Also capped at the next slot (see _scheduled_retry_deadline), so a
+# retry can never run into the slot after it.
+_SCHEDULED_RETRY_WINDOW_SECONDS = 30 * 60
+
+
+def _claim_scheduled_slot(slot: datetime) -> bool:
+    """True if THIS worker now owns `slot` and should run it.
+
+    Redis unreachable returns True: every worker then falls back to the lock
+    alone, which fails closed for this destructive run, so the outcome is the
+    old one (nobody runs, the skip is recorded) rather than eight runs.
+
+    If the owning worker dies mid-retry the slot is lost, same as before this
+    existed; the next slot recovers it.
+    """
+    try:
+        from core.utils import RedisClient
+        r = RedisClient.get_client()
+        return bool(r.set(
+            _SCHEDULER_SLOT_KEY_PREFIX + slot.isoformat(), str(os.getpid()),
+            nx=True, ex=_SCHEDULER_SLOT_CLAIM_TTL_SECONDS,
+        ))
+    except Exception as e:
+        logger.warning("[ranked_matchups] could not claim scheduled slot %s (%s); "
+                       "relying on the run lock alone", slot.isoformat(), e)
+        return True
+
+
+def _scheduled_retry_deadline(slot: datetime, times: List[Tuple[int, int]], tz) -> datetime:
+    """When the slot's owner stops retrying: the retry window, or one retry
+    interval before the NEXT slot, whichever is sooner."""
+    deadline = slot + timedelta(seconds=_SCHEDULED_RETRY_WINDOW_SECONDS)
+    nxt = _next_fire_time(times, tz, now=slot)
+    if nxt is not None:
+        deadline = min(deadline, nxt - timedelta(seconds=_SCHEDULED_RETRY_SECONDS))
+    return deadline
+
+
+def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
+                        slot: datetime, times: List[Tuple[int, int]], tz) -> bool:
+    """Run the scheduled auto_pipeline for `slot` once, across all workers.
+
+    Returns True only if the stop event fired while waiting (the caller
+    exits). Every wait goes through _scheduler_sleep so a retrying scheduler
+    holds no DB connection (#82/#136), and settings are re-read after each
+    wait for the same reason the loop re-reads them after its long sleep
+    (#223): a user can turn auto-refresh off while the run is waiting.
+    """
+    if not _claim_scheduled_slot(slot):
+        logger.info("[ranked_matchups] scheduled slot %s is owned by another worker",
+                    slot.isoformat())
+        return False
+    deadline = _scheduled_retry_deadline(slot, times, tz)
+    while True:
+        if tasks.run_scheduled_pipeline(settings, record_skip=False):
+            return False
+        if datetime.now(tz) + timedelta(seconds=_SCHEDULED_RETRY_SECONDS) > deadline:
+            logger.warning(
+                "[ranked_matchups] scheduled run for %s did NOT run: the run lock was "
+                "still held at %s (another refresh, apply or reap kept it, or Redis is "
+                "unreachable). The next scheduled time picks it up.",
+                slot.isoformat(), deadline.isoformat())
+            tasks.record_skipped_run("scheduled_auto_pipeline")
+            return False
+        logger.info("[ranked_matchups] scheduled run for %s waiting %ds for the run lock",
+                    slot.isoformat(), _SCHEDULED_RETRY_SECONDS)
+        if _scheduler_sleep(stop_event, _SCHEDULED_RETRY_SECONDS):
+            return True
+        settings = plugin_ref.get_current_settings()
+        if not settings.get("auto_refresh_enabled", False):
+            return False
 
 
 _SCHEDULER_LOCK_KEY = f"plugins:{PLUGIN_KEY}:scheduler:lock"
@@ -7472,6 +7599,116 @@ def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> 
     return done
 
 
+# ---------- rematch after an M3U update ----------
+#
+# Matching is a snapshot taken at refresh time, but providers post and RENAME
+# their event feeds on their own clock. Many reuse a fixed set of slots
+# ("ESPN UNLTD 052", "NCAAF 009") and rename each one per game, so a slot that
+# named another event at the last refresh can name tonight's game after the
+# next M3U refresh (or stop naming the game it was matched to). Between
+# scheduled refreshes nothing noticed. Measured 2026-10-10: an M3U on a
+# 12-hour refresh renamed its slots to a noon game at 12:22, the curated
+# channel stayed a zero-stream placeholder (a 503 when tuned), and it took a
+# manual Refresh + apply to attach the feeds.
+#
+# So the reaper loop (already awake every few minutes in every worker) checks
+# whether any active M3U account has refreshed since our last refresh while a
+# curated game is live or about to start, and if so runs the auto_pipeline
+# once for that M3U refresh. A full refresh rather than a rematch-only pass,
+# because matching needs the scored slate and the same apply path; it costs a
+# few minutes of one subprocess, at most once per M3U refresh.
+_REMATCH_CLAIM_KEY_PREFIX = f"plugins:{PLUGIN_KEY}:m3u_rematch:"
+_REMATCH_CLAIM_TTL_SECONDS = 24 * 3600
+# A game that kicked off this long ago may still be on (overtime, a long
+# baseball game); one further away than LOOKAHEAD gets a scheduled refresh first.
+_REMATCH_LOOKBACK_SECONDS = 4 * 3600
+_REMATCH_LOOKAHEAD_SECONDS = 6 * 3600
+# Debounce: an M3U that refreshes right after our refresh waits until the
+# cache is this old. Not a drop, the condition stays true until it runs.
+_REMATCH_MIN_CACHE_AGE_SECONDS = 30 * 60
+
+
+def _latest_m3u_refresh() -> Optional[datetime]:
+    """When an active M3U account last refreshed successfully, or None.
+
+    M3UAccount.updated_at is "Time when this account was last successfully
+    refreshed" in Dispatcharr: the model's save() keeps auto_now off it, and
+    m3u/tasks.py sets it only on the success path. DO NOT use status (it
+    flips to fetching mid-refresh) or Stream.updated_at (bumped per changed
+    stream, and there are thousands)."""
+    from django.db.models import Max
+    from apps.m3u.models import M3UAccount
+    return (M3UAccount.objects.filter(is_active=True, updated_at__isnull=False)
+            .aggregate(m=Max("updated_at"))["m"])
+
+
+def _games_in_rematch_window(games: List[Dict[str, Any]], now: datetime) -> List[Dict[str, Any]]:
+    """Curated games that are live or start soon enough that a new feed
+    matters before the next scheduled refresh. Matched games count too: a
+    renamed slot can take a matched game's feed away."""
+    lo = now - timedelta(seconds=_REMATCH_LOOKBACK_SECONDS)
+    hi = now + timedelta(seconds=_REMATCH_LOOKAHEAD_SECONDS)
+    out = []
+    for g in games:
+        dt = parse_iso_utc(g.get("start_time_utc"))
+        if dt is not None and lo <= dt <= hi:
+            out.append(g)
+    return out
+
+
+def _maybe_rematch_after_m3u(settings: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    """Run the auto_pipeline once per M3U refresh that landed after our last
+    refresh, while a curated game is in the window. Returns True if it ran.
+
+    Gated on auto_refresh_enabled: a user who turned scheduled runs off has
+    asked for no background refreshes. Exactly once per M3U refresh across
+    workers via a Redis claim keyed by the refresh time; a run that FAILS
+    keeps its claim, so a broken refresh is not retried every few minutes (the
+    next M3U refresh or scheduled time tries again). Redis unreachable means no
+    claim and no run: this is destructive work and the schedule still covers it.
+    """
+    if not settings.get("auto_refresh_enabled", False):
+        return False
+    now = now or datetime.now(timezone.utc)
+    cache = _read_cache()
+    refreshed = parse_iso_utc(cache.get("refreshed_at"))
+    if refreshed is None:
+        return False
+    if (now - refreshed).total_seconds() < _REMATCH_MIN_CACHE_AGE_SECONDS:
+        return False
+    stamp = _latest_m3u_refresh()
+    if stamp is None or stamp <= refreshed:
+        return False
+    soon = _games_in_rematch_window(cache.get("games") or [], now)
+    if not soon:
+        return False
+    key = _REMATCH_CLAIM_KEY_PREFIX + stamp.isoformat()
+    try:
+        from core.utils import RedisClient
+        r = RedisClient.get_client()
+        if not r.set(key, str(os.getpid()), nx=True, ex=_REMATCH_CLAIM_TTL_SECONDS):
+            return False
+    except Exception as e:
+        logger.warning("[ranked_matchups] M3U rematch not started, Redis unavailable: %s", e)
+        return False
+    tz = _resolve_tz(settings.get("local_timezone", "UTC"))
+    logger.info(
+        "[ranked_matchups] M3U refreshed at %s, after the last refresh at %s, with %d "
+        "curated game(s) live or starting soon; running Refresh + apply to pick up "
+        "new or renamed feeds",
+        _fmt_run_time(stamp.isoformat(), tz), _fmt_run_time(refreshed.isoformat(), tz),
+        len(soon))
+    if tasks.run_m3u_rematch_pipeline(settings):
+        return True
+    # Lock held: give the claim back so a later tick retries. The holder is
+    # usually a refresh itself, which makes this one unnecessary.
+    try:
+        r.delete(key)
+    except Exception:
+        pass
+    return False
+
+
 def _reaper_loop(plugin_ref, stop_event):
     """Remove finished games from the guide between refreshes (#196).
 
@@ -7509,6 +7746,11 @@ def _reaper_loop(plugin_ref, stop_event):
                     return
                 settings = plugin_ref.get_current_settings()
                 _run_due_stops(settings)
+                # Its own try: a failure here must not cost this tick's reap.
+                try:
+                    _maybe_rematch_after_m3u(settings)
+                except Exception:
+                    logger.exception("[ranked_matchups] M3U rematch check failed")
                 if reap_delay is None or delay + 1 < reap_delay:
                     continue
                 result = _action_reap_locked(settings)
@@ -7671,6 +7913,13 @@ class Plugin:
         # still alive) that return fires, and on an upgrade from a version
         # with no reaper the thread would then never start at all until the
         # worker restarted. _start_reaper is itself idempotent.
+        # NO THREADS IN THE PIPELINE CHILD. Its django.setup() discovers plugins
+        # and builds this Plugin; before this guard every pipeline subprocess
+        # started its own scheduler and reaper (seen in the forwarded child log
+        # as "scheduler thread started (pid=<child>)"), extra actors that could
+        # fire a schedule or a handoff from inside a run.
+        if os.environ.get(tasks.PIPELINE_CHILD_ENV) == "1":
+            return
         self._start_reaper()
         if reg.thread is not None and reg.thread.is_alive():
             return

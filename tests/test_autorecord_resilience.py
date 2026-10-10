@@ -100,7 +100,7 @@ class TestWiring:
     def test_scheduler_rereads_settings_after_waking(self, src):
         body = _body(src, "_scheduler_loop")
         sleep = body.index("if _scheduler_sleep(stop_event, sleep_s):")
-        fire = body.index("tasks.run_scheduled_pipeline(settings)")
+        fire = body.index("_run_scheduled_slot(plugin_ref, stop_event, settings, target, times, tz)")
         between = body[sleep:fire]
         assert "settings = plugin_ref.get_current_settings()" in between
         assert 'settings.get("auto_refresh_enabled", False)' in between

@@ -5,6 +5,33 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A game whose feeds the provider posts after the last refresh now gets
+  them without a manual run.** Matching is a snapshot taken at refresh time,
+  and many providers reuse fixed event slots ("ESPN UNLTD 052") that they
+  rename per game on their own clock. On 2026-10-10 an M3U on a 12-hour
+  refresh renamed its slots to a noon game at 12:22 PM, after the 11:42
+  refresh, and the curated channel stayed an empty placeholder that answered
+  503 when tuned. The reaper loop now notices when an active M3U account has
+  refreshed after the plugin's last refresh while a curated game is live or
+  starts within 6 hours, and runs Refresh + apply once for that M3U refresh
+  (requires auto-refresh to be on). Show current state labels it "Refresh +
+  apply after an M3U update".
+- **A scheduled run no longer vanishes when something else holds the run lock
+  at that moment.** Every web worker runs a scheduler and they all fire
+  together; when the reaper's re-apply held the lock at 13:00:00 for eight
+  seconds, every copy logged "skipping" and the next run was 16:00. One
+  worker now claims each scheduled time and waits for the lock (up to 30
+  minutes, never into the next scheduled time), and only that one runs it.
+- **Diagnose explains a late feed instead of calling it a bug.** When a
+  channel or stream names the game but an M3U refresh landed after the
+  plugin's last refresh, the verdict says when the feed arrived and to click
+  Refresh + apply now, rather than "unexpected; please send us this".
+- The pipeline subprocess no longer starts its own scheduler and reaper
+  threads (its Django setup discovers plugins, which used to start a second
+  copy of both inside every run).
+
 ## [1.32.0] - 2026-10-10
 
 ### Changed

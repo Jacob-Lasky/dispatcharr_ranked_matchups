@@ -48,7 +48,8 @@ def _restore_plugin_attrs(plugin):
     restore them so the stubs don't leak into other test files sharing this
     process (notably test_field_event_lookup, which drives the real
     _build_epg_lookup)."""
-    names = ("_read_cache", "_diagnose_window_sample", "_build_epg_lookup", "logger")
+    names = ("_read_cache", "_diagnose_window_sample", "_build_epg_lookup", "logger",
+             "_latest_m3u_refresh")
     saved = {n: getattr(plugin, n) for n in names}
     yield
     for n, v in saved.items():
@@ -83,16 +84,19 @@ def _game(away, home, *, prefix="WC", score=5.0, matched=None,
     }
 
 
-def _run(plugin, games, *, window_rows=None, lookup_cands=None):
-    """Drive _action_diagnose with the two DB helpers stubbed."""
-    plugin._read_cache = lambda: {"games": games}
+def _run(plugin, games, *, window_rows=None, lookup_cands=None, refreshed_at=None,
+         m3u_refreshed=None, settings=None):
+    """Drive _action_diagnose with the DB helpers stubbed. `m3u_refreshed` is
+    what _latest_m3u_refresh reports (None: no M3U has refreshed)."""
+    plugin._read_cache = lambda: {"games": games, "refreshed_at": refreshed_at}
+    plugin._latest_m3u_refresh = lambda: m3u_refreshed
     plugin._diagnose_window_sample = lambda *a, **k: list(window_rows or [])
     # **kw: _action_diagnose threads the excluded_groups policy through (#206),
     # and a stub that rejects kwargs would raise a TypeError that the action's
     # own `except Exception` swallows into an empty candidate list, i.e. a wrong
     # message rather than a failure. Measured: that is exactly how it broke.
     plugin._build_epg_lookup = lambda **kw: (lambda shim: list(lookup_cands or []))
-    out = plugin._action_diagnose({})
+    out = plugin._action_diagnose(settings or {})
     assert out["status"] == "ok"
     return out["message"]
 
@@ -176,6 +180,35 @@ class TestDeepDive:
         games = [_game("New York Knicks", "San Antonio Spurs", prefix="NBA", score=8.0)]
         msg = _run(plugin, games, window_rows=[], lookup_cands=[stream_cand])
         assert "stream name has both teams but it didn't match" in msg
+
+    def test_feed_that_arrived_after_the_refresh_says_so(self, plugin, ChannelCandidate):
+        # 2026-10-10: the M3U renamed its event slots to the noon game at 12:22,
+        # forty minutes after our 11:42 refresh. That is not a matcher bug, and
+        # "unexpected; please send us this" sent the user hunting for one.
+        from datetime import datetime, timezone
+        cands = [_cand(ChannelCandidate, "Knicks vs Spurs HD")]
+        rows = [("Knicks vs Spurs HD", "", " [BOTH TEAMS]")]
+        games = [_game("New York Knicks", "San Antonio Spurs", prefix="NBA", score=8.0)]
+        msg = _run(plugin, games, window_rows=rows, lookup_cands=cands,
+                   refreshed_at="2026-10-10T15:42:09+00:00",
+                   m3u_refreshed=datetime(2026, 10, 10, 16, 22, 14, tzinfo=timezone.utc),
+                   settings={"local_timezone": "America/New_York"})
+        assert "unexpected" not in msg
+        assert "M3U update at 2026-10-10 12:22 EDT" in msg
+        assert "after the last refresh at 2026-10-10 11:42 EDT" in msg
+        assert "'Refresh + apply now'" in msg
+
+    def test_feed_already_present_at_refresh_is_still_unexpected(self, plugin, ChannelCandidate):
+        # The M3U refreshed BEFORE our refresh, so the matcher saw this name and
+        # missed it: that one IS worth reporting.
+        from datetime import datetime, timezone
+        cands = [_cand(ChannelCandidate, "Knicks vs Spurs HD")]
+        rows = [("Knicks vs Spurs HD", "", " [BOTH TEAMS]")]
+        games = [_game("New York Knicks", "San Antonio Spurs", prefix="NBA", score=8.0)]
+        msg = _run(plugin, games, window_rows=rows, lookup_cands=cands,
+                   refreshed_at="2026-10-10T15:42:09+00:00",
+                   m3u_refreshed=datetime(2026, 10, 10, 4, 22, tzinfo=timezone.utc))
+        assert "unexpected" in msg
 
     def test_long_title_is_truncated(self, plugin):
         long_title = "FIFA World Cup Quarterfinal Extravaganza Presented by Sponsor: Japan vs"
