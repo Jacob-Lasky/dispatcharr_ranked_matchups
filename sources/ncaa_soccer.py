@@ -33,7 +33,7 @@ import requests
 from .base import GameRow
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
-from ._espn import extract_espn_scoreboard_event
+from ._espn import extract_espn_scoreboard_event, fetch_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_soccer")
 
@@ -44,7 +44,15 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 # avoid ESPN's silent 25-event cap on date-range scoreboard queries
 # (see ncaa_baseball.py for the same trap).
 SEASON_START_MONTH = 8   # August
-SEASON_END_MONTH = 12    # December
+
+# Last day of each gender's regular season (conference tournaments included),
+# as (month, day). A CALENDAR APPROXIMATION, chosen inside the gap ESPN showed
+# in 2025 between the last conference final and the first tournament round:
+# men's games ran through Nov 16 with none Nov 17-19 (first round Nov 20);
+# women's through Nov 9 with none Nov 10-13 (first round Nov 14). The NCAA
+# calendar shifts by weekday each year; re-check against the scoreboard if a
+# season's last conference final or first round moves outside these windows.
+_REGULAR_SEASON_END = {"m": (11, 18), "w": (11, 11)}
 
 # Default per-team scoring rate priors. NCAA D1 soccer averages
 # ~1.5 goals/team/game in regulation across both M's and W's.
@@ -181,8 +189,14 @@ class NcaaSoccerSource(PointsBasedSportSource):
         """
         seen: Dict[Any, Dict[str, Any]] = {}
         season_start = datetime(self.season_year, SEASON_START_MONTH, 1, tzinfo=timezone.utc).date()
-        season_end_first = datetime(self.season_year, SEASON_END_MONTH, 1, tzinfo=timezone.utc).date()
-        season_end = (season_end_first + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+        # The REGULAR season's end, not December's: ESPN's NCAA soccer
+        # scoreboard gives tournament games the same season slug, type and
+        # note as regular-season games (checked against 2025: the College Cup
+        # final on Dec 15 reads exactly like an October game), so they cannot
+        # be filtered by field. Walking into the tournament would add its
+        # results to the regular-season table the bands are scored on (#229).
+        month, day_of_month = _REGULAR_SEASON_END[self.gender]
+        season_end = datetime(self.season_year, month, day_of_month, tzinfo=timezone.utc).date()
         # Walk to the END of the season, never to now + lookahead (#229). This
         # list is the simulator's whole season: the fixtures still to play are
         # what decide who finishes where. Capping it at next week made the
@@ -190,13 +204,11 @@ class NcaaSoccerSource(PointsBasedSportSource):
         # read 0 (every NFL game, measured 2026-10-10). Same bug #65 fixed for
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = season_end
-        if end < season_start:
-            return []
-        day = season_start
-        while day <= end:
-            data = _http_get(
-                f"{ESPN_BASE}/{self._espn_slug}/scoreboard?dates={day.strftime('%Y%m%d')}"
-            )
+
+        def day_board(day):
+            return _http_get(f"{ESPN_BASE}/{self._espn_slug}/scoreboard?dates={day.strftime('%Y%m%d')}")
+
+        for _day, data in fetch_days(season_start, end, day_board):
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)
@@ -205,7 +217,6 @@ class NcaaSoccerSource(PointsBasedSportSource):
                     if rec["id"] in seen:
                         continue
                     seen[rec["id"]] = rec
-            day += timedelta(days=1)
         return list(seen.values())
 
     # ---------- Rankings ----------

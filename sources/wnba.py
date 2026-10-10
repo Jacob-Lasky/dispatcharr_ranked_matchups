@@ -41,6 +41,7 @@ from .base import GameRow
 from .bracket import BestOfNSeriesSource
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
+from ._espn import fetch_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.wnba")
 
@@ -56,7 +57,6 @@ _DEFAULT_POINTS_AGAINST = 82.0
 # in late-September through mid-October (mid-October through November
 # for the new 2025+ Finals format). Window: May 1 - Nov 30.
 SEASON_START_MONTH = 5   # May
-SEASON_END_MONTH = 11    # November (covers expanded 2025+ playoff window)
 
 # 2025+ WNBA Finals are best-of-7; 2024 and earlier were best-of-5.
 # Series lengths per stage:
@@ -289,11 +289,11 @@ class WnbaRegularSource(PointsBasedSportSource):
         # read 0 (every NFL game, measured 2026-10-10). Same bug #65 fixed for
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = regular_end
-        if end < season_start:
-            return []
-        day = season_start
-        while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+
+        def day_board(day):
+            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+
+        for _day, data in fetch_days(season_start, end, day_board):
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)
@@ -307,7 +307,6 @@ class WnbaRegularSource(PointsBasedSportSource):
                         k: v for k, v in rec.items()
                         if k not in ("season_type", "notes")
                     }
-            day += timedelta(days=1)
         return list(seen.values())
 
 

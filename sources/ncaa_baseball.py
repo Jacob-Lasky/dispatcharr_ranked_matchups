@@ -56,7 +56,7 @@ from .._util import (
     parse_iso_utc,
     poisson_sample as _poisson,
 )
-from ._espn import extract_espn_scoreboard_event
+from ._espn import extract_espn_scoreboard_event, fetch_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_baseball")
 
@@ -264,12 +264,11 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
         # read 0 (every NFL game, measured 2026-10-10). Same bug #65 fixed for
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = season_end
-        if end < season_start:
-            # Off-season / pre-season: no games yet.
-            return []
-        day = season_start
-        while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+
+        def day_board(day):
+            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+
+        for _day, data in fetch_days(season_start, end, day_board):
             if data:
                 for event in data.get("events") or []:
                     if _is_postseason_event(event):
@@ -284,7 +283,6 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
                     if rec["id"] in seen:
                         continue
                     seen[rec["id"]] = rec
-            day += timedelta(days=1)
         return list(seen.values())
 
     # ---------- Rankings (D1Baseball.com poll) ----------

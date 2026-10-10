@@ -39,8 +39,9 @@ sweeps differ on purpose. See #190.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .._util import parse_iso_utc
 
@@ -276,3 +277,39 @@ def sweep_upcoming_scoreboard(
             seen_ids.add(key)
             out.append(rec)
     return out
+
+
+# Concurrent scoreboard requests for a season walk. A full-season walk is one
+# request per day (up to ~210 for an NBA season), and walking every enabled
+# source sequentially measured ~0.4 s per request on Tower: several minutes per
+# refresh once #229 made the walks run to the season's end. Eight in flight
+# keeps it to seconds without leaning hard on an unofficial API.
+_SEASON_WALK_WORKERS = 8
+
+
+def fetch_days(
+    start: date,
+    end: date,
+    fetch_day: Callable[[date], Any],
+    max_workers: int = _SEASON_WALK_WORKERS,
+) -> List[Tuple[date, Any]]:
+    """`[(day, fetch_day(day)), ...]` for every day from `start` to `end`
+    inclusive, IN DATE ORDER, fetched concurrently (#229).
+
+    `fetch_day` is injected for the same reason `http_get` is everywhere in
+    this module: each source's tests stub its own `_http_get`, and a helper
+    that made requests itself would turn those stubs into silent no-ops.
+    Results come back in date order so callers' "first occurrence wins"
+    dedupe behaves exactly as their old sequential loops did. Runs only on
+    the importance path, inside the pipeline subprocess (never a uwsgi
+    worker), where real threads are fine.
+    """
+    days: List[date] = []
+    day = start
+    while day <= end:
+        days.append(day)
+        day += timedelta(days=1)
+    if not days:
+        return []
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(days)))) as pool:
+        return list(zip(days, pool.map(fetch_day, days)))
