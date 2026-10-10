@@ -60,6 +60,24 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   - Action descriptions no longer advertise stale timings ("~25s", "~40s"); a
     full slate takes minutes.
 
+- **One football-data.org hiccup no longer costs the whole refresh** (#228).
+  The full-season fixture list that the importance simulator replays is read
+  inside its per-season loop, and a failed read is deliberately not cached as
+  an empty season (that would silently score every game in the competition
+  zero importance). So a single transient error was re-fetched, with backoff
+  sleeps, once per simulated season — measured offline at 28 s per season,
+  enough to push the refresh past its 1500 s ceiling. The fetch is now tried
+  at most twice per refresh, then gives up without further network calls or
+  sleeps.
+- **A competition whose season list could not be fetched is reported.** Its
+  games had no standings stakes simulated, so refresh now lists it like a
+  failed source — `<code> season fixtures (stakes not simulated)` — and
+  **Show current state** warns about it, instead of letting the missing
+  signal pass as a genuine zero. The other signals still counted, so a
+  knockout tie keeps its round premium. One of the two attempts is reserved
+  for scoring time, because the earlier head-to-head reads could otherwise
+  use both up before the simulator ever asked.
+
 ## [1.31.0] - 2026-09-27
 
 ### Added

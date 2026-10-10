@@ -730,6 +730,14 @@ expected before judging the whole guide.
   machinery that makes WC 2026 group games show R16+ leverage is
   WC-specific. EURO 2028 needs analogous wiring once UEFA publishes
   the bracket structure (~12-18 months pre-tournament).
+- **A failed season fetch zeroes importance for that competition**, for
+  the run. The simulator replays the competition's full fixture list, so
+  if football-data.org cannot be reached for it the games score no
+  standings stakes (other signals still count). The fetch is retried at
+  most twice per refresh rather than once per simulated season, and a
+  competition that gives up is reported in the refresh summary as
+  `<code> season fixtures (stakes not simulated)`, so the zero is visible
+  rather than passing for a real result.
 - **In-progress games** are treated as SCHEDULED (not FINISHED) for
   state-building so the simulator doesn't seed wins/losses from
   mid-game state. Once the game ends and the source's API updates,

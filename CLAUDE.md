@@ -63,7 +63,7 @@ downstream is sport-agnostic.
 | `sources/mlb.py` | statsapi.mlb.com (official, no key). `MlbRegularSource` uses raw win count (no OT-loss bonus). `MlbPlayoffSource` is a BestOfNSeriesSource with per-stage series lengths (WC=3, LDS=5, LCS=7, WS=7). Same regular-season → playoff strength-sharing pattern as NHL. |
 | `sources/nba.py` | ESPN unofficial API (stats.nba.com is WAF-blocked from most homelab egress). `NbaRegularSource` uses raw win count. `NbaPlayoffSource` is a BestOfNSeriesSource with uniform SERIES_LENGTH=7 (R1 / CSF / CF / FINALS). Stage routing comes from parsing the ESPN headline ("East 1st Round - Game 3" etc.) — the only place ESPN exposes the playoff round. All-Star Tournament games (which ESPN tags `season.type=2` but `competition.type.abbreviation=ALLSTAR`) are filtered out so the regular-season team list stays at 30. |
 | `sources/mls.py` | ESPN unofficial API for the schedule + The Odds API (`soccer_usa_mls`) for closeness. Intentionally thin: `MlsSource` does NOT inherit `PointsBasedSportSource` and `supports_importance=False`. MLS surfaces with favorite + closeness signals only; standings-based importance and the mixed-format MLS Cup bracket (best-of-3 R1 + single-leg subsequent rounds) are tracked in #30. Team-name fuzzy matching reuses `_util.TEAM_SUFFIX_TOKENS` — never add "united" to that list (it's a substantive body word for Atlanta United / D.C. United / Minnesota United). |
-| `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. `SoccerSource` is league-shaped (PL, ELC); `KnockoutSoccerSource` is bracket-shaped (UCL) — multi-inherits from `AggregateLegSource` (bracket state machine) + `SoccerSource` (FD.org fetch / strengths) with the MRO `K → AggregateLegSource → BracketSportSource → SoccerSource → SportSource`. Routed by `LEAGUE_CONTEXTS[fd_code].format`. `_fetch_standings_with_seed` returns a `StandingsBundle` (position map, scoring table, current table, previous-season final table, seeded flag), never one merged table — see the standings gotcha below. `build_h2h_entries` builds the previous-meetings list; name matching there is EXACT on purpose. |
+| `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. `SoccerSource` is league-shaped (PL, ELC); `KnockoutSoccerSource` is bracket-shaped (UCL) — multi-inherits from `AggregateLegSource` (bracket state machine) + `SoccerSource` (FD.org fetch / strengths) with the MRO `K → AggregateLegSource → BracketSportSource → SoccerSource → SportSource`. Routed by `LEAGUE_CONTEXTS[fd_code].format`. `_fetch_standings_with_seed` returns a `StandingsBundle` (position map, scoring table, current table, previous-season final table, seeded flag), never one merged table — see the standings gotcha below. `build_h2h_entries` builds the previous-meetings list; name matching there is EXACT on purpose. `_fetch_season_matches_for_code` (the list the importance simulator replays) still never caches a FAILURE as an empty season, but it does remember the failure COUNT: `_SEASON_FETCH_MAX_ATTEMPTS` (2) attempts per refresh, `allow_scoring_retry()` hands scoring one of them, `season_fetch_failures()` reports the ones that gave up — see the season-fetch gotcha below. |
 | `sources/_espn.py` | Shared ESPN helpers. `extract_espn_scoreboard_event` normalises one scoreboard event (its docstring forbids inlining a fourth copy). `sweep_upcoming_scoreboard` is the whole per-day sweep for UPCOMING-only sources, owning the US-Eastern-bucket lookback (`SCOREBOARD_LOOKBACK_DAYS`), the FINISHED drop, the stale-SCHEDULED floor (`MAX_AGE_AFTER_KICKOFF`) and the id dedupe. Used by `friendlies.py` + `english_cup.py`. Takes `http_get` INJECTED so each source keeps its own patchable `requests` symbol. The bracket sources deliberately do NOT use it: they sweep a fixed calendar window and KEEP finished games because bracket state comes from results already played. |
 | `sources/friendlies.py` | ESPN exhibition soccer: `InternationalFriendliesSource` (`fifa.friendly` / `fifa.friendly.w`, parametrized on gender) and `ClubFriendliesSource` (`club.friendly`). `supports_importance=False` deliberately: no table to simulate. Gated to Favorites by default (`friendlies_favorites_only`) because an exhibition's only claim to a slot is the favorite signal. `CLUBFRIENDLY` is a distinct prefix from `FRIENDLY` and its absence from `rivalries.json` is load-bearing: a pre-season kickabout is not a derby. |
 | `sources/english_cup.py` | EFL (Carabao) Cup + FA Cup via ESPN (`eng.league_cup` / `eng.fa`). Exists because Football-Data.org gates EVERY domestic cup behind a paid plan (FLC=TIER_THREE, FAC=TIER_TWO; verified 403 on the free-tier key), so a `soccer.py::COMPETITIONS` entry would 403 every refresh and contribute zero games silently. Rounds come from `season.slug`; the slug->stage maps are PER-COMPETITION because the two cups' round names overlap at different depths (FA Cup 4th round = R32, EFL Cup 4th round = R16). `supports_importance=False` and ranks always `None` — the latter is what stops a giant-killing tie being penalised for being lopsided. Early rounds score via the `CUP_R*` band in `scoring.py`, ramping to just under the shared `QUARTER_FINALS`. #190. |
@@ -537,6 +537,26 @@ stay in agreement with that one.
   errored, nothing playable), shared by the refresh result and show_status —
   and it reads the summary strings by `_SOURCE_ERROR_MARK`, which is why
   `_source_error_entry` is the only place that formats them.
+- **"Never cache a failure" is not "retry forever"** (#228).
+  `sources/soccer.py::_fetch_season_matches_for_code` deliberately does not
+  cache a failed full-season fetch as an empty season (that would silently zero
+  importance for the whole competition), and the importance simulator reads
+  that list INSIDE its per-season loop — so one transient football-data.org
+  error became hundreds of paced, backed-off refetches and a refresh that hit
+  the 1500s ceiling. The failure COUNT is now remembered (never the empty
+  result): `_SEASON_FETCH_MAX_ATTEMPTS` attempts per refresh, cleared by
+  `_clear_fd_caches`, after which the fetcher returns `[]` with no network and
+  no sleep. Two halves make the bound safe. `allow_scoring_retry()`, called by
+  `_action_refresh` as the scoring loop begins, resets every failed
+  competition to one attempt remaining, because the early head-to-head reads
+  (#209) — one per source sharing an `fd_code`, e.g. a World Cup's group AND
+  knockout sources — can otherwise spend the whole budget before the simulator
+  ever asks, while FD.org recovers in between. And `season_fetch_failures()`
+  feeds `_action_refresh` one `_source_error_entry` per given-up competition,
+  appended to `src_summary` BEFORE the cache write so `_slate_problems` and
+  **Show current state** see it. The label says "stakes not simulated", not
+  "scored 0": the other signals still ran, so a knockout tie keeps its round
+  premium.
 - **The child log's LEADING LEVEL NAME is a contract.** `_pipeline_runner.py`
   sets `format="%(levelname)s %(name)s: %(message)s"`, and
   `tasks._child_line_level` parses that first token so a subprocess WARNING is
@@ -638,6 +658,10 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   skipped), warns above it when sources errored or nothing on the list is
   playable, and a timed-out run forwards its child's log tail and names the step
   it reached
+- A football-data.org season fetch cannot eat the refresh budget or go quiet
+  (#228): the season list the importance simulator replays is retried at most
+  twice per refresh (one of them guaranteed to scoring), and a competition that
+  gives up is reported as a failed source, "stakes not simulated"
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)
