@@ -4,8 +4,8 @@ Two problems shape this module, and the fix for each is load-bearing:
 
 1. HTTP RESPONSE TIMEOUT (#84). Dispatcharr's HTTP layer drops the
    response when a synchronous plugin action runs longer than the
-   client's fetch timeout (~30s browsers, 60s axios). Auto pipeline is
-   ~40s end-to-end on a populated install, so the Plugins page shows
+   client's fetch timeout (~30s browsers, 60s axios). Auto pipeline takes
+   minutes end-to-end on a full slate, so the Plugins page would show
    "failed to run plugin action" even though the work completed. The
    HTTP entry points therefore return a queued envelope immediately and
    run the work in a daemon thread that publishes progress to a Redis
@@ -65,7 +65,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.tasks")
 
@@ -209,17 +209,21 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
 
     lock_token = _try_acquire_scheduler_lock(destructive=destructive)
     if not lock_token:
-        logger.info(
+        logger.warning(
             "[ranked_matchups.tasks] %s task %s: scheduler lock unavailable; "
             "skipping (another refresh / auto_pipeline is in flight, or Redis is "
             "unreachable and this action writes)",
             kind, task_id,
         )
-        # Best-effort: publish a short-lived 'busy' marker so the UI's
-        # show_status surfaces the skipped state for a few seconds. The
-        # marker uses the SAME inflight key the active run is updating;
-        # we deliberately do not overwrite an active marker.
+        # The button already answered "queued", so record that this request
+        # did NOTHING; otherwise Show current state would keep presenting the
+        # previous run's verdict as if it answered this click. Recorded beside
+        # that verdict, never over it: the previous outcome is still the truth
+        # about the last run that actually ran.
+        _record_skip(kind)
         return
+    started = datetime.now(timezone.utc)
+    result: Dict[str, Any] = {"status": "error", "message": "crashed before returning a result"}
     try:
         _set_inflight(kind, task_id, "refresh")
         result = target(settings)
@@ -235,13 +239,104 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
             kind, task_id, result.get("status"),
             result.get("message") or "(no message)",
         )
-    except Exception:
+    except Exception as e:
         logger.exception(
             "[ranked_matchups.tasks] %s task %s crashed", kind, task_id,
         )
+        result = {"status": "error", "message": f"crashed: {e}"}
     finally:
+        _record_last_run(kind, task_id, started, result)
         _clear_inflight()
         _release_scheduler_lock(lock_token)
+
+
+# Outcome of the most recent background run (#227). Every caller of
+# _run_under_lock discards the result dict, so before this file existed a
+# FAILED run left no trace outside the container log: Show current state read
+# only cache.json, which a failed run never touches, and presented the last
+# good cache (or "Cache empty") as if nothing were wrong. A file, not Redis,
+# because the answer has to survive a container restart and be readable by
+# every uwsgi worker; it sits beside cache.json for the same reason.
+LAST_RUN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_run.json")
+
+
+def _as_int(value: Any) -> int:
+    """A count read back from last_run.json, which is a file a person can
+    edit or a crash can truncate: anything non-numeric reads as 0."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _write_last_run(record: Dict[str, Any]) -> None:
+    """Atomic replace through a writer-unique temp file. Refresh runs WITHOUT
+    the lock when Redis is unreachable (it fails open), so two workers can
+    write at once; a shared temp name would let one replace the other's
+    half-written file."""
+    tmp = f"{LAST_RUN_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(record, f)
+    os.replace(tmp, LAST_RUN_PATH)
+
+
+def _record_last_run(kind: str, task_id: str, started: datetime, result: Dict[str, Any]) -> None:
+    """Persist this run's outcome and the running count of consecutive
+    failures. NEVER raises: it runs first in _run_under_lock's `finally`, so
+    an escape here would skip the inflight clear and the lock release behind
+    it and wedge every later run until the lock TTL."""
+    try:
+        finished = datetime.now(timezone.utc)
+        status = str(result.get("status") or "error")
+        prev = read_last_run() or {}
+        failures = 0
+        if status != "ok":
+            failures = _as_int(prev.get("consecutive_failures")) + 1
+        _write_last_run({
+            "kind": kind,
+            "task_id": task_id,
+            "status": status,
+            "message": str(result.get("message") or ""),
+            "started_at": started.isoformat(),
+            "finished_at": finished.isoformat(),
+            "duration_s": round((finished - started).total_seconds()),
+            "consecutive_failures": failures,
+            "last_ok_at": finished.isoformat() if status == "ok" else prev.get("last_ok_at"),
+        })
+    except Exception as e:  # noqa: BLE001 - see docstring
+        logger.warning("[ranked_matchups.tasks] could not record run outcome to %s: %s", LAST_RUN_PATH, e)
+
+
+def _record_skip(kind: str) -> None:
+    """Note that a requested run was skipped (lock held or Redis down) on the
+    existing record, without touching that record's verdict. Never raises."""
+    try:
+        record = read_last_run() or {}
+        record["skipped_kind"] = kind
+        record["skipped_at"] = datetime.now(timezone.utc).isoformat()
+        _write_last_run(record)
+    except Exception as e:  # noqa: BLE001 - caller is a daemon thread
+        logger.warning("[ranked_matchups.tasks] could not record skipped run: %s", e)
+
+
+# User-facing names for the run kinds _run_under_lock records. Show current
+# state prints these, so a toast never shows an internal id.
+RUN_KIND_LABELS = {
+    "auto_pipeline": "Refresh + apply",
+    "scheduled_auto_pipeline": "Scheduled refresh + apply",
+    "refresh": "Refresh",
+}
+
+
+def read_last_run() -> Optional[Dict[str, Any]]:
+    """The last background run's outcome, or None if no run has finished
+    since this file was introduced (or the file is unreadable)."""
+    try:
+        with open(LAST_RUN_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _new_task_id() -> str:
@@ -265,6 +360,65 @@ def _python_executable() -> str:
     if exe and "uwsgi" not in os.path.basename(exe):
         return exe
     return shutil.which("python3") or shutil.which("python") or "python3"
+
+
+# How many trailing child log lines a timed-out run forwards. A full run logs a
+# few hundred lines; the tail is where the stall is, and an unbounded forward
+# of a runaway child's output would flood the container log.
+_TIMEOUT_LOG_TAIL_LINES = 200
+
+
+def _decode_stream(data: Any) -> str:
+    """TimeoutExpired carries BYTES even under text=True (CPython attaches the
+    raw captured buffers before decoding), while a completed run carries str.
+    Normalise both, and None, to str."""
+    if data is None:
+        return ""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return str(data)
+
+
+def _forward_child_log(lines: List[str], tail: Optional[int] = None) -> None:
+    """Re-log the child's stderr lines under this module's logger.
+
+    A completed run forwards EVERY line (tail=None), as it always has: that
+    log is the run's whole diagnostic record. Only a timed-out run passes
+    `tail`, bounding the forward so a runaway child cannot flood the log,
+    and says how many lines it skipped so a truncated forward is never
+    mistaken for the whole log."""
+    if tail is not None and len(lines) > tail:
+        logger.info(
+            "[ranked_matchups.subproc] (%d earlier lines omitted)",
+            len(lines) - tail,
+        )
+        lines = lines[-tail:]
+    for line in lines:
+        logger.log(_child_line_level(line), "[ranked_matchups.subproc] %s", line)
+
+
+def _child_line_level(line: str) -> int:
+    """The level the child logged a line at. The runner's format starts every
+    record with its level name (_pipeline_runner.py basicConfig), so a child
+    WARNING stays a WARNING here instead of being flattened to INFO, where a
+    warnings-only log view would never show it. Unprefixed lines (tracebacks,
+    stray prints) forward at INFO."""
+    head = line.split(" ", 1)[0]
+    level = logging.getLevelName(head)
+    return level if isinstance(level, int) else logging.INFO
+
+
+def _last_child_step(lines: List[str]) -> Optional[str]:
+    """The last ranked_matchups progress line the child logged, stripped of
+    its level/logger prefix, for the one-line timeout verdict. Falls back to
+    the last non-empty line of any kind."""
+    for line in reversed(lines):
+        if "[ranked_matchups" in line:
+            return line[line.index("[ranked_matchups"):].strip()[:300]
+    for line in reversed(lines):
+        if line.strip():
+            return line.strip()[:300]
+    return None
 
 
 def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -305,21 +459,32 @@ def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, 
             timeout=_SUBPROCESS_TIMEOUT_SECONDS,
             env=env,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        # FORWARD THE CHILD'S PARTIAL LOG BEFORE REPORTING THE TIMEOUT (#227).
+        # subprocess.run kills the child and re-raises with whatever stderr it
+        # had captured so far on `e.stderr`. That is the ONLY record of which
+        # sources were fetched and which step was still running when the
+        # ceiling hit. Dropping it (as this branch used to) left users and
+        # maintainers with a single "timed out" line and no way to tell where.
+        lines = _decode_stream(e.stderr).splitlines()
+        _forward_child_log(lines, tail=_TIMEOUT_LOG_TAIL_LINES)
+        last_step = _last_child_step(lines)
         logger.error(
-            "[ranked_matchups] pipeline subprocess action=%s timed out after %ss",
-            action, _SUBPROCESS_TIMEOUT_SECONDS,
+            "[ranked_matchups] pipeline subprocess action=%s timed out after %ss; "
+            "last step reached: %s",
+            action, _SUBPROCESS_TIMEOUT_SECONDS, last_step or "(no log output)",
         )
-        return {"status": "error", "message": "pipeline subprocess timed out"}
+        message = f"pipeline subprocess timed out after {_SUBPROCESS_TIMEOUT_SECONDS // 60} min"
+        if last_step:
+            message += f"; last step reached: {last_step}"
+        return {"status": "error", "message": message}
     except Exception as e:  # noqa: BLE001 - never let this escape the thread
         logger.exception("[ranked_matchups] pipeline subprocess action=%s crashed", action)
         return {"status": "error", "message": f"pipeline subprocess error: {e}"}
 
     # The child routes all its logging to stderr; surface it under our logger
     # so scheduled-run diagnostics land where they always did.
-    if proc.stderr:
-        for line in proc.stderr.splitlines():
-            logger.info("[ranked_matchups.subproc] %s", line)
+    _forward_child_log((proc.stderr or "").splitlines())
 
     if proc.returncode != 0:
         logger.error(

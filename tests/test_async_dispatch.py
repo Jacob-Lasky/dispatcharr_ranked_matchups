@@ -254,7 +254,7 @@ class TestShowStatusSurfacesInflight:
             with patch.object(plugin_mod.tasks, "read_inflight", return_value=None):
                 result = plugin_mod._action_show_status({})
         assert result["status"] == "ok"
-        assert "Cache empty" in result["message"]
+        assert "No completed refresh yet" in result["message"]
         assert "in flight" not in result["message"]
 
     def test_populated_cache_with_inflight_prepends_progress_line(self, plugin_mod):

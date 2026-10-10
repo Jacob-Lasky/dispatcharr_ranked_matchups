@@ -74,6 +74,7 @@ State (gitignored, lives in `<plugin_dir>/`):
 - `cache.json` — last refresh result (curated game list with score breakdowns)
 - `recording_stops.json` — planned stops of RUNNING recordings (#216 phase C): written whole by apply under the scheduler lock, only READ by the live handoff timer in `_reaper_loop` (`_run_due_stops`), so the timer never races apply
 - `recordings_state.json` — auto-record bookkeeping (#216): what the plugin last wrote for each recording it created (so a user edit is recognised and left alone), and tombstones for ones the user deleted so they are not re-created
+- `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
 - `cfbd_api_key`, `football_data_api_key`, `odds_api_key`, `anthropic_api_key` — file fallback when settings field is blank.
 
 ## How channels are produced
@@ -490,6 +491,36 @@ stay in agreement with that one.
   path and the prose path must agree on — `SEED_PLAYED_THRESHOLD`,
   `is_bottom_outcome`, `ordinal` — live in `_util` as single definitions,
   because #209 shipped precisely because those two paths disagreed.
+- **A failed run never rewrites `cache.json`, so nothing in the cache can
+  report one** (#227). Every caller of `tasks._run_under_lock` discards the
+  result dict, so before `last_run.json` a failure left no trace outside the
+  container log and **Show current state** served the last GOOD cache (or
+  "Cache empty. Run refresh.") as if all were well. Four pieces hold the
+  answer together and each has a trap: `_record_last_run` / `_record_skip`
+  run inside `finally` **ahead of** the inflight clear and the lock release,
+  so neither may ever raise (hence `_as_int` and the blanket `except`) or a
+  corrupt record wedges every later run until the lock TTL; a skipped request
+  (lock held / Redis down) writes only `skipped_*` and never a `status`,
+  because it did not run and must not overwrite the real verdict; the
+  per-writer temp name in `_write_last_run` exists because refresh fails open
+  when Redis is down, so two workers can write at once; and `_run_health_lines`
+  orders the lines data warnings → config notices → verdict LAST, with a
+  running pipeline stated IN the verdict so the last line never presents the
+  previous run's outcome as the answer to the click just made.
+  `_slate_problems` is the ONE definition of "upstream broke" (sources that
+  errored, nothing playable), shared by the refresh result and show_status —
+  and it reads the summary strings by `_SOURCE_ERROR_MARK`, which is why
+  `_source_error_entry` is the only place that formats them.
+- **The child log's LEADING LEVEL NAME is a contract.** `_pipeline_runner.py`
+  sets `format="%(levelname)s %(name)s: %(message)s"`, and
+  `tasks._child_line_level` parses that first token so a subprocess WARNING is
+  re-logged as a WARNING instead of flattened to INFO, where a warnings-only
+  log view would never show it. Changing either side silently hides upstream
+  breakage. Relatedly, a TIMED-OUT run forwards its child's partial stderr
+  (bytes on `TimeoutExpired`, even under `text=True`) bounded to
+  `_TIMEOUT_LOG_TAIL_LINES` and names the last step reached — that tail is the
+  only evidence of where the 1500s ceiling hit; a COMPLETED run still forwards
+  every line.
 - **Postgres connection pool**: long-running plugin code can exhaust the
   default Postgres connection pool. Monitor with `SELECT count(*) FROM
   pg_stat_activity` in the Dispatcharr container if you add worker-heavy
@@ -575,6 +606,12 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
 - Recordings survive a source outage (#224): each one stores why it exists, and
   a game that vanished from the whole cache is only cancelled once that reason
   stops holding under the current settings
+- Failed and upstream-starved runs are visible (#227): every background run's
+  outcome is persisted to `last_run.json`, **Show current state** ends with that
+  verdict (OK / FAILED with the streak and the last good refresh / RUNNING NOW /
+  skipped), warns above it when sources errored or nothing on the list is
+  playable, and a timed-out run forwards its child's log tail and names the step
+  it reached
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)

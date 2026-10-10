@@ -28,6 +28,8 @@ import sys
 logging.basicConfig(
     level=logging.INFO,
     stream=sys.stderr,
+    # The LEADING LEVEL NAME is a contract: tasks._child_line_level reads it to
+    # re-log each forwarded line at its real level. Keep it first.
     format="%(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("ranked_matchups.runner")

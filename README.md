@@ -245,9 +245,41 @@ own name must identify the matchup or event for the plugin to find it.
 | `apply` | Create / update virtual channels in the target group, link matched streams, write `ProgramData` descriptions, schedule or cancel recordings for your [recorded teams](#recording-your-teams), delete stale ones. | DB (honors `dry_run`) |
 | | *Waits for the result and shows the real summary. Runs in a separate process so it cannot stall the web worker, which costs a second or two of startup.* | |
 | `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand. | Both |
-| `show_status` | Print the current curated list with per-game score breakdown. No writes. | — |
+| `show_status` | Print the current curated list with per-game score breakdown, and end with a verdict on the last background run (see [Did the last run work?](#did-the-last-run-work)). No writes. | — |
 | `preview_names` | Render the channel-name template against sample games so you can check the layout before applying. Reports template errors and lists every variable. No writes. | — |
 | `reap_now` | Drop games that finished more than `remove_finished_after_minutes` ago and backfill from the bench. Re-fetches nothing. | `cache.json` + DB |
+
+### Did the last run work?
+
+`refresh` and `auto_pipeline` run in the background — on a full slate they take
+minutes, far longer than a browser is willing to wait — so their button returns
+right away and the real outcome shows up in **Show current state**.
+
+Its last line is always the verdict:
+
+- `Last run OK: Scheduled refresh + apply finished 2026-10-10 04:21 EDT (took
+  21 min).` — plus `with N warning(s) above` if there are any, since those sit
+  higher up and can scroll out of view.
+- `LAST RUN FAILED: ... at <time>, N failures in a row: <why>. Last successful
+  refresh: <time>.` A failed run never rewrites the curated list, so everything
+  above that line is the older, still-good data — which is exactly why this used
+  to look like a healthy install.
+- `RUNNING NOW: ... since <time>; the results above are from before it.` printed
+  above the previous run's verdict, so the last line is never mistaken for an
+  answer to the click you just made.
+- `NOTE: ... requested <time> did not run: another run held the lock, or Redis
+  was unreachable.`
+
+Above the verdict come warnings about the data itself, the two failures a run
+can otherwise complete "ok" through: **sources that failed to fetch** (named,
+with the errors in the container log) and **a list where nothing is playable**,
+meaning no game matched a stream in your channels — run **Diagnose matching**
+for that one.
+
+The verdict is kept in `last_run.json` beside `cache.json` in the plugin
+directory, so it survives a container restart. For more detail, the container
+log carries each source's error; a run that hits the internal time limit now
+logs the tail of its own progress and names the step it reached.
 
 ### Clearing out finished games
 

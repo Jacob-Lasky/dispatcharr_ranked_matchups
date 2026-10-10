@@ -316,7 +316,7 @@ class TestShowStatusReportsDryRun:
         # refresh has completed. That path returns early, so it needs the
         # notice too.
         msg = self._status(plugin, {"dry_run": True}, cache={})
-        assert "Cache empty" in msg
+        assert "No completed refresh yet" in msg
         assert plugin.DRY_RUN_NOTICE in msg
 
     def test_notice_is_the_last_line(self, plugin):
