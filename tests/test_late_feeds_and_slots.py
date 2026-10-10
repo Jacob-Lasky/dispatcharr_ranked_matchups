@@ -28,14 +28,24 @@ UTC = timezone.utc
 @pytest.fixture
 def store(monkeypatch):
     """A fake core.utils.RedisClient shared by every "worker" in a test."""
-    data = {}
+    class Store(dict):
+        """The keys, plus .ttls: the expiry last set on each key, in seconds."""
+        ttls = None
+
+    data = Store()
+    data.ttls = ttls = {}
 
     class FakeClient:
         def set(self, key, value, nx=False, ex=None):
             if nx and key in data:
                 return None
             data[key] = value
+            ttls[key] = ex
             return True
+
+        def expire(self, key, seconds):
+            ttls[key] = seconds
+            return key in data
 
         def delete(self, key):
             return 1 if data.pop(key, None) is not None else 0
@@ -207,6 +217,14 @@ class TestScheduledSlot:
         assert attempts == [True]          # one attempt, recording its own skip
         assert sleeps == []
 
+    def test_redis_down_past_the_deadline_records_a_skip(self, plugin, redis_down, monkeypatch):
+        attempts = _pipeline(monkeypatch, plugin, [True])
+        skips = _skips(monkeypatch, plugin)
+        slot = datetime.now(UTC) - timedelta(minutes=31)
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert attempts == []
+        assert skips == ["scheduled_auto_pipeline"]
+
     def test_a_late_wake_does_not_start_past_the_deadline(self, plugin, store, monkeypatch):
         attempts = _pipeline(monkeypatch, plugin, [True])
         skips = _skips(monkeypatch, plugin)
@@ -265,11 +283,15 @@ def rematch(plugin, store, monkeypatch):
     monkeypatch.setattr(plugin, "_read_cache", lambda: state["cache"])
     monkeypatch.setattr(plugin, "_latest_m3u_refresh", lambda: state["m3u"])
 
+    state["outcome"] = "ok"
+
     def fake_run(settings):
         runs.append(settings)
         return state["ran"]
 
     monkeypatch.setattr(plugin.tasks, "run_m3u_rematch_pipeline", fake_run)
+    monkeypatch.setattr(plugin.tasks, "read_last_run",
+                        lambda: {"kind": "m3u_rematch", "status": state["outcome"]})
     return state, runs
 
 
@@ -289,7 +311,9 @@ class TestRematchAfterM3U:
         # refresh. An M3U refreshing every five minutes must not start a full
         # failing pipeline each time: the cooldown holds it to one per hour.
         state, runs = rematch
+        state["outcome"] = "error"
         plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW)
+        assert store.ttls[plugin._REMATCH_COOLDOWN_KEY] == 3600
         for i in range(1, 12):
             state["m3u"] = M3U + timedelta(minutes=5 * i)
             plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW + timedelta(minutes=5 * i))
@@ -297,6 +321,13 @@ class TestRematchAfterM3U:
         store.pop(plugin._REMATCH_COOLDOWN_KEY)                  # the hour is up
         assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW + timedelta(hours=1))
         assert len(runs) == 2
+
+    def test_a_success_cools_down_briefly_so_the_next_feed_is_prompt(self, plugin, store, rematch):
+        # A second M3U update minutes after a successful rematch can carry
+        # another live game's feed; an hour's wait would leave it dark.
+        _state, _runs = rematch
+        assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW) is True
+        assert store.ttls[plugin._REMATCH_COOLDOWN_KEY] == 15 * 60
 
     def test_m3u_refresh_during_matching_is_not_missed(self, plugin, rematch):
         # Matching read the streams at 11:40, the M3U finished at 11:41, the
@@ -449,3 +480,58 @@ class TestNoThreadsInThePipelineChild:
         finally:
             sreg.thread, sreg.stop_event, rreg.thread, rreg.stop_event = saved
         assert sorted(started) == ["ranked_matchups-reaper", "ranked_matchups-scheduler"]
+
+
+class TestCandidateChangedAt:
+    """Diagnose blames a late feed only when EVERY naming candidate is newer
+    than the match: one that was already there is a real matcher miss."""
+
+    @pytest.fixture
+    def models(self, monkeypatch):
+        times = {"stream": {}, "channel": {}}
+
+        def manager(kind, field):
+            class _QS:
+                def __init__(self, ids):
+                    self.ids = ids
+
+                def values_list(self, name, flat=True):
+                    assert name == field
+                    return [times[kind][i] for i in self.ids if i in times[kind]]
+
+            class _Mgr:
+                def filter(self, id__in):
+                    return _QS(list(id__in))
+            return _Mgr()
+
+        mod = type(sys)("apps.channels.models")
+        mod.Stream = type("Stream", (), {"objects": manager("stream", "updated_at")})
+        mod.Channel = type("Channel", (), {"objects": manager("channel", "created_at")})
+        monkeypatch.setitem(sys.modules, "apps", type(sys)("apps"))
+        monkeypatch.setitem(sys.modules, "apps.channels", type(sys)("apps.channels"))
+        monkeypatch.setitem(sys.modules, "apps.channels.models", mod)
+        return times
+
+    def _cands(self, *, streams=(), channels=()):
+        from dispatcharr_ranked_matchups.matcher import ChannelCandidate
+        out = [ChannelCandidate(channel_id=-sid, channel_name="s", program_title="s",
+                                program_start=NOW, program_end=NOW, stream_id=sid)
+               for sid in streams]
+        out += [ChannelCandidate(channel_id=cid, channel_name="c", program_title="c",
+                                 program_start=NOW, program_end=NOW) for cid in channels]
+        return out
+
+    def test_the_oldest_candidate_decides(self, plugin, models):
+        models["stream"][1] = REFRESHED - timedelta(hours=2)    # there at match time
+        models["channel"][9] = M3U                              # appeared later
+        assert plugin._candidate_changed_at(self._cands(streams=[1], channels=[9])) == \
+            REFRESHED - timedelta(hours=2)
+
+    def test_all_late_reports_the_oldest_late_time(self, plugin, models):
+        models["stream"][1] = M3U
+        models["channel"][9] = M3U + timedelta(seconds=5)
+        assert plugin._candidate_changed_at(self._cands(streams=[1], channels=[9])) == M3U
+
+    def test_a_candidate_with_no_time_is_not_assumed_late(self, plugin, models):
+        models["stream"][1] = M3U
+        assert plugin._candidate_changed_at(self._cands(streams=[1, 2])) is None

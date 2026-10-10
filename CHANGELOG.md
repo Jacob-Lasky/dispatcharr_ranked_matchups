@@ -16,8 +16,8 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   503 when tuned. The reaper loop now notices when an active M3U account has
   refreshed after the plugin's last refresh while a curated game is live or
   starts within 6 hours, and runs Refresh + apply (requires auto-refresh to be
-  on; at most once an hour across all workers, so a failing refresh is not
-  re-run on every M3U refresh). Show current state labels it "Refresh + apply
+  on; one run across all workers, then a 15-minute cooldown, or an hour after
+  a failed run so a broken refresh is not re-run on every M3U refresh). Show current state labels it "Refresh + apply
   after an M3U update".
 - **A scheduled run no longer vanishes when something else holds the run lock
   at that moment.** Every web worker runs a scheduler and they all fire

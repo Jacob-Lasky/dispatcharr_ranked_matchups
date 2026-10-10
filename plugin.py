@@ -6877,29 +6877,34 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
 
 
 def _candidate_changed_at(cands: List[Any]) -> Optional[datetime]:
-    """Latest time any of these candidates came into being or was renamed.
+    """When the OLDEST of these naming candidates appeared, or None.
 
-    Per candidate, not the newest M3U refresh: an unrelated account refreshing
-    after our match would otherwise excuse a real miss on a feed that was
-    there all along. Stream.updated_at is bumped only for streams whose
-    content changed in an M3U refresh (m3u/tasks.py), so a slot renamed to
-    this game carries the rename time. A whole-channel candidate (Path A/B)
-    counts its own creation and its streams' changes."""
-    from django.db.models import Max
+    The oldest, not the newest: if any one of them already named the game
+    when we matched, the matcher saw it and missed it, and that is the real
+    bug to report however many feeds turned up afterwards. Per candidate, not
+    the newest M3U refresh, for the same reason: an unrelated account
+    refreshing after our match must not excuse a miss.
+
+    A stream candidate (Path C) counts Stream.updated_at, which an M3U refresh
+    bumps only for streams whose content changed (m3u/tasks.py), so a slot
+    renamed to this game carries the rename time. A whole-channel candidate
+    (Path A/B) counts its created_at; DO NOT use Channel.updated_at, which any
+    save bumps (an EPG assignment, a profile change)."""
     from apps.channels.models import Channel, Stream
     stream_ids = [c.stream_id for c in cands if c.stream_id is not None]
     chan_ids = [c.channel_id for c in cands if c.stream_id is None and c.channel_id > 0]
     times = []
     if stream_ids:
-        times.append(Stream.objects.filter(id__in=stream_ids)
-                     .aggregate(m=Max("updated_at"))["m"])
+        times += list(Stream.objects.filter(id__in=stream_ids)
+                      .values_list("updated_at", flat=True))
     if chan_ids:
-        times.append(Channel.objects.filter(id__in=chan_ids)
-                     .aggregate(m=Max("created_at"))["m"])
-        times.append(Stream.objects.filter(channels__id__in=chan_ids)
-                     .aggregate(m=Max("updated_at"))["m"])
+        times += list(Channel.objects.filter(id__in=chan_ids)
+                      .values_list("created_at", flat=True))
     times = [t for t in times if t is not None]
-    return max(times) if times else None
+    # Any candidate with no known time could have been there all along.
+    if not times or len(times) < len(stream_ids) + len(chan_ids):
+        return None
+    return min(times)
 
 
 def _late_feed_note(cache: Dict[str, Any], settings: Dict[str, Any], cands: List[Any]) -> str:
@@ -7434,10 +7439,13 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
         logger.info("[ranked_matchups] scheduled slot %s is owned by another worker",
                     slot.isoformat())
         return False
-    if claim == _SLOT_UNKNOWN:
-        tasks.run_scheduled_pipeline(settings)
-        return False
     deadline = _scheduled_retry_deadline(slot, times, tz)
+    if claim == _SLOT_UNKNOWN:
+        if datetime.now(timezone.utc) <= deadline:
+            tasks.run_scheduled_pipeline(settings)
+        else:
+            tasks.record_skipped_run("scheduled_auto_pipeline")
+        return False
     while True:
         # Checked BEFORE each attempt too, so a late wake never starts this
         # slot's run past its deadline (into the next slot's time).
@@ -7677,13 +7685,16 @@ def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> 
 # subprocess.
 #
 # ONE cooldown key for every worker and every M3U refresh, set when a rematch
-# starts: at most one rematch per _REMATCH_COOLDOWN_SECONDS. A successful run
-# moves the cache's match time past the M3U refresh, which is what stops a
-# repeat; the cooldown is what bounds a FAILING one. DO NOT key it per M3U
-# refresh time instead: an M3U refreshing every few minutes while the
-# pipeline fails would then start a full failing pipeline for every refresh.
+# starts. A successful run moves the cache's match time past the M3U refresh,
+# which is what stops a repeat; the cooldown bounds the rest. After a success
+# it is SHORT, so a second M3U update minutes later (another feed for a live
+# game) is picked up promptly; after a failure it is an hour, so a broken
+# pipeline is not re-run on every M3U refresh. DO NOT key it per M3U refresh
+# time instead: an M3U refreshing every few minutes while the pipeline fails
+# would then start a full failing pipeline for every refresh.
 _REMATCH_COOLDOWN_KEY = f"plugins:{PLUGIN_KEY}:m3u_rematch:cooldown"
 _REMATCH_COOLDOWN_SECONDS = 60 * 60
+_REMATCH_COOLDOWN_AFTER_OK_SECONDS = 15 * 60
 # A game that kicked off this long ago may still be on (overtime, a long
 # baseball game); one further away than LOOKAHEAD gets a scheduled refresh first.
 _REMATCH_LOOKBACK_SECONDS = 4 * 3600
@@ -7730,8 +7741,8 @@ def _maybe_rematch_after_m3u(settings: Dict[str, Any], now: Optional[datetime] =
 
     Gated on auto_refresh_enabled: a user who turned scheduled runs off has
     asked for no background refreshes. One run across all workers per
-    cooldown (see _REMATCH_COOLDOWN_KEY); a run that FAILS keeps the cooldown,
-    so a broken refresh is retried at most hourly, not every few minutes.
+    cooldown (see _REMATCH_COOLDOWN_KEY): 15 minutes after a success, an hour
+    after a failure, so a broken refresh is retried at most hourly.
     Redis unreachable means no run: this is destructive work and the schedule
     still covers it.
     """
@@ -7765,6 +7776,12 @@ def _maybe_rematch_after_m3u(settings: Dict[str, Any], now: Optional[datetime] =
         _fmt_run_time(stamp.isoformat(), tz), _fmt_run_time(matched.isoformat(), tz),
         len(soon))
     if tasks.run_m3u_rematch_pipeline(settings):
+        last = tasks.read_last_run() or {}
+        if last.get("kind") == "m3u_rematch" and last.get("status") == "ok":
+            try:
+                r.expire(key, _REMATCH_COOLDOWN_AFTER_OK_SECONDS)
+            except Exception:
+                pass  # the hour-long cooldown stands; the schedule still runs
         return True
     # Lock held: lift the cooldown so a later tick retries. The holder is
     # usually a refresh itself, which makes this one unnecessary.
