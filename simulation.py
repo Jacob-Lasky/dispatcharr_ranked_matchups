@@ -36,16 +36,13 @@ if TYPE_CHECKING:
     from .sources.base import GameRow, MatchResult, SportSource
 
 
-# Number of Monte Carlo iterations per importance call. Per the SOTA section:
-# 1000 sims × 10 matches per matchday × 2 competitions = 20k full-season
-# simulations per refresh, ~50ms per sim with pure-Python Poisson sampling.
-# Comfortably within the scheduler's 6-hour cadence.
+# Number of Monte Carlo iterations per importance call when the caller does not
+# say. Production passes the `importance_seasons` setting explicitly (see
+# plugin._action_refresh), so this only applies to direct callers and tests.
 #
 # Lahvička (2012) used 10k sims for academic-grade convergence; 1k is plenty
 # for the kind of rank-ordering decisions a TV-guide curator needs. Tau-c
-# standard error scales as 1/sqrt(N); going from 1k → 10k halves the SE but
-# 10x the runtime, and the SE at 1k is already finer than the consequence
-# weights are calibrated.
+# standard error scales as 1/sqrt(N).
 DEFAULT_N_SIMS = 1000
 
 
@@ -401,3 +398,128 @@ def monte_carlo_importance_batch_chain(
             tables[(team, outcome)][row][col] += 1
 
     return {q: abs(kendall_tau_c(t)) for q, t in tables.items()}
+
+
+def monte_carlo_importance_shared(
+    source: "SportSource",
+    targets: Sequence["GameRow"],
+    queries: Sequence[Sequence[Tuple[str, str]]],
+    n_sims: int = DEFAULT_N_SIMS,
+    rng: Optional[random.Random] = None,
+) -> List[Optional[Dict[Tuple[str, str], float]]]:
+    """Importance for MANY target matches of one source, from ONE set of N
+    simulated seasons (#230).
+
+    `monte_carlo_importance_batch` re-simulates the whole remaining season
+    for every target match, so a refresh costs targets x N seasons. With a
+    full slate (94 NHL games, 227 NCAA soccer games) that exceeded the
+    25-minute pipeline ceiling on every run. Here each simulated season is
+    played once, every target's result is read off it at its natural place
+    in the schedule, and each (target, team, outcome) query gets its own
+    contingency table from the same N seasons: cost is N seasons per source,
+    whatever the number of targets. Measured on a real 499-game slate:
+    2212 CPU-s at 500 sims per game vs 125 CPU-s at 2000 shared seasons,
+    with the shared estimate CLOSER to a 2000-per-game reference (rank
+    correlation 0.99 vs 0.97).
+
+    ONLY VALID FOR SOURCES WHOSE `sample_result` IGNORES `state`
+    (`shared_season_importance = True`). The per-game simulator samples the
+    target FIRST, from the initial state; this one samples it in schedule
+    order, from a mid-season state. Those draw from the same distribution
+    only when the result model does not read the state. A knockout source
+    that reads leg 1 when sampling leg 2 does read it, and stays on the
+    per-game path. DO NOT call this for a source that has not opted in.
+
+    Returns one entry per target: `{(team, outcome): |tau_c|}`, or None when
+    that target was not played in every simulated season (absent from the
+    source's remaining pool, or reachable only on some bracket paths). The
+    caller must fall back to the per-game path for a None; it is NOT a zero.
+    """
+    if not getattr(source, "shared_season_importance", False):
+        raise ValueError(
+            f"{type(source).__name__} has not opted into shared-season importance "
+            "(its sample_result may read state); use monte_carlo_importance_batch."
+        )
+    rng = rng or random.Random()
+    strengths = source.estimate_strengths()
+    base_state = source.initial_state()
+
+    tables: List[Dict[Tuple[str, str], List[List[int]]]] = [
+        {q: [[0, 0], [0, 0], [0, 0]] for q in qs} for qs in queries
+    ]
+    appearances = [0] * len(targets)
+
+    # Which target (if any) a pool row IS. remaining_matches builds fresh
+    # GameRows every call, so identity is decided by _same_match, exactly as
+    # the per-game simulator decides it. Candidates come from every id the
+    # row carries AND from its (home, away) pair: an id match must not be
+    # missed because the scored row spells a team differently from the season
+    # feed. The memo is keyed by ALL of the row's ids plus teams and kickoff,
+    # never by one id: _same_match compares the first key BOTH rows carry, so
+    # two pool rows sharing one id can still be different targets.
+    by_id: Dict[Tuple[str, Any], List[int]] = {}
+    by_pair: Dict[Tuple[str, str], List[int]] = {}
+    for i, t in enumerate(targets):
+        t_extra = t.extra if isinstance(t.extra, dict) else {}
+        for k in _MATCH_ID_KEYS:
+            if t_extra.get(k) is not None:
+                by_id.setdefault((k, t_extra[k]), []).append(i)
+        by_pair.setdefault((t.home, t.away), []).append(i)
+    resolved: Dict[Any, Optional[int]] = {}
+
+    def target_index(m: "GameRow") -> Optional[int]:
+        extra = m.extra if isinstance(m.extra, dict) else {}
+        ids = tuple((k, extra.get(k)) for k in _MATCH_ID_KEYS)
+        memo_key = (ids, m.home, m.away, m.start_time)
+        if memo_key not in resolved:
+            candidates: List[int] = []
+            for k, v in ids:
+                if v is not None:
+                    candidates += by_id.get((k, v), [])
+            candidates += by_pair.get((m.home, m.away), [])
+            resolved[memo_key] = next(
+                (i for i in dict.fromkeys(candidates) if _same_match(m, targets[i])), None,
+            )
+        return resolved[memo_key]
+
+    for _ in range(n_sims):
+        state = base_state
+        results: Dict[int, "MatchResult"] = {}
+        # Drain until empty, as the per-game simulator does: one pass for a
+        # league, and correct for any source whose later fixtures appear only
+        # once earlier ones are applied.
+        while True:
+            rem = source.remaining_matches(state)
+            if not rem:
+                break
+            for m in rem:
+                ti = target_index(m)
+                if ti is not None and ti in results:
+                    # A repeated copy of a target already played this season.
+                    # The per-game simulator excludes every copy of its target
+                    # after sampling it once; sampling the copy here would give
+                    # one team an extra game the old path never played.
+                    continue
+                r = source.sample_result(state, m, strengths, rng)
+                if ti is not None:
+                    results[ti] = r
+                state = source.apply_result(state, m, r)
+        outcomes = source.terminal_outcomes(state)
+        for ti, r in results.items():
+            appearances[ti] += 1
+            target = targets[ti]
+            for team, outcome in queries[ti]:
+                row = _RESULT_ROW[_classify_target_result(r, team, target.home, target.away)]
+                col = 0 if outcome in outcomes.get(team, []) else 1
+                tables[ti][(team, outcome)][row][col] += 1
+
+    # Only a target played in EVERY simulated season has an unconditional
+    # table. One that appears in some seasons only (a bracket fixture that
+    # exists only if a feeder tie went one way) would be measured conditional
+    # on reaching it, while the per-game simulator forces it into every
+    # season: return None so the caller falls back to that path.
+    return [
+        {q: abs(kendall_tau_c(t)) for q, t in tables[i].items()}
+        if n_sims > 0 and appearances[i] == n_sims else None
+        for i in range(len(targets))
+    ]

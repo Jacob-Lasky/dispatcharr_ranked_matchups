@@ -167,6 +167,15 @@ class SportSource(ABC):
         """Return upcoming games in the next `days_ahead` days. Empty list during
         offseason. Caller does not need to filter by date."""
 
+    # Opt-in to shared-season importance (#230): every scored game of this
+    # source is read off ONE set of simulated seasons instead of re-simulating
+    # the season per game. Valid ONLY when sample_result ignores `state`, since
+    # the shared path samples each target mid-season rather than first. A
+    # subclass that reads state in sample_result (a knockout reading leg 1 to
+    # sample leg 2) MUST leave this False. tests/test_shared_importance.py
+    # enforces that statically for every opted-in class.
+    shared_season_importance: bool = False
+
     # ---------- Monte Carlo importance interface ----------
     # All 7 default to NotImplementedError. Sources that flip
     # `supports_importance = True` MUST override all of them; the simulator

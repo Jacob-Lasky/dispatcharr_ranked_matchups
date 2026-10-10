@@ -64,6 +64,9 @@ class PointsBasedSportSource(SportSource):
     """
 
     supports_importance = True
+    # Result model is pure Poisson on fixed strengths; sample_result never
+    # reads state, so the season can be shared across games (#230).
+    shared_season_importance = True
 
     # Subclasses MUST set these. Keep type-checkable defaults so the ABC
     # surfaces a clear NotImplementedError at instantiation if missed.

@@ -273,7 +273,7 @@ The high-level loop:
 ```
 for each (target_match, team, outcome) tuple:
     table = [[0, 0], [0, 0], [0, 0]]   # 3 result rows × 2 outcome cols
-    for sim in range(1000):
+    for sim in range(N_SEASONS):
         result = sample_result(target_match)               # W / D / L for target team
         for game in remaining_matches:
             game_result = sample_result(game)
@@ -285,9 +285,14 @@ for each (target_match, team, outcome) tuple:
 ```
 
 For each candidate outcome (title, UCL spot, relegation, Stanley Cup
-winner, R16 advancement, etc.), this asks the question: "in 1,000
+winner, R16 advancement, etc.), this asks the question: "in N
 simulated alternate universes, how much does the way this match goes
 shift the probability of this team hitting this outcome?"
+
+That is the definition, not literally the loop that runs. For most sources
+the N seasons are simulated once for the whole league and every target match
+reads its table off them: the same estimate for a fraction of the cost. See
+"Simulated seasons" below.
 
 A handful of design choices matter here:
 
@@ -352,8 +357,8 @@ outcome. Each `SportSource` implements `estimate_strengths`:
   regulation / 1-pt OT-loss rule.
 - **MLB:** runs-for / runs-against averages, Poisson on runs.
 
-Strengths are estimated once per refresh and reused across the 1,000
-sims; the per-sim cost is just the per-match sampling.
+Strengths are estimated once per refresh and reused across every
+simulated season; the per-season cost is just the per-match sampling.
 
 ### Outcome bands
 
@@ -395,18 +400,33 @@ across the league (a Manchester United fan whose team isn't playing
 still cares about the title race between Liverpool and Arsenal). The
 EPG description shows the top 3 (team, outcome) leverage lines.
 
-### N_sims = 1000
+### Simulated seasons: 2000 per league, shared by every game in it
 
-Lahvička's original paper used 10,000 sims for academic-grade
-convergence. The plugin uses 1,000 because:
+Each league's remaining season is simulated `importance_seasons` times
+(default 2000) ONCE per refresh, and every scored game in that league
+reads its own result off those same seasons (#230). Each (game, team,
+outcome) query still gets its own contingency table; only the seasons
+are shared. Cost is per league, not per game.
 
-- Tau-c standard error scales as `1 / sqrt(N)`. Going from 1k → 10k
-  halves the SE but 10x's runtime.
-- The SE at 1k is already finer than the consequence-weight grid the
-  rankings sort by. Rankings stay stable.
-- 1k × 10 games per matchday × 2 competitions = 20k full-season
-  simulations per refresh, ~50ms per sim in pure-Python Poisson. Fits
-  comfortably in the daily-refresh budget.
+This replaced simulating the whole season again for every game, which
+cost games x sims x season and, on a full autumn slate (94 NHL, 227 NCAA
+soccer, 61 NCAAF games), ran past the 25-minute pipeline ceiling.
+Measured on that slate against a 2000-sims-per-game reference:
+
+| estimator | CPU | rank correlation | mean error (score pts) |
+| --- | --- | --- | --- |
+| old: 500 sims per game | 2212 s | 0.97 | 0.32 |
+| shared: 2000 per league | 125 s | 0.99 | 0.21 |
+
+Sharing is valid only for sources whose result model ignores the
+season state (league and points-based sources): the shared path samples
+each game in schedule order rather than first. Knockout sources that
+read leg 1 to sample leg 2, and the cross-source chain below, keep the
+per-game simulator; they cost almost nothing.
+
+Lahvička's original paper used 10,000 sims. Tau-c standard error scales
+as `1 / sqrt(N)`; at 2000 the noise sits below the consequence-weight
+grid the rankings sort by.
 
 
 ## Cross-source chains (the World Cup 2026 case)
@@ -736,7 +756,8 @@ expected before judging the whole guide.
 Source code for everything described above:
 
 - `scoring.py` — signal computation, raw sum, compression, tunable weights
-- `simulation.py` — Monte Carlo loop, `kendall_tau_c`, the chain variant
+- `simulation.py` — Monte Carlo loop, `kendall_tau_c`, the chain variant,
+  and `monte_carlo_importance_shared` (one set of seasons per source)
 - `sources/base.py` — `SportSource` abstract contract
 - `sources/soccer.py` — soccer leagues + group/knockout + Annex C
 - `sources/bracket.py` — generic best-of-N + double-elim + aggregate-leg bracket machinery

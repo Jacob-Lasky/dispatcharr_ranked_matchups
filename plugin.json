@@ -41,7 +41,7 @@
           "label": "D1 FBS + FCS"
         }
       ],
-      "help_text": "Which divisions NCAA Football pulls. CFBD's feed also carries Division II and III, which can never score (they are outside the simulated season) yet still cost about 7 seconds of importance simulation each — opening week 2026 was 157 games of which only 27 involved an FBS team. FBS only is the default and is the recommended setting. Adding FCS roughly triples the NCAAF share of a refresh, and scores those games with FBS win-count bands (6 wins = bowl eligible), which is an approximation since FCS has a different postseason."
+      "help_text": "Which divisions NCAA Football pulls. CFBD's feed also carries Division II and III, which can never score (they are outside the simulated season) yet still add to the refresh — opening week 2026 was 157 games of which only 27 involved an FBS team. FBS only is the default and is the recommended setting. Adding FCS widens the simulated season, and scores those games with FBS win-count bands (6 wins = bowl eligible), which is an approximation since FCS has a different postseason."
     },
     {
       "id": "enable_ncaam",
@@ -564,12 +564,12 @@
       "help_text": "Multiplier on Lahvička match-importance: |Kendall tau-c| × consequence weight, summed across both playing teams' outcome bands AND any in-league favorites' outcome bands (so a non-favorite game that swings a favorite's relegation chance gets credit structurally). Set to 0 to disable."
     },
     {
-      "id": "n_importance_sims",
+      "id": "importance_seasons",
       "type": "number",
-      "label": "Importance Monte Carlo iterations",
-      "default": 500,
-      "help_text": "Number of season simulations per match for the importance signal. 500 ≈ 0.5s per match on the test EPL season; total refresh cost stays under 30s for a typical 25-match curated list. 1000 doubles compute time but tightens tau-c convergence (Lahvička 2012 used 10000 for academic-grade stability). Drop to 200 if scheduler runs feel sluggish."
-    },
+      "label": "Importance: simulated seasons per league",
+      "default": 2000,
+      "help_text": "How many times each league's remaining season is simulated to measure how much each game matters for titles, playoff spots and relegation. Every game in a league is read off the same simulated seasons, so the cost is per league, not per game: 2000 takes about two minutes for a full slate of several hundred games. More is steadier, fewer is faster; below 500 the ranking starts to wobble between refreshes."
+     },
     {
       "id": "_section_naming",
       "type": "info",

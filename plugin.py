@@ -2927,6 +2927,119 @@ def _build_sources(settings: Dict[str, Any]):
 _SCORING_PROGRESS_EVERY = 40
 
 
+# Simulated seasons per league for the importance signal (#230). A NEW setting
+# id, deliberately not a reuse of the old `n_importance_sims`: that one counted
+# seasons PER GAME, and installs that saved the form hold its old value (500).
+# Reading it under the new per-league meaning would silently pin those installs
+# to a quarter of the intended precision. The old key is ignored.
+IMPORTANCE_SEASONS_SETTING = "importance_seasons"
+IMPORTANCE_SEASONS_DEFAULT = 2000
+
+
+# Sims PER GAME for the games the shared path cannot answer (knockouts, an
+# active group->knockout chain, a game missing from its source's pool). Held at
+# the historical per-game default deliberately: that path still costs
+# games x sims x season, so applying the per-league importance_seasons (2000)
+# to it would quadruple exactly the cost #230 removed.
+PER_GAME_IMPORTANCE_SIMS = 500
+
+
+def _importance_seasons(settings: Dict[str, Any]) -> int:
+    try:
+        n = int(settings.get(IMPORTANCE_SEASONS_SETTING, IMPORTANCE_SEASONS_DEFAULT))
+    except (TypeError, ValueError):
+        return IMPORTANCE_SEASONS_DEFAULT
+    return n if n > 0 else IMPORTANCE_SEASONS_DEFAULT
+
+
+def _favorites_with_standings(extra: Dict[str, Any], favorites: List[str]) -> List[Dict[str, Any]]:
+    """Favorites found in this game's league table, with their position.
+
+    Reads the SEEDED scoring table, `standings_table`, and must keep doing so
+    (#209): it feeds the score (the favorites-in-league importance queries),
+    and switching it to the current table would silently re-rank every
+    early-season game. Prose reads the current table elsewhere."""
+    out: List[Dict[str, Any]] = []
+    for fav in favorites:
+        fav_lc = fav.lower()
+        for entry in extra.get("standings_table") or []:
+            name = entry.get("name", "")
+            if fav_lc in name.lower():
+                out.append({
+                    "name": name,
+                    "position": entry["position"],
+                    "points": entry.get("points"),
+                })
+                break
+    return out
+
+
+def _importance_applies(src: Any, league_ctx: Any) -> bool:
+    """Whether a game from `src` in this league gets an importance score at
+    all. One predicate for the shared and per-game paths."""
+    return bool(
+        getattr(src, "supports_importance", False)
+        and league_ctx is not None
+        and league_ctx.thresholds
+    )
+
+
+def _shared_league_importance(
+    games: List[Any], sources: List[Any], favorites: List[str], n_seasons: int,
+) -> Dict[int, Tuple[float, List[str], List[str]]]:
+    """Importance for every game a shared-season simulation can answer,
+    keyed by index into `games` (#230).
+
+    Games are grouped by (source object, competition) and each group's
+    season is simulated ONCE. A group is skipped (its games fall back to the
+    per-game simulator) when the source has not opted in, or when its
+    cross-source group->knockout chain is active, since the chain simulator
+    has no shared form. A failing group is logged and skipped, never fatal,
+    matching the per-game path's catch."""
+    from .scoring import LEAGUE_CONTEXTS, compute_league_importance
+
+    groups: Dict[Tuple[int, str], List[int]] = {}
+    for i, (g, src) in enumerate(zip(games, sources)):
+        code = (g.extra or {}).get("fd_competition_code")
+        ctx = LEAGUE_CONTEXTS.get(code) if code else None
+        if not (_importance_applies(src, ctx) and getattr(src, "shared_season_importance", False)):
+            continue
+        groups.setdefault((id(src), code), []).append(i)
+
+    out: Dict[int, Tuple[float, List[str], List[str]]] = {}
+    for (_src_id, code), idxs in groups.items():
+        src = sources[idxs[0]]
+        chain_fn = getattr(src, "cross_source_chain", None)
+        label = getattr(src, "sport_label", code)
+        started = time.monotonic()
+        try:
+            if callable(chain_fn) and chain_fn() is not None:
+                continue
+            results = compute_league_importance(
+                src, [games[i] for i in idxs], LEAGUE_CONTEXTS[code], n_sims=n_seasons,
+                favorites_by_match=[
+                    [f["name"] for f in _favorites_with_standings(games[i].extra or {}, favorites)]
+                    for i in idxs
+                ],
+            )
+        except Exception as e:
+            logger.warning(
+                "[ranked_matchups] shared importance failed for %s (%d games); "
+                "falling back to per-game: %s", label, len(idxs), e,
+            )
+            continue
+        answered = 0
+        for i, res in zip(idxs, results):
+            if res is not None:
+                out[i] = res
+                answered += 1
+        logger.info(
+            "[ranked_matchups] importance: %s, %d of %d games from %d shared seasons in %.1fs",
+            label, answered, len(idxs), n_seasons, time.monotonic() - started,
+        )
+    return out
+
+
 def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     from .scoring import GameSignals, score_game
     from .matcher import match_games_to_channels
@@ -3043,7 +3156,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         match_favorites, LEAGUE_CONTEXTS, build_impact_narratives,
         compute_match_importance, wc_knockout_importance,
     )
-    n_importance_sims = int(settings.get("n_importance_sims", 500))
+    importance_seasons = _importance_seasons(settings)
     scored: List[Tuple[Any, GameSignals, Any]] = []
     # Scoring is the long, otherwise silent phase. Log its start and steady
     # progress (#227): a run that hits the subprocess ceiling reports its last
@@ -3051,6 +3164,14 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # of the fetch, which sends whoever reads it to the wrong phase.
     score_started = time.monotonic()
     logger.info("[ranked_matchups] scoring %d games", len(all_games))
+    # Importance for every game whose source can share simulated seasons,
+    # computed per league up front (#230); the loop below falls back to the
+    # per-game simulator only for the rest (knockouts, active group->knockout
+    # chains, a game missing from its source's pool).
+    shared_importance = (
+        _shared_league_importance(all_games, game_sources, favorites, importance_seasons)
+        if weights.importance > 0 else {}
+    )
     for done_n, (g, src) in enumerate(zip(all_games, game_sources)):
         # done_n games are finished when this one starts, so a timeout here
         # reports what was actually completed, not this game as if done.
@@ -3075,19 +3196,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # PROSE reads the current table, inside `_impact_narratives_for`,
         # because a sentence a human reads must be true today.
         scoring_table = extra.get("standings_table") or []
-        favs_with_standings: List[Dict[str, Any]] = []
-        if scoring_table:
-            for fav in favorites:
-                fav_lc = fav.lower()
-                for entry in scoring_table:
-                    name = entry.get("name", "")
-                    if fav_lc in name.lower():
-                        favs_with_standings.append({
-                            "name": name,
-                            "position": entry["position"],
-                            "points": entry.get("points"),
-                        })
-                        break
+        favs_with_standings = _favorites_with_standings(extra, favorites)
 
         # Pre-render the natural-language impact narrative now and stash
         # on the row so it survives the post-score cap/resort. Apply
@@ -3107,16 +3216,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         importance_pts: float = 0.0
         importance_notes: List[str] = []
         importance_thresholds_hit: List[str] = []
-        if (
-            weights.importance > 0
-            and getattr(src, "supports_importance", False)
-            and league_ctx is not None
-            and league_ctx.thresholds
-        ):
+        if done_n in shared_importance:
+            importance_pts, importance_notes, importance_thresholds_hit = shared_importance[done_n]
+        elif weights.importance > 0 and _importance_applies(src, league_ctx):
             try:
                 importance_pts, importance_notes, importance_thresholds_hit = (
                     compute_match_importance(
-                        src, g, league_ctx, n_sims=n_importance_sims,
+                        src, g, league_ctx, n_sims=PER_GAME_IMPORTANCE_SIMS,
                         favorites_in_league=[f["name"] for f in favs_with_standings],
                     )
                 )

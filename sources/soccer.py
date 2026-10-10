@@ -719,6 +719,10 @@ class SoccerSource(SportSource):
     # so the importance simulator can't run on them. The lazy cache
     # populates only for configs where LEAGUE_CONTEXTS has thresholds.
     supports_importance = True
+    # League-shape result model reads only strengths, never state, so the
+    # season can be shared across games (#230). KnockoutSoccerSource reads
+    # leg 1 from state and turns this back off.
+    shared_season_importance = True
 
     # Pre-season fallback per-team strength (rolling-window estimate has no
     # samples yet). 1.4 goals/match home and 1.1 away approximates the EPL
@@ -1447,6 +1451,10 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
     tie semantics; SoccerSource still backs fetch_upcoming, estimate_
     strengths, sport_prefix/label, and __init__.
     """
+
+    # sample_result reads leg 1's result from state to sample leg 2, so a
+    # mid-season draw differs from a first draw: per-game path only (#230).
+    shared_season_importance = False
 
     # Stage tuple ordered by depth (earlier rounds first). PLAYOFFS and
     # LAST_32 are both at depth 0: UEFA cup competitions use PLAYOFFS as
