@@ -22,7 +22,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, cast
 
 from . import naming
 
@@ -1347,22 +1347,7 @@ def compute_match_importance(
     if not league_ctx.thresholds:
         return 0.0, [], []
 
-    # Teams to query: the two playing teams plus favorites in this league
-    # who aren't already playing. Skipping the in-match favorites avoids
-    # double-counting (their leverage is already in the home/away queries).
-    teams_to_query: List[str] = [match.home, match.away]
-    in_match_lc = {match.home.lower(), match.away.lower()}
-    if favorites_in_league:
-        for fav in favorites_in_league:
-            if fav.lower() in in_match_lc:
-                continue
-            teams_to_query.append(fav)
-
-    # (team, outcome_label) query list: len(teams) × N bands.
-    queries: List[Tuple[str, str]] = []
-    for team in teams_to_query:
-        for _, label, _ in league_ctx.thresholds:
-            queries.append((team, label))
+    queries = importance_queries(match, league_ctx, favorites_in_league)
 
     # Chain routing (#53): if the source declares a cross-source chain
     # AND that chain is currently active (pre-tournament FD.org state
@@ -1390,6 +1375,72 @@ def compute_match_importance(
             source, match, queries, n_sims=n_sims, rng=rng,
         )
 
+    return importance_points(leverages, league_ctx)
+
+
+def compute_league_importance(
+    source: Any,
+    matches: Sequence[Any],
+    league_ctx: "LeagueContext",
+    n_sims: int = 2000,
+    rng: Optional[Any] = None,
+    favorites_by_match: Optional[Sequence[Optional[List[str]]]] = None,
+) -> List[Optional[Tuple[float, List[str], List[str]]]]:
+    """compute_match_importance for every scored match of ONE source at once,
+    from one shared set of simulated seasons (#230). Same queries, same
+    weights, same output shape per match.
+
+    Returns None for a match the shared path cannot answer (the source has
+    not opted into shared seasons, the league has no bands, or the match is
+    not in the source's remaining pool). The caller falls back to
+    compute_match_importance for those; None is never a zero."""
+    from .simulation import monte_carlo_importance_shared
+    n = len(matches)
+    if (
+        not n
+        or not getattr(source, "supports_importance", False)
+        or not getattr(source, "shared_season_importance", False)
+        or not league_ctx.thresholds
+    ):
+        return [None] * n
+    favs = list(favorites_by_match) if favorites_by_match is not None else [None] * n
+    queries = [importance_queries(m, league_ctx, f) for m, f in zip(matches, favs)]
+    leverages = monte_carlo_importance_shared(source, matches, queries, n_sims=n_sims, rng=rng)
+    return [importance_points(lv, league_ctx) if lv is not None else None for lv in leverages]
+
+
+def importance_queries(
+    match: Any,
+    league_ctx: "LeagueContext",
+    favorites_in_league: Optional[List[str]] = None,
+) -> List[Tuple[str, str]]:
+    """The (team, outcome_label) pairs importance is measured for: the two
+    playing teams plus every favorite in this league who isn't already
+    playing, each crossed with the league's outcome bands. Shared by the
+    per-game and shared-season paths so both ask the same questions."""
+    # Skipping the in-match favorites avoids double-counting (their leverage
+    # is already in the home/away queries).
+    teams_to_query: List[str] = [match.home, match.away]
+    in_match_lc = {match.home.lower(), match.away.lower()}
+    if favorites_in_league:
+        for fav in favorites_in_league:
+            if fav.lower() in in_match_lc:
+                continue
+            teams_to_query.append(fav)
+    return [
+        (team, label)
+        for team in teams_to_query
+        for _, label, _ in league_ctx.thresholds
+    ]
+
+
+def importance_points(
+    leverages: Dict[Tuple[str, str], float],
+    league_ctx: "LeagueContext",
+) -> Tuple[float, List[str], List[str]]:
+    """Turn `{(team, label): |tau_c|}` into compute_match_importance's
+    `(raw_points, notes, thresholds_hit)`: leverage x consequence weight,
+    summed, with one note per nonzero contribution. Shared by both paths."""
     # Map label → weight once so the contribution loop is single-pass.
     weight_by_label: Dict[str, float] = {
         label: weight for _, label, weight in league_ctx.thresholds

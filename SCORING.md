@@ -395,18 +395,33 @@ across the league (a Manchester United fan whose team isn't playing
 still cares about the title race between Liverpool and Arsenal). The
 EPG description shows the top 3 (team, outcome) leverage lines.
 
-### N_sims = 1000
+### Simulated seasons: 2000 per league, shared by every game in it
 
-Lahvička's original paper used 10,000 sims for academic-grade
-convergence. The plugin uses 1,000 because:
+Each league's remaining season is simulated `importance_seasons` times
+(default 2000) ONCE per refresh, and every scored game in that league
+reads its own result off those same seasons (#230). Each (game, team,
+outcome) query still gets its own contingency table; only the seasons
+are shared. Cost is per league, not per game.
 
-- Tau-c standard error scales as `1 / sqrt(N)`. Going from 1k → 10k
-  halves the SE but 10x's runtime.
-- The SE at 1k is already finer than the consequence-weight grid the
-  rankings sort by. Rankings stay stable.
-- 1k × 10 games per matchday × 2 competitions = 20k full-season
-  simulations per refresh, ~50ms per sim in pure-Python Poisson. Fits
-  comfortably in the daily-refresh budget.
+This replaced simulating the whole season again for every game, which
+cost games x sims x season and, on a full autumn slate (94 NHL, 227 NCAA
+soccer, 61 NCAAF games), ran past the 25-minute pipeline ceiling.
+Measured on that slate against a 2000-sims-per-game reference:
+
+| estimator | CPU | rank correlation | mean error (score pts) |
+| --- | --- | --- | --- |
+| old: 500 sims per game | 2212 s | 0.97 | 0.32 |
+| shared: 2000 per league | 125 s | 0.99 | 0.21 |
+
+Sharing is valid only for sources whose result model ignores the
+season state (league and points-based sources): the shared path samples
+each game in schedule order rather than first. Knockout sources that
+read leg 1 to sample leg 2, and the cross-source chain below, keep the
+per-game simulator; they cost almost nothing.
+
+Lahvička's original paper used 10,000 sims. Tau-c standard error scales
+as `1 / sqrt(N)`; at 2000 the noise sits below the consequence-weight
+grid the rankings sort by.
 
 
 ## Cross-source chains (the World Cup 2026 case)
