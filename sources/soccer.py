@@ -251,10 +251,11 @@ _PREV_SEASON_MATCHES_CACHE: Dict[str, List[Dict]] = {}
 # error into hundreds of paced, backed-off refetches and a timed-out refresh.
 _SEASON_FETCH_FAILURES: Dict[str, Tuple[int, str]] = {}
 
-# Attempts per competition per refresh before a failed season fetch stops being
-# retried. Two, not one: the first read happens early (head-to-head, #209), and
-# a 429 there is often gone by the time scoring needs the list. Each attempt
-# already includes _fd_get's own backoff retries.
+# Attempts before a failed season fetch stops being retried. Two, not one: the
+# first read happens early (head-to-head, #209), and a 429 there is often gone
+# by the time scoring needs the list; allow_scoring_retry() guarantees scoring
+# that second attempt however many early reads failed. Each attempt already
+# includes _fd_get's own backoff retries.
 _SEASON_FETCH_MAX_ATTEMPTS = 2
 
 
@@ -280,10 +281,22 @@ def _clear_fd_caches() -> None:
     _SEASON_FETCH_FAILURES.clear()
 
 
+def allow_scoring_retry() -> None:
+    """Give every competition whose season fetch failed exactly one more
+    attempt. plugin._action_refresh calls this as scoring begins, because the
+    retry the budget exists for is the one at scoring time: early reads (the
+    head-to-head read of every source sharing an fd_code, e.g. a World Cup's
+    group AND knockout sources) can otherwise spend both attempts before the
+    simulator ever asks, while football-data.org recovers in between."""
+    for code, (attempts, err) in list(_SEASON_FETCH_FAILURES.items()):
+        _SEASON_FETCH_FAILURES[code] = (min(attempts, _SEASON_FETCH_MAX_ATTEMPTS - 1), err)
+
+
 def season_fetch_failures() -> Dict[str, str]:
     """Competitions whose full-season fetch gave up this refresh, with the
-    last error. Their importance is scored as zero, so the refresh reports
-    them as a failed source instead of letting the zeros pass as real (#228)."""
+    last error. Their games' standings stakes were not simulated, so the
+    refresh reports them as a failed source instead of letting the missing
+    signal pass as a real zero (#228)."""
     return {
         code: err for code, (attempts, err) in _SEASON_FETCH_FAILURES.items()
         if attempts >= _SEASON_FETCH_MAX_ATTEMPTS

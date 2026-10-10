@@ -87,6 +87,41 @@ class TestRefreshReportsIt:
         assert report < write, "reported after the cache write, Show current state would never see it"
 
     def test_reported_entry_reads_as_a_failed_source(self, plugin):
-        entry = plugin._source_error_entry("ELC season data (importance scored 0)", "429")
+        entry = plugin._source_error_entry("ELC season fixtures (stakes not simulated)", "429")
         (problem,) = plugin._slate_problems([entry], [])
-        assert "1 source(s) failed to fetch (ELC season data (importance scored 0))" in problem
+        assert "1 source(s) failed to fetch (ELC season fixtures (stakes not simulated))" in problem
+
+
+class TestScoringGetsItsRetry:
+    def test_early_reads_cannot_spend_the_scoring_retry(self, monkeypatch):
+        # World Cup group + knockout sources share an fd_code; both early
+        # head-to-head reads can fail. Scoring must still get one attempt.
+        calls = []
+        monkeypatch.setattr(soccer, "_fd_get", _failing(calls))
+        soccer._fetch_season_matches_for_code("key", "WC")   # knockout source's early read
+        soccer._fetch_season_matches_for_code("key", "WC")   # group source's early read
+        assert len(calls) == 2
+        soccer.allow_scoring_retry()
+
+        class Resp:
+            def json(self):
+                return {"matches": [{"id": 7}]}
+        monkeypatch.setattr(soccer, "_fd_get", lambda url, key, **kw: (calls.append(url), Resp())[1])
+        assert soccer._fetch_season_matches_for_code("key", "WC") == [{"id": 7}]
+        assert len(calls) == 3
+        assert soccer.season_fetch_failures() == {}
+
+    def test_the_scoring_retry_is_exactly_one(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(soccer, "_fd_get", _failing(calls))
+        for _ in range(3):
+            soccer._fetch_season_matches_for_code("key", "WC")
+        soccer.allow_scoring_retry()
+        for _ in range(40):
+            soccer._fetch_season_matches_for_code("key", "WC")
+        assert len(calls) == 3   # two early, ONE at scoring, none per season
+        assert set(soccer.season_fetch_failures()) == {"WC"}
+
+    def test_refresh_grants_it_before_the_scoring_loop(self, plugin):
+        src = inspect.getsource(plugin._action_refresh)
+        assert src.index("_soccer_allow_scoring_retry()") < src.index("for done_n, (g, src) in enumerate(")

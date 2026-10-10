@@ -3164,6 +3164,10 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # of the fetch, which sends whoever reads it to the wrong phase.
     score_started = time.monotonic()
     logger.info("[ranked_matchups] scoring %d games", len(all_games))
+    # Scoring is when the season lists matter; a fetch that failed during the
+    # early reads gets its one retry here (#228), BEFORE the shared importance
+    # run below, which is the first thing to read them.
+    _soccer_allow_scoring_retry()
     # Importance for every game whose source can share simulated seasons,
     # computed per league up front (#230); the loop below falls back to the
     # per-game simulator only for the rest (knockouts, active group->knockout
@@ -3434,11 +3438,12 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # all: it still applies exactly the list it is given.
     applied_payload, bench_payload = _split_applied(games_payload, max_games)
 
-    # A competition whose season list could not be fetched scored zero
-    # importance for every game; report it like a failed source (#228).
-    # Before the cache write, so Show current state sees it too.
+    # A competition whose season list could not be fetched had no standings
+    # stakes simulated for its games; report it like a failed source (#228).
+    # "Not simulated", not "scored 0": a World Cup knockout tie still gets its
+    # round premium. Before the cache write, so Show current state sees it.
     for code, err in _soccer_season_fetch_failures().items():
-        src_summary.append(_source_error_entry(f"{code} season data (importance scored 0)", err))
+        src_summary.append(_source_error_entry(f"{code} season fixtures (stakes not simulated)", err))
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
@@ -6494,6 +6499,11 @@ def _source_error_entry(label: str, err: Any) -> str:
 def _soccer_season_fetch_failures() -> Dict[str, str]:
     from .sources.soccer import season_fetch_failures
     return season_fetch_failures()
+
+
+def _soccer_allow_scoring_retry() -> None:
+    from .sources.soccer import allow_scoring_retry
+    allow_scoring_retry()
 
 
 def _is_playable(game: Dict[str, Any]) -> bool:
