@@ -585,7 +585,7 @@ def run_m3u_rematch_pipeline(settings: Dict[str, Any]) -> bool:
     """Reaper-loop entry point for the post-M3U-refresh rematch (see
     plugin._maybe_rematch_after_m3u). The same lock/subprocess path as the
     scheduler, under its own kind so Show current state names why it ran.
-    A lost lock is NOT recorded as a skip: the caller releases its claim and
+    A lost lock is NOT recorded as a skip: the caller lifts its cooldown and
     a later tick tries again, and the run holding the lock is itself a
     refresh that will usually make this one unnecessary."""
     return _run_under_lock(

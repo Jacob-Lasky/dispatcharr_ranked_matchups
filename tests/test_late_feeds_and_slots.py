@@ -79,6 +79,10 @@ def _sleeps(monkeypatch, plugin, *, stop_after=None):
 
     def fake(stop_event, timeout):
         calls.append(timeout)
+        # The fake does not advance the clock, so a retry loop that ignores its
+        # own exit conditions would spin forever: fail it instead of hanging.
+        if len(calls) > 50:
+            raise AssertionError("retry loop did not stop")
         return stop_after is not None and len(calls) >= stop_after
 
     monkeypatch.setattr(plugin, "_scheduler_sleep", fake)
@@ -114,6 +118,14 @@ def _now_slot():
     return datetime.now(UTC).replace(microsecond=0) - timedelta(seconds=1)
 
 
+def _only(slot):
+    """A schedule holding just this slot's time of day, so the next slot is a
+    day away and the retry deadline is the 30-minute window whatever the wall
+    clock says. (TIMES would put the next slot inside the window near 4, 10,
+    13, 16 or 19 UTC and make these tests fail at those hours.)"""
+    return [(slot.hour, slot.minute)]
+
+
 class TestScheduledSlot:
     def test_lock_held_at_the_slot_is_retried_not_skipped(self, plugin, store, monkeypatch):
         # WITNESS: before the fix the scheduler ran once, lost the lock to the
@@ -121,8 +133,9 @@ class TestScheduledSlot:
         attempts = _pipeline(monkeypatch, plugin, [False, True])
         sleeps = _sleeps(monkeypatch, plugin)
         skips = _skips(monkeypatch, plugin)
+        slot = _now_slot()
         stopped = plugin._run_scheduled_slot(
-            _Plugin(SETTINGS), _Stop(), SETTINGS, _now_slot(), TIMES, UTC)
+            _Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
         assert stopped is False
         assert len(attempts) == 2
         assert sleeps == [60]
@@ -137,16 +150,16 @@ class TestScheduledSlot:
         _sleeps(monkeypatch, plugin)
         slot = _now_slot()
         for _worker in range(8):
-            plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, TIMES, UTC)
+            plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
         assert len(attempts) == 1
 
     def test_next_slot_is_claimable_again(self, plugin, store, monkeypatch):
         attempts = _pipeline(monkeypatch, plugin, [True])
         _sleeps(monkeypatch, plugin)
         slot = _now_slot()
-        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, TIMES, UTC)
-        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS,
-                                   slot + timedelta(hours=3), TIMES, UTC)
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        later = slot + timedelta(hours=3)
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, later, _only(later), UTC)
         assert len(attempts) == 2
 
     def test_gives_up_at_the_deadline_and_records_one_skip(self, plugin, store, monkeypatch):
@@ -155,7 +168,7 @@ class TestScheduledSlot:
         skips = _skips(monkeypatch, plugin)
         # 29m30s into the 30-minute window: one attempt, no room for another.
         slot = datetime.now(UTC) - timedelta(minutes=29, seconds=30)
-        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, TIMES, UTC)
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
         assert len(attempts) == 1
         assert sleeps == []
         assert skips == ["scheduled_auto_pipeline"]
@@ -170,18 +183,54 @@ class TestScheduledSlot:
     def test_stop_while_waiting_exits_the_loop(self, plugin, store, monkeypatch):
         _pipeline(monkeypatch, plugin, [False])
         _sleeps(monkeypatch, plugin, stop_after=1)
+        slot = _now_slot()
         assert plugin._run_scheduled_slot(
-            _Plugin(SETTINGS), _Stop(), SETTINGS, _now_slot(), TIMES, UTC) is True
+            _Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC) is True
 
     def test_turning_auto_refresh_off_while_waiting_cancels(self, plugin, store, monkeypatch):
         attempts = _pipeline(monkeypatch, plugin, [False, True])
         _sleeps(monkeypatch, plugin)
         live = _Plugin({**SETTINGS, "auto_refresh_enabled": False})
-        plugin._run_scheduled_slot(live, _Stop(), SETTINGS, _now_slot(), TIMES, UTC)
+        slot = _now_slot()
+        plugin._run_scheduled_slot(live, _Stop(), SETTINGS, slot, _only(slot), UTC)
         assert len(attempts) == 1
 
-    def test_redis_down_falls_back_to_the_lock_alone(self, plugin, redis_down):
-        assert plugin._claim_scheduled_slot(_now_slot()) is True
+    def test_redis_down_makes_one_attempt_and_no_retries(self, plugin, redis_down, monkeypatch):
+        # Every worker is an "owner" when the claim cannot be checked. If they
+        # all retried, Redis returning mid-window would let each take the lock
+        # in turn: eight full pipelines.
+        assert plugin._claim_scheduled_slot(_now_slot()) == plugin._SLOT_UNKNOWN
+        attempts = _pipeline(monkeypatch, plugin, [False])
+        sleeps = _sleeps(monkeypatch, plugin)
+        slot = _now_slot()
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert attempts == [True]          # one attempt, recording its own skip
+        assert sleeps == []
+
+    def test_a_late_wake_does_not_start_past_the_deadline(self, plugin, store, monkeypatch):
+        attempts = _pipeline(monkeypatch, plugin, [True])
+        skips = _skips(monkeypatch, plugin)
+        slot = datetime.now(UTC) - timedelta(minutes=31)
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert attempts == []
+        assert skips == ["scheduled_auto_pipeline"]
+
+    def test_next_fire_time_on_the_fall_back_night(self, plugin):
+        # 2026-11-01, America/New_York falls back at 02:00 EDT. At 01:00 EST
+        # (06:00 UTC) the 01:30 EDT slot (05:30 UTC) has ALREADY passed. Wall-time
+        # comparison picked it again, fired immediately and re-ran the slot.
+        from zoneinfo import ZoneInfo
+        ny = ZoneInfo("America/New_York")
+        now = datetime(2026, 11, 1, 6, 0, tzinfo=UTC).astimezone(ny)
+        nxt = plugin._next_fire_time([(1, 30), (4, 0)], ny, now=now)
+        assert nxt.astimezone(UTC) == datetime(2026, 11, 1, 9, 0, tzinfo=UTC)
+
+    def test_retry_window_is_elapsed_time_across_fall_back(self, plugin):
+        from zoneinfo import ZoneInfo
+        ny = ZoneInfo("America/New_York")
+        slot = datetime(2026, 11, 1, 1, 30, tzinfo=ny)          # 01:30 EDT = 05:30 UTC
+        assert plugin._scheduled_retry_deadline(slot, [(1, 30), (6, 0)], ny) == \
+            datetime(2026, 11, 1, 6, 0, tzinfo=UTC)              # 30 real minutes
 
     def test_scheduler_loop_goes_through_the_slot_runner(self, plugin):
         # The loop must not call run_scheduled_pipeline directly any more: a
@@ -192,8 +241,9 @@ class TestScheduledSlot:
         assert "_run_scheduled_slot(plugin_ref, stop_event, settings, target, times, tz)" in body
 
 
-def _cache(refreshed, games):
-    return {"refreshed_at": refreshed.isoformat(), "games": games}
+def _cache(matched, games, refreshed=None):
+    return {"matched_at": matched.isoformat(),
+            "refreshed_at": (refreshed or matched).isoformat(), "games": games}
 
 
 def _game(start):
@@ -229,17 +279,40 @@ class TestRematchAfterM3U:
         _state, runs = rematch
         assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW) is True
         assert len(runs) == 1
-        # Every other worker's reaper, and this one's next tick: claimed.
+        # Every other worker's reaper, and this one's next tick: cooled down.
         for _ in range(8):
             assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW) is False
         assert len(runs) == 1
 
-    def test_a_later_m3u_refresh_runs_again(self, plugin, rematch):
+    def test_a_failing_pipeline_is_not_rerun_for_every_m3u_refresh(self, plugin, store, rematch):
+        # The run "ran" but failed, so the cache never moved past the M3U
+        # refresh. An M3U refreshing every five minutes must not start a full
+        # failing pipeline each time: the cooldown holds it to one per hour.
         state, runs = rematch
         plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW)
-        state["m3u"] = M3U + timedelta(hours=1)
-        plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW + timedelta(hours=1))
+        for i in range(1, 12):
+            state["m3u"] = M3U + timedelta(minutes=5 * i)
+            plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW + timedelta(minutes=5 * i))
+        assert len(runs) == 1
+        store.pop(plugin._REMATCH_COOLDOWN_KEY)                  # the hour is up
+        assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW + timedelta(hours=1))
         assert len(runs) == 2
+
+    def test_m3u_refresh_during_matching_is_not_missed(self, plugin, rematch):
+        # Matching read the streams at 11:40, the M3U finished at 11:41, the
+        # cache was written at 11:42. Against refreshed_at the M3U looks older
+        # and its feeds would never be rematched.
+        state, runs = rematch
+        state["cache"] = _cache(REFRESHED - timedelta(minutes=2), [_game(KICKOFF)],
+                                refreshed=REFRESHED)
+        state["m3u"] = REFRESHED - timedelta(minutes=1)
+        assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW) is True
+        assert len(runs) == 1
+
+    def test_cache_from_before_matched_at_falls_back_to_refreshed_at(self, plugin, rematch):
+        state, runs = rematch
+        state["cache"] = {"refreshed_at": REFRESHED.isoformat(), "games": [_game(KICKOFF)]}
+        assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW) is True
 
     def test_m3u_older_than_our_refresh_does_nothing(self, plugin, rematch):
         state, runs = rematch
@@ -265,13 +338,13 @@ class TestRematchAfterM3U:
         assert plugin._maybe_rematch_after_m3u({"auto_refresh_enabled": False}, now=NOW) is False
         assert runs == []
 
-    def test_fresh_cache_waits_rather_than_drops(self, plugin, rematch):
+    def test_a_feed_just_after_our_refresh_is_not_held_back(self, plugin, rematch):
+        # Refresh at 12:00, feed at 12:01, kickoff 12:02: rematch on the next
+        # tick, not half an hour later.
         state, runs = rematch
-        state["cache"] = _cache(NOW - timedelta(minutes=10), [_game(KICKOFF)])
-        state["m3u"] = NOW - timedelta(minutes=5)
-        assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW) is False
-        assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW + timedelta(minutes=25)) is True
-        assert len(runs) == 1
+        state["cache"] = _cache(NOW - timedelta(minutes=2), [_game(NOW)])
+        state["m3u"] = NOW - timedelta(minutes=1)
+        assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW) is True
 
     def test_lock_held_gives_the_claim_back(self, plugin, rematch):
         state, runs = rematch
@@ -285,6 +358,7 @@ class TestRematchAfterM3U:
         state, runs = rematch
         state["cache"] = {"games": [_game(KICKOFF)]}
         assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW) is False
+        assert runs == []
         assert runs == []
 
     def test_redis_down_does_not_run(self, plugin, monkeypatch, redis_down):

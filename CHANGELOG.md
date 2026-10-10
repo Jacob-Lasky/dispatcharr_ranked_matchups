@@ -15,19 +15,23 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   refresh, and the curated channel stayed an empty placeholder that answered
   503 when tuned. The reaper loop now notices when an active M3U account has
   refreshed after the plugin's last refresh while a curated game is live or
-  starts within 6 hours, and runs Refresh + apply once for that M3U refresh
-  (requires auto-refresh to be on). Show current state labels it "Refresh +
-  apply after an M3U update".
+  starts within 6 hours, and runs Refresh + apply (requires auto-refresh to be
+  on; at most once an hour across all workers, so a failing refresh is not
+  re-run on every M3U refresh). Show current state labels it "Refresh + apply
+  after an M3U update".
 - **A scheduled run no longer vanishes when something else holds the run lock
   at that moment.** Every web worker runs a scheduler and they all fire
   together; when the reaper's re-apply held the lock at 13:00:00 for eight
   seconds, every copy logged "skipping" and the next run was 16:00. One
   worker now claims each scheduled time and waits for the lock (up to 30
   minutes, never into the next scheduled time), and only that one runs it.
-- **Diagnose explains a late feed instead of calling it a bug.** When a
-  channel or stream names the game but an M3U refresh landed after the
-  plugin's last refresh, the verdict says when the feed arrived and to click
+- **Diagnose explains a late feed instead of calling it a bug.** When the
+  channel or stream that names the game appeared or was renamed after the
+  plugin last matched, the verdict says when it appeared and to click
   Refresh + apply now, rather than "unexpected; please send us this".
+- The scheduler's clock maths is now DST-safe: on the night clocks fall back
+  it could pick a slot that had already run and fire it again, and its sleep
+  and retry windows were wall-clock rather than elapsed time.
 - The pipeline subprocess no longer starts its own scheduler and reaper
   threads (its Django setup discovers plugins, which used to start a second
   copy of both inside every run).
