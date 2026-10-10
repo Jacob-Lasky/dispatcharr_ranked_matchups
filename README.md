@@ -245,7 +245,7 @@ own name must identify the matchup or event for the plugin to find it.
 | `refresh` | Pull upcoming games from each enabled sport, score each, match them to EPG listings, channels and streams, save curated list. | `cache.json` |
 | `apply` | Create / update virtual channels in the target group, link matched streams, write `ProgramData` descriptions, schedule or cancel recordings for your [recorded teams](#recording-your-teams), delete stale ones. | DB (honors `dry_run`) |
 | | *Waits for the result and shows the real summary. Runs in a separate process so it cannot stall the web worker, which costs a second or two of startup.* | |
-| `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand. | Both |
+| `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand; and it also runs by itself when an M3U update lands near a curated game's kickoff (see [When a feed arrives after a refresh](#when-a-feed-arrives-after-a-refresh)). | Both |
 | `show_status` | Print the current curated list with per-game score breakdown, and end with a verdict on the last background run (see [Did the last run work?](#did-the-last-run-work)). No writes. | — |
 | `preview_names` | Render the channel-name template against sample games so you can check the layout before applying. Reports template errors and lists every variable. No writes. | — |
 | `reap_now` | Drop games that finished more than `remove_finished_after_minutes` ago and backfill from the bench. Re-fetches nothing. | `cache.json` + DB |
@@ -269,7 +269,16 @@ Its last line is always the verdict:
   above the previous run's verdict, so the last line is never mistaken for an
   answer to the click you just made.
 - `NOTE: ... requested <time> did not run: another run held the lock, or Redis
-  was unreachable.`
+  was unreachable.` A *scheduled* run no longer gives up at the first busy
+  moment: one worker takes ownership of that scheduled time and keeps waiting
+  for the lock for up to half an hour (never into the next scheduled time), so
+  this line means the lock stayed held the whole while, not that something else
+  happened to hold it for the few seconds the clock struck.
+
+The run is named by why it happened — `Refresh + apply` (the button),
+`Scheduled refresh + apply` (a time from **Scheduled times**), `Refresh + apply
+after an M3U update` (see [When a feed arrives after a
+refresh](#when-a-feed-arrives-after-a-refresh)), or `Refresh`.
 
 Above the verdict come warnings about the data itself, the two failures a run
 can otherwise complete "ok" through: **sources that failed to fetch** (named,
@@ -394,6 +403,34 @@ Those still attach as fallbacks; they just do not become the primary stream.
 
 Games with no match above the placeholder threshold still get a channel; see
 [Placeholder channels](#placeholder-channels).
+
+### When a feed arrives after a refresh
+
+Matching is a snapshot: it reads your channels and streams at the moment a
+refresh runs. Providers do not work to that clock. Many reuse a fixed set of
+event slots — `ESPN UNLTD 052`, `NCAAF 009` — and rename each one per game, so
+the slot carrying tonight's kickoff may have named something else when the
+plugin last looked. With an M3U account on a long refresh interval, that rename
+can land after your last scheduled refresh and the matchup channel sits there
+with no stream until the next one, hours later.
+
+So the plugin watches for it. When an M3U account refreshes **after** the
+plugin's last match, and a curated game is on now or starts within six hours,
+it runs `refresh` + `apply` once on its own to pick up the new or renamed
+feeds. It shows up in **Show current state** as `Refresh + apply after an M3U
+update`. Three things to know:
+
+- It needs **Auto-refresh + apply on schedule** turned on. If you have switched
+  background runs off, the plugin does not start one behind your back.
+- It runs at most once per M3U update, and then holds off for 15 minutes (an
+  hour if the run failed), so a provider refreshing every few minutes cannot
+  make the plugin refresh every few minutes.
+- A refresh takes minutes, so a feed posted at kickoff is attached shortly
+  after kickoff, not before it.
+
+**Diagnose matching** knows about this too: if the channel or stream naming a
+game only appeared after the last match, it tells you when the feed showed up
+and to click **Refresh + apply now**, rather than reporting a matching bug.
 
 ## How channels are created
 
@@ -588,7 +625,9 @@ no Dispatcharr channel currently has an EPG entry for the game**. The
 description marks it `[NOTE] No EPG match found yet — this is a
 placeholder channel`. When the provider EPG eventually publishes the
 broadcast info, the next refresh adds streams to the virtual channel and it
-becomes playable.
+becomes playable — and if the feed turns up close to kickoff, the plugin
+re-matches on its own rather than waiting for that refresh; see [When a feed
+arrives after a refresh](#when-a-feed-arrives-after-a-refresh).
 
 This is what surfaces big upcoming games (e.g., Wrexham vs Middlesbrough on
 Saturday) before the EPG catches up — typically UK soccer EPG is published

@@ -71,10 +71,10 @@ downstream is sport-agnostic.
 | `logos.py` | TheSportsDB matchup-thumbnail resolver. Looks up the curated game via `searchevents.php` (team-name pair, date-tolerance ±2 days, sport-hint disambiguation), downloads the 960x540 graphic to `/data/logos/ranked_matchups_<sha1>.jpg`, and registers a `Logo` row pointing at it. Persistent per-marker cache (`sportsdb_thumb_cache.json`, 14d positive TTL / 1d negative TTL) means apply only HTTP-probes each fixture once. Field-event sources (`away=="Field"`) and dry_run short-circuit the lookup. Stale-file sweep at the end of each apply prunes JPGs whose marker isn't in the live set. Also resolves the league/tournament BADGE fallback (#102): `SPORTSDB_LEAGUE_IDS` (`sport_prefix` -> verified league id), `league_id_for`, `resolve_league_badge_url` (`lookupleague.php` -> `strBadge`), cached as `ranked_matchups_badge_<id>.png` (distinct prefix the sweep skips). |
 
 State (gitignored, lives in `<plugin_dir>/`):
-- `cache.json` — last refresh result (curated game list with score breakdowns)
+- `cache.json` — last refresh result (curated game list with score breakdowns). Carries TWO timestamps: `refreshed_at` (the cache write) and `matched_at` (stamped as matching BEGAN, before scoring and the EPG/stream sweep). `_match_snapshot_time` reads `matched_at` and falls back to `refreshed_at` for a pre-upgrade cache; anything asking "were these matches taken before X?" must use it, because an M3U refresh that lands DURING a long refresh is older than `refreshed_at` and would never be noticed
 - `recording_stops.json` — planned stops of RUNNING recordings (#216 phase C): written whole by apply under the scheduler lock, only READ by the live handoff timer in `_reaper_loop` (`_run_due_stops`), so the timer never races apply
 - `recordings_state.json` — auto-record bookkeeping (#216): what the plugin last wrote for each recording it created (so a user edit is recognised and left alone), and tombstones for ones the user deleted so they are not re-created
-- `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
+- `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict. `kind` is one of `RUN_KIND_LABELS` (`auto_pipeline`, `scheduled_auto_pipeline`, `m3u_rematch`, `refresh`) — the label is what names WHY a run happened, so a new background trigger needs an entry there or Show current state cannot explain itself. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
 - `cfbd_api_key`, `football_data_api_key`, `odds_api_key`, `anthropic_api_key` — file fallback when settings field is blank.
 
 ## How channels are produced
@@ -293,13 +293,73 @@ has that asymmetry.
 reaper (removes finished games between refreshes, #196). They have SEPARATE
 reload-stable registries and must both be torn down in `stop()`.
 
-The reaper loop does double duty since #216 phase C: it also runs the live
-handoff timer (`_run_due_stops`). So it must NOT early-return when reaping is
-off — it sleeps until whichever comes first, the next expiry, the next planned
-stop (`next_stop_delay`), or `_HANDOFF_RECHECK_SECONDS`, runs the due stops on
-every wake, and only calls `_action_reap_locked` when it woke for a reap.
-Every worker runs this loop; each stop is a locked, idempotent write, so
-exactly one of them stops a given recording.
+The reaper loop does triple duty: besides reaping it runs the live handoff
+timer (`_run_due_stops`, #216 phase C) and the post-M3U rematch check
+(`_maybe_rematch_after_m3u`, see below). So it must NOT early-return when
+reaping is off — it sleeps until whichever comes first, the next expiry, the
+next planned stop (`next_stop_delay`), or `_HANDOFF_RECHECK_SECONDS`, and on
+EVERY wake runs the due stops and the rematch check, **above** the
+`reap_delay` gate that `continue`s past non-reap ticks; only a tick that woke
+for a reap calls `_action_reap_locked`. Anything put below that gate runs only
+on the rare tick that also reaps. Every worker runs this loop; each stop is a
+locked, idempotent write, so exactly one of them stops a given recording.
+
+**Matching is a SNAPSHOT, and providers rename their feeds on their own
+clock.** Many M3Us reuse fixed event slots ("ESPN UNLTD 052") and rename each
+per game, so a slot that named something else at refresh time can name
+tonight's game after the next M3U refresh — and between scheduled refreshes
+nothing noticed, leaving a curated channel as a zero-stream placeholder that
+answers 503 when tuned (measured 2026-10-10: M3U renamed at 12:22, our refresh
+was 11:42, next scheduled run 16:00). `_maybe_rematch_after_m3u` compares
+`_latest_m3u_refresh()` (active `M3UAccount.updated_at`, which Dispatcharr sets
+only on a successful refresh — NOT `status`, which flips mid-refresh, and NOT
+`Stream.updated_at`) against `_match_snapshot_time(cache)`, and when a curated
+game is inside `_games_in_rematch_window` (live up to 4h back, or starting
+within 6h) runs the FULL auto_pipeline via `tasks.run_m3u_rematch_pipeline`.
+Three things hold it down and each is load-bearing: it is gated on
+`auto_refresh_enabled` (a user who turned background runs off gets none); ONE
+Redis cooldown key for all workers and all M3U refreshes
+(`_REMATCH_COOLDOWN_KEY`), shortened to 15 min after a success so a second late
+feed is picked up promptly and left at an hour after a failure so a broken
+pipeline is not re-run on every M3U refresh — do NOT key it per M3U refresh
+time, an M3U refreshing every few minutes would then start a failing pipeline
+each time; and Redis unreachable means no run at all, since this is destructive
+work the schedule still covers. A lost run lock is not a failure: the cooldown
+is deleted so a later tick retries, and the holder is usually a refresh that
+makes this one unnecessary.
+
+**A scheduled slot is CLAIMED by one worker, which then waits for the lock.**
+Every uwsgi worker runs its own scheduler and they all fire at the same second.
+Before `_run_scheduled_slot` each fired once, the cross-worker lock let one
+through, and the rest logged "skipping" — fine until something ELSE held the
+lock at that second (the reaper's re-apply, a manual run), at which point every
+copy skipped and the slot was lost until the next one hours later. Now
+`_claim_scheduled_slot` does a Redis `SET NX` keyed by the slot time and only
+the winner retries (`_SCHEDULED_RETRY_SECONDS` apart, until
+`_scheduled_retry_deadline`: the 30-minute window or one interval before the
+NEXT slot, whichever is sooner). The CLAIM, not the lock, is what stops the
+other seven each running the pipeline once the lock frees — dropping it and
+retrying everywhere runs the pipeline eight times back to back. When Redis is
+unreachable (`_SLOT_UNKNOWN`) every worker is an "owner", so that path makes
+exactly ONE attempt and records the skip, never retries. Per-attempt losses are
+not recorded as skips (`run_scheduled_pipeline(record_skip=False)`); the owner
+calls `tasks.record_skipped_run` once when it gives up.
+
+**Zoned datetime arithmetic is WALL-CLOCK arithmetic.** Two datetimes sharing
+one `ZoneInfo` compare and subtract by wall time, so on a fall-back night
+`_next_fire_time` picked a slot that had already run and fired it again, and a
+30-minute retry window became 90. Every comparison, sleep length and deadline
+in the scheduler converts to UTC first (`_next_fire_time`, `_scheduler_loop`'s
+`sleep_s`, `_scheduled_retry_deadline`). Anything new that does clock maths on
+the user's `local_timezone` has the same hazard.
+
+**No threads in the pipeline child.** The subprocess runs `django.setup()`,
+which discovers plugins and builds a `Plugin` — so every pipeline run used to
+start a second scheduler and reaper inside itself (visible in the forwarded
+child log as "scheduler thread started (pid=<child>)"), extra actors that could
+fire a schedule or a handoff from inside a run. `tasks.run_pipeline_subprocess`
+sets `PIPELINE_CHILD_ENV=1` and `Plugin.__init__` returns before
+`_start_reaper()` when it sees it.
 
 **The trap that already bit once: `_start_reaper()` must not sit behind the
 scheduler's early return.** `__init__` returns early when a live scheduler is
@@ -318,10 +378,12 @@ reads settings at the top of the loop to work out WHEN to fire, then sleeps
 until the next `scheduled_times` slot — hours. It must re-read
 (`plugin_ref.get_current_settings()`, and re-check `auto_refresh_enabled`)
 AFTER `_scheduler_sleep` returns and before handing settings to
-`tasks.run_scheduled_pipeline`. Measured 2026-09-26: Recorded teams added at
+`_run_scheduled_slot`. Measured 2026-09-26: Recorded teams added at
 5:48 PM were invisible to the 7 PM run, which then cancelled a scheduled
 recording. Anything else that sleeps and then acts on a snapshot has the same
-hazard.
+hazard — including `_run_scheduled_slot`'s own retry wait, which re-reads
+settings and bails after each `_scheduler_sleep` so turning auto-refresh off
+while a slot is waiting for the lock cancels it.
 
 ### cache.json has TWO lists: `games` and `bench`
 
@@ -548,12 +610,16 @@ stay in agreement with that one.
   result dict, so before `last_run.json` a failure left no trace outside the
   container log and **Show current state** served the last GOOD cache (or
   "Cache empty. Run refresh.") as if all were well. Four pieces hold the
-  answer together and each has a trap: `_record_last_run` / `_record_skip`
+  answer together and each has a trap: `_record_last_run` / `record_skipped_run`
   run inside `finally` **ahead of** the inflight clear and the lock release,
   so neither may ever raise (hence `_as_int` and the blanket `except`) or a
   corrupt record wedges every later run until the lock TTL; a skipped request
   (lock held / Redis down) writes only `skipped_*` and never a `status`,
-  because it did not run and must not overwrite the real verdict; the
+  because it did not run and must not overwrite the real verdict — and a
+  caller that will RETRY the lock passes `record_skip=False` and calls
+  `record_skipped_run` itself only once it gives up, since `_run_under_lock`'s
+  bool return ("did the work run?") is what a retry loop steers on and a lock
+  that frees a minute later must not leave a stale "did not run" note; the
   per-writer temp name in `_write_last_run` exists because refresh fails open
   when Redis is down, so two workers can write at once; and `_run_health_lines`
   orders the lines data warnings → config notices → verdict LAST, with a
@@ -593,6 +659,22 @@ stay in agreement with that one.
   `_TIMEOUT_LOG_TAIL_LINES` and names the last step reached — that tail is the
   only evidence of where the 1500s ceiling hit; a COMPLETED run still forwards
   every line.
+- **A name that matches NOW may not have existed when we matched, and
+  Diagnose must say so.** `_action_diagnose` reads the live DB while the
+  verdict it explains came from the cached match, so a feed that arrived (or a
+  reused slot renamed) after the last refresh looked like a matcher bug and
+  Diagnose told the user "unexpected; please send us this". `_late_feed_note`
+  replaces that verdict when `_candidate_changed_at` is later than
+  `_match_snapshot_time`. Two deliberate choices there: it takes the OLDEST
+  candidate, not the newest — if any one of them already named the game at
+  match time, the matcher saw it and missed it, and that IS the bug to report,
+  however many feeds turned up afterwards — and a candidate with no known time
+  makes the whole answer `None`, because it could have been there all along.
+  The per-candidate times are `Stream.updated_at` (an M3U refresh bumps it only
+  for streams whose content changed, so a renamed slot carries its rename time)
+  and `Channel.created_at` — never `Channel.updated_at`, which any save bumps,
+  an EPG assignment or a profile change included. The whole note is wrapped in
+  a `try`: a diagnostic must never raise.
 - **Postgres connection pool**: long-running plugin code can exhaust the
   default Postgres connection pool. Monitor with `SELECT count(*) FROM
   pg_stat_activity` in the Dispatcharr container if you add worker-heavy
@@ -688,6 +770,16 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   (#228): the season list the importance simulator replays is retried at most
   twice per refresh (one of them guaranteed to scoring), and a competition that
   gives up is reported as a failed source, "stakes not simulated"
+- Feeds that arrive between refreshes are picked up: when an active M3U account
+  refreshes after our matches were taken and a curated game is live or starts
+  within 6 hours, the reaper loop runs Refresh + apply once
+  (`_maybe_rematch_after_m3u`, gated on auto-refresh, one run per cooldown
+  across all workers). Show current state names it "Refresh + apply after an
+  M3U update"; Diagnose explains a late feed instead of calling it a bug
+- A scheduled time is no longer lost when something else holds the run lock at
+  that second: one worker claims the slot and retries the lock up to 30 minutes
+  (never into the next slot). Scheduler clock maths is DST-safe, and the
+  pipeline subprocess starts no scheduler or reaper of its own
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)
