@@ -245,6 +245,17 @@ def _fd_get(
 _TIER_FIXTURES_CACHE: "Optional[Tuple[Tuple[str, str, str], Dict[str, List[Dict]]]]" = None
 _SEASON_MATCHES_CACHE: Dict[str, List[Dict]] = {}
 _PREV_SEASON_MATCHES_CACHE: Dict[str, List[Dict]] = {}
+# Failed full-season fetches this refresh: fd_code -> (attempts, last error).
+# Bounds the retries (#228). The importance simulator reads the season list
+# inside its per-season loop, so an UNbounded retry turned one transient FD.org
+# error into hundreds of paced, backed-off refetches and a timed-out refresh.
+_SEASON_FETCH_FAILURES: Dict[str, Tuple[int, str]] = {}
+
+# Attempts per competition per refresh before a failed season fetch stops being
+# retried. Two, not one: the first read happens early (head-to-head, #209), and
+# a 429 there is often gone by the time scoring needs the list. Each attempt
+# already includes _fd_get's own backoff retries.
+_SEASON_FETCH_MAX_ATTEMPTS = 2
 
 
 # FD.org's /v4/matches endpoint caps each call's window at 10 days
@@ -266,6 +277,17 @@ def _clear_fd_caches() -> None:
     _TIER_FIXTURES_CACHE = None
     _SEASON_MATCHES_CACHE.clear()
     _PREV_SEASON_MATCHES_CACHE.clear()
+    _SEASON_FETCH_FAILURES.clear()
+
+
+def season_fetch_failures() -> Dict[str, str]:
+    """Competitions whose full-season fetch gave up this refresh, with the
+    last error. Their importance is scored as zero, so the refresh reports
+    them as a failed source instead of letting the zeros pass as real (#228)."""
+    return {
+        code: err for code, (attempts, err) in _SEASON_FETCH_FAILURES.items()
+        if attempts >= _SEASON_FETCH_MAX_ATTEMPTS
+    }
 
 
 def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dict]]:
@@ -362,19 +384,38 @@ def _fetch_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[Dict]:
         return _SEASON_MATCHES_CACHE[fd_code]
     if not fd_api_key:
         return []
+    attempts, _last = _SEASON_FETCH_FAILURES.get(fd_code, (0, ""))
+    if attempts >= _SEASON_FETCH_MAX_ATTEMPTS:
+        # Given up for this refresh: no network, no backoff sleep. Reported by
+        # season_fetch_failures(), so the resulting zeros are not silent.
+        return []
     try:
         r = _fd_get(f"{FD_BASE}/competitions/{fd_code}/matches", fd_api_key)
         data = r.json()
     except Exception as e:
-        logger.warning("[soccer:%s] all-matches fetch failed: %s", fd_code, e)
-        # DO NOT cache the failure. This list feeds the Monte Carlo importance
-        # SIMULATOR, and since #209 it is also fetched earlier in the refresh
-        # for head-to-head. Caching [] on a transient 429 would hand the
-        # scorer an empty season it never asked for: importance would read the
-        # cached failure instead of retrying, `initial_state` would have no
-        # teams, and every game in that competition would silently score zero
-        # importance. Same rule the sibling CFBD fetcher states outright
-        # ("DO NOT cache a failure") in sources/ncaaf.py::_fetch_raw_season.
+        attempts += 1
+        _SEASON_FETCH_FAILURES[fd_code] = (attempts, str(e))
+        logger.warning(
+            "[soccer:%s] all-matches fetch failed (attempt %d of %d this refresh): %s",
+            fd_code, attempts, _SEASON_FETCH_MAX_ATTEMPTS, e,
+        )
+        # DO NOT cache the failure as an empty season. This list feeds the
+        # Monte Carlo importance SIMULATOR, and since #209 it is also fetched
+        # earlier in the refresh for head-to-head. Caching [] on a transient
+        # 429 would hand the scorer an empty season it never asked for:
+        # importance would read the cached failure instead of retrying,
+        # `initial_state` would have no teams, and every game in that
+        # competition would silently score zero importance. Same rule the
+        # sibling CFBD fetcher states outright ("DO NOT cache a failure") in
+        # sources/ncaaf.py::_fetch_raw_season.
+        #
+        # What IS remembered is the failure count (#228), and that is a
+        # different thing: it bounds retries to _SEASON_FETCH_MAX_ATTEMPTS per
+        # refresh, because the simulator asks once per simulated season and an
+        # unbounded retry made one transient error cost the whole refresh.
+        # Once given up, the competition is reported as failed
+        # (season_fetch_failures), so the zero is loud, which is what the
+        # rule above exists to guarantee.
         return []
     matches: List[Dict] = data.get("matches", []) or []
     _SEASON_MATCHES_CACHE[fd_code] = matches

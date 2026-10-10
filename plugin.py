@@ -3434,6 +3434,12 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # all: it still applies exactly the list it is given.
     applied_payload, bench_payload = _split_applied(games_payload, max_games)
 
+    # A competition whose season list could not be fetched scored zero
+    # importance for every game; report it like a failed source (#228).
+    # Before the cache write, so Show current state sees it too.
+    for code, err in _soccer_season_fetch_failures().items():
+        src_summary.append(_source_error_entry(f"{code} season data (importance scored 0)", err))
+
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
         "summary": src_summary,
@@ -6481,8 +6487,13 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
 _SOURCE_ERROR_MARK = ": error ("
 
 
-def _source_error_entry(label: str, err: Exception) -> str:
+def _source_error_entry(label: str, err: Any) -> str:
     return f"{label}{_SOURCE_ERROR_MARK}{err})"
+
+
+def _soccer_season_fetch_failures() -> Dict[str, str]:
+    from .sources.soccer import season_fetch_failures
+    return season_fetch_failures()
 
 
 def _is_playable(game: Dict[str, Any]) -> bool:
