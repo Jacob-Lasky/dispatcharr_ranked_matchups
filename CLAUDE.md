@@ -74,7 +74,7 @@ State (gitignored, lives in `<plugin_dir>/`):
 - `cache.json` — last refresh result (curated game list with score breakdowns). Carries TWO timestamps: `refreshed_at` (the cache write) and `matched_at` (stamped as matching BEGAN: after scoring, immediately before the EPG/stream sweep). `_match_snapshot_time` reads `matched_at` and falls back to `refreshed_at` for a pre-upgrade cache; anything asking "were these matches taken before X?" must use it, because an M3U refresh that lands DURING a long refresh is older than `refreshed_at` and would never be noticed
 - `recording_stops.json` — planned stops of RUNNING recordings (#216 phase C): written whole by apply under the scheduler lock, only READ by the live handoff timer in `_reaper_loop` (`_run_due_stops`), so the timer never races apply
 - `recordings_state.json` — auto-record bookkeeping (#216): what the plugin last wrote for each recording it created (so a user edit is recognised and left alone), and tombstones for ones the user deleted so they are not re-created
-- `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict. `kind` is one of `RUN_KIND_LABELS` (`auto_pipeline`, `scheduled_auto_pipeline`, `m3u_rematch`, `refresh`) — the label is what names WHY a run happened, so a new background trigger needs an entry there or Show current state cannot explain itself. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
+- `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict AND by `_slot_already_covered` to decide a waiting scheduled slot has already been done for it (see the scheduler section) — so `kind`, `status` and `started_at` steer behaviour, not just display. `kind` is one of `RUN_KIND_LABELS` (`auto_pipeline`, `scheduled_auto_pipeline`, `m3u_rematch`, `refresh`) — the label is what names WHY a run happened, so a new background trigger needs an entry there or Show current state cannot explain itself, plus a decision about whether it belongs in `_PIPELINE_RUN_KINDS`. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
 - `cfbd_api_key`, `football_data_api_key`, `odds_api_key`, `anthropic_api_key` — file fallback when settings field is blank.
 
 ## How channels are produced
@@ -344,6 +344,22 @@ unreachable (`_SLOT_UNKNOWN`) every worker is an "owner", so that path makes
 exactly ONE attempt and records the skip, never retries. Per-attempt losses are
 not recorded as skips (`run_scheduled_pipeline(record_skip=False)`); the owner
 calls `tasks.record_skipped_run` once when it gives up.
+
+**Waiting for the lock means somebody else is doing work, and some of that work
+IS this slot's.** After each retry sleep the owner asks `_slot_already_covered`:
+if `last_run.json` records a refresh + apply (`_PIPELINE_RUN_KINDS` —
+`auto_pipeline`, `scheduled_auto_pipeline`, `m3u_rematch`, NOT a bare `refresh`,
+which does not apply) that STARTED at or after the slot and finished `ok`, the
+slot's job is done and the owner returns without running a second pipeline back
+to back. The common causes are a manual Refresh + apply clicked just after the
+slot, an M3U rematch, and a deploy: the reload endpoint restarts the scheduler
+thread only in the worker that serves it, so the other workers keep running the
+previous version's threads until the container restarts and one of those can
+hold the lock through the whole window. Both halves of the condition are
+load-bearing: a FAILED run does not cover the slot (nothing was published), and
+`started_at` must be compared, not `finished_at` — a run that began BEFORE the
+slot used a pre-slot view of the world, which is the whole reason the slot
+exists.
 
 **Zoned datetime arithmetic is WALL-CLOCK arithmetic.** Two datetimes sharing
 one `ZoneInfo` compare and subtract by wall time, so on a fall-back night
@@ -778,7 +794,9 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   M3U update"; Diagnose explains a late feed instead of calling it a bug
 - A scheduled time is no longer lost when something else holds the run lock at
   that second: one worker claims the slot and retries the lock up to 30 minutes
-  (never into the next slot). Scheduler clock maths is DST-safe, and the
+  (never into the next slot), and stands down without running if a refresh +
+  apply that started after the slot finishes OK while it waits. Scheduler clock
+  maths is DST-safe, and the
   pipeline subprocess starts no scheduler or reaper of its own
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
