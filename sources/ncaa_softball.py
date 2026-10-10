@@ -54,6 +54,7 @@ from .._util import (
     parse_iso_utc,
     poisson_sample as _poisson,
 )
+from ._espn import fetch_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_softball")
 
@@ -277,13 +278,18 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
         season_end_first = datetime(self.season_year, SEASON_END_MONTH, 1,
                                     tzinfo=timezone.utc).date()
         season_end = (season_end_first + timedelta(days=31)).replace(day=1) - timedelta(days=1)
-        now = datetime.now(timezone.utc).date()
-        end = min(now + timedelta(days=7), season_end)
-        if end < season_start:
-            return []
-        day = season_start
-        while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+        # Walk to the END of the season, never to now + lookahead (#229). This
+        # list is the simulator's whole season: the fixtures still to play are
+        # what decide who finishes where. Capping it at next week made the
+        # season end next week, so no team could change band and importance
+        # read 0 (every NFL game, measured 2026-10-10). Same bug #65 fixed for
+        # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
+        end = season_end
+
+        def day_board(day):
+            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+
+        for _day, data in fetch_days(season_start, end, day_board):
             if data:
                 for event in data.get("events") or []:
                     if _is_postseason_event(event):
@@ -297,7 +303,6 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
                     if rec["id"] in seen:
                         continue
                     seen[rec["id"]] = rec
-            day += timedelta(days=1)
         return list(seen.values())
 
 

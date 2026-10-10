@@ -38,6 +38,7 @@ from .base import GameRow
 from .bracket import BestOfNSeriesSource
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
+from ._espn import fetch_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.nfl")
 
@@ -266,13 +267,18 @@ class NflRegularSource(PointsBasedSportSource):
         ).date()
         # Regular season ends first week of January. Pad to Jan 15.
         regular_end = datetime(self.season_end_year, 1, 15, tzinfo=timezone.utc).date()
-        now = datetime.now(timezone.utc).date()
-        end = min(now + timedelta(days=7), regular_end)
-        if end < season_start:
-            return []
-        day = season_start
-        while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+        # Walk to the END of the season, never to now + lookahead (#229). This
+        # list is the simulator's whole season: the fixtures still to play are
+        # what decide who finishes where. Capping it at next week made the
+        # season end next week, so no team could change band and importance
+        # read 0 (every NFL game, measured 2026-10-10). Same bug #65 fixed for
+        # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
+        end = regular_end
+
+        def day_board(day):
+            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+
+        for _day, data in fetch_days(season_start, end, day_board):
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)
@@ -287,7 +293,6 @@ class NflRegularSource(PointsBasedSportSource):
                         k: v for k, v in rec.items()
                         if k not in ("season_type", "notes")
                     }
-            day += timedelta(days=1)
         return list(seen.values())
 
 

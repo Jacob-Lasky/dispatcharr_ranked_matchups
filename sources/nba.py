@@ -53,6 +53,7 @@ from .base import GameRow
 from .bracket import BestOfNSeriesSource
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
+from ._espn import fetch_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.nba")
 
@@ -70,7 +71,6 @@ _DEFAULT_POINTS_AGAINST = 115.0
 # ESPN's `season.year` field uses the ENDING calendar year (e.g., "2025"
 # means the 2024-25 season).
 SEASON_START_MONTH = 10  # October
-SEASON_END_MONTH = 6     # June (Finals)
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
@@ -339,13 +339,18 @@ class NbaRegularSource(PointsBasedSportSource):
         regular_end = datetime(
             self.season_end_year, 4, 30, tzinfo=timezone.utc,
         ).date()
-        now = datetime.now(timezone.utc).date()
-        end = min(now + timedelta(days=7), regular_end)
-        if end < season_start:
-            return []
-        day = season_start
-        while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+        # Walk to the END of the season, never to now + lookahead (#229). This
+        # list is the simulator's whole season: the fixtures still to play are
+        # what decide who finishes where. Capping it at next week made the
+        # season end next week, so no team could change band and importance
+        # read 0 (every NFL game, measured 2026-10-10). Same bug #65 fixed for
+        # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
+        end = regular_end
+
+        def day_board(day):
+            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+
+        for _day, data in fetch_days(season_start, end, day_board):
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)
@@ -363,7 +368,6 @@ class NbaRegularSource(PointsBasedSportSource):
                         k: v for k, v in rec.items()
                         if k not in ("season_type", "notes")
                     }
-            day += timedelta(days=1)
         return list(seen.values())
 
 

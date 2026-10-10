@@ -64,7 +64,7 @@ downstream is sport-agnostic.
 | `sources/nba.py` | ESPN unofficial API (stats.nba.com is WAF-blocked from most homelab egress). `NbaRegularSource` uses raw win count. `NbaPlayoffSource` is a BestOfNSeriesSource with uniform SERIES_LENGTH=7 (R1 / CSF / CF / FINALS). Stage routing comes from parsing the ESPN headline ("East 1st Round - Game 3" etc.) — the only place ESPN exposes the playoff round. All-Star Tournament games (which ESPN tags `season.type=2` but `competition.type.abbreviation=ALLSTAR`) are filtered out so the regular-season team list stays at 30. |
 | `sources/mls.py` | ESPN unofficial API for the schedule + The Odds API (`soccer_usa_mls`) for closeness. Intentionally thin: `MlsSource` does NOT inherit `PointsBasedSportSource` and `supports_importance=False`. MLS surfaces with favorite + closeness signals only; standings-based importance and the mixed-format MLS Cup bracket (best-of-3 R1 + single-leg subsequent rounds) are tracked in #30. Team-name fuzzy matching reuses `_util.TEAM_SUFFIX_TOKENS` — never add "united" to that list (it's a substantive body word for Atlanta United / D.C. United / Minnesota United). |
 | `sources/soccer.py` | Football-Data.org for fixtures+standings, The Odds API for spreads. League position used as rank. `SoccerSource` is league-shaped (PL, ELC); `KnockoutSoccerSource` is bracket-shaped (UCL) — multi-inherits from `AggregateLegSource` (bracket state machine) + `SoccerSource` (FD.org fetch / strengths) with the MRO `K → AggregateLegSource → BracketSportSource → SoccerSource → SportSource`. Routed by `LEAGUE_CONTEXTS[fd_code].format`. `_fetch_standings_with_seed` returns a `StandingsBundle` (position map, scoring table, current table, previous-season final table, seeded flag), never one merged table — see the standings gotcha below. `build_h2h_entries` builds the previous-meetings list; name matching there is EXACT on purpose. `_fetch_season_matches_for_code` (the list the importance simulator replays) still never caches a FAILURE as an empty season, but it does remember the failure COUNT: `_SEASON_FETCH_MAX_ATTEMPTS` (2) attempts per refresh, `allow_scoring_retry()` hands scoring one of them, `season_fetch_failures()` reports the ones that gave up — see the season-fetch gotcha below. |
-| `sources/_espn.py` | Shared ESPN helpers. `extract_espn_scoreboard_event` normalises one scoreboard event (its docstring forbids inlining a fourth copy). `sweep_upcoming_scoreboard` is the whole per-day sweep for UPCOMING-only sources, owning the US-Eastern-bucket lookback (`SCOREBOARD_LOOKBACK_DAYS`), the FINISHED drop, the stale-SCHEDULED floor (`MAX_AGE_AFTER_KICKOFF`) and the id dedupe. Used by `friendlies.py` + `english_cup.py`. Takes `http_get` INJECTED so each source keeps its own patchable `requests` symbol. The bracket sources deliberately do NOT use it: they sweep a fixed calendar window and KEEP finished games because bracket state comes from results already played. |
+| `sources/_espn.py` | Shared ESPN helpers. `extract_espn_scoreboard_event` normalises one scoreboard event (its docstring forbids inlining a fourth copy). `sweep_upcoming_scoreboard` is the whole per-day sweep for UPCOMING-only sources, owning the US-Eastern-bucket lookback (`SCOREBOARD_LOOKBACK_DAYS`), the FINISHED drop, the stale-SCHEDULED floor (`MAX_AGE_AFTER_KICKOFF`) and the id dedupe. Used by `friendlies.py` + `english_cup.py`. Takes `http_get` INJECTED so each source keeps its own patchable `requests` symbol. The bracket sources deliberately do NOT use it: they sweep a fixed calendar window and KEEP finished games because bracket state comes from results already played. `fetch_days(start, end, fetch_day)` is the separate helper the full-season walks use (#229): it runs the per-day requests on a `ThreadPoolExecutor` (`_SEASON_WALK_WORKERS = 8`) and returns `[(day, result), ...]` in DATE order, so each caller's "first occurrence wins" dedupe behaves as its old sequential loop did. `fetch_day` is injected for the same reason `http_get` is. The module still imports no `requests` (`tests/test_full_season_window.py` pins that). |
 | `sources/friendlies.py` | ESPN exhibition soccer: `InternationalFriendliesSource` (`fifa.friendly` / `fifa.friendly.w`, parametrized on gender) and `ClubFriendliesSource` (`club.friendly`). `supports_importance=False` deliberately: no table to simulate. Gated to Favorites by default (`friendlies_favorites_only`) because an exhibition's only claim to a slot is the favorite signal. `CLUBFRIENDLY` is a distinct prefix from `FRIENDLY` and its absence from `rivalries.json` is load-bearing: a pre-season kickabout is not a derby. |
 | `sources/english_cup.py` | EFL (Carabao) Cup + FA Cup via ESPN (`eng.league_cup` / `eng.fa`). Exists because Football-Data.org gates EVERY domestic cup behind a paid plan (FLC=TIER_THREE, FAC=TIER_TWO; verified 403 on the free-tier key), so a `soccer.py::COMPETITIONS` entry would 403 every refresh and contribute zero games silently. Rounds come from `season.slug`; the slug->stage maps are PER-COMPETITION because the two cups' round names overlap at different depths (FA Cup 4th round = R32, EFL Cup 4th round = R16). `supports_importance=False` and ranks always `None` — the latter is what stops a giant-killing tie being penalised for being lopsided. Early rounds score via the `CUP_R*` band in `scoring.py`, ramping to just under the shared `QUARTER_FINALS`. #190. |
 | `recording.py` | Auto-record policy (#216), pure and ORM-free: `resolve_slot_budget` (tightest positive M3U `max_streams` minus reserve), `plan_recordings` (kickoff order, capacity checked as concurrency; busy = other recordings, held = ours in progress, cut only as a `Plan.stops` STOP when `live_stops` (phase C; never dropped whole), extended only when the budget allows; post-roll yield and tier-1/tier-2 interruption via `priority_key` / `can_interrupt`, both PLANNED as `Plan.handoffs` by moving the earlier recording's end before it starts, keeping only the cuts the new game needs and rolling back an attempt that cannot free enough), `classify_existing` (user-deleted -> tombstone, user-edited or terminal -> hands off), `decide` (create / full-save update / extend-only while recording), `cancellable` (takes the cache `slate` + a `reason_holds` predicate, #224), `covered_by_user`, `recording_over` (the 🔴, read from real rows), `description_line`, the live-stop helpers `stop_entries` / `due_stops` / `next_stop_delay` / `stopped_properties` (mirrors Dispatcharr's Stop) / `strip_dot` / `stopped_description`, the WHY-we-recorded keys (`REASON_KEY` / `TEAMS_KEY` / `LEAGUE_KEY` / `GAME_KEY`) with `reason_properties` / `reason_changed` / `reason_checker`, and the `recordings_state.json` load/save/prune. `MARKER_KEY` in `Recording.custom_properties` is the only "ours" test. The ORM around it is `_autorecord_*` in plugin.py, which writes with `.create()` / FULL `.save()` on purpose (the Recording signals are wanted; `.update()` or a narrow `update_fields` leaves the capture task stale) — the ONE exception is `_backfill_reason`, which stamps the reason with `save(update_fields=["custom_properties"])` precisely because no time changed and nothing needs rescheduling. |
@@ -239,7 +239,8 @@ bracket paths) would otherwise be measured conditional on reaching it.
 
 The 1500s ceiling is still what decides whether a `fetch_upcoming` filter is
 cosmetic or load-bearing — the per-game fallback is unchanged, and a wider
-emitted set widens the simulated season for everyone. Two rules survive #230:
+emitted set widens the simulated season for everyone. Three rules bound what
+gets simulated:
 
 - **Bound what `fetch_upcoming` emits to what can actually score.** NCAAF
   shipped without a division filter and pulled all of CFBD's D-II/D-III
@@ -252,6 +253,31 @@ emitted set widens the simulated season for everyone. Two rules survive #230:
   win-count band, so its games score exactly 0.00 while still being played in
   every simulated season. Derive both from one predicate and one cached fetch;
   two call sites that "agree" are a convention, and conventions drift silently.
+- **A `_fetch_full_season_games` walk runs to the season's END, and must never
+  read the clock** (#229). That list IS the simulator's season: the fixtures
+  still to play are what decide who finishes where, so capping the walk at
+  `now + 7 days` makes the simulated season end next week, nobody can change
+  band, and importance reads exactly 0 (measured 2026-10-10: every NFL game,
+  with 80 of 272 fixtures seen). Seven ESPN sources shipped with that cap;
+  #65 had already fixed the same bug for MLS alone in `mls_standings.py`.
+  `tests/test_full_season_window.py` is the CLASS guard: an AST check that no
+  `_fetch_full_season_games` in `sources/` calls `now` / `today` / `utcnow`,
+  plus a behavioural half that walks each source under two pinned clocks and
+  asserts the last day requested is identical. Walking the whole season is
+  affordable because the days are fetched concurrently via
+  `_espn.fetch_days` — and because the walk is concurrent, a test must assert
+  on `max(days)`, not on the last call made.
+
+  The season's end is a CALENDAR constant per source, so pick one that ends
+  the walk where the thing being simulated ends. NCAA soccer's is
+  `_REGULAR_SEASON_END` (`{"m": (11, 18), "w": (11, 11)}`) rather than
+  December: ESPN gives NCAA tournament games the same season slug, type and
+  note as regular-season games, so they cannot be filtered by field, and
+  walking into the tournament would add its results to the regular-season
+  table the win-count bands are scored on. Those two dates sit inside the gap
+  ESPN showed in 2025 between the last conference final and the first
+  tournament round; the NCAA calendar shifts by weekday each year, so re-check
+  them against the scoreboard when a season's rounds move.
 
 Separately, `outcome_eligible_teams()` on `PointsBasedSportSource` exists
 because game inclusion and outcome eligibility are different questions. An
