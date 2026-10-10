@@ -256,10 +256,27 @@ Don't hand-roll the scoreboard parsing or the sweep window.
   stale-but-still-SCHEDULED games, and dedupes by event id. Pass your
   module's own `_http_get` as `http_get`: each source keeps its own
   `requests` symbol so its tests can stub it.
+- `fetch_days(start, end, fetch_day)` is the per-day walk used by
+  `_fetch_full_season_games` (the schedule the importance simulator
+  replays). It fetches the days concurrently, 8 at a time, and returns
+  `[(day, result), ...]` in date order so a "first occurrence wins"
+  dedupe behaves exactly as a sequential loop would. Pass your module's
+  own fetch closure, same reason as above.
 
 Bracket-shaped sources deliberately do not use the sweep. They read a
 fixed calendar window and keep finished games, because bracket state is
 derived from results already played.
+
+**A full-season walk ends at the season's END, never at `now + lookahead`**
+(#229). The list it returns is the simulator's whole season, so stopping
+it a week out makes the season end a week out: no team can change outcome
+band and every importance score comes back 0. Use a calendar constant for
+the end date and do not call `datetime.now()` anywhere in
+`_fetch_full_season_games`; `tests/test_full_season_window.py` fails any
+source that does. Choose a constant that ends where the thing you simulate
+ends: NCAA soccer stops at the regular season's last day, because ESPN
+labels tournament games identically to regular-season ones and they would
+otherwise pollute the table the bands are scored on.
 
 ### Wire it in
 
