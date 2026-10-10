@@ -5,6 +5,32 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed or upstream-starved run is now visible** (#227). A background run
+  that failed left no trace outside the container log: it never rewrites
+  `cache.json`, so **Show current state** kept serving the last good list — or
+  "Cache empty. Run refresh." — as though nothing were wrong, and "run refresh"
+  is the wrong advice when refresh is exactly what keeps failing.
+  - Every background run records its outcome to `last_run.json` beside
+    `cache.json` (kind, status, message, duration, consecutive failures, last
+    success). **Show current state** ends with that verdict: `Last run OK`,
+    `LAST RUN FAILED` (with the failure streak, the reason, and when the last
+    successful refresh was), `RUNNING NOW` above the previous verdict, or a
+    note that a requested run never started because another held the lock or
+    Redis was unreachable.
+  - Two failures a run can complete "ok" through are now called out, in the
+    toast and in the log: **sources that failed to fetch** (named) and **a list
+    where no game matched any stream in your channels**. Matched counts
+    stream-only (Path C) matches as playable, as they are.
+  - A run killed at the subprocess time limit forwards the tail of its child's
+    log and names the step it reached, instead of a bare "timed out" line.
+    Scoring — the long, previously silent phase — logs steady progress, and the
+    apply phase announces itself, so that step is meaningful. Child WARNING
+    lines stay WARNINGs when forwarded, and an empty slate logs at WARNING.
+  - Action descriptions no longer advertise stale timings ("~25s", "~40s"); a
+    full slate takes minutes.
+
 ## [1.31.0] - 2026-09-27
 
 ### Added
