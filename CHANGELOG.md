@@ -5,6 +5,8 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.33.0] - 2026-10-10
+
 ### Fixed
 
 - **A game whose feeds the provider posts after the last refresh now gets

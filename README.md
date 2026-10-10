@@ -238,6 +238,23 @@ The plugin matches EPG listings, channel names, and stream names, then links
 eligible streams to its virtual channels! If a stream is not on a channel, its
 own name must identify the matchup or event for the plugin to find it.
 
+### A matchup channel gives a 503 or won't play during the game
+
+That channel has no stream attached yet: it is a [placeholder](#placeholder-channels),
+and Dispatcharr answers 503 when a channel with no stream is tuned. Usually the
+feed for that game had not reached Dispatcharr when the plugin last matched.
+
+1. Run **Diagnose matching**. If it says the feed appeared after the last match,
+   click **Refresh + apply now** (with auto-refresh on, the plugin also does this
+   itself within a few minutes; see [When a feed arrives after a
+   refresh](#when-a-feed-arrives-after-a-refresh)).
+2. If no stream names the game at all, your provider has not posted it yet, or
+   your M3U account has not refreshed since it did. Check the account's refresh
+   interval: 4 hours or less is the setting that makes live events work.
+3. If the channel plays the wrong game, the provider renamed the slot it was
+   matched to; the next refresh after the M3U update corrects it. To keep a
+   group out entirely, use **Exclude stream groups**.
+
 ## Pipeline
 
 | Action | What it does | Writes |
@@ -427,6 +444,13 @@ update`. Three things to know:
   make the plugin refresh every few minutes.
 - A refresh takes minutes, so a feed posted at kickoff is attached shortly
   after kickoff, not before it.
+- **The plugin can only attach a feed Dispatcharr has already pulled.** If your
+  M3U account refreshes every 12 or 24 hours, a slot renamed for a noon game at
+  10 AM is invisible until that account's next refresh, which can be after the
+  final whistle. Set the account's refresh interval (M3U & EPG Manager → edit
+  the account → Refresh Interval) to **4 hours or less** if you watch live
+  events. That is the one lever only you control; the plugin reacts within
+  minutes of each refresh.
 
 **Diagnose matching** knows about this too: if the channel or stream naming a
 game only appeared after the last match, it tells you when the feed showed up
