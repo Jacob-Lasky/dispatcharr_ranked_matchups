@@ -273,7 +273,7 @@ The high-level loop:
 ```
 for each (target_match, team, outcome) tuple:
     table = [[0, 0], [0, 0], [0, 0]]   # 3 result rows × 2 outcome cols
-    for sim in range(1000):
+    for sim in range(N_SEASONS):
         result = sample_result(target_match)               # W / D / L for target team
         for game in remaining_matches:
             game_result = sample_result(game)
@@ -285,9 +285,14 @@ for each (target_match, team, outcome) tuple:
 ```
 
 For each candidate outcome (title, UCL spot, relegation, Stanley Cup
-winner, R16 advancement, etc.), this asks the question: "in 1,000
+winner, R16 advancement, etc.), this asks the question: "in N
 simulated alternate universes, how much does the way this match goes
 shift the probability of this team hitting this outcome?"
+
+That is the definition, not literally the loop that runs. For most sources
+the N seasons are simulated once for the whole league and every target match
+reads its table off them: the same estimate for a fraction of the cost. See
+"Simulated seasons" below.
 
 A handful of design choices matter here:
 
@@ -352,8 +357,8 @@ outcome. Each `SportSource` implements `estimate_strengths`:
   regulation / 1-pt OT-loss rule.
 - **MLB:** runs-for / runs-against averages, Poisson on runs.
 
-Strengths are estimated once per refresh and reused across the 1,000
-sims; the per-sim cost is just the per-match sampling.
+Strengths are estimated once per refresh and reused across every
+simulated season; the per-season cost is just the per-match sampling.
 
 ### Outcome bands
 
@@ -751,7 +756,8 @@ expected before judging the whole guide.
 Source code for everything described above:
 
 - `scoring.py` — signal computation, raw sum, compression, tunable weights
-- `simulation.py` — Monte Carlo loop, `kendall_tau_c`, the chain variant
+- `simulation.py` — Monte Carlo loop, `kendall_tau_c`, the chain variant,
+  and `monte_carlo_importance_shared` (one set of seasons per source)
 - `sources/base.py` — `SportSource` abstract contract
 - `sources/soccer.py` — soccer leagues + group/knockout + Annex C
 - `sources/bracket.py` — generic best-of-N + double-elim + aggregate-leg bracket machinery

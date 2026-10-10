@@ -51,13 +51,13 @@ downstream is sport-agnostic.
 |---|---|
 | `plugin.json` | Manifest: settings (sports toggles, weights, favorites, schedule), actions. Read by Dispatcharr loader. |
 | `plugin.py` | Plugin class and action handlers. Daemon scheduler, EPG lookup closure, virtual-channel and stream linking, and inactive XMLTV EPG source management. |
-| `scoring.py` | `GameSignals`, `Weights`, `GameScore`. `score_game()` sums per-signal contributions, `_compress_to_10()` does the tanh squash. Helpers: `match_favorites`, `compute_match_importance` (Lahvička Monte Carlo), `format_channel_name` (delegates to `naming`), `render_importance_tagline` + `STAGE_BANDS` (bracket-band prettify), `tournament_stage_label`. League thresholds in `LEAGUE_CONTEXTS` dict (position, label, consequence_weight). |
+| `scoring.py` | `GameSignals`, `Weights`, `GameScore`. `score_game()` sums per-signal contributions, `_compress_to_10()` does the tanh squash. Helpers: `match_favorites`, `compute_match_importance` (Lahvička Monte Carlo, one game at a time) and `compute_league_importance` (every game of one source from one shared set of seasons, #230) — both built from the same `importance_queries` + `importance_points` pair so the two paths ask the same questions and weight the answers identically, `format_channel_name` (delegates to `naming`), `render_importance_tagline` + `STAGE_BANDS` (bracket-band prettify), `tournament_stage_label`. League thresholds in `LEAGUE_CONTEXTS` dict (position, label, consequence_weight). |
 | `naming.py` | Channel-name templating (Sonarr/Radarr `{group}`-collapse convention). `render_name`, `validate_template`, `build_context`, `preview_lines`, `DEFAULT_NAME_TEMPLATE`, `TOKENS`. Pure: no Django, no `scoring` import — which is why `_RECORDING_DOT` is a literal here rather than an import of `recording.DOT`; the two must stay the same glyph (`tests/test_autorecord.py` pins it). `{recording_dot}` is deliberately absent from `DEFAULT_NAME_TEMPLATE`. |
 | `simulation.py` | Sport-agnostic Monte Carlo importance per Lahvička (2012). `monte_carlo_importance()` for single (team, outcome); `monte_carlo_importance_batch()` shares one set of N season simulations across K queries for ONE game; `monte_carlo_importance_shared()` shares one set across EVERY game of a source (#230), the production path for sources with `shared_season_importance = True` (state-free result models; knockouts opt out). `kendall_tau_c()` is the ordinal-association measure. |
 | `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` to Dispatcharr channels and streams. `_build_epg_lookup` (plugin.py) supplies three candidate paths: A, EPG `ProgramData` title, sub-title or description (whole-channel); B, channel name (whole-channel); C, stream name (stream-granular, so a stream need not be on a channel at all). Three tiers: `regex_strict` (channel or stream name names both teams, merging Tier-2 programme matches behind it), `regex_unique` (exactly one non-preview programme match), then Claude batched fallback or first candidate. `_partition_attach_targets` splits the result into `channel_ids` and `stream_ids`. |
-| `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Monte Carlo importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. |
+| `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Monte Carlo importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. A second, independent flag `shared_season_importance` (default False, #230) says the source's `sample_result` ignores `state`, so one set of simulated seasons can serve every one of its games — see the cost section below. |
 | `sources/bracket.py` | `BracketSportSource` shared state machine for all knockout/playoff sports (bracket inference, `_round_reached`, `terminal_outcomes` cascade). Three concrete tie shapes: `AggregateLegSource` (two-leg, used by `KnockoutSoccerSource`), `BestOfNSeriesSource` (best-of-N series, used by `NhlPlayoffSource`, `MlbPlayoffSource`, `NcaaBaseballPlayoffSource`, `NcaaSoftballPlayoffSource` for their Super Regional + Finals stages), and `DoubleEliminationSource` (4-team double-elim base class for NCAA Baseball / Softball Regional + 8-team MCWS/WCWS bracket; plumbing into the sport sources is tracked in #43). `BestOfNSeriesSource._series_length_for_stage(stage)` hook lets each sport map stages to series lengths — NHL uses uniform 7; MLB uses 3/5/7/7 (WC/LDS/LCS/WS). |
-| `sources/points_based.py` | Shared Monte Carlo for round-robin point-scoring sports (NCAAF, NCAAM, NHL regular, MLB regular). Subclasses set `_count_field` to choose between `"wins"` (CFB/CBB/MLB) and `"standings_points"` (NHL) for terminal_outcomes bucketing. |
+| `sources/points_based.py` | Shared Monte Carlo for round-robin point-scoring sports (NCAAF, NCAAM, NHL regular, MLB regular). Subclasses set `_count_field` to choose between `"wins"` (CFB/CBB/MLB) and `"standings_points"` (NHL) for terminal_outcomes bucketing. Sets `shared_season_importance = True` for the whole family: the result model is Poisson on fixed strengths and never reads `state`. |
 | `sources/ncaaf.py` | CFBD `/rankings`, `/games`, `/lines` calls. CFBD uses **camelCase** (homeTeam, awayTeam) — easy gotcha. |
 | `sources/nhl.py` | api-web.nhle.com (official, no key). `NhlRegularSource` uses standings points (regulation win = 2, OT/SO loss = 1, regulation loss = 0). `NhlPlayoffSource` is a best-of-7 BracketSportSource. The two cross-feed: NhlPlayoffSource borrows regular-season strengths via `set_regular_season_strengths()` so cup-final sampling uses the 82-game baseline. |
 | `sources/mlb.py` | statsapi.mlb.com (official, no key). `MlbRegularSource` uses raw win count (no OT-loss bonus). `MlbPlayoffSource` is a BestOfNSeriesSource with per-stage series lengths (WC=3, LDS=5, LCS=7, WS=7). Same regular-season → playoff strength-sharing pattern as NHL. |
@@ -206,26 +206,52 @@ Four formats exist for the threshold cutoffs:
 state's `_teams[team][<_count_field>]` is what `terminal_outcomes`
 buckets against the threshold cutoff.
 
-### Every emitted row costs ~7s, and the refresh budget is 1500s
+### The importance budget: one set of seasons per league, 1500s for the lot
 
-**A source that flips `supports_importance = True` is buying a Monte Carlo
-season replay PER EMITTED GAME. Measured 2026-08-29 for NCAAF: ~7.0s each.**
-`tasks.py` kills the pipeline subprocess at 1500s, so the whole refresh
-affords roughly 200 importance-bearing rows across ALL sources combined.
+`tasks.py` kills the pipeline subprocess at 1500s, and importance simulation
+is what fills it. Since #230 there are TWO cost models, and which one a source
+gets is decided by `shared_season_importance`:
 
-This is the budget that decides whether a `fetch_upcoming` filter is
-cosmetic or load-bearing, and it is invisible at authoring time because the
-cost lands in `plugin._action_refresh`, not in the source. Two rules:
+- **Shared (`shared_season_importance = True`)**: `_shared_league_importance`
+  in `plugin.py` groups the slate by (source, competition), simulates each
+  group's remaining season `importance_seasons` times (default 2000) ONCE, and
+  reads every game of that group off those seasons. **Cost is per league, not
+  per game.** Measured on a 499-game autumn slate: 125 CPU-s total.
+- **Per game (the fallback)**: `compute_match_importance` replays the whole
+  remaining season for ONE game, at `PER_GAME_IMPORTANCE_SIMS` (500, pinned at
+  its historical value on purpose — applying the per-league 2000 to it would
+  quadruple exactly the cost #230 removed). Measured 2026-08-29 for NCAAF:
+  ~7.0s per row. This path takes knockout sources, an active group→knockout
+  chain, and any game `monte_carlo_importance_shared` returns `None` for.
+
+**Only a source whose `sample_result` ignores `state` may opt in.** The shared
+simulator samples each target at its natural place in the schedule rather than
+first, which draws from the same distribution only when the result model does
+not read the season state. `KnockoutSoccerSource` reads leg 1 to sample leg 2
+and therefore sets the flag back to False.
+`tests/test_shared_importance.py` enforces this as a CLASS guard over every
+`SportSource` subclass (AST check on `sample_result`), so a new source that
+inherits the opt-in while reading state fails without anyone remembering it.
+
+`None` from the shared path is "fall back", never a zero: a target not played
+in EVERY simulated season (absent from the pool, or reachable only on some
+bracket paths) would otherwise be measured conditional on reaching it.
+
+The 1500s ceiling is still what decides whether a `fetch_upcoming` filter is
+cosmetic or load-bearing — the per-game fallback is unchanged, and a wider
+emitted set widens the simulated season for everyone. Two rules survive #230:
 
 - **Bound what `fetch_upcoming` emits to what can actually score.** NCAAF
   shipped without a division filter and pulled all of CFBD's D-II/D-III
-  feed: 157 games where 27 involved an FBS team, ~1100s of the budget, and
-  `auto_pipeline` timed out on every run from the day the season opened.
+  feed: 157 games where 27 involved an FBS team, ~1100s of the budget under
+  the then-current per-game model, and `auto_pipeline` timed out on every run
+  from the day the season opened. Sharing makes those rows cheaper, not free:
+  they still lengthen every simulated season.
 - **The emitted universe and the simulated universe must be the same set.**
   A team the simulator has never heard of has no strength estimate and no
-  win-count band, so its games score exactly 0.00 while still paying the
-  full 7s. Derive both from one predicate and one cached fetch; two call
-  sites that "agree" are a convention, and conventions drift silently.
+  win-count band, so its games score exactly 0.00 while still being played in
+  every simulated season. Derive both from one predicate and one cached fetch;
+  two call sites that "agree" are a convention, and conventions drift silently.
 
 Separately, `outcome_eligible_teams()` on `PointsBasedSportSource` exists
 because game inclusion and outcome eligibility are different questions. An

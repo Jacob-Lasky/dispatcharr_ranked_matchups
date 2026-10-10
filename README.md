@@ -39,10 +39,11 @@ It's **deterministic** (it uses math to get the same answer each time) and
 The most interesting part, for my fellow nerds, is from a fascinating paper
 (Lahvička, J. (2012). *Football match importance via a contingency-table
 coefficient*) that strives to answer how important game X is to team Y's
-season. Or, in plain language: "in 1,000 simulated alternate universes, how
+season. Or, in plain language: "in 2,000 simulated alternate universes, how
 much does the way this match goes shift the probability of this team hitting
-this outcome?" The plugin runs that simulation per match per refresh. Full
-math walk-through in [SCORING.md](SCORING.md).
+this outcome?" Each refresh plays out every league's remaining season those
+2,000 times once, and reads each of that league's games off the same
+simulated seasons. Full math walk-through in [SCORING.md](SCORING.md).
 
 I wanted to release this before the World Cup and I am completely open to
 feedback. I hope you use this plugin and that it helps raise your favorite
@@ -126,9 +127,9 @@ CFBD's feed carries every NCAA division, not just Division I. The
 Division II and III are never pulled under either setting. They are not
 merely uninteresting: the Monte Carlo importance simulation replays only the
 selected divisions' season, so a team outside it scores 0.00 every time while
-still costing roughly seven seconds of simulation. Opening week 2026 returned
+still being played out in every simulated season. Opening week 2026 returned
 157 games in a seven-day window of which 27 involved an FBS team, so the
-unfiltered feed spent about eighteen minutes per refresh to add nothing.
+unfiltered feed spent most of a refresh to add nothing.
 
 FCS teams stay unranked because the AP Top 25 is an FBS poll, and an
 FBS-vs-FCS game is ranked on its FBS team. Note that unranked does not mean
@@ -615,6 +616,13 @@ needs `supports_importance=True` on the `SportSource` plus the 7-method
 Monte Carlo interface (`estimate_strengths`, `initial_state`,
 `remaining_matches`, `sample_result`, `apply_result`, `terminal_outcomes`,
 `outcome_labels`) — see `sources/soccer.py` for the canonical impl.
+
+Also set `shared_season_importance=True` if — and only if — your
+`sample_result` ignores the `state` argument. That lets every game of your
+source be scored off one set of simulated seasons instead of re-simulating
+the season per game, which is the difference between a league costing
+seconds and costing minutes. A source that reads the state while sampling
+(a two-leg knockout tie reading leg 1 to sample leg 2) must leave it off.
 
 ## Scoring transparency
 

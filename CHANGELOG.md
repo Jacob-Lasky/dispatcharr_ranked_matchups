@@ -5,6 +5,35 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+### Changed
+
+- **Importance now simulates each league's season once and shares it across
+  that league's games** (#230). Every scored game used to buy its own replay
+  of the whole remaining season, so the cost was `games × seasons × season`:
+  on a full autumn slate (94 NHL, 227 NCAA soccer, 61 NCAAF games) that ran
+  past the 25-minute pipeline ceiling on every refresh. Each league's
+  remaining season is now played out once per refresh and every game of that
+  league reads its own contingency table off those same seasons — cost is per
+  league, not per game. Measured on that slate against a 2000-sims-per-game
+  reference: 2212 CPU-s at the old 500 sims per game (rank correlation 0.97,
+  mean error 0.32 score points) versus 125 CPU-s at 2000 shared seasons
+  (0.99 / 0.21), so the new path is both faster and closer.
+  - **Setting renamed**: "Importance Monte Carlo iterations"
+    (`n_importance_sims`, 500 per match) is replaced by "Importance:
+    simulated seasons per league" (`importance_seasons`, default 2000). The
+    old key is deliberately NOT read: it counted seasons per game, so an
+    install that saved 500 under it would be pinned to a quarter of the
+    intended precision under the new per-league meaning. If you had tuned the
+    old setting, set the new one.
+  - Sharing is only valid for sources whose result model ignores the season
+    state, which is every league and points-based source
+    (`shared_season_importance = True`). Knockout sources that read leg 1 to
+    sample leg 2, an active group→knockout chain, and any game missing from
+    its source's remaining pool keep the per-game simulator at its historical
+    500 sims; they are a small share of a slate.
+  - No change to what the signal means or how it is weighted: same queries,
+    same consequence weights, same EPG breakdown lines.
+
 ### Fixed
 
 - **A failed or upstream-starved run is now visible** (#227). A background run
