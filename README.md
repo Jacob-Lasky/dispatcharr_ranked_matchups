@@ -290,7 +290,11 @@ Its last line is always the verdict:
   moment: one worker takes ownership of that scheduled time and keeps waiting
   for the lock for up to half an hour (never into the next scheduled time), so
   this line means the lock stayed held the whole while, not that something else
-  happened to hold it for the few seconds the clock struck.
+  happened to hold it for the few seconds the clock struck. If what held the
+  lock was itself a refresh + apply that started after the scheduled time — you
+  clicked the button, or an M3U update triggered one — the scheduled run counts
+  as done and quietly stands down rather than repeating it, so no note appears
+  at all.
 
 The run is named by why it happened — `Refresh + apply` (the button),
 `Scheduled refresh + apply` (a time from **Scheduled times**), `Refresh + apply

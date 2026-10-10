@@ -163,6 +163,39 @@ class TestScheduledSlot:
             plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
         assert len(attempts) == 1
 
+    def _last_run(self, monkeypatch, plugin, record):
+        monkeypatch.setattr(plugin.tasks, "read_last_run", lambda: record)
+
+    def test_a_run_that_started_after_the_slot_covers_it(self, plugin, store, monkeypatch):
+        # While the owner waited, someone else (a manual click, a rematch, or an
+        # old-version scheduler during a deploy) ran the whole pipeline. Running
+        # it again the moment the lock frees would only repeat it.
+        attempts = _pipeline(monkeypatch, plugin, [False, True])
+        _sleeps(monkeypatch, plugin)
+        slot = _now_slot()
+        self._last_run(monkeypatch, plugin, {
+            "kind": "scheduled_auto_pipeline", "status": "ok",
+            "started_at": (slot + timedelta(seconds=1)).isoformat()})
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert len(attempts) == 1
+
+    @pytest.mark.parametrize("record", [
+        {"kind": "auto_pipeline", "status": "error", "started_at": "LATER"},
+        {"kind": "auto_pipeline", "status": "ok", "started_at": "EARLIER"},
+        {"kind": "refresh", "status": "ok", "started_at": "LATER"},
+        {},
+    ], ids=["failed", "started-before-the-slot", "refresh-only", "no-record"])
+    def test_runs_that_do_not_cover_the_slot(self, plugin, store, monkeypatch, record):
+        attempts = _pipeline(monkeypatch, plugin, [False, True])
+        _sleeps(monkeypatch, plugin)
+        slot = _now_slot()
+        when = {"LATER": slot + timedelta(seconds=1), "EARLIER": slot - timedelta(minutes=5)}
+        if "started_at" in record:
+            record = {**record, "started_at": when[record["started_at"]].isoformat()}
+        self._last_run(monkeypatch, plugin, record)
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert len(attempts) == 2
+
     def test_next_slot_is_claimable_again(self, plugin, store, monkeypatch):
         attempts = _pipeline(monkeypatch, plugin, [True])
         _sleeps(monkeypatch, plugin)
