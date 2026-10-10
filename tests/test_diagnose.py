@@ -48,7 +48,8 @@ def _restore_plugin_attrs(plugin):
     restore them so the stubs don't leak into other test files sharing this
     process (notably test_field_event_lookup, which drives the real
     _build_epg_lookup)."""
-    names = ("_read_cache", "_diagnose_window_sample", "_build_epg_lookup", "logger")
+    names = ("_read_cache", "_diagnose_window_sample", "_build_epg_lookup", "logger",
+             "_candidate_changed_at")
     saved = {n: getattr(plugin, n) for n in names}
     yield
     for n, v in saved.items():
@@ -83,16 +84,19 @@ def _game(away, home, *, prefix="WC", score=5.0, matched=None,
     }
 
 
-def _run(plugin, games, *, window_rows=None, lookup_cands=None):
-    """Drive _action_diagnose with the two DB helpers stubbed."""
-    plugin._read_cache = lambda: {"games": games}
+def _run(plugin, games, *, window_rows=None, lookup_cands=None, matched_at=None,
+         feed_changed=None, settings=None):
+    """Drive _action_diagnose with the DB helpers stubbed. `feed_changed` is
+    what _candidate_changed_at reports for the naming candidates."""
+    plugin._read_cache = lambda: {"games": games, "matched_at": matched_at}
+    plugin._candidate_changed_at = lambda cands: feed_changed
     plugin._diagnose_window_sample = lambda *a, **k: list(window_rows or [])
     # **kw: _action_diagnose threads the excluded_groups policy through (#206),
     # and a stub that rejects kwargs would raise a TypeError that the action's
     # own `except Exception` swallows into an empty candidate list, i.e. a wrong
     # message rather than a failure. Measured: that is exactly how it broke.
     plugin._build_epg_lookup = lambda **kw: (lambda shim: list(lookup_cands or []))
-    out = plugin._action_diagnose({})
+    out = plugin._action_diagnose(settings or {})
     assert out["status"] == "ok"
     return out["message"]
 
@@ -176,6 +180,35 @@ class TestDeepDive:
         games = [_game("New York Knicks", "San Antonio Spurs", prefix="NBA", score=8.0)]
         msg = _run(plugin, games, window_rows=[], lookup_cands=[stream_cand])
         assert "stream name has both teams but it didn't match" in msg
+
+    def test_feed_that_arrived_after_the_refresh_says_so(self, plugin, ChannelCandidate):
+        # 2026-10-10: the M3U renamed its event slots to the noon game at 12:22,
+        # forty minutes after our 11:42 refresh. That is not a matcher bug, and
+        # "unexpected; please send us this" sent the user hunting for one.
+        from datetime import datetime, timezone
+        cands = [_cand(ChannelCandidate, "Knicks vs Spurs HD")]
+        rows = [("Knicks vs Spurs HD", "", " [BOTH TEAMS]")]
+        games = [_game("New York Knicks", "San Antonio Spurs", prefix="NBA", score=8.0)]
+        msg = _run(plugin, games, window_rows=rows, lookup_cands=cands,
+                   matched_at="2026-10-10T15:42:09+00:00",
+                   feed_changed=datetime(2026, 10, 10, 16, 21, 53, tzinfo=timezone.utc),
+                   settings={"local_timezone": "America/New_York"})
+        assert "unexpected" not in msg
+        assert "Its feed appeared at 2026-10-10 12:21 EDT" in msg
+        assert "after the last match at 2026-10-10 11:42 EDT" in msg
+        assert "'Refresh + apply now'" in msg
+
+    def test_feed_already_present_at_refresh_is_still_unexpected(self, plugin, ChannelCandidate):
+        # The naming feed was there BEFORE our match, so the matcher saw it and
+        # missed it: that one IS worth reporting, whatever else refreshed since.
+        from datetime import datetime, timezone
+        cands = [_cand(ChannelCandidate, "Knicks vs Spurs HD")]
+        rows = [("Knicks vs Spurs HD", "", " [BOTH TEAMS]")]
+        games = [_game("New York Knicks", "San Antonio Spurs", prefix="NBA", score=8.0)]
+        msg = _run(plugin, games, window_rows=rows, lookup_cands=cands,
+                   matched_at="2026-10-10T15:42:09+00:00",
+                   feed_changed=datetime(2026, 10, 10, 4, 22, tzinfo=timezone.utc))
+        assert "unexpected" in msg
 
     def test_long_title_is_truncated(self, plugin):
         long_title = "FIFA World Cup Quarterfinal Extravaganza Presented by Sponsor: Japan vs"

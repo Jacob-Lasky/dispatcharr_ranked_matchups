@@ -49,7 +49,7 @@ Trade-offs of the daemon-thread-supervises-subprocess approach:
   + No Celery dependency, no broker round-trip, no worker_ready race.
   + Redis-backed scheduler lock still gates cross-worker mutex.
   - Worker restart kills the supervising thread (the child is reaped by
-    the OS). The 30-min Redis lock TTL auto-clears so a retry succeeds.
+    the OS). The Redis lock TTL (90 min) auto-clears so a retry succeeds.
   - ~1-2s django.setup() cost per run in the child. Acceptable for a
     6-hourly + manual action; the win is no frozen worker.
 """
@@ -78,10 +78,16 @@ PLUGIN_KEY = os.path.basename(
 ).replace(" ", "_").lower()
 
 _INFLIGHT_KEY = f"plugins:{PLUGIN_KEY}:inflight"
-# Matches the scheduler lock TTL in plugin.py. If a run wedges past this we
-# want show_status to stop claiming work is in progress; the lock itself
-# also auto-releases at this point so a new run can start.
+# Covers one pipeline child (_SUBPROCESS_TIMEOUT_SECONDS, 25 min) with margin.
+# If a run wedges past this, show_status stops claiming work is in progress.
+# It is deliberately SHORTER than the scheduler lock TTL in plugin.py (90 min,
+# which also covers the apply pre-pass), so it does not mark the lock free.
 _INFLIGHT_TTL_SECONDS = 30 * 60
+
+# Set in the pipeline child's environment (run_pipeline_subprocess). The child
+# runs django.setup(), which discovers plugins and builds a Plugin; with this
+# set, Plugin.__init__ starts no scheduler or reaper thread in the child.
+PIPELINE_CHILD_ENV = "RANKED_MATCHUPS_PIPELINE_CHILD"
 
 # Sentinel prefixing the single stdout line the subprocess emits with its
 # JSON result. Reserving a marker (rather than parsing all of stdout) means a
@@ -89,9 +95,10 @@ _INFLIGHT_TTL_SECONDS = 30 * 60
 # _pipeline_runner.py imports this constant so there is one source of truth.
 _RESULT_SENTINEL = "__RM_PIPELINE_RESULT__ "
 
-# Hard ceiling on a single pipeline run. Kept just under the 30-min scheduler
-# lock TTL so a hung child can't outlive the lock and wedge the next run; on
-# timeout we return an error and the lock auto-releases.
+# Hard ceiling on a single pipeline run. Kept well under the 90-min scheduler
+# lock TTL (plugin._SCHEDULER_LOCK_TTL_SECONDS) so a hung child can't outlive
+# the lock and let a second run start beside it; on timeout we return an error
+# and the lock is released.
 _SUBPROCESS_TIMEOUT_SECONDS = 25 * 60
 
 # Action selectors for the subprocess boundary -- the contract between
@@ -193,10 +200,16 @@ def read_inflight() -> Optional[Dict[str, Any]]:
         return None
 
 
-def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], Dict[str, Any]], settings: Dict[str, Any]) -> None:
+def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], Dict[str, Any]], settings: Dict[str, Any], *, record_skip: bool = True) -> bool:
     """Common thread body: acquire scheduler lock, publish inflight,
     run the work, clear inflight, release lock. Logs exceptions but
-    never propagates them out of the thread."""
+    never propagates them out of the thread.
+
+    Returns True if the work ran (whatever its outcome), False if the lock
+    was unavailable and nothing ran. A caller that will RETRY a lost lock
+    passes record_skip=False and records the skip itself once it gives up,
+    so a lock that frees up a minute later does not leave a stale "did not
+    run" note behind (and the per-attempt line drops to INFO)."""
     # Lazy import: keeps tasks.py importable without Django configured.
     from .plugin import _try_acquire_scheduler_lock, _release_scheduler_lock
 
@@ -209,19 +222,22 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
 
     lock_token = _try_acquire_scheduler_lock(destructive=destructive)
     if not lock_token:
-        logger.warning(
+        logger.log(
+            logging.WARNING if record_skip else logging.INFO,
             "[ranked_matchups.tasks] %s task %s: scheduler lock unavailable; "
-            "skipping (another refresh / auto_pipeline is in flight, or Redis is "
+            "%s (another refresh / auto_pipeline is in flight, or Redis is "
             "unreachable and this action writes)",
-            kind, task_id,
+            kind, task_id, "skipping" if record_skip else "will retry",
         )
+        if not record_skip:
+            return False
         # The button already answered "queued", so record that this request
         # did NOTHING; otherwise Show current state would keep presenting the
         # previous run's verdict as if it answered this click. Recorded beside
         # that verdict, never over it: the previous outcome is still the truth
         # about the last run that actually ran.
-        _record_skip(kind)
-        return
+        record_skipped_run(kind)
+        return False
     started = datetime.now(timezone.utc)
     result: Dict[str, Any] = {"status": "error", "message": "crashed before returning a result"}
     try:
@@ -248,6 +264,7 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
         _record_last_run(kind, task_id, started, result)
         _clear_inflight()
         _release_scheduler_lock(lock_token)
+    return True
 
 
 # Outcome of the most recent background run (#227). Every caller of
@@ -307,7 +324,7 @@ def _record_last_run(kind: str, task_id: str, started: datetime, result: Dict[st
         logger.warning("[ranked_matchups.tasks] could not record run outcome to %s: %s", LAST_RUN_PATH, e)
 
 
-def _record_skip(kind: str) -> None:
+def record_skipped_run(kind: str) -> None:
     """Note that a requested run was skipped (lock held or Redis down) on the
     existing record, without touching that record's verdict. Never raises."""
     try:
@@ -324,6 +341,7 @@ def _record_skip(kind: str) -> None:
 RUN_KIND_LABELS = {
     "auto_pipeline": "Refresh + apply",
     "scheduled_auto_pipeline": "Scheduled refresh + apply",
+    "m3u_rematch": "Refresh + apply after an M3U update",
     "refresh": "Refresh",
 }
 
@@ -446,6 +464,10 @@ def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, 
     # child via PYTHONPATH. (The child inherits our cwd by default, which is
     # the worker's /app, so we don't pass cwd explicitly.)
     env = os.environ.copy()
+    # Marks the child so Plugin.__init__ starts no scheduler or reaper there:
+    # django.setup() in the child runs plugin discovery, which used to start a
+    # second scheduler and reaper inside every pipeline subprocess.
+    env[PIPELINE_CHILD_ENV] = "1"
     forwarded = os.pathsep.join(p for p in sys.path if p)
     env["PYTHONPATH"] = (
         forwarded + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -540,7 +562,7 @@ def run_refresh_background(settings: Dict[str, Any]) -> str:
     return task_id
 
 
-def run_scheduled_pipeline(settings: Dict[str, Any]) -> None:
+def run_scheduled_pipeline(settings: Dict[str, Any], *, record_skip: bool = True) -> bool:
     """Scheduler entry point for the auto-refresh tick.
 
     Runs the auto_pipeline through the SAME lock/inflight/subprocess path the
@@ -549,10 +571,27 @@ def run_scheduled_pipeline(settings: Dict[str, Any]) -> None:
     re-freezing the gevent hub. Blocks until the child completes; that's fine
     because the scheduler runs in its own loop thread, not a request worker.
     The kind/task_id mark this as a scheduled run so show_status can tell it
-    apart from an HTTP-queued one."""
-    _run_under_lock(
+    apart from an HTTP-queued one. Returns _run_under_lock's ran flag."""
+    return _run_under_lock(
         "scheduled_auto_pipeline",
         f"scheduler-{os.getpid()}",
         partial(run_pipeline_subprocess, ACTION_AUTO_PIPELINE),
         settings,
+        record_skip=record_skip,
+    )
+
+
+def run_m3u_rematch_pipeline(settings: Dict[str, Any]) -> bool:
+    """Reaper-loop entry point for the post-M3U-refresh rematch (see
+    plugin._maybe_rematch_after_m3u). The same lock/subprocess path as the
+    scheduler, under its own kind so Show current state names why it ran.
+    A lost lock is NOT recorded as a skip: the caller lifts its cooldown and
+    a later tick tries again, and the run holding the lock is itself a
+    refresh that will usually make this one unnecessary."""
+    return _run_under_lock(
+        "m3u_rematch",
+        f"m3u-rematch-{os.getpid()}",
+        partial(run_pipeline_subprocess, ACTION_AUTO_PIPELINE),
+        settings,
+        record_skip=False,
     )
