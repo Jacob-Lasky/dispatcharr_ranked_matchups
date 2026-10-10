@@ -3051,11 +3051,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # of the fetch, which sends whoever reads it to the wrong phase.
     score_started = time.monotonic()
     logger.info("[ranked_matchups] scoring %d games", len(all_games))
-    for scored_n, (g, src) in enumerate(zip(all_games, game_sources), 1):
-        if scored_n % _SCORING_PROGRESS_EVERY == 0:
+    for done_n, (g, src) in enumerate(zip(all_games, game_sources)):
+        # done_n games are finished when this one starts, so a timeout here
+        # reports what was actually completed, not this game as if done.
+        if done_n and done_n % _SCORING_PROGRESS_EVERY == 0:
             logger.info(
                 "[ranked_matchups] scoring: %d/%d games done (%.0fs), now %s",
-                scored_n, len(all_games), time.monotonic() - score_started,
+                done_n, len(all_games), time.monotonic() - score_started,
                 getattr(src, "sport_label", "?"),
             )
         extra = g.extra or {}
@@ -6234,6 +6236,9 @@ def _action_auto_pipeline_sync(settings: Dict[str, Any]) -> Dict[str, Any]:
     if r1.get("status") != "ok":
         return r1
     tasks._update_inflight_phase("apply")
+    # Marks the phase boundary in the log, so a run that stalls in apply is
+    # not reported as stalled at refresh's last line (#227).
+    logger.info("[ranked_matchups] apply: starting")
     r2 = _action_apply(settings)
     return {
         "status": r2.get("status", "ok"),
@@ -6420,9 +6425,11 @@ def _fmt_run_time(iso: Optional[str], tz) -> str:
 
 def _run_health_lines(
     cache: Dict[str, Any], last_run: Optional[Dict[str, Any]], tz,
+    inflight: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[str], List[str]]:
     """The verdict block that ends Show current state (#227): did the last
-    background run work, and did it produce anything playable.
+    background run work, is one running now, and did the result contain
+    anything playable.
 
     Exists because a failing pipeline used to be invisible here. A failed run
     never rewrites cache.json, so this action showed the last GOOD cache (or
@@ -6435,25 +6442,47 @@ def _run_health_lines(
     The caller orders them data warnings, then the config notices (template,
     dry run), then the run verdict LAST, where the toast is always visible.
     The verdict outranks a config notice: when refresh itself keeps failing,
-    unticking dry run fixes nothing."""
+    unticking dry run fixes nothing. Because the warnings sit ABOVE it and
+    can scroll off, an OK verdict says how many there are, and a run in
+    progress is stated in the verdict too, so the last line never presents
+    the PREVIOUS run's result as the answer to the click just made."""
     out = [
         f"WARNING: {problem}."
         for problem in _slate_problems(cache.get("summary") or [], cache.get("games") or [])
     ]
     verdict: List[str] = []
-    if last_run:
+    labels = tasks.RUN_KIND_LABELS
+    if inflight:
+        running = labels.get(inflight.get("kind"), inflight.get("kind") or "A run")
+        verdict.append(
+            f"RUNNING NOW: {running} ({inflight.get('phase', '?')}) since "
+            f"{_fmt_run_time(inflight.get('started_at'), tz)}; the results above are from before it."
+        )
+    # A record can hold only a skip note (a request skipped before any run
+    # finished): no status means no verdict, never a failure.
+    if last_run and last_run.get("status"):
         when = _fmt_run_time(last_run.get("finished_at"), tz)
-        kind = tasks.RUN_KIND_LABELS.get(last_run.get("kind"), last_run.get("kind") or "Run")
+        kind = labels.get(last_run.get("kind"), last_run.get("kind") or "Run")
+        prefix = "Previous run" if inflight else "Last run"
         if last_run.get("status") == "ok":
-            mins = round((last_run.get("duration_s") or 0) / 60)
-            verdict.append(f"Last run OK: {kind} finished {when} (took {mins} min).")
+            mins = round(tasks._as_int(last_run.get("duration_s")) / 60)
+            tail = f" with {len(out)} warning(s) above" if out else ""
+            verdict.append(f"{prefix} OK{tail}: {kind} finished {when} (took {mins} min).")
         else:
-            streak = int(last_run.get("consecutive_failures") or 1)
+            streak = max(1, tasks._as_int(last_run.get("consecutive_failures")))
             streak_txt = f", {streak} failures in a row" if streak > 1 else ""
             msg = (last_run.get("message") or "no message")[:240]
             verdict.append(
-                f"LAST RUN FAILED: {kind} at {when}{streak_txt}: {msg}. "
+                f"{prefix.upper()} FAILED: {kind} at {when}{streak_txt}: {msg}. "
                 f"Last successful refresh: {_fmt_run_time(cache.get('refreshed_at'), tz)}."
+            )
+    if last_run:
+        skipped_at = last_run.get("skipped_at")
+        if skipped_at and str(skipped_at) > str(last_run.get("finished_at") or "") and not inflight:
+            skipped = labels.get(last_run.get("skipped_kind"), last_run.get("skipped_kind") or "A run")
+            verdict.append(
+                f"NOTE: {skipped} requested {_fmt_run_time(skipped_at, tz)} did not run: "
+                "another run held the lock, or Redis was unreachable."
             )
     return out, verdict
 
@@ -6504,19 +6533,19 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     # verdict after them as the very last line, because whether the pipeline
     # works at all is what a confused user needs most. See _run_health_lines.
     status_tz = _resolve_tz((settings or {}).get("local_timezone", "UTC"))
-    data_warnings, run_verdict = _run_health_lines(cache, tasks.read_last_run(), status_tz)
+    data_warnings, run_verdict = _run_health_lines(cache, tasks.read_last_run(), status_tz, inflight)
     notices = data_warnings + notices + run_verdict
 
     games = cache.get("games", [])
     if not games:
         if cache.get("refreshed_at"):
-            # Counts, not the summary string: the summary names every enabled
-            # source and would overflow the toast. Errored sources are named
-            # in the health warning below.
-            n_sources = len(cache.get("summary") or [])
+            # Not the summary string: it names every enabled source and would
+            # overflow the toast, and it also carries filter lines
+            # ("favorites-only: dropped N"), so its length is not a source
+            # count either. Errored sources are named in the warning below.
             msg = (
-                f"Last refresh ({_fmt_run_time(cache['refreshed_at'], status_tz)}) found no games to list "
-                f"across {n_sources} enabled source(s) in the lookahead window."
+                f"Last refresh ({_fmt_run_time(cache['refreshed_at'], status_tz)}) "
+                "found no games to list in the lookahead window."
             )
         else:
             msg = "No completed refresh yet. Click 'Refresh + apply now'."

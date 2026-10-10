@@ -86,12 +86,16 @@ class TestLastRunRecord:
         rec = self._run(tasks_mod, plugin_mod, MagicMock(side_effect=RuntimeError("boom")))
         assert rec["status"] == "error" and "boom" in rec["message"]
 
-    def test_skipped_run_records_nothing(self, tasks_mod, plugin_mod):
-        # A run that never acquired the lock did not run; recording it would
-        # overwrite the real outcome of the run that holds the lock.
+    def test_skipped_run_writes_no_verdict(self, tasks_mod, plugin_mod):
+        # A run that never acquired the lock did not run: it may note the skip,
+        # but must not write a status, which would overwrite the real outcome
+        # of the run holding the lock, or on a fresh install read as a failure.
         with patch.object(plugin_mod, "_try_acquire_scheduler_lock", return_value=None):
             tasks_mod._run_under_lock("refresh", "tid", MagicMock(), {})
-        assert tasks_mod.read_last_run() is None
+        rec = tasks_mod.read_last_run()
+        assert "status" not in rec and rec["skipped_kind"] == "refresh"
+        msg = _status(plugin_mod, {"games": [], "summary": []}, rec)
+        assert "FAILED" not in msg and "did not run" in msg
 
     def test_unreadable_file_reads_as_none(self, tasks_mod):
         with open(tasks_mod.LAST_RUN_PATH, "w") as f:
@@ -99,9 +103,9 @@ class TestLastRunRecord:
         assert tasks_mod.read_last_run() is None
 
 
-def _status(plugin_mod, cache, last_run, settings=None):
+def _status(plugin_mod, cache, last_run, settings=None, inflight=None):
     with patch.object(plugin_mod, "_read_cache", return_value=cache):
-        with patch.object(plugin_mod.tasks, "read_inflight", return_value=None):
+        with patch.object(plugin_mod.tasks, "read_inflight", return_value=inflight):
             with patch.object(plugin_mod.tasks, "read_last_run", return_value=last_run):
                 return plugin_mod._action_show_status(settings or {"dry_run": False})["message"]
 
@@ -148,7 +152,7 @@ class TestShowStatusVerdict:
                  "summary": ["NFL: error (401 Unauthorized)", "NHL: 0 games"]}
         msg = _status(plugin_mod, cache, None)
         assert "1 source(s) failed to fetch (NFL)" in msg
-        assert "found no games to list across 2 enabled source(s)" in msg
+        assert "found no games to list in the lookahead window" in msg
 
     def test_ok_run_reports_duration(self, plugin_mod):
         ok = dict(_FAILED, status="ok", duration_s=1260, consecutive_failures=0)
@@ -232,3 +236,101 @@ class TestReviewFollowups:
         src = inspect.getsource(plugin_mod._action_refresh)
         assert '"[ranked_matchups] scoring %d games"' in src
         assert "_SCORING_PROGRESS_EVERY" in src
+
+
+
+class TestSecondOpinionFindings:
+    """Defects an outside review (gpt-6-sol) found in the first cut, each
+    verified against the code before fixing."""
+
+    def _locked_run(self, tasks_mod, plugin_mod, target):
+        release = MagicMock()
+        clear = MagicMock()
+        with patch.object(plugin_mod, "_try_acquire_scheduler_lock", return_value="tok"):
+            with patch.object(plugin_mod, "_release_scheduler_lock", release):
+                with patch.object(tasks_mod, "_set_inflight"), patch.object(tasks_mod, "_clear_inflight", clear):
+                    tasks_mod._run_under_lock("auto_pipeline", "tid", target, {})
+        return release, clear
+
+    def test_corrupt_record_cannot_skip_the_lock_release(self, tasks_mod, plugin_mod):
+        # A non-numeric streak in a hand-edited or truncated file used to raise
+        # inside `finally`, ahead of the inflight clear and the lock release.
+        with open(tasks_mod.LAST_RUN_PATH, "w") as f:
+            json.dump({"status": "error", "consecutive_failures": "oops"}, f)
+        release, clear = self._locked_run(
+            tasks_mod, plugin_mod, MagicMock(return_value={"status": "error", "message": "x"}))
+        release.assert_called_once()
+        clear.assert_called_once()
+        assert tasks_mod.read_last_run()["consecutive_failures"] == 1
+
+    def test_unwritable_record_cannot_skip_the_lock_release(self, tasks_mod, plugin_mod, monkeypatch):
+        monkeypatch.setattr(tasks_mod, "LAST_RUN_PATH", "/nonexistent-dir/last_run.json")
+        release, clear = self._locked_run(tasks_mod, plugin_mod, MagicMock(return_value={"status": "ok"}))
+        release.assert_called_once()
+        clear.assert_called_once()
+
+    def test_corrupt_streak_does_not_break_show_status(self, plugin_mod):
+        bad = dict(_FAILED, consecutive_failures="oops", duration_s="x")
+        assert "LAST RUN FAILED" in _status(plugin_mod, {"games": [], "summary": []}, bad)
+
+    def test_temp_file_is_writer_unique(self, tasks_mod, monkeypatch):
+        # Refresh runs without the lock when Redis is down, so two workers can
+        # write at once; a shared temp name lets one replace the other's file.
+        seen = []
+        real_replace = tasks_mod.os.replace
+        monkeypatch.setattr(tasks_mod.os, "replace", lambda a, b: (seen.append(a), real_replace(a, b)))
+        tasks_mod._write_last_run({"status": "ok"})
+        (tmp,) = seen
+        assert str(tasks_mod.os.getpid()) in tmp and tmp != tasks_mod.LAST_RUN_PATH + ".tmp"
+
+    def test_skipped_request_is_recorded_beside_the_verdict(self, tasks_mod, plugin_mod):
+        ok = MagicMock(return_value={"status": "ok", "message": "fine"})
+        self._locked_run(tasks_mod, plugin_mod, ok)
+        with patch.object(plugin_mod, "_try_acquire_scheduler_lock", return_value=None):
+            tasks_mod._run_under_lock("auto_pipeline", "tid2", MagicMock(), {})
+        rec = tasks_mod.read_last_run()
+        assert rec["status"] == "ok"          # the verdict is untouched
+        assert rec["skipped_kind"] == "auto_pipeline"
+        msg = _status(plugin_mod, {"games": [], "summary": []}, rec)
+        assert msg.splitlines()[-1].startswith("NOTE: Refresh + apply requested")
+        assert "did not run" in msg.splitlines()[-1]
+
+    def test_ok_verdict_counts_the_warnings_above_it(self, plugin_mod):
+        ok = dict(_FAILED, status="ok", consecutive_failures=0)
+        cache = {"games": [dict(_GAME)], "summary": ["NFL: error (401)", "NHL: 1 games"]}
+        last = _status(plugin_mod, cache, ok).splitlines()[-1]
+        assert last.startswith("Last run OK with 2 warning(s) above")
+
+    def test_running_now_is_the_last_line_not_the_previous_verdict(self, plugin_mod):
+        ok = dict(_FAILED, status="ok", consecutive_failures=0)
+        inflight = {"kind": "auto_pipeline", "phase": "refresh", "task_id": "abcdef0123456789",
+                    "started_at": "2026-10-10T13:56:27+00:00"}
+        lines = _status(plugin_mod, {"games": [dict(_GAME, channel_id=1)], "summary": ["NHL: 1 games"]},
+                        ok, inflight=inflight).splitlines()
+        assert lines[-2].startswith("RUNNING NOW: Refresh + apply (refresh) since 2026-10-10 13:56 UTC")
+        assert lines[-1].startswith("Previous run OK")
+
+    def test_child_warnings_keep_their_level(self, tasks_mod, caplog):
+        import logging
+        caplog.set_level("INFO")
+        tasks_mod._forward_child_log([
+            "WARNING plugins.x: [ranked_matchups] refresh: 1 source(s) failed",
+            "INFO plugins.x: [ranked_matchups] NHL: pulled 3 games",
+            "Traceback (most recent call last):",
+        ])
+        levels = [r.levelno for r in caplog.records]
+        assert levels == [logging.WARNING, logging.INFO, logging.INFO]
+
+    def test_progress_reports_games_finished_not_started(self, plugin_mod):
+        import inspect
+        src = inspect.getsource(plugin_mod._action_refresh)
+        assert "for done_n, (g, src) in enumerate(zip(all_games, game_sources)):" in src
+        assert "if done_n and done_n % _SCORING_PROGRESS_EVERY == 0:" in src
+
+    def test_apply_phase_is_marked_in_the_log(self, plugin_mod, caplog, monkeypatch):
+        caplog.set_level("INFO")
+        monkeypatch.setattr(plugin_mod, "_action_refresh", lambda s: {"status": "ok", "message": "r"})
+        monkeypatch.setattr(plugin_mod, "_action_apply", lambda s: {"status": "ok", "message": "a"})
+        monkeypatch.setattr(plugin_mod.tasks, "_update_inflight_phase", lambda p: None)
+        plugin_mod._action_auto_pipeline_sync({})
+        assert any("[ranked_matchups] apply: starting" in r.getMessage() for r in caplog.records)

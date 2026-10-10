@@ -209,16 +209,18 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
 
     lock_token = _try_acquire_scheduler_lock(destructive=destructive)
     if not lock_token:
-        logger.info(
+        logger.warning(
             "[ranked_matchups.tasks] %s task %s: scheduler lock unavailable; "
             "skipping (another refresh / auto_pipeline is in flight, or Redis is "
             "unreachable and this action writes)",
             kind, task_id,
         )
-        # Best-effort: publish a short-lived 'busy' marker so the UI's
-        # show_status surfaces the skipped state for a few seconds. The
-        # marker uses the SAME inflight key the active run is updating;
-        # we deliberately do not overwrite an active marker.
+        # The button already answered "queued", so record that this request
+        # did NOTHING; otherwise Show current state would keep presenting the
+        # previous run's verdict as if it answered this click. Recorded beside
+        # that verdict, never over it: the previous outcome is still the truth
+        # about the last run that actually ran.
+        _record_skip(kind)
         return
     started = datetime.now(timezone.utc)
     result: Dict[str, Any] = {"status": "error", "message": "crashed before returning a result"}
@@ -258,34 +260,63 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
 LAST_RUN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_run.json")
 
 
+def _as_int(value: Any) -> int:
+    """A count read back from last_run.json, which is a file a person can
+    edit or a crash can truncate: anything non-numeric reads as 0."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _write_last_run(record: Dict[str, Any]) -> None:
+    """Atomic replace through a writer-unique temp file. Refresh runs WITHOUT
+    the lock when Redis is unreachable (it fails open), so two workers can
+    write at once; a shared temp name would let one replace the other's
+    half-written file."""
+    tmp = f"{LAST_RUN_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(record, f)
+    os.replace(tmp, LAST_RUN_PATH)
+
+
 def _record_last_run(kind: str, task_id: str, started: datetime, result: Dict[str, Any]) -> None:
     """Persist this run's outcome and the running count of consecutive
-    failures. Best-effort: a write failure is logged, never raised, because
-    the caller is a daemon thread."""
-    finished = datetime.now(timezone.utc)
-    status = str(result.get("status") or "error")
-    prev = read_last_run() or {}
-    failures = 0
-    if status != "ok":
-        failures = int(prev.get("consecutive_failures") or 0) + 1
-    record = {
-        "kind": kind,
-        "task_id": task_id,
-        "status": status,
-        "message": str(result.get("message") or ""),
-        "started_at": started.isoformat(),
-        "finished_at": finished.isoformat(),
-        "duration_s": round((finished - started).total_seconds()),
-        "consecutive_failures": failures,
-        "last_ok_at": finished.isoformat() if status == "ok" else prev.get("last_ok_at"),
-    }
-    tmp = LAST_RUN_PATH + ".tmp"
+    failures. NEVER raises: it runs first in _run_under_lock's `finally`, so
+    an escape here would skip the inflight clear and the lock release behind
+    it and wedge every later run until the lock TTL."""
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(record, f)
-        os.replace(tmp, LAST_RUN_PATH)
-    except OSError as e:
-        logger.warning("[ranked_matchups.tasks] could not write %s: %s", LAST_RUN_PATH, e)
+        finished = datetime.now(timezone.utc)
+        status = str(result.get("status") or "error")
+        prev = read_last_run() or {}
+        failures = 0
+        if status != "ok":
+            failures = _as_int(prev.get("consecutive_failures")) + 1
+        _write_last_run({
+            "kind": kind,
+            "task_id": task_id,
+            "status": status,
+            "message": str(result.get("message") or ""),
+            "started_at": started.isoformat(),
+            "finished_at": finished.isoformat(),
+            "duration_s": round((finished - started).total_seconds()),
+            "consecutive_failures": failures,
+            "last_ok_at": finished.isoformat() if status == "ok" else prev.get("last_ok_at"),
+        })
+    except Exception as e:  # noqa: BLE001 - see docstring
+        logger.warning("[ranked_matchups.tasks] could not record run outcome to %s: %s", LAST_RUN_PATH, e)
+
+
+def _record_skip(kind: str) -> None:
+    """Note that a requested run was skipped (lock held or Redis down) on the
+    existing record, without touching that record's verdict. Never raises."""
+    try:
+        record = read_last_run() or {}
+        record["skipped_kind"] = kind
+        record["skipped_at"] = datetime.now(timezone.utc).isoformat()
+        _write_last_run(record)
+    except Exception as e:  # noqa: BLE001 - caller is a daemon thread
+        logger.warning("[ranked_matchups.tasks] could not record skipped run: %s", e)
 
 
 # User-facing names for the run kinds _run_under_lock records. Show current
@@ -363,7 +394,18 @@ def _forward_child_log(lines: List[str], tail: Optional[int] = None) -> None:
         )
         lines = lines[-tail:]
     for line in lines:
-        logger.info("[ranked_matchups.subproc] %s", line)
+        logger.log(_child_line_level(line), "[ranked_matchups.subproc] %s", line)
+
+
+def _child_line_level(line: str) -> int:
+    """The level the child logged a line at. The runner's format starts every
+    record with its level name (_pipeline_runner.py basicConfig), so a child
+    WARNING stays a WARNING here instead of being flattened to INFO, where a
+    warnings-only log view would never show it. Unprefixed lines (tracebacks,
+    stray prints) forward at INFO."""
+    head = line.split(" ", 1)[0]
+    level = logging.getLevelName(head)
+    return level if isinstance(level, int) else logging.INFO
 
 
 def _last_child_step(lines: List[str]) -> Optional[str]:
