@@ -269,3 +269,45 @@ class TestRefreshHelper:
         ids = {f["id"]: f for f in manifest["fields"]}
         assert "n_importance_sims" not in ids
         assert ids["importance_seasons"]["default"] == 2000
+
+
+class TestCostScalesWithSeasonsNotGames:
+    """The defect #230 fixes, witnessed directly: the old per-game simulator
+    sampled targets x seasons x season-length results; the shared one samples
+    seasons x season-length, whatever the number of targets."""
+
+    def _count_samples(self, fn):
+        games = _season()
+        src = _League(games)
+        calls = {"n": 0}
+        real = src.sample_result
+
+        def counting(*a, **k):
+            calls["n"] += 1
+            return real(*a, **k)
+        src.sample_result = counting
+        fn(src, games)
+        remaining = sum(1 for g in games if g["status"] == "SCHEDULED")
+        return calls["n"], remaining
+
+    def test_shared_samples_each_season_once(self):
+        ctx = scoring.LEAGUE_CONTEXTS["CFB"]
+        n, remaining = self._count_samples(
+            lambda src, games: scoring.compute_league_importance(
+                src, _targets(games, 10), ctx, n_sims=20, rng=random.Random(1)))
+        assert n == 20 * remaining  # literal relation: seasons x fixtures, no x targets
+
+    def test_per_game_path_is_the_cost_that_was_removed(self):
+        # The same 10 targets through the old path cost ~10x: this is the
+        # comparison that makes the test above a witness rather than a tautology.
+        ctx = scoring.LEAGUE_CONTEXTS["CFB"]
+        n, remaining = self._count_samples(
+            lambda src, games: [scoring.compute_match_importance(src, t, ctx, n_sims=20, rng=random.Random(1))
+                                for t in _targets(games, 10)])
+        assert n == 10 * 20 * remaining
+
+    def test_fallback_path_keeps_the_historical_per_game_budget(self, plugin):
+        import inspect
+        assert plugin.PER_GAME_IMPORTANCE_SIMS == 500
+        src = inspect.getsource(plugin._action_refresh)
+        assert "n_sims=PER_GAME_IMPORTANCE_SIMS" in src

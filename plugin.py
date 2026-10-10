@@ -2936,6 +2936,14 @@ IMPORTANCE_SEASONS_SETTING = "importance_seasons"
 IMPORTANCE_SEASONS_DEFAULT = 2000
 
 
+# Sims PER GAME for the games the shared path cannot answer (knockouts, an
+# active group->knockout chain, a game missing from its source's pool). Held at
+# the historical per-game default deliberately: that path still costs
+# games x sims x season, so applying the per-league importance_seasons (2000)
+# to it would quadruple exactly the cost #230 removed.
+PER_GAME_IMPORTANCE_SIMS = 500
+
+
 def _importance_seasons(settings: Dict[str, Any]) -> int:
     try:
         n = int(settings.get(IMPORTANCE_SEASONS_SETTING, IMPORTANCE_SEASONS_DEFAULT))
@@ -3214,7 +3222,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 importance_pts, importance_notes, importance_thresholds_hit = (
                     compute_match_importance(
-                        src, g, league_ctx, n_sims=importance_seasons,
+                        src, g, league_ctx, n_sims=PER_GAME_IMPORTANCE_SIMS,
                         favorites_in_league=[f["name"] for f in favs_with_standings],
                     )
                 )
