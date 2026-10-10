@@ -5,6 +5,8 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.32.0] - 2026-10-10
+
 ### Changed
 
 - **Importance now simulates each league's season once and shares it across
