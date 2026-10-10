@@ -114,6 +114,19 @@ def _no_real_sleeps(monkeypatch):
     monkeypatch.setattr(soccer, "_fd_sleep", lambda _seconds: None)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_last_run(tmp_path, monkeypatch):
+    """Point tasks.LAST_RUN_PATH at a per-test temp file (#227).
+
+    Every _run_under_lock call records its outcome to last_run.json beside the
+    code, and show_status reads it back. Left live, a test that runs a fake
+    pipeline would write a real file into the repo checkout, and a later
+    show_status test would read whatever an earlier test left there, so its
+    result would depend on test order. Autouse so a new test cannot forget."""
+    tasks = _load_tasks_module()
+    monkeypatch.setattr(tasks, "LAST_RUN_PATH", str(tmp_path / "last_run.json"))
+
+
 def pytest_configure(config):
     """Register custom markers so `-W error` / `--strict-markers` runs stay
     clean and a typo'd marker name fails loudly instead of silently doing

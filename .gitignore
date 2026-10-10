@@ -11,6 +11,7 @@ cache.json
 llm_descriptions_cache.json
 recordings_state.json
 recording_stops.json
+last_run.json
 *.tmp
 
 # Python

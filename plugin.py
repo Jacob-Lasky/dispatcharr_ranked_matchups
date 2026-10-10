@@ -34,6 +34,7 @@ import os
 import re
 import sys
 import threading
+import time
 import types
 import uuid
 from dataclasses import asdict
@@ -2421,7 +2422,9 @@ def _empty_refresh_result(msg: str, src_summary: List[str]) -> Dict[str, Any]:
     serving games that no longer pass the curator), and return the action's
     ok-with-message payload. Shared by the no-games-fetched and
     everything-filtered-out exits so the two can't drift."""
-    logger.info("[ranked_matchups] %s", msg)
+    # WARNING, not info: an empty slate is either a real off-day or upstream
+    # breakage, and in the background-run log the two must not look routine.
+    logger.warning("[ranked_matchups] %s", msg)
     _write_cache({
         "games": [],
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
@@ -2919,6 +2922,11 @@ def _build_sources(settings: Dict[str, Any]):
 
 # ---------- refresh ----------
 
+# Scoring progress cadence: often enough that a stall is located to within a
+# few games, rare enough that a 500-game slate logs a dozen lines, not 500.
+_SCORING_PROGRESS_EVERY = 40
+
+
 def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     from .scoring import GameSignals, score_game
     from .matcher import match_games_to_channels
@@ -2953,7 +2961,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             games = src.fetch_upcoming(days_ahead=lookahead)
         except Exception as e:
             logger.exception("[ranked_matchups] source %s fetch failed", src.sport_label)
-            src_summary.append(f"{src.sport_label}: error ({e})")
+            src_summary.append(_source_error_entry(src.sport_label, e))
             continue
         all_games.extend(games)
         game_sources.extend([src] * len(games))
@@ -3037,7 +3045,19 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     )
     n_importance_sims = int(settings.get("n_importance_sims", 500))
     scored: List[Tuple[Any, GameSignals, Any]] = []
-    for g, src in zip(all_games, game_sources):
+    # Scoring is the long, otherwise silent phase. Log its start and steady
+    # progress (#227): a run that hits the subprocess ceiling reports its last
+    # log line as "last step reached", and without these that line is the end
+    # of the fetch, which sends whoever reads it to the wrong phase.
+    score_started = time.monotonic()
+    logger.info("[ranked_matchups] scoring %d games", len(all_games))
+    for scored_n, (g, src) in enumerate(zip(all_games, game_sources), 1):
+        if scored_n % _SCORING_PROGRESS_EVERY == 0:
+            logger.info(
+                "[ranked_matchups] scoring: %d/%d games done (%.0fs), now %s",
+                scored_n, len(all_games), time.monotonic() - score_started,
+                getattr(src, "sport_label", "?"),
+            )
         extra = g.extra or {}
         comp_code = extra.get("fd_competition_code")
         league_ctx = LEAGUE_CONTEXTS.get(comp_code) if comp_code else None
@@ -3324,11 +3344,20 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     games_payload = applied_payload
-    matched = sum(1 for g in games_payload if g["channel_id"])
+    matched = sum(1 for g in games_payload if _is_playable(g))
+    # Upstream breakage gets its own WARNING line and leads the message (#227):
+    # buried in the per-source summary below, a failed source or "0
+    # matched" reads as a normal run, and the scheduled log is the only record
+    # a background run leaves.
+    problems = _slate_problems(src_summary, games_payload)
+    for problem in problems:
+        logger.warning("[ranked_matchups] refresh: %s", problem)
+    lead = "".join(f"WARNING: {p}. " for p in problems)
     return {
         "status": "ok",
         "message": (
-            f"Refreshed: {len(games_payload)} games scored, {matched} matched to a broadcast. "
+            lead
+            + f"Refreshed: {len(games_payload)} games scored, {matched} matched to a broadcast. "
             + " | ".join(src_summary)
         ),
     }
@@ -6231,8 +6260,8 @@ def _action_auto_pipeline_async(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 def _action_refresh_async(settings: Dict[str, Any]) -> Dict[str, Any]:
     """HTTP-facing refresh. Spawns a daemon thread and returns
-    immediately. Refresh alone runs ~25s which is borderline-over the
-    30s browser fetch default; queueing it keeps the UI honest."""
+    immediately. A refresh takes minutes on a full slate, far past the
+    ~30s browser fetch timeout, so it must not run inside the request."""
     task_id = tasks.run_refresh_background(settings)
     return {
         "status": "queued",
@@ -6334,6 +6363,101 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------- show status ----------
 
+# How a failed source is recorded in a refresh's per-source summary. One
+# constant for the writer (_source_error_entry) and the reader
+# (_slate_problems), so the warning cannot silently stop matching if the
+# summary wording changes. The summary is persisted in cache.json.
+_SOURCE_ERROR_MARK = ": error ("
+
+
+def _source_error_entry(label: str, err: Exception) -> str:
+    return f"{label}{_SOURCE_ERROR_MARK}{err})"
+
+
+def _is_playable(game: Dict[str, Any]) -> bool:
+    """A cached game a viewer can actually watch: matched to a whole channel,
+    or to individual streams (Path C stream-name matches set stream_ids with
+    no channel_id, and still play)."""
+    return bool(game.get("channel_id") or game.get("stream_ids"))
+
+
+def _slate_problems(summary: List[Any], games: List[Dict[str, Any]]) -> List[str]:
+    """Upstream breakage a refresh can complete 'ok' through (#227): sources
+    that errored, and a list with nothing playable on it. One phrase each,
+    shared by the refresh result (log + toast) and Show current state so the
+    two surfaces can never disagree about what went wrong."""
+    problems: List[str] = []
+    errored = [
+        entry.split(_SOURCE_ERROR_MARK, 1)[0]
+        for entry in summary
+        if isinstance(entry, str) and _SOURCE_ERROR_MARK in entry
+    ]
+    if errored:
+        shown = ", ".join(errored[:3]) + (f" +{len(errored) - 3} more" if len(errored) > 3 else "")
+        problems.append(
+            f"{len(errored)} source(s) failed to fetch ({shown}); the log has each error"
+        )
+    if games and not any(_is_playable(g) for g in games):
+        problems.append(
+            f"none of the {len(games)} listed games matched a stream in your channels, "
+            "so nothing in the group is playable; run 'Diagnose matching'"
+        )
+    return problems
+
+
+def _fmt_run_time(iso: Optional[str], tz) -> str:
+    """'2026-10-10 09:25 EDT' from an ISO timestamp, in the user's zone."""
+    if not iso:
+        return "never"
+    try:
+        dt = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return str(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+
+
+def _run_health_lines(
+    cache: Dict[str, Any], last_run: Optional[Dict[str, Any]], tz,
+) -> Tuple[List[str], List[str]]:
+    """The verdict block that ends Show current state (#227): did the last
+    background run work, and did it produce anything playable.
+
+    Exists because a failing pipeline used to be invisible here. A failed run
+    never rewrites cache.json, so this action showed the last GOOD cache (or
+    "Cache empty. Run refresh.") as if all were well, and "run refresh" is the
+    wrong advice when refresh is exactly what keeps failing. Upstream data
+    breaking (a source erroring, no stream carrying any listed game) was
+    likewise buried in a long summary string. Each condition gets ONE short,
+    specific line, returned as (data_warnings, run_verdict).
+
+    The caller orders them data warnings, then the config notices (template,
+    dry run), then the run verdict LAST, where the toast is always visible.
+    The verdict outranks a config notice: when refresh itself keeps failing,
+    unticking dry run fixes nothing."""
+    out = [
+        f"WARNING: {problem}."
+        for problem in _slate_problems(cache.get("summary") or [], cache.get("games") or [])
+    ]
+    verdict: List[str] = []
+    if last_run:
+        when = _fmt_run_time(last_run.get("finished_at"), tz)
+        kind = tasks.RUN_KIND_LABELS.get(last_run.get("kind"), last_run.get("kind") or "Run")
+        if last_run.get("status") == "ok":
+            mins = round((last_run.get("duration_s") or 0) / 60)
+            verdict.append(f"Last run OK: {kind} finished {when} (took {mins} min).")
+        else:
+            streak = int(last_run.get("consecutive_failures") or 1)
+            streak_txt = f", {streak} failures in a row" if streak > 1 else ""
+            msg = (last_run.get("message") or "no message")[:240]
+            verdict.append(
+                f"LAST RUN FAILED: {kind} at {when}{streak_txt}: {msg}. "
+                f"Last successful refresh: {_fmt_run_time(cache.get('refreshed_at'), tz)}."
+            )
+    return out, verdict
+
+
 def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     # Reads settings to report the two configuration states that make the
     # plugin look broken when it is working: a rejected name_template (#126,
@@ -6376,9 +6500,26 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     if dry_run:
         notices.append(f"NOTE: {DRY_RUN_NOTICE}")
 
+    # Run health (#227): data warnings ahead of the config notices, the run
+    # verdict after them as the very last line, because whether the pipeline
+    # works at all is what a confused user needs most. See _run_health_lines.
+    status_tz = _resolve_tz((settings or {}).get("local_timezone", "UTC"))
+    data_warnings, run_verdict = _run_health_lines(cache, tasks.read_last_run(), status_tz)
+    notices = data_warnings + notices + run_verdict
+
     games = cache.get("games", [])
     if not games:
-        msg = "Cache empty. Run refresh."
+        if cache.get("refreshed_at"):
+            # Counts, not the summary string: the summary names every enabled
+            # source and would overflow the toast. Errored sources are named
+            # in the health warning below.
+            n_sources = len(cache.get("summary") or [])
+            msg = (
+                f"Last refresh ({_fmt_run_time(cache['refreshed_at'], status_tz)}) found no games to list "
+                f"across {n_sources} enabled source(s) in the lookahead window."
+            )
+        else:
+            msg = "No completed refresh yet. Click 'Refresh + apply now'."
         if inflight_line:
             msg = inflight_line + "\n" + msg
         if notices:
@@ -7450,7 +7591,7 @@ class Plugin:
             # map to ASYNC entrypoints because they run too long for browser / axios
             # default fetch timeouts (~30s): they queue and return a task id, and the
             # UI polls show_status for progress. See #84 and tasks.py. apply stays
-            # synchronous (~17s, fits).
+            # synchronous.
             handler = _ACTION_HANDLERS.get(action)
             if handler is None:
                 return {"status": "error", "message": f"Unknown action: {action!r}"}
