@@ -27,6 +27,8 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   seconds, every copy logged "skipping" and the next run was 16:00. One
   worker now claims each scheduled time and waits for the lock (up to 30
   minutes, never into the next scheduled time), and only that one runs it.
+  If a Refresh + apply that started after the scheduled time finishes while
+  it waits (a manual click, an M3U rematch), the slot counts as done.
 - **Diagnose explains a late feed instead of calling it a bug.** When the
   channel or stream that names the game appeared or was renamed after the
   plugin last matched, the verdict says when it appeared and to click

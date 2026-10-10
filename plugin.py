@@ -7424,6 +7424,28 @@ def _scheduled_retry_deadline(slot: datetime, times: List[Tuple[int, int]], tz) 
     return deadline
 
 
+# Run kinds that do a scheduled slot's whole job (refresh + apply).
+_PIPELINE_RUN_KINDS = frozenset({"auto_pipeline", "scheduled_auto_pipeline", "m3u_rematch"})
+
+
+def _slot_already_covered(slot: datetime) -> bool:
+    """True if a refresh + apply that STARTED at or after `slot` has already
+    finished OK, so this slot's work is done and running it again would only
+    repeat it.
+
+    This is what stops a waiting owner from running a second pipeline right
+    after the lock holder's: a manual Refresh + apply clicked just after the
+    slot, an M3U rematch, or, during a deploy, a scheduler thread still running
+    the previous version's code in another worker (the reload endpoint
+    restarts threads only in the worker that serves it; the rest keep theirs
+    until the container restarts). A FAILED run does not cover the slot."""
+    last = tasks.read_last_run() or {}
+    if last.get("kind") not in _PIPELINE_RUN_KINDS or last.get("status") != "ok":
+        return False
+    started = parse_iso_utc(last.get("started_at"))
+    return started is not None and started >= slot.astimezone(timezone.utc)
+
+
 def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
                         slot: datetime, times: List[Tuple[int, int]], tz) -> bool:
     """Run the scheduled auto_pipeline for `slot` once, across all workers.
@@ -7466,6 +7488,10 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
             return True
         settings = plugin_ref.get_current_settings()
         if not settings.get("auto_refresh_enabled", False):
+            return False
+        if _slot_already_covered(slot):
+            logger.info("[ranked_matchups] scheduled run for %s not needed: a refresh + "
+                        "apply that started after it has finished", slot.isoformat())
             return False
 
 
