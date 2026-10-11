@@ -162,6 +162,10 @@ def refresh_env(plugin, tmp_path, monkeypatch):
         return lookup
     monkeypatch.setattr(plugin, "_build_epg_lookup", build_lookup)
     monkeypatch.setattr(plugin, "_resolve_key", lambda *_a, **_kw: "")
+    # The DB half of the previous slate (#264): no DB here, and nothing on air
+    # that the prior cache does not list. tests/test_hold_lost_cache.py drives
+    # the real readback against the ORM harness.
+    monkeypatch.setattr(plugin, "_published_rows", lambda: ([], 0))
 
     def fake_match(scored, _lookup, _key, _model, widen=False):
         return [

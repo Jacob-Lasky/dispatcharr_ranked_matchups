@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult
+from .base import GameRow, MatchResult, report_lost_days
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, poisson_sample as _poisson, http_get_json
@@ -165,6 +165,9 @@ class NhlRegularSource(PointsBasedSportSource):
             d = today + timedelta(days=offset)
             data = _http_get(f"{NHL_API_BASE}/schedule/{d.isoformat()}")
             if not data:
+                # A lost day, not a quiet one: the refresh holds the games it
+                # had published for it (#261, see base.report_lost_days).
+                report_lost_days([d])
                 continue
             for week in data.get("gameWeek", []) or []:
                 for g in week.get("games", []) or []:
@@ -434,6 +437,9 @@ class NhlPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
             d = today + timedelta(days=offset)
             data = _http_get(f"{NHL_API_BASE}/schedule/{d.isoformat()}")
             if not data:
+                # A lost day, not a quiet one: the refresh holds the games it
+                # had published for it (#261, see base.report_lost_days).
+                report_lost_days([d])
                 continue
             for week in data.get("gameWeek", []) or []:
                 for g in week.get("games", []) or []:

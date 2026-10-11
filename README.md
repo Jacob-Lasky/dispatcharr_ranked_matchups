@@ -323,11 +323,12 @@ The run is named by why it happened — `Refresh + apply` (the button),
 after an M3U update` (see [When a feed arrives after a
 refresh](#when-a-feed-arrives-after-a-refresh)), or `Refresh`.
 
-Above the verdict come warnings about the data itself, the two failures a run
+Above the verdict come warnings about the data itself, the failures a run
 can otherwise complete "ok" through: **sources that failed to fetch** (named,
-with the errors in the container log) and **a list where nothing is playable**,
-meaning no game matched a stream in your channels — run **Diagnose matching**
-for that one.
+with the errors in the container log), **sources that lost days of their
+schedule** (a day's request kept failing; games already published for that day
+stay on air), and **a list where nothing is playable**, meaning no game
+matched a stream in your channels — run **Diagnose matching** for that one.
 
 The verdict is kept in `last_run.json` beside `cache.json` in the plugin
 directory, so it survives a container restart. For more detail, the container
@@ -339,8 +340,12 @@ logs the tail of its own progress and names the step it reached.
 By default a game's channel stays in the group until the first scheduled
 refresh after its estimated end, which on a five-a-day schedule can be hours
 after the final whistle. A refresh never removes a game that is still on air,
-even when its sport's feed has already dropped it or that feed is down. Two
-settings change when a finished game goes, both off by default:
+even when its sport's feed has already dropped it, that feed is down, or the
+feed lost only the day the game is on. That holds after an upgrade too, when
+Dispatcharr replaces the plugin folder and `cache.json` with it: the plugin
+also records each published game in its own guide entry and reads it back
+from there. Two settings change when a finished game goes, both off by
+default:
 
 | Setting | Effect |
 |---|---|

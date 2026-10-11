@@ -125,8 +125,10 @@ def _fetch_scoreboard_range(start: date, end: date) -> List[Dict[str, Any]]:
 
     A day that fails is retried once when it is a blip (see
     `_espn.SCOREBOARD_WALK_CHUNK_DAYS`); one still failing contributes
-    nothing and the rest still arrive, which callers treat as "fewer games"
-    rather than an error, the same as every other ESPN source's walk.
+    nothing and the rest still arrive. The walk reports the lost day
+    (`_espn.fetch_scoreboard_days`, #261), which is what lets the refresh
+    hold the games it had published for that day instead of reading the
+    shorter list as a quiet one.
     """
     if end < start:
         return []

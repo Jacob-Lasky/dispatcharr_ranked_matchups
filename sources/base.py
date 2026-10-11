@@ -14,9 +14,50 @@ from __future__ import annotations
 
 import random
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, List, Optional, TypedDict
+from datetime import date, datetime
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, TypedDict
+
+
+# ---------- partial-fetch accounting (#261) ----------
+#
+# A per-day sweep (ESPN's scoreboard, NHL's schedule) that loses a day still
+# returns the other days' games, so its result looks like a clean, shorter
+# slate. The refresh's on-air hold (#240) reads "this source returned nothing"
+# as an outage and keeps the previous games; a source that lost ONE day is
+# not empty, so without this record the games of that day were dropped and
+# their channels deleted. A sweep reports every day it asked for and did not
+# get (failed after its retry, or never requested because the walk was
+# abandoned), and the refresh holds previously published games dated on one.
+#
+# A ContextVar, not a return value: fifteen fetch_upcoming implementations
+# walk days through the two shared walks, and threading a second result
+# through each is fifteen chances to drop it. The refresh opens the record
+# around ONE source's fetch_upcoming at a time (sources are fetched one after
+# another, and the walks report from the calling thread, never from their
+# pool threads), so a day lands on the source that lost it. Outside a record
+# (full-season walks during scoring, tests) reporting is a no-op.
+_LOST_DAYS: ContextVar[Optional[Set[date]]] = ContextVar("ranked_matchups_lost_days", default=None)
+
+
+def report_lost_days(days: Iterable[date]) -> None:
+    """Record calendar days this fetch asked for and got no answer for."""
+    sink = _LOST_DAYS.get()
+    if sink is not None:
+        sink.update(days)
+
+
+@contextmanager
+def recording_lost_days() -> Iterator[Set[date]]:
+    """Collect the days `report_lost_days` is told about inside the block."""
+    sink: Set[date] = set()
+    token = _LOST_DAYS.set(sink)
+    try:
+        yield sink
+    finally:
+        _LOST_DAYS.reset(token)
 
 
 class SoccerTeamRow(TypedDict):
