@@ -40,6 +40,7 @@ sweeps differ on purpose. See #190.
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -393,16 +394,26 @@ def fetch_days(
         return list(zip(days, pool.map(fetch_day, days)))
 
 
-# How many days a walk tries before giving up on a scoreboard that answers
-# NOTHING. A day with no games is a 200 with an empty `events` list, so a run
-# of None pages means the endpoint itself is failing (down, hung, or rejecting
-# the request), not a quiet stretch of calendar. Two concurrent batches: when
-# every request hangs to its 15 s timeout, a whole-season walk stops after
-# ~30 s instead of ~38 batches (~570 s for MLS's 303 days), and a refresh that
-# walks several such seasons in a row stays inside the pipeline's 25-minute
-# ceiling (#182 review). The cost is a walk that loses its first 16 days to a
-# brief outage also skips the rest; it is retried on the next refresh.
-SCOREBOARD_GIVE_UP_AFTER_DAYS = 2 * _SEASON_WALK_WORKERS
+# A walk is fetched in chunks of this many days (two concurrent batches), and
+# gives up on a scoreboard that is HANGING: a chunk in which every day came
+# back None AND that took at least SCOREBOARD_SLOW_CHUNK_SECONDS stops the
+# walk. Both halves are load-bearing (#182 review):
+#
+#   - All None, because a day with no games is a 200 with an empty `events`
+#     list. A whole chunk of None means the endpoint itself is failing, not a
+#     quiet stretch of calendar, and it is checked on EVERY chunk, so an
+#     endpoint that answers day one and then hangs is still caught.
+#   - Slow, because only a hang threatens the pipeline's 25-minute ceiling.
+#     Every request timing out at 15 s costs ~30 s per chunk, so a 303-day
+#     MLS walk would take ~570 s and two or three such walks in a row overran
+#     the ceiling. An endpoint that fails FAST (a 503, a refused connection)
+#     costs nothing to keep asking, and it may recover mid-walk, so it is
+#     walked to the end rather than silently truncating the season.
+#
+# The cost is that a walk which meets a hang loses the rest of its window for
+# this refresh (a WARNING says so); the next refresh retries it.
+SCOREBOARD_WALK_CHUNK_DAYS = 2 * _SEASON_WALK_WORKERS
+SCOREBOARD_SLOW_CHUNK_SECONDS = 10.0
 
 
 def fetch_scoreboard_days(
@@ -420,22 +431,27 @@ def fetch_scoreboard_days(
     affordable: a slow endpoint costs one timeout per `_SEASON_WALK_WORKERS`
     days instead of one per day.
 
-    If every one of the first `SCOREBOARD_GIVE_UP_AFTER_DAYS` days comes back
-    None, the walk stops there, logs a WARNING and returns just those days,
-    so the result can be SHORTER than the window. Callers already treat a
-    missing day as "no games that day".
+    Stops early, with a WARNING, at the first chunk that is entirely None AND
+    slow (see SCOREBOARD_WALK_CHUNK_DAYS), so the result can be SHORTER than
+    the window. Callers already treat a missing day as "no games that day".
     """
     fetch = lambda day: fetch_scoreboard_day(http_get, scoreboard_url, day)  # noqa: E731
-    probe_end = min(end, start + timedelta(days=SCOREBOARD_GIVE_UP_AFTER_DAYS - 1))
-    pages = fetch_days(start, probe_end, fetch)
-    if probe_end >= end:
-        return pages
-    if all(page is None for _day, page in pages):
-        logger.warning(
-            "[espn] %s: the first %d days (%s-%s) all failed; not requesting "
-            "the remaining days through %s",
-            scoreboard_url, len(pages), start.strftime("%Y%m%d"),
-            probe_end.strftime("%Y%m%d"), end.strftime("%Y%m%d"),
-        )
-        return pages
-    return pages + fetch_days(probe_end + timedelta(days=1), end, fetch)
+    pages: List[Tuple[date, Optional[Dict[str, Any]]]] = []
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(end, chunk_start + timedelta(days=SCOREBOARD_WALK_CHUNK_DAYS - 1))
+        began = time.monotonic()
+        chunk = fetch_days(chunk_start, chunk_end, fetch)
+        pages.extend(chunk)
+        took = time.monotonic() - began
+        if (chunk_end < end and all(page is None for _day, page in chunk)
+                and took >= SCOREBOARD_SLOW_CHUNK_SECONDS):
+            logger.warning(
+                "[espn] %s: every day %s-%s failed and took %.0f s; not "
+                "requesting the remaining days through %s",
+                scoreboard_url, chunk_start.strftime("%Y%m%d"),
+                chunk_end.strftime("%Y%m%d"), took, end.strftime("%Y%m%d"),
+            )
+            break
+        chunk_start = chunk_end + timedelta(days=1)
+    return pages

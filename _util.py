@@ -604,9 +604,35 @@ def http_get_json(
         return r.json()
     except (requests_mod.RequestException, ValueError) as exc:
         log.warning(
-            "[%s] %s failed: %s", tag, redact_secrets(url), redact_secrets(exc),
+            "[%s] %s failed: %s", tag, redact_secrets(url),
+            _redact_header_values(redact_secrets(exc), headers),
         )
         return None
+
+
+_SECRET_HEADER_NAME_RE = re.compile(r"key|token|secret|auth|pass", re.IGNORECASE)
+
+
+def _redact_header_values(text: str, headers: Optional[Dict[str, str]]) -> str:
+    """Mask the value of every credential-named header that appears in `text`.
+
+    `requests` puts a malformed header value in its exception message
+    verbatim (`InvalidHeader: ... in header value: ' <key>'`, measured with a
+    RapidAPI key pasted with a leading space), and a header is where boxing's
+    key travels, so the key-shape regexes in `redact_secrets` never see it.
+    Both the raw value and its `repr` body are masked, because the message
+    quotes the value with `!r` (a trailing newline arrives as a literal
+    backslash-n).
+    """
+    for name, value in (headers or {}).items():
+        if not _SECRET_HEADER_NAME_RE.search(str(name)):
+            continue  # e.g. x-rapidapi-host: the host name helps diagnose, and is public
+        if not isinstance(value, str) or not value.strip():
+            continue
+        for form in (repr(value)[1:-1], value, value.strip()):
+            if form:
+                text = text.replace(form, "***")
+    return text
 
 
 _ORDINAL_SUFFIXES = ("th", "st", "nd", "rd")

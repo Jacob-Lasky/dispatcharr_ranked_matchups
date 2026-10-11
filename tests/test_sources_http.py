@@ -203,3 +203,41 @@ def test_params_and_headers_are_forwarded_only_when_given():
         ("u", {"timeout": 15.0}),
         ("u", {"timeout": 3.0, "params": {"a": 1}, "headers": {"h": "v"}}),
     ]
+
+
+class TestHeaderValuesNeverReachTheLog:
+    """boxing's RapidAPI key travels in a HEADER, where the key-shape regexes
+    in redact_secrets cannot see it, and `requests` echoes a malformed header
+    value verbatim in its InvalidHeader message."""
+
+    def test_real_requests_invalid_header_is_masked(self, caplog):
+        import requests
+        from dispatcharr_ranked_matchups._util import http_get_json
+        log = logging.getLogger("plugins.dispatcharr_ranked_matchups.boxing")
+        with caplog.at_level(logging.WARNING):
+            out = http_get_json(
+                requests, "http://127.0.0.1:9/never-contacted", log=log, tag="boxing",
+                headers={"x-rapidapi-key": "SEKRITKEY99\n", "x-rapidapi-host": "h.example"},
+            )
+        assert out is None
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "InvalidHeader" in text or "header value" in text, text
+        assert "SEKRITKEY99" not in text
+
+    def test_credential_header_masked_and_host_kept(self, monkeypatch, caplog):
+        from dispatcharr_ranked_matchups.sources import boxing as mod
+        boom = FakeRequests.RequestException(
+            "header value: 'SEKRITKEY99' for host boxing-data-api.p.rapidapi.com")
+        fake = FakeRequests(raises=boom)
+        monkeypatch.setattr(mod, "requests", fake)
+        with caplog.at_level(logging.WARNING):
+            assert mod.BoxingSource(api_key="SEKRITKEY99")._http_get("u", params={}) is None
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "SEKRITKEY99" not in text
+        assert "boxing-data-api.p.rapidapi.com" in text
+
+    def test_boxing_strips_a_pasted_key(self):
+        from dispatcharr_ranked_matchups.sources.boxing import BoxingSource
+        assert BoxingSource(api_key="  abc123\n").api_key == "abc123"
+        assert BoxingSource(api_key=None).api_key == ""
+

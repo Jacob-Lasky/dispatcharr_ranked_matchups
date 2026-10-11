@@ -254,15 +254,18 @@ def test_every_espn_sweep_fetches_its_days_concurrently(sweep, monkeypatch):
     assert emu.max_inflight > 1, f"{_id} walked its scoreboard days one at a time"
 
 
-class TestWalkGivesUpOnADeadEndpoint:
+class TestWalkGivesUpOnAHangingEndpoint:
     """A hung ESPN costs a 15 s timeout per request even concurrently; a
-    303-day MLS walk is ~38 batches. Several such walks in a row overran the
-    pipeline's 1500 s ceiling (#182 review), so a walk whose first 16 days ALL
-    fail stops there. Literals (16, 303) on purpose."""
+    303-day MLS walk is ~38 batches, and several such walks in a row overran
+    the pipeline's 1500 s ceiling (#182 review). A chunk of 16 days that ALL
+    fail AND take long stops the walk; fast failures do not. "Slow" is set by
+    patching the threshold, so these tests do not sleep. Literals (16, 32,
+    303) on purpose."""
 
     @staticmethod
-    def _walk(fail_until, start=date(2025, 2, 1), end=date(2025, 11, 30)):
-        from dispatcharr_ranked_matchups.sources._espn import fetch_scoreboard_days
+    def _walk(monkeypatch, ok_days, slow, start=date(2025, 2, 1), end=date(2025, 11, 30)):
+        from dispatcharr_ranked_matchups.sources import _espn
+        monkeypatch.setattr(_espn, "SCOREBOARD_SLOW_CHUNK_SECONDS", 0.0 if slow else 1e9)
         asked = []
         lock = threading.Lock()
 
@@ -270,24 +273,39 @@ class TestWalkGivesUpOnADeadEndpoint:
             day = datetime.strptime(url.split("dates=")[1][:8], "%Y%m%d").date()
             with lock:
                 asked.append(day)
-            return None if (day - start).days < fail_until else {"events": []}
-        pages = fetch_scoreboard_days(http_get, "https://x.test/scoreboard", start, end)
+            return {"events": []} if (day - start).days in ok_days else None
+        pages = _espn.fetch_scoreboard_days(http_get, "https://x.test/scoreboard", start, end)
         return asked, pages
 
-    def test_dead_endpoint_stops_after_sixteen_days(self, caplog):
+    def test_hanging_endpoint_stops_after_one_chunk(self, monkeypatch, caplog):
         with caplog.at_level(logging.WARNING):
-            asked, pages = self._walk(fail_until=10_000)
+            asked, pages = self._walk(monkeypatch, ok_days=set(), slow=True)
         assert len(asked) == 16 and len(pages) == 16
         assert max(asked) == date(2025, 2, 16)
-        assert any("all failed" in r.getMessage() for r in caplog.records)
+        assert any("not requesting the remaining days" in r.getMessage()
+                   for r in caplog.records)
 
-    def test_one_good_day_in_the_probe_keeps_the_whole_walk(self):
-        asked, pages = self._walk(fail_until=15)
+    def test_endpoint_that_answers_then_hangs_is_still_caught(self, monkeypatch):
+        asked, pages = self._walk(monkeypatch, ok_days={0}, slow=True)
+        assert len(asked) == 32 and len(pages) == 32
+
+    def test_fast_failures_walk_the_whole_window(self, monkeypatch):
+        """A 503 or a refused connection costs nothing to keep asking, and the
+        endpoint may recover, so the season is not truncated for it."""
+        asked, pages = self._walk(monkeypatch, ok_days={200}, slow=False)
         assert len(asked) == 303 and len(pages) == 303
+        assert [d for d, p in pages if p is not None] == [date(2025, 2, 1) + timedelta(days=200)]
 
-    def test_a_window_no_longer_than_the_probe_is_never_cut(self):
-        asked, pages = self._walk(fail_until=10_000, end=date(2025, 2, 10))
-        assert len(asked) == 10 and len(pages) == 10
+    def test_a_window_no_longer_than_one_chunk_is_never_cut(self, monkeypatch):
+        asked, pages = self._walk(monkeypatch, ok_days=set(), slow=True,
+                                  end=date(2025, 2, 16))
+        assert len(asked) == 16 and len(pages) == 16
+
+    def test_last_chunk_never_counts_as_a_reason_to_stop(self, monkeypatch, caplog):
+        with caplog.at_level(logging.WARNING):
+            self._walk(monkeypatch, ok_days=set(range(16)), slow=True,
+                       end=date(2025, 3, 1))
+        assert not any("not requesting" in r.getMessage() for r in caplog.records)
 
 
 def test_concurrent_walk_returns_days_in_date_order():

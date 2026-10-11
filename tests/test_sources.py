@@ -11157,9 +11157,19 @@ def _patch_cup_http_per_bucket(monkeypatch, buckets):
     bucket and pass without testing the premise.
     """
     from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
-    from dispatcharr_ranked_matchups.sources._espn import SCOREBOARD_LOOKBACK_DAYS
+    from dispatcharr_ranked_matchups.sources import _espn
 
-    first = datetime.now(timezone.utc).date() - timedelta(days=SCOREBOARD_LOOKBACK_DAYS)
+    # Pin the sweep's clock to the instant the buckets are laid out, so a run
+    # straddling UTC midnight cannot shift the sweep's first day past ours.
+    now = datetime.now(timezone.utc)
+
+    class _PinnedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(_espn, "datetime", _PinnedDatetime)
+    first = now.date() - timedelta(days=_espn.SCOREBOARD_LOOKBACK_DAYS)
 
     class FakeResp:
         def __init__(self, events): self._events = events

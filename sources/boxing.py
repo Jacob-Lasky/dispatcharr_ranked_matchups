@@ -121,7 +121,9 @@ class BoxingSource(SportSource):
     # golf / UFC / racing. No Monte Carlo importance.
 
     def __init__(self, api_key: str) -> None:
-        self.api_key = api_key
+        # Stripped: a key pasted with a leading space or trailing newline is
+        # an invalid header value, which `requests` rejects outright.
+        self.api_key = (api_key or "").strip()
 
     @property
     def sport_prefix(self) -> str:
@@ -218,7 +220,8 @@ class BoxingSource(SportSource):
         """Patch point for this module's HTTP; the body is `_util.http_get_json`.
 
         A method rather than a module function because the RapidAPI key rides
-        in `self._headers()`. Headers never reach a log line."""
+        in `self._headers()`; `http_get_json` masks header values in the one
+        log line that could echo them (a `requests` InvalidHeader message)."""
         return http_get_json(
             requests, url, log=logger, tag="boxing", timeout=timeout,
             params=params, headers=self._headers(),
