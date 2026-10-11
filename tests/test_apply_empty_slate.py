@@ -1,4 +1,5 @@
-"""Apply on an empty slate (#241), driven through the real ORM.
+"""Apply on an empty slate (#241), and the on-air hold after cache.json was
+lost (#264), driven through the real ORM.
 
 The reported defect: when the reaper takes the LAST applied game off the list
 (nothing left to promote from the bench), it rewrites the cache with
@@ -144,6 +145,20 @@ def _publish(env, games, settings=None):
     return owned
 
 
+def _strip_stamps(env):
+    """Make every published channel look like one an earlier release wrote:
+    no cache row stamped on its guide entries (#264)."""
+    env.m.ProgramData.objects.update(custom_properties={})
+
+
+def _end_guide(env, marker):
+    """Time passing for one channel's guide: every entry it has is over."""
+    past = _now() - timedelta(minutes=1)
+    env.m.ProgramData.objects.filter(epg__tvg_id=marker).update(
+        start_time=past - timedelta(hours=3), end_time=past,
+    )
+
+
 # ------------------------------------------------- scenarios (subprocess) ---
 
 def scenario_reaping_the_last_game_removes_its_channel(env):
@@ -219,6 +234,9 @@ def scenario_refresh_does_not_vouch_on_top_of_an_unvouched_slate(env):
     this empty result, and the live CFB channel must stay."""
     user_ch, _ = _seed_source_channel(env)
     _publish(env, [_row(401, _now() + timedelta(hours=1), user_ch.id)])
+    # Published before apply stamped its rows: the DB cannot name it either
+    # (with a stamp the refresh holds it, see the #264 scenarios below).
+    _strip_stamps(env)
     _write_cache(env, [_row(402, _now() - timedelta(hours=10), user_ch.id, home="Texas", away="Oklahoma")],
                  empty_slate_known=False)
 
@@ -355,13 +373,15 @@ def scenario_source_outage_does_not_empty_the_slate(env):
 
 
 def scenario_outage_after_the_cache_was_lost_removes_nothing(env):
-    """The case the #240 hold cannot cover: cache.json is gone (the plugin
-    folder was replaced on upgrade) and the first refresh hits an outage. With
-    no previous games to carry it writes `games == []`, and publishing that
-    would delete a live channel. It is marked instead, and apply leaves the
-    guide alone until a refresh with games writes a normal cache."""
+    """The case neither record of the slate covers: cache.json is gone (the
+    plugin folder was replaced on upgrade), the live channel was published by
+    a release that did not stamp its row into the DB, and the first refresh
+    hits an outage. With no previous games to carry it writes `games == []`,
+    and publishing that would delete the live channel. It is marked instead,
+    and apply leaves the guide alone."""
     user_ch, _ = _seed_source_channel(env)
     owned = _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    _strip_stamps(env)
     os.remove(env.plugin.CACHE_PATH)
 
     with _sources(env, _StubSource(error=RuntimeError("CFBD 525"))):
@@ -374,14 +394,22 @@ def scenario_outage_after_the_cache_was_lost_removes_nothing(env):
     assert OUTAGE_MESSAGE_PART in result["message"], result
     assert set(_owned(env)) == set(owned)
 
-    # The source recovers: a normal cache again, and apply publishes it, which
-    # takes the game it no longer lists off air as usual.
+    # The source recovers and lists another game. The live channel is still
+    # unknown to the slate, so apply keeps it while its guide says it is on
+    # air (#264), and once that guide has run out it goes as usual.
     other = _game_row("Texas", "Oklahoma", _now() + timedelta(days=1))
     with _sources(env, _StubSource([other])):
         assert env.plugin._action_refresh(_settings())["status"] == "ok"
-    assert _read_cache(env)["empty_slate_known"] is True
-    assert env.plugin._action_apply(_settings())["status"] == "ok"
+    assert _read_cache(env)["empty_slate_known"] is False  # one channel unaccounted
+    result = env.plugin._action_apply(_settings())
+    assert "Kept until their guide ends (not in the cache): 1" in result["message"], result
+    assert "ranked_matchups:CFB:401" in _owned(env)
+
+    _end_guide(env, "ranked_matchups:CFB:401")
+    result = env.plugin._action_apply(_settings())
+    assert result.get("slate_vouched") is True, result
     assert "ranked_matchups:CFB:401" not in _owned(env)
+    assert _read_cache(env)["empty_slate_known"] is True
 
 
 def scenario_lost_cache_then_a_healthy_empty_refresh_clears_the_guide(env):
@@ -478,17 +506,19 @@ def scenario_a_dry_run_apply_does_not_vouch(env):
 
 
 def scenario_apply_does_not_vouch_while_it_keeps_an_unlisted_recording_channel(env):
-    """cache.json was lost while a CFB game was on air and recording, and its
-    source is failing. The next refresh lists only another game, and apply
-    keeps the CFB channel for its recording without the slate listing it. The
-    slate does not cover what is on air, so it must stay unvouched, or a later
-    empty slate would take the CFB channel down once the recording stops."""
+    """cache.json was lost, a CFB game later today has a recording scheduled,
+    and the next refresh no longer lists that game (and an off-season source
+    answers with nothing). Apply keeps the CFB channel for its recording
+    without the slate listing it. The slate does not cover what is on air, so
+    it must stay unvouched, or a later empty slate would take the CFB channel
+    down once the recording stops. (A game that had KICKED OFF would be held
+    by the refresh itself, from the row apply stamped into the DB, #264.)"""
     m = env.m
     user_ch, _ = _seed_source_channel(env)
-    owned = _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    owned = _publish(env, [_row(401, _now() + timedelta(hours=3), user_ch.id)])
     m.Recording.objects.create(
-        channel=owned["ranked_matchups:CFB:401"], start_time=_now() - timedelta(minutes=30),
-        end_time=_now() + timedelta(hours=3), custom_properties={"status": "recording"},
+        channel=owned["ranked_matchups:CFB:401"], start_time=_now() + timedelta(hours=3),
+        end_time=_now() + timedelta(hours=6), custom_properties={},
     )
     os.remove(env.plugin.CACHE_PATH)
     _seed_source_channel(env, name="Oklahoma at Texas")
@@ -629,6 +659,413 @@ def scenario_empty_slate_dry_run_deletes_nothing(env):
     assert "stale_deleted=1" in result["message"], result
     assert set(_owned(env)) == set(owned)
     assert m.EPGData.objects.filter(tvg_id="ranked_matchups:CFB:401").exists()
+
+
+# ------------------------------- #264: the hold after cache.json was lost ---
+
+def _nfl_source(game_start):
+    """A healthy second source, so the refresh after the outage is NOT empty:
+    the case #241's refusal never covered, because a non-empty slate is
+    published whatever its stamp says."""
+    from dispatcharr_ranked_matchups.sources.base import GameRow
+    src = _StubSource([GameRow(
+        sport_prefix="NFL", sport_label="NFL", home="Chiefs", away="Bills",
+        rank_home=None, rank_away=None, start_time=game_start,
+        extra={"nfl_game_id": 9001, "game_id": 9001},
+    )])
+    src.sport_prefix, src.sport_label = "NFL", "NFL"
+    return src
+
+
+def scenario_apply_stamps_the_published_row_on_the_live_entry(env):
+    """The DB record the lost-cache hold reads: the cache row each channel was
+    published from, on its LIVE guide entry only."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() + timedelta(days=1), user_ch.id)])
+
+    progs = list(m.ProgramData.objects.filter(epg__tvg_id="ranked_matchups:CFB:401"))
+    stamped = [p for p in progs if (p.custom_properties or {}).get("ranked_matchups_row")]
+    assert len(progs) == 3 and len(stamped) == 1, [(p.title, p.custom_properties) for p in progs]
+    assert stamped[0].title.endswith("ᴸᶦᵛᵉ"), stamped[0].title
+    row = stamped[0].custom_properties["ranked_matchups_row"]
+    assert row["extra"] == {"cfbd_id": 401} and row["home"] == "Georgia"
+
+
+def scenario_a_lost_cache_does_not_drop_a_failed_sources_live_game(env):
+    """WITNESS, the #264 repro: cache.json is gone, CFB fails, NFL answers.
+    The refresh used to write a non-empty slate of the NFL game alone, and
+    the apply after it deleted the live CFB channel mid-game."""
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    os.remove(env.plugin.CACHE_PATH)
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    cache = _read_cache(env)
+    held = [g for g in cache["games"] if g["extra"].get("cfbd_id") == 401]
+    assert len(held) == 1 and held[0]["held_on_air"] is True, cache["games"]
+
+    result = env.plugin._action_apply(_settings())
+
+    assert result["status"] == "ok", result
+    assert "ranked_matchups:CFB:401" in _owned(env), "the live CFB channel was deleted"
+
+
+def scenario_a_lost_cache_does_not_drop_a_live_game_its_healthy_source_stopped_listing(env):
+    """WITNESS: no outage at all. ncaaf.py lists only games that have not
+    kicked off, so with cache.json gone the live game is simply missing from
+    a healthy fetch, and only the DB record can hold it."""
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    os.remove(env.plugin.CACHE_PATH)
+    later = _game_row("Texas", "Oklahoma", _now() + timedelta(days=1), cfbd_id=777)
+
+    with _sources(env, _StubSource([later])):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    assert env.plugin._action_apply(_settings())["status"] == "ok"
+
+    assert "ranked_matchups:CFB:401" in _owned(env), "the live CFB channel was deleted"
+
+
+def scenario_a_lost_cache_holds_a_failed_sources_upcoming_game(env):
+    """WITNESS: the #240 outage case (CFBD down before kickoff) on the first
+    refresh after cache.json was lost. Two hours out, so the guide's live
+    window has not opened and apply's on-air fallback cannot be what keeps
+    it: only the row read back from the DB does."""
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() + timedelta(hours=2), user_ch.id)])
+    os.remove(env.plugin.CACHE_PATH)
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    assert env.plugin._action_apply(_settings())["status"] == "ok"
+
+    assert "ranked_matchups:CFB:401" in _owned(env)
+
+
+def scenario_a_lost_cache_does_not_freeze_a_healthy_sources_upcoming_game(env):
+    """Guard: the DB record is held by the same rule as the cache. A game that
+    has not started, from a source that answered and no longer lists it, goes.
+    The off-season source keeps the slate unvouched, so apply's fallback runs
+    too, and must not keep a STAMPED channel the refresh judged."""
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() + timedelta(hours=3), user_ch.id)])
+    os.remove(env.plugin.CACHE_PATH)
+    later = _game_row("Texas", "Oklahoma", _now() + timedelta(days=1), cfbd_id=777)
+
+    with _sources(env, _StubSource([later]), _off_season_source()):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    assert _read_cache(env)["empty_slate_known"] is False
+    result = env.plugin._action_apply(_settings())
+
+    assert "Kept until their guide ends" not in result["message"], result
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
+def scenario_a_live_channel_published_before_the_stamp_is_kept_while_on_air(env):
+    """WITNESS for apply's fallback: the first refresh after upgrading to the
+    release that stamps rows still finds channels without one. cache.json is
+    gone, CFB fails, NFL answers: the live CFB channel stays while its own
+    guide says it is on air, the slate is not vouched meanwhile, and once its
+    guide has run out it goes and the slate is vouched."""
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    _strip_stamps(env)
+    os.remove(env.plugin.CACHE_PATH)
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    # Nothing in either record names the CFB game: only the NFL one is listed.
+    assert [(g["sport_prefix"], g["home"]) for g in _read_cache(env)["games"]] == [("NFL", "Chiefs")]
+
+    result = env.plugin._action_apply(_settings())
+
+    assert result["status"] == "ok", result
+    assert "Kept until their guide ends (not in the cache): 1" in result["message"], result
+    assert "slate_vouched" not in result, result
+    assert "ranked_matchups:CFB:401" in _owned(env), "the live CFB channel was deleted"
+
+    _end_guide(env, "ranked_matchups:CFB:401")
+    result = env.plugin._action_apply(_settings())
+    assert result.get("slate_vouched") is True, result
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
+def scenario_an_unstamped_failed_sources_upcoming_channel_is_kept_until_its_guide_ends(env):
+    """WITNESS: the first refresh after upgrading to the stamping release, CFB
+    failing two hours before kickoff, NFL answering. The refresh has no row
+    for the CFB game (no stamp), so it is the #240 outage case with nothing
+    to hold it; apply keeps the channel by its own guide instead, and lets it
+    go once that guide has run out."""
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() + timedelta(hours=2), user_ch.id)])
+    _strip_stamps(env)
+    os.remove(env.plugin.CACHE_PATH)
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    result = env.plugin._action_apply(_settings())
+
+    assert "Kept until their guide ends (not in the cache): 1" in result["message"], result
+    assert "ranked_matchups:CFB:401" in _owned(env)
+
+    _end_guide(env, "ranked_matchups:CFB:401")
+    result = env.plugin._action_apply(_settings())
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+    assert result.get("slate_vouched") is True, result
+
+
+def scenario_a_channel_on_someone_elses_guide_is_not_kept(env):
+    """The fallback reads only the entries apply wrote for the channel. A
+    plugin channel a user pointed at an ordinary EPG feed (always something
+    current on it) must not read as a game on air, or it would be kept, and
+    the slate left unvouched, for as long as the feed runs."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() + timedelta(hours=3), user_ch.id)])
+    feed = m.EPGSource.objects.create(name="Provider", source_type="xmltv")
+    espn = m.EPGData.objects.create(epg_source=feed, tvg_id="espn.us", name="ESPN")
+    m.ProgramData.objects.create(epg=espn, tvg_id="espn.us", title="SportsCenter",
+                                 start_time=_now() - timedelta(hours=1),
+                                 end_time=_now() + timedelta(hours=1))
+    m.Channel.objects.filter(pk=owned["ranked_matchups:CFB:401"].pk).update(epg_data_id=espn.id)
+    os.remove(env.plugin.CACHE_PATH)
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    result = env.plugin._action_apply(_settings())
+
+    assert "Kept until their guide ends" not in result["message"], result
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
+def scenario_a_kept_channel_survives_a_group_rename(env):
+    """Apply's rename cleanup deletes the old group's EPG source, guide entries
+    and all. Read after it, an unstamped live channel's guide was gone and the
+    channel was reaped mid-game; the keep is read before the cleanup, and the
+    cleanup leaves the kept channel's guide for a later apply."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    _strip_stamps(env)
+    os.remove(env.plugin.CACHE_PATH)
+    renamed = _settings(channel_profile_name="Top Games")
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
+        assert env.plugin._action_refresh(renamed)["status"] == "ok"
+    result = env.plugin._action_apply(renamed)
+
+    assert result["status"] == "ok", result
+    live = m.Channel.objects.filter(tvg_id="ranked_matchups:CFB:401")
+    assert [c.channel_group.name for c in live] == ["Top Games"], result
+    assert m.ProgramData.objects.filter(tvg_id="ranked_matchups:CFB:401").exists()
+
+
+def scenario_a_healthy_empty_refresh_keeps_an_unstamped_live_channel(env):
+    """WITNESS for the vouching side: cache.json gone, every source answered,
+    Favorites-only dropped what they listed, so the result is empty and no
+    source failed. Before #264 that vouched for the empty slate, and apply
+    deleted the live channel the refresh never knew about (ncaaf.py does not
+    list a game that has kicked off). A channel the hold could not see now
+    keeps the result unvouched."""
+    user_ch, _ = _seed_source_channel(env)
+    settings = _settings(favorites="Georgia", favorites_only="strict")
+    _publish(env, [_row(402, _now() - timedelta(minutes=30), user_ch.id, home="Georgia", away="Auburn")],
+             settings)
+    _strip_stamps(env)
+    os.remove(env.plugin.CACHE_PATH)
+
+    with _sources(env, _StubSource([_game_row("Texas", "Oklahoma", _now() + timedelta(days=1))])):
+        assert env.plugin._action_refresh(settings)["status"] == "ok"
+    cache = _read_cache(env)
+    assert cache["games"] == [] and cache["empty_slate_known"] is False, cache
+
+    result = env.plugin._action_apply(settings)
+
+    assert OUTAGE_MESSAGE_PART in result["message"], result
+    assert "ranked_matchups:CFB:402" in _owned(env), "the live channel was deleted"
+
+
+def scenario_a_stamp_that_names_another_game_is_not_read(env):
+    """A stamp counts only for the channel it describes. One whose row builds
+    a different marker (an EPG entry left behind by a re-keyed channel, a
+    hand edit) is ignored, and its channel counts as one the hold cannot see."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() + timedelta(days=1), user_ch.id)])
+    live = m.ProgramData.objects.get(custom_properties__has_key="ranked_matchups_row")
+    props = dict(live.custom_properties)
+    props["ranked_matchups_row"] = {**props["ranked_matchups_row"], "extra": {"cfbd_id": 999}}
+    m.ProgramData.objects.filter(pk=live.pk).update(custom_properties=props)
+
+    rows, unaccounted = env.plugin._published_rows()
+
+    assert rows == [] and unaccounted == 1
+
+
+def scenario_a_live_game_whose_feed_vanished_keeps_its_channel(env):
+    """WITNESS (codex review): the hold carries a live game with its previous
+    match, but its stream is gone mid-game. Its score is under the placeholder
+    threshold, so apply used to skip the row and reap the live channel as
+    stale, the removal #240 exists to prevent. It stays, as a placeholder."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    settings = _settings(placeholder_min_score=9.0)
+    row = _row(401, _now() - timedelta(minutes=30), user_ch.id)
+    _write_cache(env, [{**row, "score": 9.5}])
+    assert env.plugin._action_apply(settings)["status"] == "ok"
+    assert "ranked_matchups:CFB:401" in _owned(env)
+    m.Stream.objects.filter(pk=stream.pk).delete()
+    _write_cache(env, [{**row, "score": 7.4, "held_on_air": True}])
+
+    result = env.plugin._action_apply(settings)
+
+    assert result["status"] == "ok", result
+    assert "ranked_matchups:CFB:401" in _owned(env), result
+    assert "unmatched_skipped=0" in result["message"], result
+
+
+def scenario_a_recording_live_game_whose_feed_vanished_keeps_its_stream_links(env):
+    """Guard (codex review): a live channel that is RECORDING keeps the #146
+    path, kept for its recording with its stream links, rather than becoming
+    a placeholder whose links are stripped mid-recording. The stream is
+    removed from the source channel; the Stream row itself remains."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    settings = _settings(placeholder_min_score=9.0)
+    row = _row(401, _now() - timedelta(minutes=30), user_ch.id)
+    _write_cache(env, [{**row, "score": 9.5}])
+    assert env.plugin._action_apply(settings)["status"] == "ok"
+    ch = _owned(env)["ranked_matchups:CFB:401"]
+    m.Recording.objects.create(channel=ch, start_time=_now() - timedelta(minutes=30),
+                               end_time=_now() + timedelta(hours=3),
+                               custom_properties={"status": "recording"})
+    m.ChannelStream.objects.filter(channel=user_ch).delete()
+    _write_cache(env, [{**row, "score": 7.4}])
+
+    result = env.plugin._action_apply(settings)
+
+    assert "ranked_matchups:CFB:401" in _owned(env), result
+    assert list(m.ChannelStream.objects.filter(channel=ch).values_list("stream_id", flat=True)) == [stream.id]
+
+
+def scenario_a_finished_unmatched_game_is_not_kept_as_on_air(env):
+    """Guard (codex review): "on air" ends at the reap deadline. A source that
+    still lists a finished game must not keep its stream-less channel."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    settings = _settings(placeholder_min_score=9.0)
+    row = _row(401, _now() - timedelta(minutes=30), user_ch.id)
+    _write_cache(env, [{**row, "score": 9.5}])
+    assert env.plugin._action_apply(settings)["status"] == "ok"
+    m.Stream.objects.filter(pk=stream.pk).delete()
+    _write_cache(env, [{**row, "score": 7.4,
+                        "start_time_utc": (_now() - timedelta(hours=10)).isoformat()}])
+
+    result = env.plugin._action_apply(settings)
+
+    assert "unmatched_skipped=1" in result["message"], result
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
+def scenario_an_unmatched_game_not_yet_on_air_is_still_skipped(env):
+    """Guard: only a game that has kicked off keeps a stream-less channel
+    below the threshold. One that has not started goes as before."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    settings = _settings(placeholder_min_score=9.0)
+    row = _row(401, _now() + timedelta(hours=3), user_ch.id)
+    _write_cache(env, [{**row, "score": 9.5}])
+    assert env.plugin._action_apply(settings)["status"] == "ok"
+    m.Stream.objects.filter(pk=stream.pk).delete()
+    _write_cache(env, [{**row, "score": 7.4}])
+
+    result = env.plugin._action_apply(settings)
+
+    assert "unmatched_skipped=1" in result["message"], result
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
+def scenario_a_lost_cache_reads_nothing_from_the_archive_channel(env):
+    """The recordings archive is ours but is never a published game: it must
+    neither be held nor count as a channel the hold could not see, or it
+    would keep every outage-free empty result unvouched for good."""
+    env.plugin._ensure_archive_channel("Matchups Recordings")
+
+    rows, unaccounted = env.plugin._published_rows()
+
+    assert rows == [] and unaccounted == 0
+
+
+def scenario_a_dry_run_does_not_count_a_channel_kept_by_its_guide_as_deleted(env):
+    """WITNESS (#170's rule on #264's keep): a rehearsal reports what a real
+    run would do. After an upgrade lost cache.json, a real apply keeps an
+    unstamped live channel by its guide; the dry run used to report it in
+    `stale_deleted`, so the rehearsal said the live game would be removed."""
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    _strip_stamps(env)
+    os.remove(env.plugin.CACHE_PATH)
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+
+    result = env.plugin._action_apply(_settings(dry_run=True))
+
+    assert result["status"] == "ok", result
+    assert "stale_deleted=0" in result["message"], result
+    assert "Kept until their guide ends (not in the cache): 1" in result["message"], result
+    assert set(_owned(env)) == set(owned)
+
+
+def scenario_a_dry_run_does_not_count_a_recording_channel_as_deleted(env):
+    """WITNESS: the same for a channel the reap keeps for its active
+    recording (#146). It left the slate, a real apply keeps it, and the dry
+    run must not report it deleted."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    m.Recording.objects.create(
+        channel=owned["ranked_matchups:CFB:401"], start_time=_now() - timedelta(minutes=30),
+        end_time=_now() + timedelta(hours=3), custom_properties={"status": "recording"},
+    )
+    _write_cache(env, [_row(402, _now() + timedelta(days=1), user_ch.id, home="Texas", away="Oklahoma")])
+
+    result = env.plugin._action_apply(_settings(dry_run=True))
+
+    assert result["status"] == "ok", result
+    assert "stale_deleted=0" in result["message"], result
+    assert "1 channel(s) kept (active recording)" in result["message"], result
+    assert set(_owned(env)) == set(owned)
+
+
+def scenario_a_dry_run_counts_a_channel_whose_recording_auto_record_cancels(env):
+    """Guard (codex review of the dry-run count): auto-record cancels its own
+    scheduled recording BEFORE the reap, so a real apply then reaps the
+    channel. The dry run cancels nothing, and must still not count that
+    recording as a reason to keep the channel."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() + timedelta(hours=6), user_ch.id)],
+                     _settings(recorded_teams="Georgia"))
+    rec = m.Recording.objects.get(channel=owned["ranked_matchups:CFB:401"])
+    _write_cache(env, [_row(402, _now() + timedelta(days=1), user_ch.id, home="Texas", away="Oklahoma")])
+
+    dry = env.plugin._action_apply(_settings(dry_run=True))
+    assert "stale_deleted=1" in dry["message"], dry
+    assert m.Recording.objects.filter(pk=rec.pk).exists()
+
+    real = env.plugin._action_apply(_settings())
+    assert "stale_deleted=1" in real["message"], real
+    assert not m.Recording.objects.filter(pk=rec.pk).exists()
+    assert "ranked_matchups:CFB:401" not in _owned(env)
 
 
 def _assert_no_cache_touches_nothing(env, write_bad_cache, message=NO_CACHE_MESSAGE):
@@ -825,3 +1262,31 @@ def test_every_state_file_the_plugin_writes_is_gitignored():
     state_files = _module_level_json_paths()
     assert state_files[("plugin", "GAMETHUMBS_CACHE_PATH")] == "gamethumbs_cache.json"
     assert sorted(n for n in state_files.values() if n not in ignored) == []
+
+
+class TestKeptByGuide:
+    """The fallback's rule, pure (#264). Literal titles, as apply writes them."""
+
+    NOW = datetime(2026, 10, 11, 20, 0, tzinfo=timezone.utc)
+
+    def _p(self, start_h, end_h, title):
+        return (self.NOW + timedelta(hours=start_h), self.NOW + timedelta(hours=end_h), title)
+
+    def test_live_entry_keeps_even_a_stamped_channel(self, plugin):
+        assert plugin._kept_by_guide({"x": 1}, [self._p(-1, 2, "Alabama vs Georgia ᴸᶦᵛᵉ")], self.NOW)
+
+    def test_past_entry_is_still_on_air(self, plugin):
+        assert plugin._kept_by_guide({"x": 1}, [self._p(-1, 1, "Past: Alabama vs Georgia")], self.NOW)
+
+    def test_upcoming_entry_keeps_only_an_unstamped_channel(self, plugin):
+        up = [self._p(-2, 1, "Upcoming: Alabama vs Georgia, Sat 7:30 PM"),
+              self._p(1, 4, "Alabama vs Georgia ᴸᶦᵛᵉ")]
+        assert plugin._kept_by_guide(None, up, self.NOW) is True
+        assert plugin._kept_by_guide({"x": 1}, up, self.NOW) is False
+
+    def test_recording_dot_upcoming_is_still_upcoming(self, plugin):
+        up = [self._p(-2, 1, "🔴 Upcoming: Alabama vs Georgia")]
+        assert plugin._kept_by_guide({"x": 1}, up, self.NOW) is False
+
+    def test_nothing_left_keeps_nothing(self, plugin):
+        assert plugin._kept_by_guide(None, [], self.NOW) is False

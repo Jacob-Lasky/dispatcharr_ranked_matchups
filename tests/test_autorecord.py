@@ -298,7 +298,7 @@ class TestApplyWiring:
         assert 'recording=rec_dot)' in body
 
     def test_recorded_team_always_gets_a_placeholder(self, src):
-        assert 'if score_val >= placeholder_threshold or g.get("recorded_matched"):' in src
+        assert 'if score_val >= placeholder_threshold or g.get("recorded_matched") or on_air:' in src
 
     def test_channel_name_uses_the_plan(self, src):
         assert "recording=autorec.will_record(marker)," in src

@@ -49,6 +49,7 @@ _REDIRECTED_PATHS = (
     ("plugin", "LLM_DESCRIPTIONS_CACHE_PATH"),
     ("plugin", "SPORTSDB_THUMB_CACHE_PATH"),
     ("plugin", "GAMETHUMBS_CACHE_PATH"),
+    ("plugin", "NUMBERING_STATE_PATH"),
     ("sources._odds", "CACHE_PATH"),
     ("tasks", "LAST_RUN_PATH"),
 )

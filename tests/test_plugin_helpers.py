@@ -4084,8 +4084,8 @@ class TestKeptForRecordingChannelsHonourExclusion:
 
     def test_membership_is_stripped_from_kept_channels(self):
         src = self._src()
-        assert "if kept_for_recording and excluded_ids:" in src
-        i = src.index("if kept_for_recording and excluded_ids:")
+        assert "if kept_stale and excluded_ids:" in src
+        i = src.index("if kept_stale and excluded_ids:")
         block = src[i:i + 500]
         assert "ChannelStream.objects.filter(" in block
         assert "stream_id__in=excluded_ids" in block
@@ -4094,7 +4094,7 @@ class TestKeptForRecordingChannelsHonourExclusion:
         """The channel is kept ON PURPOSE. Deleting it, or the Recording, would
         destroy the thing #146 exists to protect."""
         src = self._src()
-        i = src.index("if kept_for_recording and excluded_ids:")
+        i = src.index("if kept_stale and excluded_ids:")
         block = src[i:src.index("# Restore kept channels", i)]
         assert "Channel.objects" not in block
         assert "Recording.objects" not in block
@@ -4102,7 +4102,7 @@ class TestKeptForRecordingChannelsHonourExclusion:
     def test_the_strip_runs_only_when_a_policy_exists(self):
         # `excluded_ids` empty must not issue a query, let alone a delete.
         src = self._src()
-        assert "if kept_for_recording and excluded_ids:" in src
+        assert "if kept_stale and excluded_ids:" in src
 
 
 

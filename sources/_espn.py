@@ -60,6 +60,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TypeVar
 
 from .._util import parse_iso_utc
+from .base import report_lost_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.espn")
 
@@ -624,7 +625,7 @@ def fetch_scoreboard_days(
     ESPN bracket sweeps do NOT use it: they fetch through
     `fetch_scoreboard_day` inside `BracketSportSource._sweep_bracket_days`,
     which gives up the whole sweep at the first batch with a failed day
-    (#245), where this walk reads a failed day as an empty one. Concurrency keeps a long window
+    (#245), where this walk skips a failed day and reports it (#261). Concurrency keeps a long window
     affordable: a slow endpoint costs one timeout per `_SEASON_WALK_WORKERS`
     days instead of one per day.
 
@@ -632,8 +633,11 @@ def fetch_scoreboard_days(
     slow, or once the walk has used SCOREBOARD_WALK_BUDGET_SECONDS (see
     SCOREBOARD_WALK_CHUNK_DAYS), so the result can be SHORTER than the
     window. A walk that ran to its end retries a blip of failed days once
-    (`_retry_failed_days`). A day still None after that reads as "no games
-    that day" to every caller.
+    (`_retry_failed_days`). A day still None after that, or never requested,
+    is LOST: callers skip it as if it had no games, so the walk reports it
+    (`base.report_lost_days`, logged at WARNING) and the refresh holds the
+    games it had published for that day (#261). DO NOT drop the report: a
+    sweep that lost a day is otherwise indistinguishable from a quiet one.
     """
     fetch = lambda day: fetch_scoreboard_day(http_get, scoreboard_url, day)  # noqa: E731
     pages: List[Tuple[date, Optional[Dict[str, Any]]]] = []
@@ -668,7 +672,36 @@ def fetch_scoreboard_days(
         chunk_start = chunk_end + timedelta(days=1)
     if not hung:  # a hung LAST chunk is an outage too, not a blip to retry
         _retry_failed_days(fetch, pages, scoreboard_url, walk_began)
+    _report_lost_days(pages, scoreboard_url, start, end)
     return pages
+
+
+def _report_lost_days(
+    pages: List[Tuple[date, Optional[Dict[str, Any]]]],
+    scoreboard_url: str,
+    start: date,
+    end: date,
+) -> None:
+    """Report every day from `start` to `end` the walk has no page for: one
+    that failed after its retry, or one never requested because the walk was
+    abandoned. See `base.report_lost_days` (#261)."""
+    answered = {day for day, page in pages if page is not None}
+    lost: List[date] = []
+    day = start
+    while day <= end:
+        if day not in answered:
+            lost.append(day)
+        day += timedelta(days=1)
+    if not lost:
+        return
+    shown = ", ".join(d.strftime("%Y%m%d") for d in lost[:5])
+    more = f" +{len(lost) - 5} more" if len(lost) > 5 else ""
+    logger.warning(
+        "[espn] %s: no answer for %d of %d day(s) (%s%s); their games are "
+        "missing from this walk",
+        scoreboard_url, len(lost), (end - start).days + 1, shown, more,
+    )
+    report_lost_days(lost)
 
 
 def _retry_failed_days(

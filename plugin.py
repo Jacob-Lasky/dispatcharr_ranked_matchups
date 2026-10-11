@@ -742,7 +742,8 @@ def _recording_is_active(rec, now) -> bool:
     return end is not None and end > now
 
 
-def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled):
+def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled,
+                                    keep_ids=frozenset()):
     """Decide, for stale (past-game) channels, which are safe to reap and which
     recordings to re-home first. Pure policy, no ORM.
 
@@ -751,17 +752,24 @@ def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled
     now: aware datetime.
     archive_enabled: whether re-homing is available (False when the archive
         group name clashes with the live group, so recordings cannot be moved).
+    keep_ids: channel ids kept whatever their recordings: kept by their guide
+        while the cache cannot vouch for the slate (#264, _kept_by_guide).
+        Kept, not re-homed, so their recordings stay where they are.
 
     Returns (reapable, kept, rehome_rec_ids):
       reapable        channels safe to delete (no recordings, or all done and
                       re-homable).
       kept            channels to leave in place this cycle (active recording,
                       or recordings present but archive disabled so reaping
-                      would destroy them). Reconciles next cycle.
+                      would destroy them, or in `keep_ids`). Reconciles next
+                      cycle.
       rehome_rec_ids  recording ids on reapable channels to move to the archive.
     """
     reapable, kept, rehome_rec_ids = [], [], []
     for ch in stale:
+        if ch.id in keep_ids:
+            kept.append(ch)
+            continue
         recs = recs_by_channel.get(ch.id, [])
         if not recs:
             reapable.append(ch)
@@ -779,8 +787,9 @@ def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled
     return reapable, kept, rehome_rec_ids
 
 
-def _numbers_held_for_recordings(stale, archive_enabled) -> set:
-    """Channel numbers of stale channels this apply will KEEP for a recording.
+def _numbers_held_for_recordings(stale, archive_enabled, keep_ids=frozenset()) -> set:
+    """Channel numbers of stale channels this apply will KEEP, for a recording
+    or because they are in `keep_ids` (kept by their guide, #264).
 
     Same policy as the reap step (_partition_stale_for_recordings), evaluated
     before numbering so a new game is never handed a number a kept channel is
@@ -796,8 +805,94 @@ def _numbers_held_for_recordings(stale, archive_enabled) -> set:
         recs_by_channel.setdefault(r.channel_id, []).append(r)
     _reapable, kept, _rehome = _partition_stale_for_recordings(
         candidates, recs_by_channel, datetime.now(timezone.utc), archive_enabled,
+        keep_ids,
     )
     return {int(ch.channel_number) for ch in kept}
+
+
+def _guide_shows_on_air(programmes, now: datetime) -> bool:
+    """Whether a channel's published guide says its game is on air: a Live or
+    Past entry (see _build_program_title) is current. The Upcoming entry does
+    not count, because it runs from the apply that wrote it to the start of
+    the live window. Pure: `programmes` is `(start, end, title)` tuples."""
+    for start, end, title in programmes:
+        if start is not None and end is not None and start <= now < end:
+            if not _is_upcoming_title(title):
+                return True
+    return False
+
+
+def _kept_by_guide(stamp: Optional[Dict[str, Any]], programmes, now: datetime) -> bool:
+    """Apply's fallback for a stale channel on a slate the cache cannot vouch
+    for (#264): keep it while its own guide says it may still be wanted.
+
+    - On air (a current Live or Past entry): always. It may be a live game
+      the refresh had no row for, and the reap would delete it mid-game.
+    - Not yet ended, for a channel with NO stamp: the refresh could not judge
+      it at all (published before apply stamped rows, so its game may belong
+      to a source that is failing right now, which #240 holds). It goes once
+      its guide runs out, which is no later than the reap deadline
+      (_compute_past_slot_end).
+
+    DO NOT keep a STAMPED channel that is not on air: the refresh had its row
+    and dropped it on purpose (a healthy source no longer lists a game that
+    has not started, or the cap). Keeping it would freeze those games until
+    they end, and the unvouched state (which lasts while anything is kept)
+    with them; unstamped channels are a finite set left from before the
+    stamp, so their keep is bounded. Pure: `programmes` is `(start, end,
+    title)` tuples of the entries that have not ended."""
+    if _guide_shows_on_air(programmes, now):
+        return True
+    return stamp is None and any(end is not None and end > now for _s, end, _t in programmes)
+
+
+def _published_guide(channels, now: datetime) -> Dict[int, Tuple[Optional[Dict[str, Any]], list]]:
+    """What apply published for each channel, read back from the guide (#264):
+    `{channel id: (stamped row or None, [(start, end, title) not yet ended])}`.
+
+    Only entries apply wrote FOR THAT CHANNEL count (ProgramData.tvg_id equal
+    to the channel's marker): a channel a user pointed at an ordinary EPG feed
+    must not read that feed's programmes as its own game on air. A stamp
+    counts only when its row builds the channel's own marker, which also
+    rejects one left on an entry a re-keyed channel no longer owns. Read-only."""
+    out: Dict[int, Tuple[Optional[Dict[str, Any]], list]] = {ch.id: (None, []) for ch in channels}
+    by_epg = {ch.epg_data_id: ch for ch in channels if getattr(ch, "epg_data_id", None)}
+    if not by_epg:
+        return out
+    from apps.epg.models import ProgramData
+    for epg_id, tvg_id, start, end, title, props in (
+        ProgramData.objects
+        .filter(epg_id__in=list(by_epg), tvg_id__startswith=TVG_ID_PREFIX)
+        .values_list("epg_id", "tvg_id", "start_time", "end_time", "title", "custom_properties")
+    ):
+        ch = by_epg[epg_id]
+        if tvg_id != ch.tvg_id:
+            continue
+        stamp, progs = out[ch.id]
+        row = (props or {}).get(_PUBLISHED_ROW_KEY) if isinstance(props, dict) else None
+        if isinstance(row, dict) and _build_marker_key(row) == ch.tvg_id:
+            stamp = row
+        if end is not None and end > now:
+            progs = progs + [(start, end, title)]
+        out[ch.id] = (stamp, progs)
+    return out
+
+
+def _owned_published_channels():
+    """Every channel we own, in all groups: a group rename migrates them on
+    the next apply, so they are on air meanwhile. The recordings archive is
+    among them and harmless: apply writes it no guide entries, so it carries
+    no stamp and nothing _kept_by_guide could keep."""
+    from apps.channels.models import Channel
+    return list(Channel.objects.filter(_owned_tvg_id_q()))
+
+
+def _guide_kept_ids(channels, now: datetime) -> set:
+    """Ids of `channels` apply's fallback keeps (_kept_by_guide)."""
+    return {
+        cid for cid, (stamp, progs) in _published_guide(channels, now).items()
+        if _kept_by_guide(stamp, progs, now)
+    }
 
 
 # ---------- Auto-record (#216) ----------
@@ -853,6 +948,10 @@ class _AutoRecord:
         self.state: Dict[str, Dict[str, Any]] = {"created": {}, "tombstones": {}}
         self.new_tombstones: List[str] = []
         self.created = self.updated = self.cancelled = 0
+        # Recordings _autorecord_cancel removes (or, on a dry run, would), so
+        # the dry-run reap can leave them out of its keep check as the real
+        # reap does by running after the delete.
+        self.cancelled_ids: set = set()
         self.failed: List[str] = []
         self.names: Dict[str, str] = {}
         self.slate: Optional[set] = None        # every marker in the cache (#224)
@@ -1005,6 +1104,7 @@ def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool) -> None:
             if rec is None or recording_policy.is_in_progress(rec) or recording_policy.is_terminal(rec):
                 continue
         ar.cancelled += 1
+        ar.cancelled_ids.add(rec.pk)
         if dry_run:
             continue
         rec.delete()
@@ -2188,6 +2288,21 @@ def _live_window(g: Dict[str, Any], start_dt: datetime) -> Tuple[datetime, datet
     return prog_start, prog_end
 
 
+# The Upcoming entry's title prefix. One constant for the writer below and
+# _is_upcoming_title, which apply's on-air fallback (#264) reads it back with.
+_UPCOMING_TITLE_PREFIX = "Upcoming: "
+
+
+def _is_upcoming_title(title: Optional[str]) -> bool:
+    """Whether `title` is an Upcoming entry _build_program_title wrote, with or
+    without its recording dot."""
+    t = title or ""
+    dot = f"{recording_policy.DOT} "
+    if t.startswith(dot):
+        t = t[len(dot):]
+    return t.startswith(_UPCOMING_TITLE_PREFIX)
+
+
 def _build_program_title(state: str, matchup: str, kickoff_local: str, recording: bool = False) -> str:
     """ProgramData.title for one of the three EPG windows on a virtual
     channel. `state` is `"upcoming"` / `"live"` / `"past"`. Truncates
@@ -2197,7 +2312,8 @@ def _build_program_title(state: str, matchup: str, kickoff_local: str, recording
     on Past: by then the recording is over, and a dot there reads as "will
     record". The caller derives it from the channel's actual Recording rows."""
     if state == "upcoming":
-        title = f"Upcoming: {matchup}, {kickoff_local}" if kickoff_local else f"Upcoming: {matchup}"
+        title = (f"{_UPCOMING_TITLE_PREFIX}{matchup}, {kickoff_local}" if kickoff_local
+                 else f"{_UPCOMING_TITLE_PREFIX}{matchup}")
     elif state == "live":
         title = f"{matchup} ᴸᶦᵛᵉ"
     elif state == "past":
@@ -2425,14 +2541,87 @@ def _vouch_published_slate(cache: Dict[str, Any]) -> bool:
     return True
 
 
-def _slate_known(prior_cache: Dict[str, Any], outage_labels: set) -> bool:
+def _slate_known(prior_cache: Dict[str, Any], outage_labels: set, unaccounted: int = 0) -> bool:
     """Whether a refresh can vouch for an empty result (`_EMPTY_SLATE_KNOWN_KEY`).
 
     Yes when the previous cache was vouched (so _rows_to_hold could carry
-    anything a failed source dropped), or when no source failed or came back
-    empty (so there is nothing an outage could have dropped). `outage_labels`
-    is the set _rows_to_hold treats as an outage."""
-    return _cache_vouched(prior_cache) or not outage_labels
+    anything a failed source dropped), or when no source failed, came back
+    empty or lost a day (so there is nothing an outage could have dropped)
+    AND no channel the hold could not see is still running its guide
+    (`unaccounted == 0`, see _published_rows). The second half matters
+    because a source that answered still omits games that have kicked off
+    (ncaaf.py, mlb.py), and only the hold keeps those: a channel published
+    before apply stamped its rows (#264) may be one, and a vouched slate
+    turns off apply's fallback that would keep it. `outage_labels` is every
+    label _rows_to_hold treats as an outage, the lost-day ones included."""
+    if _cache_vouched(prior_cache):
+        return True
+    return not outage_labels and unaccounted == 0
+
+
+# ProgramData.custom_properties key under which apply stamps the cache row a
+# channel's LIVE guide entry was written from (#264). The DB is then a second
+# record of the published slate that survives what cache.json does not: the
+# plugin folder replaced on upgrade (Dispatcharr's plugin import does that),
+# or a damaged file. Read back by _published_rows. Namespaced, because
+# Dispatcharr's XMLTV writer reads its own keys from the same dict
+# (categories, episode, ...); any other key is ignored there.
+_PUBLISHED_ROW_KEY = "ranked_matchups_row"
+
+
+def _published_row_stamp(row: Dict[str, Any]) -> Dict[str, Any]:
+    """The custom_properties apply writes on a live guide entry. The row goes
+    through JSON first: JSONField's encoder rejects a datetime that the cache
+    writer (default=str) would have accepted, and a failed stamp would fail
+    the whole apply transaction."""
+    return {_PUBLISHED_ROW_KEY: json.loads(json.dumps(row, default=str))}
+
+
+def _published_rows() -> Tuple[List[Dict[str, Any]], int]:
+    """The cache rows apply stamped on the channels it has on air (#264), and
+    how many channels the hold cannot see but apply's fallback still keeps:
+    no usable stamp (published before the stamp existed, or by a dry run),
+    and a guide that has not ended (_kept_by_guide). See _published_guide for
+    which stamps count. Read-only.
+
+    DO NOT catch a DB error here: a refresh that cannot read what is on air
+    must fail (no cache written, so no apply follows), not carry on as if
+    nothing were."""
+    now = datetime.now(timezone.utc)
+    guide = _published_guide(_owned_published_channels(), now)
+    rows = [stamp for stamp, _progs in guide.values() if stamp is not None]
+    unaccounted = sum(
+        1 for stamp, progs in guide.values()
+        if stamp is None and _kept_by_guide(stamp, progs, now)
+    )
+    return rows, unaccounted
+
+
+def _prior_games(prior_cache: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
+    """The previous slate the refresh's hold starts from (#240, #264), and how
+    many channels on air it could not describe (for _slate_known).
+
+    A vouched cache lists everything on air, so it is used alone, as before.
+    Otherwise (cache.json missing, unreadable, or written while it could not
+    vouch) the rows apply stamped into the DB are added to whatever the cache
+    still lists, the cache's copy first: a channel the cache does not name can
+    still be live, and without its row nothing holds it. DO NOT drop the DB
+    half: Dispatcharr's plugin import replaces the plugin folder on every
+    upgrade, cache.json with it, and the first refresh after that, with one
+    source failing, deleted that source's live channels (#264)."""
+    games = [g for g in (prior_cache.get("games") or []) if isinstance(g, dict)]
+    if _cache_vouched(prior_cache):
+        return games, 0
+    published, unaccounted = _published_rows()
+    seen = {_build_marker_key(g) for g in games}
+    added = [r for r in published if _build_marker_key(r) not in seen]
+    if added:
+        logger.info(
+            "[ranked_matchups] refresh: cache.json cannot vouch for the slate "
+            "on air; %d published game(s) read back from the DB for the hold",
+            len(added),
+        )
+    return games + added, unaccounted
 
 
 def _write_cache(data: Dict[str, Any]) -> None:
@@ -3447,10 +3636,16 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # sibling is indistinguishable from an empty schedule and is not caught.
     pulled_by_label: Dict[str, int] = {}
     raised_labels: set = set()
+    # Days a per-day sweep asked for and got no answer for (#261), by label.
+    # The sweep still returns its other days, so without this a lost day reads
+    # as a quiet one and the games published for it are dropped.
+    lost_days_by_label: Dict[str, set] = {}
+    from .sources.base import recording_lost_days
     for src in sources:
         pulled_by_label.setdefault(src.sport_label, 0)
         try:
-            games = src.fetch_upcoming(days_ahead=lookahead)
+            with recording_lost_days() as lost_days:
+                games = src.fetch_upcoming(days_ahead=lookahead)
         except Exception as e:
             logger.exception("[ranked_matchups] source %s fetch failed", src.sport_label)
             src_summary.append(_source_error_entry(src.sport_label, e))
@@ -3460,22 +3655,41 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         pulled_by_label[src.sport_label] += len(games)
         all_games.extend(games)
         game_sources.extend([src] * len(games))
-        src_summary.append(f"{src.sport_label}: {len(games)} games")
-        logger.info("[ranked_matchups] %s: pulled %d games", src.sport_label, len(games))
+        if lost_days:
+            lost_days_by_label.setdefault(src.sport_label, set()).update(lost_days)
+            src_summary.append(_source_partial_entry(src.sport_label, len(games), lost_days))
+            logger.warning(
+                "[ranked_matchups] %s: pulled %d games, but no answer for %d "
+                "day(s): %s", src.sport_label, len(games), len(lost_days),
+                ", ".join(d.isoformat() for d in sorted(lost_days)),
+            )
+        else:
+            src_summary.append(f"{src.sport_label}: {len(games)} games")
+            logger.info("[ranked_matchups] %s: pulled %d games", src.sport_label, len(games))
 
-    # 1-. Games already on air, and games whose source came back empty, stay on
-    # air (#240). See _rows_to_hold. `held` is keyed by marker; the ones this
-    # fetch still lists are protected from the cap below, the rest are carried
-    # over from the previous cache and re-matched after the main match.
+    # 1-. Games already on air, games whose source came back empty, and games
+    # dated on a day their source's sweep lost, stay on air (#240, #261). See
+    # _rows_to_hold. `held` is keyed by marker; the ones this fetch still
+    # lists are protected from the cap below, the rest are carried over from
+    # the previous slate and re-matched after the main match. The previous
+    # slate is the cache, or, when the cache cannot vouch for it (lost on
+    # upgrade, unreadable, written during an outage), what apply published
+    # into the DB as well (#264, _prior_games).
     prior_cache = _read_cache()
-    outage_labels = raised_labels | {label for label, n in pulled_by_label.items() if n == 0}
-    slate_known = _slate_known(prior_cache, outage_labels)
+    empty_labels = raised_labels | {label for label, n in pulled_by_label.items() if n == 0}
+    # A label that lost days could have dropped games too, so it is an
+    # outage for vouching an empty result (_slate_known), while the hold
+    # keeps only its games dated on the days it lost.
+    outage_labels = empty_labels | set(lost_days_by_label)
+    prior_games, unaccounted = _prior_games(prior_cache)
+    slate_known = _slate_known(prior_cache, outage_labels, unaccounted)
     held = _rows_to_hold(
-        prior_cache.get("games") or [],
+        prior_games,
         datetime.now(timezone.utc),
         _reap_settings(settings),
         settings,
-        outage_labels,
+        empty_labels,
+        lost_days_by_label,
     )
     held_ids = {id(g) for g in all_games if _gamerow_marker(g) in held}
     fetched_markers = {_gamerow_marker(g) for g in all_games}
@@ -3889,7 +4103,8 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         applied_payload.extend(carried)
         logger.info(
             "[ranked_matchups] refresh: kept %d game(s) on air that this fetch "
-            "did not list (already started, or their source returned nothing)",
+            "did not list (already started, or their source returned nothing "
+            "or lost their day)",
             len(carried),
         )
         src_summary.append(f"kept on air: {len(carried)}")
@@ -5683,6 +5898,7 @@ def _rows_to_hold(
     remove_after_minutes: int,
     settings: Dict[str, Any],
     empty_labels: set,
+    lost_days: Optional[Dict[str, set]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Previously applied games a refresh must keep on air, by marker (#240).
 
@@ -5700,6 +5916,12 @@ def _rows_to_hold(
       returned 525 at 19:00 and every CFB channel, Georgia at Alabama included,
       was deleted half an hour before kickoff. A source does not lose a listed
       game for real without listing others, so zero is read as an outage.
+    - Games dated on a DAY their source's sweep lost (#261): `lost_days` maps
+      a label to the calendar days a per-day sweep got no answer for
+      (sources.base.report_lost_days). The sweep returned its other days, so
+      the label is not empty, but the lost day's games are just as missing.
+      Only that day's games are held: a game on a day that answered and no
+      longer lists it really is gone. See _on_lost_day for the date rule.
 
     Held until the reaper would remove the game anyway (_partition_expired):
     the reaper owns taking finished games off air, and a refresh does not.
@@ -5714,9 +5936,27 @@ def _rows_to_hold(
         start = parse_iso_utc(row.get("start_time_utc"))
         if start is None:
             continue
-        if start <= now or row.get("sport_label") in empty_labels:
+        label = row.get("sport_label")
+        if (start <= now or label in empty_labels
+                or _on_lost_day(start, (lost_days or {}).get(label))):
             held[_build_marker_key(row)] = row
     return held
+
+
+def _on_lost_day(start: datetime, lost: Optional[set]) -> bool:
+    """Whether a game kicking off at `start` (UTC) may sit in one of the
+    `lost` sweep days (#261).
+
+    A sweep day is the source's own calendar bucket, and ESPN buckets by US
+    EASTERN date (see _espn.SCOREBOARD_LOOKBACK_DAYS), so a 01:00Z kickoff
+    belongs to the previous day's bucket. Both candidates are checked, the
+    UTC date and the date five hours earlier: Eastern is UTC-4 or UTC-5, so
+    its date is always one of the two. Over-matching only ever holds a game
+    one more refresh; under-matching deletes a channel, so DO NOT narrow
+    this to one zone."""
+    if not lost:
+        return False
+    return start.date() in lost or (start - timedelta(hours=5)).date() in lost
 
 
 def _gamerow_from_row(row: Dict[str, Any]) -> Any:
@@ -6188,6 +6428,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     _deletable_group_names = _deletable_group_names_for(
         group_name, recordings_group_name,
     )
+    # A slate the cache cannot vouch for may omit a channel that must stay
+    # (#264: cache.json lost, and the channel published before apply stamped
+    # its row, so the refresh could not hold it). Those are kept by their own
+    # guide (_kept_by_guide) instead of reaped. Read HERE, before the rename
+    # cleanup below touches an old EPG source: it moves our rows to the current
+    # source (#263) rather than deleting them, but the keep must not depend on
+    # that ordering.
+    # Over every channel we own; only the stale ones are ever looked up.
+    guide_kept_ids = (
+        set() if _cache_vouched(cache)
+        else _guide_kept_ids(_owned_published_channels(), datetime.now(timezone.utc))
+    )
     foreign_owned_groups = list(
         ChannelGroup.objects.exclude(name__in=_protected_group_names)
         .filter(_owned_tvg_id_q("channels__"))
@@ -6350,16 +6602,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     numbering_mode = _resolve_numbering_mode(settings)
     remembered_base = None
     games_by_marker_all = {_build_marker_key(g): g for g in games}
+    leaving = [ch for m, ch in existing_virtuals.items() if m not in games_by_marker_all]
     # A game that has left the slate but whose channel is still recording is
     # KEPT this apply (#146) and goes back to its number after parking, unless
     # a new game was handed that number, in which case it stays at a parking
     # number and its published number changes mid-recording. Those numbers are
     # held back from new games (review finding, #219). Collected BEFORE the
     # floor because they do not depend on it, and the kickoff floor inference
-    # needs them to run the placement apply will run.
+    # needs them to run the placement apply will run. A channel kept by its
+    # guide (guide_kept_ids, #264) is held back the same way.
     held_for_recordings = _numbers_held_for_recordings(
-        [ch for m, ch in existing_virtuals.items() if m not in games_by_marker_all],
-        archive_enabled,
+        leaving, archive_enabled, guide_kept_ids,
     )
     band_size = _resolve_compact_band_size(settings, len(games))
     # Per-game channel numbers (marker -> number). Computed once up front so
@@ -6487,7 +6740,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     deleted_stale = 0
     skipped_unmatched = 0
     rehomed_recordings = 0      # #146: recordings moved to the archive this run
-    kept_for_recording_n = 0    # #146: stale channels kept (active recording)
+    kept_stale_n = 0            # #146/#264: stale channels kept (recording, or guide)
+    kept_by_guide_n = 0         # #264: of those, kept by their guide (_kept_by_guide)
     seen_markers = set()
 
     placeholder_threshold = _float_setting(settings, "placeholder_min_score", 5.0)
@@ -6740,6 +6994,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from .matcher import _strong_team_keywords, select_streams_for_game
     from .scoring import pick_tagline
     prep_by_marker: Dict[str, Any] = {}
+    prepass_now = datetime.now(timezone.utc)
+    recording_channel_ids = {
+        r.channel_id for r in Recording.objects.filter(
+            channel_id__in=[c.id for c in existing_virtuals.values()],
+        )
+        if _recording_is_active(r, prepass_now)
+    }
     for g in games:
         source_ids = list(g.get("channel_ids") or [])
         # Path C stream-granular matches: specific streams to attach without
@@ -6784,9 +7045,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         #
         # A game with nothing attachable therefore falls into the EXISTING
         # "no source, no streams" path, which already does the right thing:
-        # placeholder if the score earns one, otherwise skip, and either way its
-        # old channel goes down the normal stale route, which preserves DVR
-        # recordings (#146).
+        # placeholder if the score earns one (or the game is already on air),
+        # otherwise skip, and then its old channel goes down the normal stale
+        # route, which preserves DVR recordings (#146).
         field_event = is_field_event(g.get("away"), g.get("extra"))
         home_kws = [] if field_event else _strong_team_keywords(g.get("home") or "")
         away_kws = [] if field_event else _strong_team_keywords(g.get("away") or "")
@@ -6816,7 +7077,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # publish an event feed only hours before kickoff, and the recording
             # has to exist on the channel before then. The next apply that
             # matches a stream attaches it to this same row (same marker).
-            if score_val >= placeholder_threshold or g.get("recorded_matched"):
+            # A game already ON AIR keeps its channel the same way (#240: a
+            # refresh never takes a game off air, only the reaper does). Its
+            # feed can vanish mid-game (a provider renames the slot, an M3U
+            # refresh drops the stream), and skipping it here would send the
+            # live channel down the stale reap below whatever the hold did.
+            # It stays as a placeholder until a later match re-attaches a
+            # stream or the reaper removes it. "On air" is the hold's own
+            # window: kicked off and not yet at its reap deadline (game end
+            # when reaping is off). A channel with an active recording is
+            # left to the stale path instead, which keeps it for the
+            # recording WITH its stream links (#146); as a placeholder it
+            # would have them stripped mid-recording.
+            kickoff = parse_iso_utc(g.get("start_time_utc"))
+            on_air_ch = existing_virtuals.get(_build_marker_key(g))
+            reap_at = _game_reap_at_utc(g, _reap_settings(settings))
+            on_air = (
+                on_air_ch is not None and on_air_ch.id not in recording_channel_ids
+                and kickoff is not None and reap_at is not None
+                and kickoff <= prepass_now < reap_at
+            )
+            if score_val >= placeholder_threshold or g.get("recorded_matched") or on_air:
                 placeholder = True
                 placeholder_channels_created += 1
             else:
@@ -7156,6 +7437,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     sub_title=subtitle,
                     description=live_description,
                     tvg_id=marker,
+                    # The row this channel was published from, so a refresh
+                    # that lost cache.json can still hold it (#264). On the
+                    # LIVE entry because it is the one every channel gets.
+                    custom_properties=_published_row_stamp(g),
                 )
                 # Past slot: bridges the final whistle to the apply that drops
                 # the channel, so the guide doesn't go blank in between. Its end
@@ -7194,8 +7479,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             recs_by_channel: Dict[int, list] = {}
             for r in Recording.objects.filter(channel_id__in=stale_ids_all):
                 recs_by_channel.setdefault(r.channel_id, []).append(r)
-            reapable, kept_for_recording, rehome_rec_ids = _partition_stale_for_recordings(
-                stale, recs_by_channel, now_reap, archive_enabled,
+            # `kept_stale` is every stale channel left in place this run: for
+            # an active recording (#146), or by its guide while the cache cannot
+            # vouch for the slate (#264, guide_kept_ids).
+            reapable, kept_stale, rehome_rec_ids = _partition_stale_for_recordings(
+                stale, recs_by_channel, now_reap, archive_enabled, guide_kept_ids,
             )
             if rehome_rec_ids:
                 archive_ch = _ensure_archive_channel(recordings_group_name)
@@ -7219,36 +7507,37 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     EPGData.objects.filter(
                         epg_source=epg_source, tvg_id__in=reap_markers,
                     ).delete()
-            # #206: a channel KEPT for an active recording never goes through
-            # the write loop, so its ChannelStream rows are whatever the last
-            # apply left. If the user has since excluded one of those streams'
-            # groups, it would stay attached indefinitely and quietly contradict
-            # "excluded streams are never attached". Strip it here.
+            # #206: a channel KEPT (for an active recording, or by its guide, #264)
+            # never goes through the write loop, so its ChannelStream rows are
+            # whatever the last apply left. If the user has since excluded one
+            # of those streams' groups, it would stay attached indefinitely and
+            # quietly contradict "excluded streams are never attached". Strip
+            # it here.
             #
             # Membership only, never the Channel and never the Recording: the
             # channel is being kept ON PURPOSE so an in-flight recording keeps
             # its target (#146). A recording already writing from an excluded
             # stream is left to finish; the point is that nothing STARTS from
             # one after the user excluded it.
-            if kept_for_recording and excluded_ids:
+            if kept_stale and excluded_ids:
                 stripped = ChannelStream.objects.filter(
-                    channel_id__in=[c.id for c in kept_for_recording],
+                    channel_id__in=[c.id for c in kept_stale],
                     stream_id__in=excluded_ids,
                 ).delete()[0]
                 if stripped:
                     policy_dropped_stream_ids |= set(excluded_ids)
                     logger.info(
                         "[ranked_matchups] stripped %d excluded-group stream "
-                        "link(s) from %d channel(s) kept for an active recording",
-                        stripped, len(kept_for_recording),
+                        "link(s) from %d kept channel(s)",
+                        stripped, len(kept_stale),
                     )
 
-            # Restore kept channels (active recording) to their pre-park number
+            # Restore kept channels (recording, or guide) to their pre-park number
             # so they don't linger at a ~park_base value. Only restore numbers
             # not claimed by a current game this run (assigned set), so the
             # unique (channel_group, channel_number) constraint can't be hit;
             # any (rare) collision leaves that channel parked, still safe.
-            if kept_for_recording:
+            if kept_stale:
                 # Numbers actually WRITTEN this run, not the whole plan.
                 # chnum_by_marker still holds entries for games the compact
                 # placeable-filter dropped and for games the pre-pass skipped,
@@ -7257,7 +7546,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 # channel really carries can block a restore.
                 assigned_now = written_numbers
                 restore = []
-                for ch in kept_for_recording:
+                for ch in kept_stale:
                     orig = prepark_numbers.get(ch.id)
                     if orig is not None and orig not in assigned_now:
                         ch.channel_number = orig
@@ -7265,9 +7554,34 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 if restore:
                     Channel.objects.bulk_update(restore, ["channel_number"])
             deleted_stale = len(reap_ids)
-            kept_for_recording_n = len(kept_for_recording)
+            kept_stale_n = len(kept_stale)
+            kept_by_guide_n = sum(1 for c in kept_stale if c.id in guide_kept_ids)
+            if kept_by_guide_n:
+                logger.warning(
+                    "[ranked_matchups] apply: kept %d channel(s) the slate omits "
+                    "because their guide has not run out and the cache cannot "
+                    "vouch for the slate (#264)", kept_by_guide_n,
+                )
         elif stale and dry_run:
-            deleted_stale = len(stale)
+            # The same keep policy as the real reap above, read-only, so a
+            # rehearsal reports what a real run would delete (#170: a dry run
+            # that overstates its deletions is as misleading as a silent one).
+            # DO NOT count every stale channel: after an upgrade lost
+            # cache.json, that reported deleting the live channels a real run
+            # keeps by their guide (#264), and channels kept for a recording
+            # (#146) were overcounted the same way. A recording auto-record
+            # would cancel above is left out, as the real reap never sees it.
+            dry_recs: Dict[int, list] = {}
+            for r in Recording.objects.filter(channel_id__in=[c.id for c in stale]).exclude(
+                    id__in=autorec.cancelled_ids):
+                dry_recs.setdefault(r.channel_id, []).append(r)
+            dry_reapable, dry_kept, dry_rehome = _partition_stale_for_recordings(
+                stale, dry_recs, datetime.now(timezone.utc), archive_enabled, guide_kept_ids,
+            )
+            deleted_stale = len(dry_reapable)
+            rehomed_recordings = len(dry_rehome)
+            kept_stale_n = len(dry_kept)
+            kept_by_guide_n = sum(1 for c in dry_kept if c.id in guide_kept_ids)
 
         # 6. Defensive: clean up orphan EPGData entries on our source whose
         # tvg_id has no corresponding virtual channel (left over from earlier
@@ -7399,11 +7713,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         )
     autorec_msg = _autorecord_finish(autorec, games, dry_run)
     rec_msg = ""
-    if rehomed_recordings or kept_for_recording_n:
+    if rehomed_recordings or kept_stale_n > kept_by_guide_n:
         rec_msg = (
             f" Recordings: {rehomed_recordings} re-homed to {recordings_group_name!r}, "
-            f"{kept_for_recording_n} channel(s) kept (active recording)."
+            f"{kept_stale_n - kept_by_guide_n} channel(s) kept (active recording)."
         )
+    if kept_by_guide_n:
+        rec_msg += f" Kept until their guide ends (not in the cache): {kept_by_guide_n}."
     msg = (
         f"{prefix}Group {group_name!r}: created={created}, updated={updated} "
         f"(placeholders={placeholder_channels_created} included), "
@@ -7429,11 +7745,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # The DB now matches this slate, so it can vouch for an empty one built on
     # it (#241, see _vouch_published_slate). Only for a real run that left
     # nothing behind: a dry run deleted nothing, and a stale channel kept for
-    # its active recording is on air without being in the slate (it may be a
-    # live game whose source was failing when the cache was lost).
+    # its active recording, or kept by its guide (#264), is on air
+    # without being in the slate (it may be a live game whose source was
+    # failing when the cache was lost).
     # `slate_vouched` tells the reaper, which rewrites the cache after this
     # returns and would otherwise drop the stamp.
-    if (not dry_run and not kept_for_recording_n and not _cache_vouched(cache)
+    if (not dry_run and not kept_stale_n and not _cache_vouched(cache)
             and _vouch_published_slate(cache)):
         result["slate_vouched"] = True
     return result
@@ -7609,6 +7926,23 @@ def _source_error_entry(label: str, err: Any) -> str:
     return f"{label}{_SOURCE_ERROR_MARK}{err})"
 
 
+# A source whose per-day sweep lost days (#261): it answered, so it is not
+# "error", but its list is short by those days. Same contract as the error
+# mark: _slate_problems keys on this exact string.
+_SOURCE_PARTIAL_MARK = ": partial ("
+
+
+def _source_partial_entry(label: str, n_games: int, lost_days: set) -> str:
+    days = [d.isoformat() for d in sorted(lost_days)]
+    return f"{label}{_SOURCE_PARTIAL_MARK}{n_games} games, no answer for {_first_few(days)})"
+
+
+def _first_few(items: List[str], n: int = 3) -> str:
+    """'a, b, c +2 more': a list short enough for a toast line."""
+    more = f" +{len(items) - n} more" if len(items) > n else ""
+    return ", ".join(items[:n]) + more
+
+
 def _soccer_season_fetch_failures() -> Dict[str, str]:
     from .sources.soccer import season_fetch_failures
     return season_fetch_failures()
@@ -7628,9 +7962,10 @@ def _is_playable(game: Dict[str, Any]) -> bool:
 
 def _slate_problems(summary: List[Any], games: List[Dict[str, Any]]) -> List[str]:
     """Upstream breakage a refresh can complete 'ok' through (#227): sources
-    that errored, and a list with nothing playable on it. One phrase each,
-    shared by the refresh result (log + toast) and Show current state so the
-    two surfaces can never disagree about what went wrong."""
+    that errored, sources whose sweep lost days (#261), and a list with
+    nothing playable on it. One phrase each, shared by the refresh result
+    (log + toast) and Show current state so the two surfaces can never
+    disagree about what went wrong."""
     problems: List[str] = []
     errored = [
         entry.split(_SOURCE_ERROR_MARK, 1)[0]
@@ -7638,9 +7973,19 @@ def _slate_problems(summary: List[Any], games: List[Dict[str, Any]]) -> List[str
         if isinstance(entry, str) and _SOURCE_ERROR_MARK in entry
     ]
     if errored:
-        shown = ", ".join(errored[:3]) + (f" +{len(errored) - 3} more" if len(errored) > 3 else "")
         problems.append(
-            f"{len(errored)} source(s) failed to fetch ({shown}); the log has each error"
+            f"{len(errored)} source(s) failed to fetch ({_first_few(errored)}); "
+            "the log has each error"
+        )
+    partial = [
+        entry.split(_SOURCE_PARTIAL_MARK, 1)[0]
+        for entry in summary
+        if isinstance(entry, str) and _SOURCE_PARTIAL_MARK in entry
+    ]
+    if partial:
+        problems.append(
+            f"{len(partial)} source(s) lost days of their schedule "
+            f"({_first_few(partial)}); games published for those days stay on air"
         )
     if games and not any(_is_playable(g) for g in games):
         problems.append(
