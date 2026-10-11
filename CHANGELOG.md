@@ -5,6 +5,26 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+### Added
+
+- **UEFA EURO group games now carry knockout leverage.** EURO 2028 is wired
+  to the same group -> knockout chain as the World Cup, using the round-of-16
+  pairings and third-placer table from UEFA's 2026-28 regulations, so a group
+  game that decides who faces whom in the knockouts scores for it. (#78)
+
+### Fixed
+
+- **The simulated World Cup / EURO bracket plays every round to the final.**
+  It used to stop one round after the entry round, so World Cup group games
+  only ever showed round-of-32 leverage. (#78)
+- **Group tables break ties on head-to-head first**, then overall goal
+  difference and goals scored, as the UEFA and FIFA regulations do; EURO's
+  best-third ranking also counts wins. (#78)
+- **The group -> knockout chain no longer switches off on a group stage's
+  final matchday** because football-data.org had already filled some knockout
+  fixtures. It runs while any group game is unplayed, and stays off for a
+  season whose groups do not match the published bracket. (#78)
+
 ## [1.33.2] - 2026-10-11
 
 ### Fixed
