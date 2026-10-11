@@ -417,23 +417,29 @@ rematch). Two properties are load-bearing:
   makes apply delete against a generation the reap never saw and is then erased
   by the reap's write. Redis dropping mid-run is exactly when a destructive
   holder is still running, so "no lock" is not "nobody is writing". DO NOT
-  reintroduce a fail-open path. Show current state says "Redis is unreachable"
-  so the refusal is never silent. The guarantee holds only once EVERY process
-  runs this code: a process still on an older version keeps the fail-open
-  refresh, so shipping this needs a container restart, not just a plugin
-  reload (see the process paragraph below).
+  reintroduce a fail-open path (`tests/test_run_lock.py` and the
+  `_LOCK_NOT_HELD` check in `tests/test_async_dispatch.py` pin this). Show
+  current state says "Redis is unreachable" (`_read_run_lock`, which must not
+  go through `tasks._redis()`: that folds a `None` client into "no client" and
+  hides the outage) so the refusal is never silent. The guarantee holds only
+  once EVERY process runs this code: a process still on an older version keeps
+  the fail-open refresh, so shipping this needs a container restart, not just a
+  plugin reload (see the process paragraph below).
 - **The lock VALUE is a JSON holder record** (#239): `kind`, `task_id`, `pid`,
-  `process` (`uwsgi worker N`, or the argv of a Celery/daphne process),
-  `thread`, plugin `version`, `acquired_at`, plus a unique `token`. The
-  `process` label keeps only bare words and flags (`_SAFE_ARG_RE`) because it
-  is copied into Redis, logs, toasts and `last_run.json`; do not loosen it to
-  a length filter, `--token=abc` is short. Release
-  compares the WHOLE string, so ownership works as before. A contended acquire
-  logs the holder at INFO, take and release are logged at INFO, the busy apply
-  toast and the skipped-run note name the holder
+  `process` (`uwsgi worker N`, or an allowlisted summary of a Celery/daphne
+  process's argv), `thread`, plugin `version`, `acquired_at`, plus a unique
+  `token`. `_process_label` copies out of argv only the program name, script
+  names (`_SCRIPT_NAME_RE`), the words in `_PROCESS_LABEL_WORDS` and a `-Q`
+  queue list (`_QUEUE_LIST_RE`), because the label is copied into Redis, logs,
+  toasts and `last_run.json`; do not loosen it to a length or looks-like-a-flag
+  filter, `--token=abc` is short. Release compares the WHOLE string, so
+  ownership works as before. A contended acquire logs the holder at INFO, take
+  and release are logged at INFO, the busy apply toast and the skipped-run note
+  (`skipped_reason` in `last_run.json`) name the holder
   (`_run_lock_unavailable_reason`), and Show current state prints a
   `Run lock: held by ...` line. A value that is not JSON is a holder running
-  code from before #239.
+  code from before #239. `apply` and `reap` have `RUN_KIND_LABELS` entries for
+  this description only; they never reach `last_run.json`'s `kind`.
 
 **The plugin runs in more processes than the uwsgi workers.** Measured on
 Tower 2026-10-10/11 (Dispatcharr's `celery.py` runs plugin discovery in
@@ -881,6 +887,9 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   apply that started after the slot finishes OK while it waits. Scheduler clock
   maths is DST-safe, and the
   pipeline subprocess starts no scheduler or reaper of its own
+- Every run takes the cross-worker run lock and refuses to start without it,
+  a plain refresh included (#199), and the lock names its holder (#239) in the
+  log, the busy toast, the skipped-run note and Show current state
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)

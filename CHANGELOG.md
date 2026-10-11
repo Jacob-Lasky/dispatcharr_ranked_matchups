@@ -5,6 +5,23 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+### Changed
+
+- **A plain Refresh no longer runs when Redis is unreachable.** Every run
+  (refresh, apply, reap, and every scheduled or manual refresh + apply) now
+  needs the run lock. An unlocked refresh could replace the curated list while
+  a reap was still working from it. **Show current state** now says outright
+  when Redis is unreachable. To be sure every process runs this version,
+  restart the container; a plugin reload alone is not enough. (#199)
+
+### Fixed
+
+- **A run that is waiting now says what it is waiting for.** The run lock
+  records who holds it: the kind of run, the task, the process and the plugin
+  version. **Show current state** prints a `Run lock: held by ...` line, and
+  the busy-apply message and the "did not run" note name the holder instead of
+  "another run held the lock, or Redis was unreachable". (#239)
+
 ## [1.33.2] - 2026-10-11
 
 ### Fixed
