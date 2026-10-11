@@ -4807,7 +4807,7 @@ class TestMlsFetchUpcomingShape:
         espn_response = {
             "events": [{
                 "id": "401123",
-                "date": "2026-04-10T23:00Z",
+                "date": (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%MZ"),  # relative: the sweep drops games past MAX_AGE_AFTER_KICKOFF (#256)
                 "season": {"year": 2026, "type": 2, "slug": "regular-season"},
                 "competitions": [{
                     "competitors": [
@@ -4847,9 +4847,9 @@ class TestMlsFetchUpcomingShape:
         src = mls_mod.MlsSource(odds_api_key="stubkey")
         games = src.fetch_upcoming(days_ahead=1)
 
-        # ESPN is called twice (days_ahead=1 -> today + tomorrow) and
-        # both return the same stub event; dedupe by event_id keeps
-        # the count at 1.
+        # ESPN is called three times (days_ahead=1 -> the lookback day,
+        # today and tomorrow, #256) and every call returns the same stub
+        # event; dedupe by event_id keeps the count at 1.
         assert len(games) == 1
         g = games[0]
         assert g.home == "LA Galaxy"
@@ -4869,7 +4869,7 @@ class TestMlsFetchUpcomingShape:
         espn_response = {
             "events": [{
                 "id": "401124",
-                "date": "2026-04-11T23:00Z",
+                "date": (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%MZ"),  # relative: the sweep drops games past MAX_AGE_AFTER_KICKOFF (#256)
                 "season": {"year": 2026, "type": 2, "slug": "regular-season"},
                 "competitions": [{
                     "competitors": [
@@ -7590,7 +7590,7 @@ class TestLigaMxSource:
         espn_response = {
             "events": [{
                 "id": "401900001",
-                "date": "2026-02-15T03:00Z",
+                "date": (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%MZ"),  # relative: the sweep drops games past MAX_AGE_AFTER_KICKOFF (#256)
                 "season": {"year": 2026, "type": 2, "slug": "torneo-clausura"},
                 "competitions": [{
                     "competitors": [

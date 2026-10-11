@@ -49,6 +49,7 @@ from .base import GameRow
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, http_get_json
+from ._espn import upcoming_window
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mlb")
 
@@ -161,33 +162,47 @@ class MlbRegularSource(PointsBasedSportSource):
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Pull the next-N-day regular-season schedule via the single
-        `/schedule` endpoint with a startDate/endDate filter. MLB's
-        schedule endpoint reliably honors date ranges (no silent cap
-        like ESPN's). Closeness signal is left None: there is no Odds
-        API integration for MLB in V1; structural importance carries.
+        """Upcoming regular-season games via the single `/schedule` endpoint
+        with a startDate/endDate filter over `_espn.upcoming_window`. MLB's
+        schedule endpoint reliably honors date ranges (no silent cap like
+        ESPN's). Closeness signal is left None: there is no Odds API
+        integration for MLB in V1; structural importance carries.
+
+        The window starts one day BEFORE today-UTC (#256) because statsapi
+        files a game under its US date, like ESPN: measured 2026-10-11,
+        Diamondbacks at Padres (2026-09-27T00:40Z) is listed under 2026-09-26,
+        and `startDate=2026-09-27` does not return it, so from 00:00Z every
+        late West Coast game vanished, BEFORE first pitch as well as during it.
+        The window's drops then apply: a FINISHED game (`abstractGameState`
+        "Final", which is also how a postponed or cancelled game reads) and a
+        stale one. A postponed game is also listed again on its makeup date
+        under the same gamePk (29 such in the 2026 season), hence the dedupe.
         """
-        today = datetime.now(timezone.utc).date()
-        end = today.fromordinal(today.toordinal() + days_ahead)
+        window = upcoming_window(days_ahead)
         url = (
             f"{MLB_API_BASE}/schedule?sportId=1&gameType=R"
-            f"&startDate={today.isoformat()}&endDate={end.isoformat()}"
+            f"&startDate={window.first_day.isoformat()}&endDate={window.last_day.isoformat()}"
         )
         data = _http_get(url)
         out: List[GameRow] = []
         if not data:
             return out
+        seen: set = set()
         for date_entry in data.get("dates", []) or []:
             for g in date_entry.get("games", []) or []:
                 gid = g.get("gamePk")
-                if gid is None:
+                if gid is None or gid in seen:
                     continue
                 teams = g.get("teams") or {}
                 home = ((teams.get("home") or {}).get("team") or {}).get("name")
                 away = ((teams.get("away") or {}).get("team") or {}).get("name")
                 start = parse_iso_utc(g.get("gameDate"))
-                if not home or not away or start is None:
+                if not home or not away:
                     continue
+                over = (g.get("status") or {}).get("abstractGameState") == "Final"
+                if not window.admits(start, over):
+                    continue
+                seen.add(gid)
                 out.append(GameRow(
                     sport_prefix=self.sport_prefix,
                     sport_label=self.sport_label,

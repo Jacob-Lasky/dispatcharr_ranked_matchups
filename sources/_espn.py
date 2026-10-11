@@ -23,21 +23,28 @@ Per-source variation is restricted to:
 DO NOT inline a fourth copy of this in a new ESPN-backed source.
 Import from here. See #66 for the consolidation history.
 
-`sweep_upcoming_scoreboard` is the second shared piece: the whole
-per-day sweep for sources that want UPCOMING fixtures only (drop
-FINISHED, drop stale-SCHEDULED, dedupe by event id). It was extracted
-from `friendlies.py` when `english_cup.py` needed the identical window,
-because the two date constants below carry the reasoning for a live bug
-each and duplicating that reasoning is how it drifts.
+`sweep_upcoming_events` is the second shared piece: the whole per-day
+sweep behind EVERY ESPN `fetch_upcoming` (#256), which wants UPCOMING
+fixtures only (drop FINISHED, drop stale-SCHEDULED, dedupe by event id)
+and owns the US-Eastern-bucket lookback through `upcoming_window`.
+`sweep_upcoming_scoreboard` is it plus the canonical extraction. It was
+extracted from `friendlies.py` when `english_cup.py` needed the identical
+window, because the two date constants below carry the reasoning for a
+live bug each and duplicating that reasoning is how it drifts; twelve
+other sources had duplicated the window anyway, each starting at
+today-UTC, until #256. `upcoming_window` is also the window for the two
+non-ESPN feeds that bucket by US date (NHL `schedule/{date}`, MLB
+`startDate=`).
 
 DO NOT route the bracket-flavoured sources' BRACKET sweeps
 (`_fetch_bracket_games` in `ncaa_soccer_cup`, `ncaa_baseball`,
-`ncaa_softball`, `mls_cup`) through it. Those sweep a fixed CALENDAR
-WINDOW and deliberately KEEP finished games, because a bracket's state is
+`ncaa_softball`, `mls_cup`, ...) or any `_fetch_full_season_games` walk
+through it. Those sweep a fixed CALENDAR WINDOW and deliberately KEEP
+finished games, because a bracket's state and a season's table are
 derived from results already played; handing them a helper that drops
 FINISHED would silently empty their cascade. Their sweeps differ on
-purpose. See #190. A bracket source's `fetch_upcoming` (the EPG path) is
-upcoming-only and may use it: `ncaa_soccer_cup` does (#235).
+purpose. See #190 and #229. A bracket source's `fetch_upcoming` (the EPG
+path) is upcoming-only and uses it like every other.
 
 `fetch_season_type_windows` / `season_type_at` are the third piece: a
 season's phases (regular season, each tournament round) from ESPN's core
@@ -50,7 +57,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TypeVar
 
 from .._util import parse_iso_utc
 
@@ -134,26 +141,37 @@ def fetch_scoreboard_day(
     return data
 
 
-# How many extra days BEHIND today-UTC the sweep reaches. ESPN buckets its
-# scoreboard by US EASTERN calendar date, not UTC, so the `dates=YYYYMMDD`
-# bucket for day D holds events with UTC timestamps running through
-# D+1 04:59Z (23:59 EST). Anchoring the sweep at today-UTC therefore goes
-# blind to every fixture in the 00:00Z-05:00Z window, which is prime time in
-# the Americas and the Pacific. Verified live 2026-07-26T01:25Z: the
+# How many extra days BEHIND today-UTC every upcoming sweep reaches. ESPN
+# buckets its scoreboard by US EASTERN calendar date, not UTC, so the
+# `dates=YYYYMMDD` bucket for day D holds events with UTC timestamps running
+# through D+1 04:59Z (23:59 EST). Anchoring the sweep at today-UTC therefore
+# goes blind to every fixture in the 00:00Z-05:00Z window, which is prime time
+# in the Americas and the Pacific. Verified live 2026-07-26T01:25Z: the
 # `dates=20260725` bucket still held "Tottenham Hotspur at Auckland FC" at
 # 2026-07-26T03:00Z (a favorite, 95 minutes from kickoff) and "Trinidad and
 # Tobago at Louisville City FC" already in progress, while the
-# `dates=20260726` bucket held neither.
+# `dates=20260726` bucket held neither. Measured again for #256 on
+# 2026-10-11 across every league that still started at today-UTC: the NCAA
+# College Cup semifinal NC State v Saint Louis (2025-12-13T01:30Z) sits under
+# `dates=20251212`, and the two US-dated non-ESPN schedules bucket the same
+# way: api-web.nhle.com `schedule/2026-10-10` lists ANA at CGY
+# (2026-10-11T02:00Z) under its 2026-10-10 day, and statsapi.mlb.com lists
+# Diamondbacks at Padres (2026-09-27T00:40Z) under 2026-09-26, so
+# `startDate=2026-09-27` never returns it even BEFORE first pitch.
 #
 # DO NOT "optimize" this back to starting at today: the extra bucket is one
 # HTTP request, the FINISHED filter drops anything already ended, and the
 # id-dedupe absorbs the overlap, so the day costs nothing. One day back fully
-# covers the skew (max US Eastern offset is UTC-5). Reaching backwards does
-# admit stale rows ESPN has not yet retagged FINISHED, which is what
+# covers the skew (max US Eastern offset is UTC-5; US Pacific is behind ET, so
+# its late games are already inside ET's day). Reaching backwards does admit
+# stale rows the feed has not yet retagged FINISHED, which is what
 # MAX_AGE_AFTER_KICKOFF below handles.
 #
-# Used to derive BOTH the sweep's start day and its length; DO NOT hardcode
-# either independently or the window silently shifts when one is edited.
+# Read ONLY through `upcoming_window`, which derives BOTH the first bucket and
+# the window's length from it; DO NOT compute today-UTC in a source, or the
+# window silently shifts when one of the two is edited (#256: twelve sources
+# each computed their own today-UTC and all went blind after 00:00Z).
+# `tests/test_upcoming_window.py` is the class guard.
 SCOREBOARD_LOOKBACK_DAYS = 1
 
 # Upper bound on how long ago a kept fixture may have kicked off. The lookback
@@ -164,8 +182,187 @@ SCOREBOARD_LOOKBACK_DAYS = 1
 # guide as "upcoming" games that ended hours ago, sorting to the top because
 # channels are numbered by kickoff time. Six hours clears any football match
 # (90 minutes plus halftime, stoppage, and extra time) with wide margin while
-# still discarding yesterday's leftovers.
+# still discarding yesterday's leftovers, and it clears a full NFL, NBA, NHL or
+# college baseball game too. The ONE exception is a field event (a fight card,
+# race or tournament), whose listed `date` is the start of something that runs
+# far longer: see `_field_event_current`.
 MAX_AGE_AFTER_KICKOFF = timedelta(hours=6)
+
+
+class UpcomingWindow(NamedTuple):
+    """The day buckets an upcoming sweep requests, and what it may keep.
+
+    Built ONLY by `upcoming_window`. `today` is the first FORWARD bucket
+    (today-UTC); every bucket from `first_day` up to it is lookback.
+    """
+
+    today: date
+    first_day: date
+    last_day: date
+    oldest_kickoff: datetime
+
+    def admits(self, start: Optional[datetime], over: bool) -> bool:
+        """Whether a game is still upcoming or in progress: not over, dated,
+        and kicked off no earlier than `oldest_kickoff`.
+
+        For a head-to-head game this is the rule in every bucket, not just the
+        lookback one: a game that ended this afternoon is no more an upcoming
+        matchup than one that ended yesterday, and a refresh dropping it does
+        not take its channel off air early, because `plugin._rows_to_hold`
+        keeps every applied game that has kicked off until the reaper retires
+        it. (Field events differ: see `_field_event_current`.)
+        """
+        return not over and start is not None and start >= self.oldest_kickoff
+
+
+def upcoming_window(days_ahead: int) -> UpcomingWindow:
+    """THE window for every upcoming sweep (#256): buckets from
+    `SCOREBOARD_LOOKBACK_DAYS` before today-UTC through `days_ahead` after it,
+    keeping games that kicked off at most `MAX_AGE_AFTER_KICKOFF` ago.
+
+    Every `fetch_upcoming` that requests feed days by date (ESPN `dates=`, NHL
+    `schedule/{date}`, MLB `startDate=`) takes its days from here, and this is
+    the only place in `sources/` that turns the clock into a date. DO NOT
+    write `datetime.now(...).date()` in a source: `tests/test_upcoming_window.py`
+    fails it, and pins every source's first requested day under a fixed clock.
+    """
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    return UpcomingWindow(
+        today=today,
+        first_day=today - timedelta(days=SCOREBOARD_LOOKBACK_DAYS),
+        last_day=today + timedelta(days=days_ahead),
+        oldest_kickoff=now - MAX_AGE_AFTER_KICKOFF,
+    )
+
+
+def scoreboard_event_over(event: Dict[str, Any]) -> bool:
+    """Whether ESPN says a head-to-head scoreboard event is over: its first
+    competition is `completed` or in state `post`.
+
+    The ONE reading of ESPN's game status. `extract_espn_scoreboard_event`
+    classifies FINISHED with it, and the upcoming sweeps drop with it. A
+    postponed or cancelled game is `post` without being `completed`, so it is
+    over too: it is not going to be played at the time it is listed.
+    """
+    comps = event.get("competitions") or []
+    comp = comps[0] if comps and isinstance(comps[0], dict) else {}
+    status_type = (comp.get("status") or {}).get("type") or {}
+    state = (status_type.get("state") or "").lower()
+    return bool(status_type.get("completed")) or state == "post"
+
+
+def _field_event_current(event: Dict[str, Any], window: UpcomingWindow) -> bool:
+    """Whether a field event (race, golf or tennis tournament, fight card)
+    from a LOOKBACK bucket is still on: not over, and either live or kicked
+    off no earlier than `window.oldest_kickoff`.
+
+    Reads the EVENT-level status, not `competitions[0]`: a fight card's first
+    competition is its first prelim bout, finished long before the main event.
+    A live (`in`) event skips the age floor because its `date` is when the
+    whole event began: a UFC card listed at 22:00Z runs to ~05:00Z, past the
+    six hours a single game is given. Measured 2026-10-11 on
+    `mma/ufc?dates=20261010`: the Fight Night card is dated 21:00Z.
+
+    Only the lookback buckets are filtered for field events. The forward
+    buckets keep everything, as they always have, because a multi-day event's
+    status describes the CURRENT DAY's play, not the event: the same morning
+    `tennis/atp?dates=20261011` reported the Rolex Shanghai Masters (running to
+    2026-10-19) as `post`, `completed`. Filtering forward buckets on that would
+    drop a tournament with a week to go.
+    """
+    status_type = (event.get("status") or {}).get("type") or {}
+    state = (status_type.get("state") or "").lower()
+    if status_type.get("completed") or state == "post":
+        return False
+    if state == "in":
+        return True
+    start = parse_iso_utc(event.get("date"))
+    return start is not None and start >= window.oldest_kickoff
+
+
+def _event_identity(event: Dict[str, Any]) -> Any:
+    """The dedupe key for one scoreboard event: its id, or, when ESPN omits
+    one, its natural identity. A MISSING id must not become the key itself:
+    `None` is a perfectly good dict key, so the first id-less event would
+    claim it for ALL of them and every later one would be dropped as a
+    duplicate of an unrelated match."""
+    eid = event.get("id")
+    if eid:
+        return eid
+    comps = event.get("competitions") or []
+    competitors = (comps[0].get("competitors") or []) if comps and isinstance(comps[0], dict) else []
+    teams = tuple(
+        ((c.get("team") or {}).get("displayName") or (c.get("team") or {}).get("name") or "")
+        for c in competitors if isinstance(c, dict)
+    )
+    return ("no-id", event.get("name") or event.get("shortName"), event.get("date"), teams)
+
+
+T = TypeVar("T")
+
+
+def sweep_upcoming_events(
+    http_get: Callable[[str], Optional[Dict[str, Any]]],
+    scoreboard_url: str,
+    days_ahead: int,
+    convert: Callable[[Dict[str, Any]], Optional[T]],
+    *,
+    field_events: bool = False,
+) -> List[T]:
+    """THE upcoming sweep for every ESPN scoreboard source (#256):
+    `convert(event)` for each event in `upcoming_window(days_ahead)` that is
+    still upcoming or live, deduped by event, in date order.
+
+    `convert` is the source's own extraction and filtering (season type,
+    postseason headline, conference); returning None skips the event. It sees
+    raw ESPN events only after the shared admission rule:
+
+      - head-to-head sources (the default): every bucket is filtered by
+        `UpcomingWindow.admits` on `scoreboard_event_over` and the event's
+        kickoff, so a FINISHED game and a stale SCHEDULED one (ESPN's status
+        lag) are dropped wherever they sit.
+      - `field_events=True`: only the lookback buckets are filtered, by
+        `_field_event_current`; see it for why the forward ones cannot be.
+
+    Admission runs BEFORE the dedupe, and an event's key is claimed only once
+    `convert` keeps it, and both orders are load-bearing. The overlapping
+    lookback bucket and the first forward bucket can carry the same event, and
+    ESPN serves the two URLs from separate cache entries, so one can lag the
+    other: a stale FINISHED (or malformed) copy that claimed the key first and
+    was then discarded would silently suppress the good copy that followed.
+    The cost is re-checking a dropped event once per bucket, a dict lookup.
+
+    `http_get` is injected for the reason given in `sweep_upcoming_scoreboard`:
+    it is the source's own patch point. Days come from `fetch_scoreboard_days`.
+    """
+    window = upcoming_window(days_ahead)
+    out: List[T] = []
+    seen: set = set()
+    for day, data in fetch_scoreboard_days(
+        http_get, scoreboard_url, window.first_day, window.last_day,
+    ):
+        if not isinstance(data, dict):
+            continue
+        for event in data.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            if field_events:
+                if day < window.today and not _field_event_current(event, window):
+                    continue
+            elif not window.admits(
+                parse_iso_utc(event.get("date")), scoreboard_event_over(event),
+            ):
+                continue
+            key = _event_identity(event)
+            if key in seen:
+                continue
+            item = convert(event)
+            if item is None:
+                continue
+            seen.add(key)
+            out.append(item)
+    return out
 
 
 def extract_espn_scoreboard_event(
@@ -215,13 +412,7 @@ def extract_espn_scoreboard_event(
     if not home_team or not away_team:
         return None
 
-    status_type = (comp.get("status") or {}).get("type") or {}
-    completed = bool(status_type.get("completed"))
-    state = (status_type.get("state") or "").lower()
-    if completed or state == "post":
-        status = "FINISHED"
-    else:
-        status = "SCHEDULED"
+    status = "FINISHED" if scoreboard_event_over(event) else "SCHEDULED"
 
     try:
         hp = int(home.get("score")) if status == "FINISHED" else None
@@ -264,16 +455,20 @@ def sweep_upcoming_scoreboard(
     extras_fn: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
     base: str = ESPN_SOCCER_BASE,
 ) -> List[Dict[str, Any]]:
-    """Sweep one ESPN competition day by day and return UPCOMING games only.
+    """Sweep one ESPN competition day by day and return UPCOMING games only,
+    as canonical `extract_espn_scoreboard_event` records.
 
-    Shared by `friendlies.py`, `english_cup.py`, `ncaa_soccer.py` and
-    `ncaa_soccer_cup.py`'s `fetch_upcoming`; see the module docstring for why
+    `sweep_upcoming_events` with `extract_espn_scoreboard_event` as the
+    conversion: the window, the FINISHED drop, the stale-SCHEDULED floor and
+    the dedupe are all `sweep_upcoming_events`'s, the one copy every ESPN
+    `fetch_upcoming` shares (#256). Used by `friendlies.py`, `english_cup.py`,
+    `ncaa_soccer.py` and `ncaa_soccer_cup.py`; see the module docstring for why
     the bracket SWEEPS deliberately do NOT use it.
 
     Walks ONE DAY AT A TIME through `fetch_scoreboard_day`; see
     SCOREBOARD_EVENT_LIMIT for why no multi-day form replaces that. The
     BUCKETS run from `SCOREBOARD_LOOKBACK_DAYS` before today-UTC through
-    `days_ahead` after it.
+    `days_ahead` after it (`upcoming_window`).
 
     `days_ahead` bounds the buckets requested, NOT the kickoff timestamps
     returned, and the two are not the same thing. ESPN buckets by US Eastern
@@ -285,15 +480,15 @@ def sweep_upcoming_scoreboard(
     a real match to an off-by-one on a timezone boundary. Do not "tighten" this
     into a hard timestamp cut without checking what it silently removes.
 
-    Three filters, in order, each of which fixed a live bug:
-      - FINISHED games are dropped: a match that already ended is not an
-        upcoming matchup. A live (in-progress) game classifies as SCHEDULED in
-        `extract_espn_scoreboard_event` and is KEPT, so "playing right now"
-        still surfaces.
-      - Games that kicked off more than `MAX_AGE_AFTER_KICKOFF` ago are dropped
-        even when still tagged SCHEDULED, catching ESPN's status lag.
+    What is dropped, each of which fixed a live bug:
+      - FINISHED games (`scoreboard_event_over`): a match that already ended is
+        not an upcoming matchup. A live (in-progress) game is not over and is
+        KEPT, so "playing right now" still surfaces.
+      - Games that kicked off more than `MAX_AGE_AFTER_KICKOFF` ago, even when
+        still tagged SCHEDULED, catching ESPN's status lag.
       - Events already seen (the lookback bucket overlaps the first forward
-        bucket) are deduped by event id.
+        bucket), deduped by event id, or by natural identity when the id is
+        missing (`_event_identity`).
 
     `http_get` is injected rather than called directly for two reasons, and the
     second one is the load-bearing one: each source keeps logging under its OWN
@@ -302,65 +497,16 @@ def sweep_upcoming_scoreboard(
     would turn all of those stubs into silent no-ops that hit the real network
     rather than failing. DO NOT "simplify" this into a direct call.
 
-    Returns the canonical `extract_espn_scoreboard_event` records (plus
-    whatever `extras_fn` adds), in sweep order. Callers apply their own
-    additional filtering (e.g. the friendlies favorites gate) afterwards.
+    Returns the records (plus whatever `extras_fn` adds) in sweep order.
+    Callers apply their own additional filtering (e.g. the friendlies
+    favorites gate) afterwards.
     """
-    now = datetime.now(timezone.utc)
-    start_day = now.date() - timedelta(days=SCOREBOARD_LOOKBACK_DAYS)
-    oldest_kickoff = now - MAX_AGE_AFTER_KICKOFF
-    out: List[Dict[str, Any]] = []
-    seen_ids: set = set()
-    for _day, data in fetch_scoreboard_days(
-        http_get, f"{base}/{slug}/scoreboard",
-        start_day, start_day + timedelta(days=days_ahead + SCOREBOARD_LOOKBACK_DAYS),
-    ):
-        if not data:
-            continue
-        for event in data.get("events") or []:
-            rec = extract_espn_scoreboard_event(
-                event, team_namer=team_namer, extras_fn=extras_fn,
-            )
-            if rec is None:
-                continue
-            # DROP FILTERS RUN BEFORE THE DEDUPE, and the order is load-bearing.
-            #
-            # The original friendlies loop claimed the id first and filtered
-            # afterwards, which lets a REJECTED copy poison the key: the
-            # overlapping lookback bucket and the first forward bucket both
-            # carry the same event, and ESPN serves those two URLs from
-            # separate cache entries, so one can lag the other. A stale
-            # FINISHED copy in the earlier bucket would consume the id and then
-            # be discarded, silently suppressing the good SCHEDULED copy that
-            # followed. Filtering first means an id is only ever claimed by an
-            # event actually kept. The cost is re-checking a dropped event once
-            # per bucket, which is a dict lookup.
-            if rec.get("status") == "FINISHED":
-                continue
-            start = rec.get("start_time")
-            if start is None:
-                continue
-            if start < oldest_kickoff:
-                # Kicked off long enough ago that it cannot still be running:
-                # ESPN just hasn't retagged it FINISHED. Keeping it would put a
-                # finished match in the guide as an upcoming game. See
-                # MAX_AGE_AFTER_KICKOFF.
-                continue
-            # A MISSING id must not become a dedupe key.
-            # `extract_espn_scoreboard_event` permits `id: None` (it passes
-            # `event.get("id")` through), and `None` is a perfectly good dict
-            # key, so using it directly meant the FIRST id-less event claimed
-            # the slot for ALL of them and every later one was dropped as a
-            # duplicate of an unrelated match. Fall back to the natural
-            # identity instead, which is what the rest of the plugin uses when
-            # no id is available.
-            eid = rec.get("id")
-            key = eid if eid else ("no-id", rec["home"], rec["away"], start)
-            if key in seen_ids:
-                continue
-            seen_ids.add(key)
-            out.append(rec)
-    return out
+    return sweep_upcoming_events(
+        http_get, f"{base}/{slug}/scoreboard", days_ahead,
+        lambda event: extract_espn_scoreboard_event(
+            event, team_namer=team_namer, extras_fn=extras_fn,
+        ),
+    )
 
 
 # Concurrent scoreboard requests for a season walk. A full-season walk is one

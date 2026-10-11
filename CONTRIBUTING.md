@@ -275,25 +275,41 @@ stays):
   100 events, which lost 225 games of the 2026 women's NCAA soccer
   season; `tests/test_espn_scoreboard.py` fails any `scoreboard?dates=`
   URL built anywhere else in `sources/`.
-- `sweep_upcoming_scoreboard` is the whole per-day sweep for a source
-  that wants upcoming fixtures only. It walks one day at a time (the
-  multi-day `dates=` forms 400 or silently drop events; see
-  `SCOREBOARD_EVENT_LIMIT`), reaches one day back
-  because ESPN buckets by US Eastern date, drops finished and
-  stale-but-still-SCHEDULED games, and dedupes by event id. Pass your
-  module's own `_http_get` as `http_get`: each source keeps its own
-  `requests` symbol so its tests can stub it.
+- `sweep_upcoming_events(http_get, scoreboard_url, days_ahead, convert)`
+  is the whole per-day sweep behind EVERY ESPN `fetch_upcoming` (#256).
+  It walks one day at a time (the multi-day `dates=` forms 400 or silently
+  drop events; see `SCOREBOARD_EVENT_LIMIT`), starts one day BEFORE
+  today-UTC because ESPN buckets by US Eastern date (from 00:00Z tonight's
+  late games sit in yesterday's bucket), drops finished and
+  stale-but-still-SCHEDULED games, and dedupes by event id. `convert` is
+  your own extraction and filtering (season type, headline, conference):
+  return a row, or None to skip the event. A field event (race,
+  tournament, fight card) passes `field_events=True`: see
+  `_field_event_current` for why only its lookback bucket is filtered.
+  `sweep_upcoming_scoreboard` is the same sweep returning
+  `extract_espn_scoreboard_event` records. Pass your module's own
+  `_http_get` as `http_get`: each source keeps its own `requests` symbol so
+  its tests can stub it.
+- `upcoming_window(days_ahead)` is the ONE place `sources/` turns the clock
+  into a date. A non-ESPN feed that is also bucketed by US date (NHL's
+  `schedule/{date}`, MLB's `startDate=`) takes its days and its
+  `admits(start, over)` rule from it. Never write
+  `datetime.now(...).date()` in a source: `tests/test_upcoming_window.py`
+  fails it, fails a `fetch_upcoming` that calls `fetch_scoreboard_days`
+  itself, and checks every built source's first requested day under a
+  pinned 22:00-Eastern clock.
 - `fetch_scoreboard_days(http_get, scoreboard_url, start, end)` is the
-  per-day walk for everything else: upcoming sweeps, `_fetch_full_season_games`
-  (the schedule the importance simulator replays) and bracket walks. It
+  per-day walk for everything else: `_fetch_full_season_games` (the
+  schedule the importance simulator replays) and the sweep above. It
   fetches the days concurrently, 8 at a time (via `fetch_days`), and
   returns `[(day, page), ...]` in date order so a "first occurrence wins"
   dedupe behaves exactly as a sequential loop would. Pass your module's
   own `_http_get`, same reason as above.
 
-Bracket-shaped sources deliberately do not use the sweep. They read a
-fixed calendar window and keep finished games, because bracket state is
-derived from results already played.
+Bracket sweeps (`_fetch_bracket_games`) and full-season walks deliberately
+do not use the upcoming sweep. They read a fixed calendar window and keep
+finished games, because bracket state and the season table are derived
+from results already played.
 
 **A full-season walk ends at the season's END, never at `now + lookahead`**
 (#229). The list it returns is the simulator's whole season, so stopping

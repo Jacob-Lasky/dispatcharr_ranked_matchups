@@ -752,3 +752,28 @@ def test_read_cache_keeps_a_damaged_stamped_file_for_show_state(plugin, tmp_path
     cache = plugin._read_cache()
     assert cache["summary"] == ["NCAA Football: error (HTTP 525)"]
     assert cache["refreshed_at"] == "2026-10-11T12:00:00+00:00"
+
+
+def test_the_harness_redirects_every_json_state_file_plugin_py_writes(plugin):
+    """The harness's repo check only fires when a scenario WRITES a stray
+    file, and only on a checkout where that file did not already exist, so a
+    state file missing from `_REDIRECTED_PATHS` fails every scenario on a clean
+    clone and passes on a used one. `numbering_state.json` (#219) did exactly
+    that: 28 scenarios failed on a fresh checkout of the 1.34.0 batch. Every
+    `*_PATH` naming a `.json` file beside the plugin must be redirected."""
+    # Read by AST, not imported: the runner is a subprocess-only module (see
+    # its docstring), and the tuple is a literal.
+    import ast
+    tree = ast.parse(open(RUNNER, encoding="utf-8").read())
+    table = next(
+        node.value for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "_REDIRECTED_PATHS" for t in node.targets)
+    )
+    redirected = {attr for mod, attr in ast.literal_eval(table) if mod == "plugin"}
+    json_paths = {
+        name for name, value in vars(plugin).items()
+        if name.endswith("_PATH") and isinstance(value, str) and value.endswith(".json")
+    }
+    assert "NUMBERING_STATE_PATH" in json_paths  # the instrument sees the one that was missed
+    assert json_paths - redirected == set()

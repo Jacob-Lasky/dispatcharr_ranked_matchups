@@ -31,13 +31,12 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional, Pattern
+from typing import Any, Dict, List, Optional, Pattern
 
 import requests
 
 from .base import GameRow, SportSource
-from ._espn import fetch_scoreboard_days
+from ._espn import sweep_upcoming_events
 from .._util import FIELD_AWAY_SENTINEL, field_event_extra, http_get_json, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.field_event")
@@ -82,8 +81,17 @@ class FieldEventSource(SportSource):
         return f"https://site.api.espn.com/apis/site/v2/sports/{self.ESPN_SLUG}"
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Pull events in the day buckets today..today+days_ahead, one
-        scoreboard request per day (`_espn.fetch_scoreboard_day`).
+        """Pull events in the day buckets of `_espn.upcoming_window`, one
+        scoreboard request per day (`_espn.fetch_scoreboard_day`), through
+        `_espn.sweep_upcoming_events(field_events=True)`.
+
+        The window starts one day BEFORE today-UTC (#256): ESPN files a
+        UFC main card or a NASCAR night race under its US Eastern date, so
+        from 00:00Z the event in progress sits in yesterday's bucket. Only
+        that lookback bucket is filtered (over events dropped, stale ones
+        dropped unless ESPN says they are live); the forward buckets keep
+        every event as they always have. `_espn._field_event_current` has
+        the measurements behind both halves.
 
         DO NOT go back to one `dates=<today>-<end>` range call. It is the
         form ESPN now rejects with HTTP 400 for every team sport, and on
@@ -92,31 +100,17 @@ class FieldEventSource(SportSource):
         returned the Charlotte race but not Phoenix on Oct 18, which the
         per-day walk finds (#182; see `_espn.SCOREBOARD_EVENT_LIMIT`). A
         multi-day event (a golf or tennis tournament) appears in every day's
-        bucket it spans, so the id dedupe below keeps its first copy.
+        bucket it spans, so the sweep's dedupe keeps its first kept copy.
         """
-        today = datetime.now(timezone.utc).date()
-        scoreboard_url = f"{self._espn_base()}/scoreboard"
-        events: List[Any] = []
-        for _day, data in fetch_scoreboard_days(
-            _http_get, scoreboard_url, today, today + timedelta(days=days_ahead),
-        ):
-            if isinstance(data, dict):
-                events.extend(data.get("events") or [])
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        for event in events:
-            eid = event.get("id")
-            if eid in seen_ids:
-                continue
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
             name = (event.get("name") or "").strip()
             short_name = (event.get("shortName") or "").strip()
             display_name = name or short_name
             if not display_name:
-                continue
+                return None
             start = parse_iso_utc(event.get("date"))
             if start is None:
-                continue
-            seen_ids.add(eid)
+                return None
             # Detect majors so the score gets bumped to the MAJOR tier
             # (e.g., golf's Masters / PGA / US Open / British Open), then the
             # tour's playoff events (golf's FedEx Cup playoffs).
@@ -125,7 +119,7 @@ class FieldEventSource(SportSource):
                 stage = "MAJOR"
             elif self.PLAYOFF_REGEX is not None and self.PLAYOFF_REGEX.search(display_name):
                 stage = "TOUR_PLAYOFF"
-            out.append(GameRow(
+            return GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
                 home=display_name,
@@ -137,10 +131,13 @@ class FieldEventSource(SportSource):
                     self.FD_COMPETITION_CODE,
                     stage,
                     short_name,
-                    espn_event_id=eid,
+                    espn_event_id=event.get("id"),
                 ),
-            ))
-        return out
+            )
+        return sweep_upcoming_events(
+            _http_get, f"{self._espn_base()}/scoreboard", days_ahead, to_row,
+            field_events=True,
+        )
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:

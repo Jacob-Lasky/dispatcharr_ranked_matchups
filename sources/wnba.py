@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -41,7 +41,12 @@ from .base import GameRow
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, http_get_json
-from ._espn import fetch_scoreboard_day, fetch_scoreboard_days
+from ._espn import (
+    fetch_scoreboard_day,
+    fetch_scoreboard_days,
+    scoreboard_event_over,
+    sweep_upcoming_events,
+)
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.wnba")
 
@@ -156,15 +161,7 @@ def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not home_team or not away_team:
         return None
 
-    status_type = (comp.get("status") or {}).get("type") or {}
-    completed = bool(status_type.get("completed"))
-    state = (status_type.get("state") or "").lower()
-    if completed or state == "post":
-        status = "FINISHED"
-    elif state == "in":
-        status = "SCHEDULED"
-    else:
-        status = "SCHEDULED"
+    status = "FINISHED" if scoreboard_event_over(event) else "SCHEDULED"
 
     try:
         hp = int(home.get("score")) if status == "FINISHED" else None
@@ -224,44 +221,35 @@ class WnbaRegularSource(PointsBasedSportSource):
         return "WNBA"
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Per-day scoreboard sweep for the next N days. Regular-season
-        games only (filter via season.type==2)."""
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        for day, data in fetch_scoreboard_days(
-            _http_get, f"{ESPN_BASE}/scoreboard",
-            today, today + timedelta(days=days_ahead),
-        ):
-            if not data:
-                continue
-            for event in data.get("events") or []:
-                rec = _extract_game_record(event)
-                if rec is None or rec.get("season_type") != 2:
-                    continue
-                eid = rec.get("id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=rec["home"],
-                    away=rec["away"],
-                    rank_home=None,
-                    rank_away=None,
-                    start_time=start,
-                    extra={
-                        "wnba_game_id": eid,
-                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                        "game_id": eid,
-                        "fd_competition_code": self.league_context_code,
-                    },
-                ))
-        return out
+        """Upcoming regular-season games (season.type == 2)
+        through `_espn.sweep_upcoming_events`, which owns the window
+        (including the US-Eastern lookback day, #256), the FINISHED and stale
+        drops and the dedupe.
+        """
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
+            rec = _extract_game_record(event)
+            if rec is None or rec.get("season_type") != 2:
+                return None
+            start = rec.get("start_time")
+            if start is None:
+                return None
+            eid = rec.get("id")
+            return GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=rec["home"],
+                away=rec["away"],
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra={
+                    "wnba_game_id": eid,
+                    # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                    "game_id": eid,
+                    "fd_competition_code": self.league_context_code,
+                },
+            )
+        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
         """Walk every day of the regular season window. WNBA's regular
@@ -359,42 +347,34 @@ class WnbaPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         return None
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Next-N-day playoff schedule (season.type==3 filter)."""
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        for day, data in fetch_scoreboard_days(
-            _http_get, f"{ESPN_BASE}/scoreboard",
-            today, today + timedelta(days=days_ahead),
-        ):
-            if not data:
-                continue
-            for event in data.get("events") or []:
-                rec = _extract_game_record(event)
-                if rec is None or rec.get("season_type") != 3:
-                    continue
-                eid = rec.get("id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=rec["home"],
-                    away=rec["away"],
-                    rank_home=None,
-                    rank_away=None,
-                    start_time=start,
-                    extra={
-                        "wnba_game_id": eid,
-                        "game_id": eid,
-                        "fd_competition_code": self._league_context_code(),
-                    },
-                ))
-        return out
+        """Upcoming playoff games (season.type == 3)
+        through `_espn.sweep_upcoming_events`, which owns the window
+        (including the US-Eastern lookback day, #256), the FINISHED and stale
+        drops and the dedupe.
+        """
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
+            rec = _extract_game_record(event)
+            if rec is None or rec.get("season_type") != 3:
+                return None
+            start = rec.get("start_time")
+            if start is None:
+                return None
+            eid = rec.get("id")
+            return GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=rec["home"],
+                away=rec["away"],
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra={
+                    "wnba_game_id": eid,
+                    "game_id": eid,
+                    "fd_competition_code": self._league_context_code(),
+                },
+            )
+        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
 
     def estimate_strengths(self) -> Dict[str, Dict[str, float]]:
         if self._team_strengths_from_regular is not None:

@@ -50,13 +50,13 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 import requests
 
 from .base import GameRow
-from ._espn import fetch_scoreboard_day, fetch_scoreboard_days
+from ._espn import fetch_scoreboard_day, sweep_upcoming_events
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .._util import parse_iso_utc, http_get_json
 
@@ -218,49 +218,39 @@ class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Emit upcoming playoff bracket games. Per-day sweep with the
-        same slug filter that `_fetch_bracket_games` uses: only events
-        whose `season.slug` is in `SLUG_TO_STAGE` surface here, so
-        regular-season games (filtered out earlier in `MlsEastSource` /
-        `MlsWestSource`) don't reappear via this source.
+        """Emit upcoming playoff bracket games through
+        `_espn.sweep_upcoming_events` (window, lookback day, FINISHED and
+        stale drops, dedupe; #256), with the same slug filter that
+        `_fetch_bracket_games` uses: only events whose `season.slug` is in
+        `SLUG_TO_STAGE` surface here, so regular-season games (filtered out
+        earlier in `MlsEastSource` / `MlsWestSource`) don't reappear via this
+        source.
         """
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        for day, data in fetch_scoreboard_days(
-            _http_get, f"{ESPN_BASE}/scoreboard",
-            today, today + timedelta(days=days_ahead),
-        ):
-            if not isinstance(data, dict):
-                continue
-            for event in data.get("events") or []:
-                rec = self._extract_bracket_record(event, matchday=1)
-                if rec is None:
-                    continue
-                eid = rec.get("game_id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=rec["home"],
-                    away=rec["away"],
-                    rank_home=None,
-                    rank_away=None,
-                    start_time=start,
-                    extra={
-                        "espn_event_id": eid,
-                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                        "game_id": eid,
-                        "fd_competition_code": self._league_context_code(),
-                        "stage": rec.get("stage"),
-                    },
-                ))
-        return out
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
+            rec = self._extract_bracket_record(event, matchday=1)
+            if rec is None:
+                return None
+            start = rec.get("start_time")
+            if start is None:
+                return None
+            eid = rec.get("game_id")
+            return GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=rec["home"],
+                away=rec["away"],
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra={
+                    "espn_event_id": eid,
+                    # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                    "game_id": eid,
+                    "fd_competition_code": self._league_context_code(),
+                    "stage": rec.get("stage"),
+                },
+            )
+        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
 
     # ---------- _fetch_bracket_games (importance side) ----------
 

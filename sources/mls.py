@@ -25,12 +25,11 @@ Plugin opts in via `enable_mls` in `plugin.json`. Off by default.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from ._espn import fetch_scoreboard_days
+from ._espn import sweep_upcoming_events
 from ._odds import fetch_odds_events
 from .base import GameRow, SportSource
 from .._util import TEAM_SUFFIX_TOKENS, http_get_json, parse_iso_utc
@@ -160,10 +159,11 @@ class MlsSource(SportSource):
         return f"https://site.api.espn.com/apis/site/v2/sports/{self._ESPN_SLUG}"
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Per-day scoreboard sweep over today..today+days_ahead.
-        Populate `closeness` from a single Odds API call that returns
-        all upcoming matches for this league; ESPN gives the schedule,
-        Odds API gives the moneyline market.
+        """Upcoming games through `_espn.sweep_upcoming_events`, which owns
+        the per-day window (including the US-Eastern lookback day, #256), the
+        FINISHED and stale drops and the dedupe. Populate `closeness` from a
+        single Odds API call that returns all upcoming matches for this league;
+        ESPN gives the schedule, Odds API gives the moneyline market.
 
         One request per day through `_espn.fetch_scoreboard_day`; see
         `_espn.SCOREBOARD_EVENT_LIMIT` for why no multi-day form replaces
@@ -171,69 +171,55 @@ class MlsSource(SportSource):
         """
         closeness_by_pair = self._fetch_closeness()
 
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        espn_base = self._espn_base()
-        for day, data in fetch_scoreboard_days(
-            _http_get, f"{espn_base}/scoreboard",
-            today, today + timedelta(days=days_ahead),
-        ):
-            if not isinstance(data, dict):
-                continue
-            for event in data.get("events") or []:
-                gid = event.get("id")
-                if gid in seen_ids:
-                    continue
-                comps = event.get("competitions") or []
-                if not comps:
-                    continue
-                comp = comps[0]
-                competitors = comp.get("competitors") or []
-                if len(competitors) != 2:
-                    continue
-                home_obj = next(
-                    (c for c in competitors if c.get("homeAway") == "home"), None
-                )
-                away_obj = next(
-                    (c for c in competitors if c.get("homeAway") == "away"), None
-                )
-                if home_obj is None or away_obj is None:
-                    continue
-                home = _team_canonical_name(home_obj.get("team") or {})
-                away = _team_canonical_name(away_obj.get("team") or {})
-                if not home or not away:
-                    continue
-                start = parse_iso_utc(event.get("date"))
-                if start is None:
-                    continue
-                seen_ids.add(gid)
-                closeness = self._lookup_closeness(closeness_by_pair, home, away)
-                # ESPN exposes the season/playoff stage in
-                # `event.season.slug`. Carry it through as
-                # `extra.season_slug` for downstream consumers (the
-                # importance simulator filed under #30 will route on
-                # it). MLS values: "regular-season", "mls-cup",
-                # "mls-cup-playoffs". NWSL: "regular-season",
-                # "nwsl-playoffs", etc. Liga MX: "torneo-apertura",
-                # "torneo-clausura", "liguilla".
-                season_slug = ((event.get("season") or {}).get("slug") or "")
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=home,
-                    away=away,
-                    rank_home=None,
-                    rank_away=None,
-                    start_time=start,
-                    closeness=closeness,
-                    extra={
-                        "espn_event_id": gid,
-                        "season_slug": season_slug,
-                        "fd_competition_code": self._FD_CODE,
-                    },
-                ))
-        return out
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
+            comps = event.get("competitions") or []
+            if not comps:
+                return None
+            competitors = comps[0].get("competitors") or []
+            if len(competitors) != 2:
+                return None
+            home_obj = next(
+                (c for c in competitors if c.get("homeAway") == "home"), None
+            )
+            away_obj = next(
+                (c for c in competitors if c.get("homeAway") == "away"), None
+            )
+            if home_obj is None or away_obj is None:
+                return None
+            home = _team_canonical_name(home_obj.get("team") or {})
+            away = _team_canonical_name(away_obj.get("team") or {})
+            if not home or not away:
+                return None
+            start = parse_iso_utc(event.get("date"))
+            if start is None:
+                return None
+            # ESPN exposes the season/playoff stage in
+            # `event.season.slug`. Carry it through as
+            # `extra.season_slug` for downstream consumers (the
+            # importance simulator filed under #30 will route on
+            # it). MLS values: "regular-season", "mls-cup",
+            # "mls-cup-playoffs". NWSL: "regular-season",
+            # "nwsl-playoffs", etc. Liga MX: "torneo-apertura",
+            # "torneo-clausura", "liguilla".
+            season_slug = ((event.get("season") or {}).get("slug") or "")
+            return GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=home,
+                away=away,
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                closeness=self._lookup_closeness(closeness_by_pair, home, away),
+                extra={
+                    "espn_event_id": event.get("id"),
+                    "season_slug": season_slug,
+                    "fd_competition_code": self._FD_CODE,
+                },
+            )
+        return sweep_upcoming_events(
+            _http_get, f"{self._espn_base()}/scoreboard", days_ahead, to_row,
+        )
 
     # ---------- closeness ----------
 
