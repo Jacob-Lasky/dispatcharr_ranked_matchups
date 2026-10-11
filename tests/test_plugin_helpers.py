@@ -327,6 +327,38 @@ class TestIsPostseasonGame:
         assert plugin._is_postseason_game(self._game("group_stage")) is False
         assert plugin._is_postseason_game(self._game("final")) is True
 
+    def test_a_stageless_espn_playoff_slug_is_postseason(self, plugin):
+        """NWSL and Liga MX rows carry only ESPN's `season_slug` (sources/
+        mls.py), so their playoff games were invisible to the 'postseason'
+        favorites gate and got league soccer's 2.5 h window (#257). Slugs as
+        ESPN returned them on 2026-10-11."""
+        def slug(s):
+            return types.SimpleNamespace(home="A", away="B", extra={"season_slug": s})
+        for s in ("playoffs---quarterfinals", "playoffs---championship",
+                  "apertura---8th-seed-game", "apertura---finals"):
+            assert plugin._is_postseason_game(slug(s)) is True, s
+        for s in ("regular-season", "torneo-apertura", "torneo-clausura", "preseason", "", None):
+            assert plugin._is_postseason_game(slug(s)) is False, s
+
+    def test_an_all_star_slug_is_not_postseason(self, plugin):
+        """Preventive guard. ESPN's soccer slug for an All-Star exhibition is
+        "all-star-game" (measured on usa.1, 2025-07-23). The MLS sources drop
+        it upstream (East/West keep only "regular-season", MLS Cup only its
+        round map), but NWSL and Liga MX go through MlsSource, which passes
+        every slug through, and on their stage-less rows the slug rule would
+        call it a playoff round: rescued past the 'postseason' favorites gate
+        and given the knockout window. Its stage-side twin, ALLSTAR, is
+        already excluded."""
+        g = types.SimpleNamespace(home="A", away="B", extra={"season_slug": "all-star-game"})
+        assert plugin._is_postseason_game(g) is False
+        assert plugin._epg_match_window("NWSL", {"season_slug": "all-star-game"}) == (5, 2.5)
+
+    def test_a_stage_outranks_the_slug(self, plugin):
+        """An MLS Cup row carries both; a WC group row with a playoff-looking
+        slug would still be a group game."""
+        g = types.SimpleNamespace(extra={"stage": "GROUP_STAGE", "season_slug": "playoffs"})
+        assert plugin._is_postseason_game(g) is False
+
 
 class TestFilterFavoritesOnly:
     """`_filter_favorites_only` is the curation gate. It filters games and
@@ -388,6 +420,14 @@ class TestFilterFavoritesOnly:
         )
         assert kept == [usa_group, wc_final, nfl_playoff]
         assert dropped == 2  # bra_group (WC group) + nfl_regular
+
+    def test_postseason_rescues_an_nwsl_playoff_game_by_its_slug(self, plugin):
+        playoff = types.SimpleNamespace(home="Spirit", away="Gotham",
+                                        extra={"season_slug": "playoffs---quarterfinals"})
+        regular = types.SimpleNamespace(home="Pride", away="Courage",
+                                        extra={"season_slug": "regular-season"})
+        kept, dropped = self._run(plugin, [playoff, regular], ["United States"], "postseason")
+        assert kept == [playoff] and dropped == 1
 
 
 class TestManifestFavoritesOnlyMatchesCode:

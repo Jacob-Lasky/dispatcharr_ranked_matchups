@@ -534,7 +534,7 @@
       "type": "number",
       "label": "Remove finished games after (minutes)",
       "default": 0,
-      "help_text": "Minutes past a game's estimated end before its channel is removed from the group, without waiting for the next scheduled refresh. The end is estimated with the same per-sport window the EPG matcher uses (about 4 hours for gridiron, 2.5 for soccer), so this is measured from THAT, not from kickoff. 0 disables reaping and finished games stay until the next refresh. A background thread wakes at the next game's deadline rather than polling."
+      "help_text": "Minutes past a game's estimated end before its channel is removed from the group, without waiting for the next scheduled refresh. The end is estimated with the same per-sport window the EPG matcher uses (about 4 hours for gridiron, 2.5 for soccer, 3 for a soccer knockout or cup tie that can go to penalties), so this is measured from THAT, not from kickoff. 0 disables reaping and finished games stay until the next refresh. A background thread wakes at the next game's deadline rather than polling."
     },
     {
       "id": "bench_size",
