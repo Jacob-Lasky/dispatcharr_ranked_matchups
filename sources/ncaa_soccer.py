@@ -32,8 +32,12 @@ import requests
 
 from .base import GameRow
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc
-from ._espn import extract_espn_scoreboard_event, fetch_days
+from ._espn import (
+    extract_espn_scoreboard_event,
+    fetch_days,
+    fetch_season_type_windows,
+    sweep_upcoming_scoreboard,
+)
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_soccer")
 
@@ -45,14 +49,22 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 # (see ncaa_baseball.py for the same trap).
 SEASON_START_MONTH = 8   # August
 
-# Last day of each gender's regular season (conference tournaments included),
-# as (month, day). A CALENDAR APPROXIMATION, chosen inside the gap ESPN showed
-# in 2025 between the last conference final and the first tournament round:
-# men's games ran through Nov 16 with none Nov 17-19 (first round Nov 20);
-# women's through Nov 9 with none Nov 10-13 (first round Nov 14). The NCAA
-# calendar shifts by weekday each year; re-check against the scoreboard if a
-# season's last conference final or first round moves outside these windows.
-_REGULAR_SEASON_END = {"m": (11, 18), "w": (11, 11)}
+# FALLBACK last day (US Eastern scoreboard date) of each gender's regular
+# season, conference tournaments included, as (month, day). Used ONLY when
+# ESPN's season calendar is unreachable: the real boundary is the end of the
+# regular-season type on that calendar (`_regular_season_cutoff`, #235),
+# which ESPN publishes per season and which tracks the NCAA's own moves.
+# Each value sits in the gap between the last conference final and the
+# first round of the 2026 calendar: men's first round Nov 19, women's
+# Nov 20 (the women's bracket moved a week later from 2026, when the
+# Women's College Cup joined the men's on the second weekend of December;
+# 2025's women's value was Nov 11, and on the 2026 calendar it would have
+# cut the conference finals off the season).
+_REGULAR_SEASON_END = {"m": (11, 18), "w": (11, 17)}
+
+# ESPN buckets its scoreboard by US Eastern date. The regular season always
+# ends in mid-November, after DST, so Eastern is UTC-5 at that boundary.
+_EASTERN_STANDARD_OFFSET = timedelta(hours=5)
 
 # Default per-team scoring rate priors. NCAA D1 soccer averages
 # ~1.5 goals/team/game in regulation across both M's and W's.
@@ -122,6 +134,8 @@ class NcaaSoccerSource(PointsBasedSportSource):
             season_year if season_year is not None
             else (now.year if now.month >= SEASON_START_MONTH else now.year - 1)
         )
+        # Memoised `_regular_season_cutoff` for this instance (one refresh).
+        self._cutoff: Optional[datetime] = None
 
     @property
     def sport_prefix(self) -> str:
@@ -135,50 +149,87 @@ class NcaaSoccerSource(PointsBasedSportSource):
     def _espn_slug(self) -> str:
         return f"usa.ncaa.{self.gender}.1"
 
+    # ---------- regular-season boundary ----------
+
+    def _regular_season_cutoff(self) -> datetime:
+        """The first UTC instant AFTER the regular season (exclusive).
+
+        From ESPN's season calendar when it answers: the end of the
+        season's first season type, the regular season, whose windows
+        were checked to sit in the gap before the first round for both
+        genders in 2024, 2025 and 2026. The College Cup's games carry
+        the same season slug, type and notes as an October game (#229,
+        #235), so this boundary is the ONLY thing that keeps them out of
+        this source: out of the simulated season, and out of
+        `fetch_upcoming`, where a regular-season row for a tournament
+        game shares the College Cup row's sport prefix and teams and
+        wins `_dedup_series_games` (same kickoff, earlier source),
+        dropping the College Cup row and its stage.
+
+        Falls back to `_REGULAR_SEASON_END` (the end of that Eastern
+        date) when the calendar is unreachable. Memoised per instance;
+        the next refresh builds a new source and asks again.
+        """
+        if self._cutoff is not None:
+            return self._cutoff
+        windows = fetch_season_type_windows(self._espn_slug, self.season_year, _http_get)
+        if windows:
+            # ESPN's end bound is inclusive at minute precision.
+            self._cutoff = windows[0].end + timedelta(minutes=1)
+        else:
+            logger.warning(
+                "[ncaa_soccer] no %d season calendar for %s; ending the "
+                "regular season at the %s fallback",
+                self.season_year, self._espn_slug, _REGULAR_SEASON_END[self.gender],
+            )
+            month, day_of_month = _REGULAR_SEASON_END[self.gender]
+            self._cutoff = (
+                datetime(self.season_year, month, day_of_month, tzinfo=timezone.utc)
+                + timedelta(days=1) + _EASTERN_STANDARD_OFFSET
+            )
+        return self._cutoff
+
     # ---------- fetch_upcoming ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Per-day scoreboard sweep (ESPN's date-range syntax silently
-        caps at 25 events: see ncaa_baseball.py)."""
+        """Upcoming regular-season games, through the shared ESPN upcoming
+        sweep (Eastern-bucket lookback, FINISHED drop, stale floor, id
+        dedupe: see `_espn.sweep_upcoming_scoreboard`), cut at the end of
+        the regular season (`_regular_season_cutoff`)."""
         rankings = self._fetch_rankings()
-        today = datetime.now(timezone.utc).date()
+        cutoff = self._regular_season_cutoff()
+        recs = sweep_upcoming_scoreboard(
+            slug=self._espn_slug,
+            days_ahead=days_ahead,
+            team_namer=_team_canonical_name,
+            http_get=_http_get,
+            base=ESPN_BASE,
+        )
         out: List[GameRow] = []
-        seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(
-                f"{ESPN_BASE}/{self._espn_slug}/scoreboard?dates={day.strftime('%Y%m%d')}"
-            )
-            if not data:
+        for rec in recs:
+            start = rec["start_time"]
+            if start >= cutoff:
+                # A College Cup game: NcaaSoccerCupSource emits it with its
+                # round. See _regular_season_cutoff.
                 continue
-            for event in data.get("events") or []:
-                rec = _extract_game_record(event)
-                if rec is None:
-                    continue
-                eid = rec.get("id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                home = rec["home"]
-                away = rec["away"]
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=home,
-                    away=away,
-                    rank_home=rankings.get(home),
-                    rank_away=rankings.get(away),
-                    start_time=start,
-                    extra={
-                        "espn_event_id": eid,
-                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                        "game_id": eid,
-                        "fd_competition_code": self.league_context_code,
-                    },
-                ))
+            home = rec["home"]
+            away = rec["away"]
+            eid = rec.get("id")
+            out.append(GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=home,
+                away=away,
+                rank_home=rankings.get(home),
+                rank_away=rankings.get(away),
+                start_time=start,
+                extra={
+                    "espn_event_id": eid,
+                    # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                    "game_id": eid,
+                    "fd_competition_code": self.league_context_code,
+                },
+            ))
         return out
 
     # ---------- _fetch_full_season_games ----------
@@ -195,8 +246,9 @@ class NcaaSoccerSource(PointsBasedSportSource):
         # final on Dec 15 reads exactly like an October game), so they cannot
         # be filtered by field. Walking into the tournament would add its
         # results to the regular-season table the bands are scored on (#229).
-        month, day_of_month = _REGULAR_SEASON_END[self.gender]
-        season_end = datetime(self.season_year, month, day_of_month, tzinfo=timezone.utc).date()
+        cutoff = self._regular_season_cutoff()
+        # The last Eastern scoreboard date that can hold a game before it.
+        season_end = (cutoff - _EASTERN_STANDARD_OFFSET - timedelta(minutes=1)).date()
         # Walk to the END of the season, never to now + lookahead (#229). This
         # list is the simulator's whole season: the fixtures still to play are
         # what decide who finishes where. Capping it at next week made the
@@ -213,6 +265,8 @@ class NcaaSoccerSource(PointsBasedSportSource):
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)
                     if rec is None or rec["id"] is None:
+                        continue
+                    if rec.get("start_time") is not None and rec["start_time"] >= cutoff:
                         continue
                     if rec["id"] in seen:
                         continue

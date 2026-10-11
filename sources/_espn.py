@@ -30,18 +30,25 @@ from `friendlies.py` when `english_cup.py` needed the identical window,
 because the two date constants below carry the reasoning for a live bug
 each and duplicating that reasoning is how it drifts.
 
-DO NOT route the bracket-flavoured sources (`ncaa_soccer_cup`,
-`ncaa_baseball`, `ncaa_softball`, `mls_cup`) through it. Those sweep a
-fixed CALENDAR WINDOW and deliberately KEEP finished games, because a
-bracket's state is derived from results already played; handing them a
-helper that drops FINISHED would silently empty their cascade. Their
-sweeps differ on purpose. See #190.
+DO NOT route the bracket-flavoured sources' BRACKET sweeps
+(`_fetch_bracket_games` in `ncaa_soccer_cup`, `ncaa_baseball`,
+`ncaa_softball`, `mls_cup`) through it. Those sweep a fixed CALENDAR
+WINDOW and deliberately KEEP finished games, because a bracket's state is
+derived from results already played; handing them a helper that drops
+FINISHED would silently empty their cascade. Their sweeps differ on
+purpose. See #190. A bracket source's `fetch_upcoming` (the EPG path) is
+upcoming-only and may use it: `ncaa_soccer_cup` does (#235).
+
+`fetch_season_type_windows` / `season_type_at` are the third piece: a
+season's phases (regular season, each tournament round) from ESPN's core
+API calendar, for competitions whose events no longer name their own round
+(the NCAA College Cup since 2025, #235).
 """
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from .._util import parse_iso_utc
 
@@ -182,8 +189,9 @@ def sweep_upcoming_scoreboard(
 ) -> List[Dict[str, Any]]:
     """Sweep one ESPN competition day by day and return UPCOMING games only.
 
-    Shared by `friendlies.py` and `english_cup.py`; see the module docstring
-    for why the bracket sources deliberately do NOT use it.
+    Shared by `friendlies.py`, `english_cup.py`, `ncaa_soccer.py` and
+    `ncaa_soccer_cup.py`'s `fetch_upcoming`; see the module docstring for why
+    the bracket SWEEPS deliberately do NOT use it.
 
     ESPN's date-RANGE syntax silently caps at 25 events, so this walks ONE DAY
     AT A TIME (the same trap documented in `ncaa_baseball.py` and
@@ -313,3 +321,93 @@ def fetch_days(
         return []
     with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(days)))) as pool:
         return list(zip(days, pool.map(fetch_day, days)))
+
+
+# ESPN's "core" API root for soccer. The site API above serves scoreboards;
+# this one serves the season calendar, which is where a competition's ROUNDS
+# live as season types (see `fetch_season_type_windows`).
+ESPN_CORE_SOCCER_BASE = "https://sports.core.api.espn.com/v2/sports/soccer/leagues"
+
+
+class SeasonTypeWindow(NamedTuple):
+    """One ESPN season type: a named phase of a season with its UTC window.
+
+    `slug` is ESPN's own name for the phase (`first-round`, `quarterfinals`,
+    `2025-ncaa-division-i-men` for the regular season), `type_id` the numeric
+    id an event's `season.type` carries when ESPN tags it, and `start` / `end`
+    the window bounds exactly as ESPN publishes them (both inclusive, minute
+    precision, adjacent windows tiling with `end` one minute before the next
+    `start`).
+    """
+    slug: str
+    type_id: Optional[int]
+    start: datetime
+    end: datetime
+
+
+def fetch_season_type_windows(
+    league_slug: str,
+    year: int,
+    http_get: Callable[[str], Optional[Dict[str, Any]]],
+) -> Optional[List[SeasonTypeWindow]]:
+    """Every season type of `league_slug`'s `year` season, sorted by start,
+    or None when ESPN returned nothing usable.
+
+    ONE request: `seasons/{year}` inlines every type with its slug and dates,
+    so the per-type `$ref`s never need following.
+
+    Why this exists (#235): ESPN stopped tagging NCAA soccer tournament events
+    with their round. In 2024 a College Cup event carried
+    `season.slug == "first-round"` and the round's own `season.type`; in 2025
+    most carried the plain season slug and type, exactly like an October
+    game (men's: 5 of 47 tagged, all third round; women's: 3 of 63), with empty
+    `notes`, a generic `altGameNote` and no `competitions[0].type`, on the
+    scoreboard, the summary and the core event alike. The season calendar
+    still publishes each round as a season type with a UTC window, and
+    routing every 2024 and 2025 tournament event by those windows reproduced
+    every slug ESPN did publish and the exact bracket shape (47 men's games,
+    63 women's) where it did not. Measured 2026-10-11.
+
+    `http_get` is injected for the reason given in `sweep_upcoming_scoreboard`:
+    each source's tests patch its OWN `_http_get`, and a request made from in
+    here would turn those patches into silent live calls.
+    """
+    data = http_get(f"{ESPN_CORE_SOCCER_BASE}/{league_slug}/seasons/{year}")
+    if not isinstance(data, dict):
+        return None
+    items = (data.get("types") or {}).get("items") or []
+    out: List[SeasonTypeWindow] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        slug = (item.get("slug") or "").strip().lower()
+        start = parse_iso_utc(item.get("startDate"))
+        end = parse_iso_utc(item.get("endDate"))
+        if not slug or start is None or end is None or end < start:
+            continue
+        try:
+            type_id: Optional[int] = int(item.get("type"))
+        except (TypeError, ValueError):
+            type_id = None
+        out.append(SeasonTypeWindow(slug, type_id, start, end))
+    if not out:
+        return None
+    out.sort(key=lambda w: w.start)
+    return out
+
+
+def season_type_at(
+    windows: List[SeasonTypeWindow], when: Optional[datetime],
+) -> Optional[SeasonTypeWindow]:
+    """The season type whose window holds `when`, or None.
+
+    The end bound is widened by one minute because ESPN's windows tile at
+    minute precision (`...04:59Z` then `...05:00Z`): a kickoff stamped with
+    seconds inside that last minute must not fall between two rounds.
+    """
+    if when is None:
+        return None
+    for w in windows:
+        if w.start <= when < w.end + timedelta(minutes=1):
+            return w
+    return None

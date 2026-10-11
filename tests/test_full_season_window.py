@@ -8,7 +8,6 @@ from an old one cannot reintroduce it.
 """
 import ast
 import glob
-import inspect
 import os
 import textwrap
 from datetime import date, datetime, timezone
@@ -81,8 +80,11 @@ _WALKERS = [
     ("nba", "NbaRegularSource", {"season_end_year": 2027}, "0430"),
     ("wnba", "WnbaRegularSource", {"season_year": 2026}, "0930"),
     ("ncaaw_basketball", "NcaawBasketballRegularSource", {"season_end_year": 2027}, "0331"),
+    # The NCAA soccer pair runs on the FALLBACK boundary here: the stub below
+    # answers ESPN's season calendar with nothing. The calendar-derived
+    # boundary is pinned in TestNcaaSoccerRegularSeasonCutoff (test_sources.py).
     ("ncaa_soccer", "NcaaSoccerSource", {"season_year": 2026, "gender": "m"}, "1118"),
-    ("ncaa_soccer", "NcaaSoccerSource", {"season_year": 2026, "gender": "w"}, "1111"),
+    ("ncaa_soccer", "NcaaSoccerSource", {"season_year": 2026, "gender": "w"}, "1117"),
 ]
 
 
@@ -107,7 +109,10 @@ def _walk_end(module_name, cls_name, attrs, pinned_now):
     days = []
 
     def fake_get(url, *a, **k):
-        days.append(url.rsplit("dates=", 1)[1][:8])
+        # Only scoreboard requests are walk days; a source may also ask for
+        # its season calendar (ncaa_soccer, #235), which carries no date.
+        if "dates=" in url:
+            days.append(url.rsplit("dates=", 1)[1][:8])
         return {"events": []}
     cls = getattr(mod, cls_name)
     src = cls(gender=attrs["gender"]) if "gender" in attrs else cls()

@@ -29,8 +29,10 @@ AU/FR/Arabic, ESPN Brasil, Nova Sport CZ) and absent from Top Matchups,
 because no cup fixture had ever entered the pipeline for the matcher to look
 for.
 
-ROUNDS. ESPN publishes the round on each event as `season.slug`, the same
-mechanism `ncaa_soccer_cup.py` keys on. Both cups expose exactly 8 ordered
+ROUNDS. ESPN publishes the round on each event as `season.slug`. (It stopped
+doing so for the NCAA College Cup in 2025, which is why `ncaa_soccer_cup.py`
+also reads the round calendar (#235); both English cups still carried it on
+every 2025-26 event checked on 2026-10-11.) Both cups expose exactly 8 ordered
 rounds, enumerated live from
 `sports.core.api.espn.com/v2/sports/soccer/leagues/<slug>/seasons/<year>/types`
 on 2026-08-26:
