@@ -542,3 +542,25 @@ class TestBestThirdRanking:
         src = GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
         standings = src._compute_group_standings(_state_from_results(src, self.GROUPS))
         assert [t for t, _ in standings.best_third_order] == ["Aaa", "Zed"]
+
+
+class TestChainNeedsASeedableFeed:
+    def test_group_with_one_named_team_keeps_the_chain_off(self, caplog):
+        # Codex review, round 1: letters A-F all present, but Group A has a
+        # single named team, so no runner-up for Match 8. The chain must stay
+        # off (group games keep `advance` leverage) rather than switch on and
+        # raise inside every simulated season.
+        matches = _reopen_matchday_3(
+            _ec_2024_matches(), datetime(2024, 6, 25, 16, tzinfo=timezone.utc),
+        )
+        for m in matches:
+            if m.get("group") == "GROUP_A":
+                for side in ("homeTeam", "awayTeam"):
+                    if m[side]["name"] != "Germany":
+                        m[side] = {"name": None}
+        groups, knockout = _euro_pair(matches)
+        groups.set_paired_knockout_source(knockout)
+        assert groups.cross_source_chain() is None
+        assert groups.cross_source_chain() is None
+        warnings = [r for r in caplog.records if "knockout leverage is off" in r.getMessage()]
+        assert len(warnings) == 1

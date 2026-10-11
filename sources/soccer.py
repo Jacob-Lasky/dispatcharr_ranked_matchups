@@ -3050,17 +3050,38 @@ class GroupStageSoccerSource(SoccerSource):
 
     def _chain_bracket(self) -> Optional[_TournamentBracket]:
         """This competition's published bracket, or None when there is none
-        to seed from: no `_CHAIN_BRACKETS` entry for its FD.org code, or a
+        to seed from: no `_CHAIN_BRACKETS` entry for its FD.org code, a
         season whose group letters are not the format's (e.g. a 32-team WC
-        season under the 48-team bracket, or groups not drawn yet)."""
+        season under the 48-team bracket, or groups not drawn yet), or a
+        feed too incomplete to fill every entry slot (a group with one
+        named team cannot supply a runner-up).
+
+        The last check seeds the bracket once from the current table.
+        Whether every slot can be filled depends only on which named teams
+        each group has, never on results, so one successful seed proves
+        every simulated season will seed too. Without it the chain would
+        switch on, `_build_bracket_seed` would raise in every simulation,
+        and each group game would lose its importance outright instead of
+        keeping its single-source `advance` leverage.
+
+        Memoised per instance, like `_team_group_map` it rests on: the
+        scorer asks once per group game, and the warning should not repeat."""
+        if hasattr(self, "_chain_bracket_memo"):
+            return self._chain_bracket_memo
         bracket = _CHAIN_BRACKETS.get(self.config.fd_code)
-        if bracket is None:
-            return None
-        letters = {
-            self._display_group_letter(g) for g in self._team_group_map().values()
-        }
-        if letters != bracket.groups:
-            return None
+        if bracket is not None:
+            letters = {
+                self._display_group_letter(g) for g in self._team_group_map().values()
+            }
+            if letters != bracket.groups:
+                bracket = None
+        if bracket is not None:
+            try:
+                self._build_bracket_seed(self.initial_state(), bracket)
+            except ValueError as e:
+                logger.warning("%s; knockout leverage is off for this refresh", e)
+                bracket = None
+        self._chain_bracket_memo: Optional[_TournamentBracket] = bracket
         return bracket
 
     def _group_stage_in_progress(self) -> bool:
