@@ -123,11 +123,11 @@ def _upcoming_schedule_games(days_ahead: int) -> List[Dict[str, Any]]:
     day = window.first_day
     while day <= window.last_day:
         data = _http_get(f"{NHL_API_BASE}/schedule/{day.isoformat()}")
-        weeks = {}
+        weeks: Dict[date, List[Dict[str, Any]]] = {}
         for week in (data or {}).get("gameWeek", []) or []:
             week_day = _parse_week_date(week.get("date"))
-            if week_day is not None:
-                weeks.setdefault(week_day, week)
+            if week_day is not None:  # a date listed twice: keep both lists
+                weeks.setdefault(week_day, []).extend(week.get("games", []) or [])
         # Only the run of days contiguous from the one requested counts as
         # answered: a short or gapped gameWeek (a failed request, a week
         # starting later than asked) must neither skip the days it left out
@@ -142,8 +142,7 @@ def _upcoming_schedule_games(days_ahead: int) -> List[Dict[str, Any]]:
         for week_day in run:
             if not (window.first_day <= week_day <= window.last_day):
                 continue
-            week = weeks[week_day]
-            for g in week.get("games", []) or []:
+            for g in weeks[week_day]:
                 gid = g.get("id")
                 if gid is None or gid in seen:
                     continue

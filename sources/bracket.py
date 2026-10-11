@@ -377,6 +377,16 @@ class BracketSportSource(SportSource):
     # league phase. Read by place_upcoming.
     ALL_ROWS_POSTSEASON: bool = False
 
+    def _unplaced_row_reaches_a_tie(
+        self, row: GameRow, bracket: Dict[str, List[Dict[str, Any]]],
+    ) -> bool:
+        """Whether a row place_upcoming could not match by id can still have
+        its sampled result filed into a tie by `apply_result`. What the
+        "not found in the bracket" warning counts. Here: it has a stage,
+        the rule every tie shape's apply_result needs first;
+        DoubleEliminationSource answers with its real tie lookup."""
+        return isinstance(row.extra.get("stage"), str)
+
     def place_upcoming(self, games: List[GameRow], *, for_scoring: bool = False) -> int:
         """Give each upcoming row its bracket identity, from this source's own
         bracket records (#243). Mutates the rows; returns how many could not be
@@ -449,12 +459,7 @@ class BracketSportSource(SportSource):
                 frozenset((hit[1].get("home"), hit[1].get("away")))
                 != frozenset((g.home, g.away))
             ):
-                # Unscorable unless placed: no stage, or a tie key the fetch
-                # left explicitly unknown (a College World Series row, whose
-                # sub-bracket only the bracket knows; #256).
-                if not isinstance(extra.get("stage"), str) or (
-                    "grouping_key" in extra and extra["grouping_key"] is None
-                ):
+                if not self._unplaced_row_reaches_a_tie(g, bracket):
                     unplaced += 1
                 continue
             tie_meta, game = hit
@@ -1421,6 +1426,20 @@ class DoubleEliminationSource(BracketSportSource):
         return new_state
 
     # ---------- helpers ----------
+
+    def _unplaced_row_reaches_a_tie(
+        self, row: GameRow, bracket: Dict[str, List[Dict[str, Any]]],
+    ) -> bool:
+        """The lookup apply_result itself uses (`_find_tie_meta`, by key then
+        by team set), so the count says exactly whether the row can score: a
+        College World Series row leaves fetch with no sub-bracket (#256) and
+        is still scorable when its teams are in a tie, while a Regional row
+        whose tie is missing (an empty bracket) is not, whatever its key."""
+        extra = row.extra
+        stage = extra.get("stage")
+        return isinstance(stage, str) and self._find_tie_meta(
+            stage, extra.get("grouping_key"), row.home, row.away, bracket,
+        ) is not None
 
     def _find_tie_meta(
         self,

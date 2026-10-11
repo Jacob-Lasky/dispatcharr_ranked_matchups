@@ -517,6 +517,19 @@ class TestEveningGameIsFound:
         rows = nhl.NhlRegularSource().fetch_upcoming(days_ahead=2)
         assert [r.start_time.isoformat() for r in rows] == ["2026-10-12T21:00:00+00:00"]
 
+    def test_nhl_merges_a_date_listed_twice(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import nhl
+        _pin_clock(monkeypatch)
+        live = {"id": 42, "gameType": 2, "gameState": "LIVE", "startTimeUTC": "2026-10-11T00:30:00Z",
+                "homeTeam": {"placeName": {"default": "Home"}, "commonName": {"default": "H"}},
+                "awayTeam": {"placeName": {"default": "Away"}, "commonName": {"default": "A"}}}
+        monkeypatch.setattr(nhl, "_http_get", lambda url, *a, **k: {"gameWeek": [
+            {"date": "2026-10-10", "games": []},
+            {"date": "2026-10-10", "games": [live]},
+            {"date": "2026-10-11", "games": []},
+        ]} if url.endswith("/2026-10-10") else {"gameWeek": []})
+        assert _homes(nhl.NhlRegularSource().fetch_upcoming(days_ahead=0)) == ["Home H"]
+
     def test_an_unplaced_world_series_row_is_reported(self, monkeypatch):
         """A College World Series row leaves fetch with no sub-bracket; if the
         bracket cannot place it, it scores no bracket importance, and
@@ -528,6 +541,35 @@ class TestEveningGameIsFound:
                       home="Arizona", away="Coastal Carolina", rank_home=None, rank_away=None,
                       start_time=datetime(2026, 6, 7, 18, 0, tzinfo=timezone.utc),
                       extra={"game_id": "d3-1", "stage": "MCWS", "grouping_key": None})
+        assert src.place_upcoming([row]) == 1
+
+    def _bracket_row(self, src, home, away, stage, key, gid):
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        return GameRow(sport_prefix=src.sport_prefix, sport_label=src.sport_label,
+                       home=home, away=away, rank_home=None, rank_away=None,
+                       start_time=datetime(2026, 6, 7, 18, 0, tzinfo=timezone.utc),
+                       extra={"game_id": gid, "stage": stage, "grouping_key": key})
+
+    def test_an_unmatched_world_series_row_whose_teams_are_in_a_tie_is_not_reported(self, monkeypatch):
+        """Not matched by id, but apply_result's team-set lookup still files
+        its result into the tie holding both teams: scorable, so not counted
+        (codex review round 4)."""
+        mod, src = _src("ncaa_baseball", "NcaaBaseballPlayoffBracketSource", season_year=2026)
+        day1 = datetime(2026, 6, 5, 18, 0, tzinfo=timezone.utc)
+
+        def rec(gid, home, away):
+            return {"game_id": gid, "stage": "MCWS", "matchday": 1, "home": home, "away": away,
+                    "home_goals": None, "away_goals": None, "status": "SCHEDULED",
+                    "start_time": day1, "extra": {"grouping_key": "MCWS_sub1"}}
+        monkeypatch.setattr(src, "_fetch_bracket_games", lambda: [
+            rec("op-1", "Arizona", "Coastal Carolina"), rec("op-2", "Louisville", "Oregon State")])
+        row = self._bracket_row(src, "Arizona", "Coastal Carolina", "MCWS", None, "not-in-bracket")
+        assert src.place_upcoming([row]) == 0
+
+    def test_a_regional_row_with_no_tie_to_reach_is_reported(self, monkeypatch):
+        mod, src = _src("ncaa_baseball", "NcaaBaseballPlayoffBracketSource", season_year=2026)
+        monkeypatch.setattr(src, "_fetch_bracket_games", lambda: [])
+        row = self._bracket_row(src, "Auburn", "Navy", "BSB_REG", "Auburn Regional", "r-1")
         assert src.place_upcoming([row]) == 1
 
     @pytest.mark.parametrize("old_day,old_start,new_day,new_start", [
