@@ -1,7 +1,8 @@
 """Transparent interestingness scoring with per-signal breakdown + helpers.
 
-Design principle: the score MUST show its work. Every game's final score is the
-sum of per-signal contributions, each visible in the cache. When the user says
+Design principle: the score MUST show its work. Every game's raw score is the
+sum of per-signal contributions, each visible in the cache, and the final 0-10
+score is that raw sum compressed (_compress_to_10 / adaptive_compress). When the user says
 "this game should be ranked higher", they can see exactly which signal needs
 to be tuned.
 
@@ -1208,6 +1209,10 @@ def _rank_scale(
         # A one-team (or empty, or undeclared) pool carries no ordering
         # information, so the percentile is undefined rather than 0 or 1.
         # Fall back to the poll depth instead of dividing by zero.
+        # A table that claimed to be exhaustive keeps refusing a field:
+        # dropping to the poll formula must not also start reading one.
+        if exhaustive:
+            field = None
         pool = RANK_POOL_DEFAULT
         exhaustive = False
     if exhaustive or field is None or field <= pool:

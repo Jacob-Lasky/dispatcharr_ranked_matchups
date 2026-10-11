@@ -70,10 +70,10 @@ implementation and testing are done by AI.
             Kickoff: Today 2:00 PM CDT 🔴 TODAY
             Matchup: Brentford FC @ Manchester United FC
             Sport: English Premier League
-            Score: 9.4/10  (raw 27.75)
+            Score: 9.4/10  (raw 27.26)
             Score breakdown:
               rank_pair: +7.37
-              close_game: +3.38
+              close_game: +2.89
               importance: +17.0
             Source: Manchester United
 

@@ -361,6 +361,12 @@ class TestRankFieldSize:
         assert self._pts(14, 16, pool=20, exhaustive=True, field=138) == 2.63
         assert self._pts(20, None, pool=20, exhaustive=True, field=138) == 0.0
 
+    def test_a_degenerate_league_table_still_ignores_a_field(self):
+        """A 1-entry exhaustive table falls back to the 25-deep poll formula
+        (no ordering information), but must not start reading a field it
+        was never entitled to: #25 stays 0.20, not 4.12."""
+        assert self._pts(25, None, pool=1, exhaustive=True, field=138) == 0.2
+
     def test_undeclared_field_keeps_the_published_pool_percentile(self):
         """A poll source that declares no field scores as it did under #194:
         #7 vs unranked, (25 + 1 - 7) / 25 -> 3.80."""
@@ -466,18 +472,25 @@ class TestPollSourcesDeclareTheirField:
         assert srcs["NcaaSoccerSource(w)"].rank_field_size == 351
 
     def test_the_poll_source_list_is_complete(self):
-        """Every SportSource class that reads a poll, by a `_fetch_rankings`
-        it defines OR inherits, or by a `/rankings` call anywhere in its own
-        source, must be listed above (and so declare its field). Checked per
-        CLASS, so a second poll reader added to an already-listed module, or
-        a subclass of a listed one, is caught too."""
+        """Every SportSource class that reads a poll (a `_fetch_rankings` it
+        defines OR inherits, or a `/rankings` call in its own source) or
+        EMITS a non-None rank without an exhaustive standings table must be
+        listed above, and so declare its field. Checked per CLASS, so a
+        second poll reader in an already-listed module, a subclass of a
+        listed one, or a source that gets its ranks from a helper, is caught
+        too."""
         import importlib
         import inspect
         import pkgutil
+        import re
         from dispatcharr_ranked_matchups import sources as pkg
         from dispatcharr_ranked_matchups.sources.base import SportSource
         listed = {type(src).__name__ for src in self._poll_sources().values()}
-        readers = set()
+        readers, emitters = set(), set()
+        # `rank_home=<anything but None>` in the fetch: the class EMITS a rank,
+        # however it got one (a module-level helper included). A league
+        # source emits one too, but stamps its exhaustive standings table.
+        emits = re.compile(r"\brank_(?:home|away)\s*=\s*(?!None\b)")
         for info in pkgutil.iter_modules(pkg.__path__):
             mod = importlib.import_module(f"{pkg.__name__}.{info.name}")
             for name, cls in inspect.getmembers(mod, inspect.isclass):
@@ -485,9 +498,14 @@ class TestPollSourcesDeclareTheirField:
                     continue
                 if hasattr(cls, "_fetch_rankings") or "/rankings" in inspect.getsource(cls):
                     readers.add(name)
-        # Fail on the instrument first: the scan must find the known six.
-        assert {"NcaafSource", "NcaaSoccerSource"} <= readers and len(readers) >= 6, readers
+                fetch = inspect.getsource(cls.fetch_upcoming)
+                if emits.search(fetch) and '"standings_table"' not in fetch:
+                    emitters.add(name)
+        # Fail on the instrument first: both scans must find the known six.
+        for found in (readers, emitters):
+            assert {"NcaafSource", "NcaaSoccerSource"} <= found and len(found) >= 6, found
         assert readers <= listed, readers - listed
+        assert emitters <= listed, emitters - listed
 
     def test_declared_fields_match_the_measured_counts(self):
         """Literal pins, against the counts measured 2026-10-11 and cited at

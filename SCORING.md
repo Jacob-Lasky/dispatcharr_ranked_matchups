@@ -187,15 +187,17 @@ entire NCAAF slate was capped at 4.17. It was also backwards on the
 merits: being ranked #1 of 136 is a stronger claim than 1st of 20.
 
 The second hard-coded assumption was just as wrong in the other
-direction: with a 20-club table the rank sum can never exceed 40, so
-`(50 - 40) / 4.8` gave a **last-vs-second-last fixture 2.08 points** for
-being in a small league.
+direction: with a 20-club table two different clubs' ranks sum to at most
+39, so `(50 - 39) / 4.8` gave a **last-vs-second-last fixture 2.29
+points** for being in a small league.
 
-The replacement is deliberately surgical. For a 25-deep pool it lands
-within a rounding step of the old numbers, so poll sports keep their
-magnitude; what changes is league tables (no longer scored as if 25 deep)
-and the unranked side (now costs a team its own share instead of
-collapsing the game into a lower-capped branch).
+The #194 replacement was deliberately surgical. For a 25-deep pool it
+landed within a rounding step of the old numbers, so poll sports kept
+their magnitude; what changed was league tables (no longer scored as if
+25 deep) and the unranked side (now costs a team its own share instead of
+collapsing the game into a lower-capped branch). #198 then deliberately
+DID move poll magnitudes, by reading a poll rank against its sport's field
+(AP #25 vs unranked: 0.20 before, 4.12 after); see the field table above.
 
 ### Signal: close_game
 
@@ -630,8 +632,10 @@ patterns:
   Carlo importance, or `weights.importance = 0`.
 - `importance` very small → both teams' outcomes are locked in (early
   September: nothing yet decided; late May: lots locked in).
-- `rank_pair` missing → at least one team is unranked or the sport
-  doesn't use rankings.
+- `rank_pair` missing → at least one team is unranked, the sport
+  doesn't use rankings, or the rank points came to 0 (last vs last of a
+  league table). `one_ranked` present instead means exactly one side is
+  ranked.
 - `close_game` missing → no spread / closeness data from the source.
 
 
