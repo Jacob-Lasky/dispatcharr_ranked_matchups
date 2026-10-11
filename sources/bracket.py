@@ -449,7 +449,12 @@ class BracketSportSource(SportSource):
                 frozenset((hit[1].get("home"), hit[1].get("away")))
                 != frozenset((g.home, g.away))
             ):
-                if not isinstance(extra.get("stage"), str):
+                # Unscorable unless placed: no stage, or a tie key the fetch
+                # left explicitly unknown (a College World Series row, whose
+                # sub-bracket only the bracket knows; #256).
+                if not isinstance(extra.get("stage"), str) or (
+                    "grouping_key" in extra and extra["grouping_key"] is None
+                ):
                     unplaced += 1
                 continue
             tie_meta, game = hit

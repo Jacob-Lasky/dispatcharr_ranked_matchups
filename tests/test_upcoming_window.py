@@ -493,9 +493,46 @@ class TestEveningGameIsFound:
         assert requested == ["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13"]
         assert _homes(rows) == ["H11 X", "H12 X", "H13 X"]
 
+    def test_nhl_takes_a_day_from_its_own_answer_not_a_gapped_earlier_one(self, monkeypatch):
+        """`schedule/2026-10-10` answers 10-10 and, past a gap, 10-12 with game
+        42 at 20:00Z; `schedule/2026-10-11` corrects it to 21:00Z. The
+        corrected kickoff is the one published (codex review)."""
+        from dispatcharr_ranked_matchups.sources import nhl
+        _pin_clock(monkeypatch)
+
+        def game(start):
+            return {"id": 42, "gameType": 2, "gameState": "FUT", "startTimeUTC": start,
+                    "homeTeam": {"placeName": {"default": "Home"}, "commonName": {"default": "H"}},
+                    "awayTeam": {"placeName": {"default": "Away"}, "commonName": {"default": "A"}}}
+
+        answers = {
+            "2026-10-10": [{"date": "2026-10-10", "games": []},
+                           {"date": "2026-10-12", "games": [game("2026-10-12T20:00:00Z")]}],
+            "2026-10-11": [{"date": "2026-10-11", "games": []},
+                           {"date": "2026-10-12", "games": [game("2026-10-12T21:00:00Z")]},
+                           {"date": "2026-10-13", "games": []}],
+        }
+        monkeypatch.setattr(nhl, "_http_get",
+                            lambda url, *a, **k: {"gameWeek": answers.get(url.rsplit("/", 1)[1], [])})
+        rows = nhl.NhlRegularSource().fetch_upcoming(days_ahead=2)
+        assert [r.start_time.isoformat() for r in rows] == ["2026-10-12T21:00:00+00:00"]
+
+    def test_an_unplaced_world_series_row_is_reported(self, monkeypatch):
+        """A College World Series row leaves fetch with no sub-bracket; if the
+        bracket cannot place it, it scores no bracket importance, and
+        place_upcoming must say so rather than count it placed (codex)."""
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        mod, src = _src("ncaa_baseball", "NcaaBaseballPlayoffBracketSource", season_year=2026)
+        monkeypatch.setattr(src, "_fetch_bracket_games", lambda: [])
+        row = GameRow(sport_prefix=src.sport_prefix, sport_label=src.sport_label,
+                      home="Arizona", away="Coastal Carolina", rank_home=None, rank_away=None,
+                      start_time=datetime(2026, 6, 7, 18, 0, tzinfo=timezone.utc),
+                      extra={"game_id": "d3-1", "stage": "MCWS", "grouping_key": None})
+        assert src.place_upcoming([row]) == 1
+
     @pytest.mark.parametrize("old_day,old_start,new_day,new_start", [
         ("2026-10-10", "2026-10-11T03:00:00Z", "2026-10-12", "2026-10-12T23:00:00Z"),  # moved later
-        ("2026-10-10", "2026-10-11T03:00:00Z", "2026-10-11", "2026-10-11T17:00:00Z"),  # moved earlier
+        ("2026-10-12", "2026-10-12T23:00:00Z", "2026-10-11", "2026-10-11T17:00:00Z"),  # moved earlier
     ], ids=["moved-later", "moved-earlier"])
     @pytest.mark.parametrize("old_first", [True, False], ids=["old-listed-first", "old-listed-last"])
     def test_mlb_publishes_the_slot_a_moved_game_moved_to(
