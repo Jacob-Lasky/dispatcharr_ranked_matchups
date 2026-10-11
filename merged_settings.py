@@ -245,17 +245,23 @@ def _finite(raw: Any) -> Optional[float]:
 def weight_overrides(settings: Dict[str, Any]) -> Tuple[Dict[str, float], List[str]]:
     """The weights the user has set, by name, plus any parse problems.
 
-    Per weight: an entry in `scoring_weights` wins; otherwise, on an install
-    not yet migrated, a stored legacy `weight_<name>` value fills the gap.
-    Anything still missing takes the Weights default (the caller's job). A
-    legacy value that is not a number (a NumberInput cleared to "") is skipped
-    and reported: before #208 it raised ValueError out of the refresh."""
-    overrides, problems = parse_weight_overrides(settings.get(SCORING_WEIGHTS_SETTING))
-    if is_migrated(settings):
+    The same precedence as the selects, with blank as the field's default:
+    a non-blank `scoring_weights` is the whole answer (weights it does not
+    name take their defaults, which is what the modal showed beside it);
+    while it is blank on an install not yet migrated, the stored legacy
+    `weight_<name>` values are the answer. Mixing the two per weight would
+    score a pre-migration refresh differently from a post-migration one,
+    because the migration keeps typed text verbatim. Anything still missing
+    takes the Weights default (the caller's job). A legacy value that is not
+    a finite number (a NumberInput cleared to "") is skipped and reported:
+    before #208 it raised ValueError out of the refresh."""
+    text = settings.get(SCORING_WEIGHTS_SETTING)
+    overrides, problems = parse_weight_overrides(text)
+    if is_migrated(settings) or str(text or "").strip():
         return overrides, problems
     for name in WEIGHT_NAMES:
         legacy = LEGACY_WEIGHT_PREFIX + name
-        if name in overrides or legacy not in settings:
+        if legacy not in settings:
             continue
         number = _finite(settings[legacy])
         if number is None:

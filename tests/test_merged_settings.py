@@ -209,10 +209,20 @@ class TestPrecedence:
         stored = {"enable_ncaaf": True, "ncaaf": "off", "settings_schema": 2}
         assert plugin._build_sources(_loader_merge(stored)) == []
 
-    def test_typed_weight_beats_legacy_and_legacy_fills_the_rest(self, plugin):
+    @pytest.mark.parametrize("path", sorted(PATHS))
+    def test_typed_weights_replace_legacy_weights_entirely(self, plugin, path):
+        """Typed text is the whole answer, before AND after migration (which
+        keeps it verbatim), so a refresh scores the same either side of the
+        migration write (codex review round 3, #208)."""
         stored = {"scoring_weights": "spread=5", "weight_spread": 0.1, "weight_rank": 2}
-        w = plugin._build_weights(_loader_merge(stored))
-        assert (w.spread, w.rank, w.favorite) == (5.0, 2.0, 6.0)
+        migrated = ms.migrate_stored_settings(stored)
+        for view in (PATHS[path](stored), PATHS[path](migrated)):
+            w = plugin._build_weights(view)
+            assert (w.spread, w.rank, w.favorite) == (5.0, 1.0, 6.0)
+
+    def test_whitespace_only_text_counts_as_blank(self, plugin):
+        w = plugin._build_weights({"scoring_weights": "  ", "weight_rank": 2})
+        assert w.rank == 2.0
 
     def test_after_migration_legacy_weights_are_ignored(self, plugin):
         stored = {"scoring_weights": "", "weight_spread": 0.1, "settings_schema": 2}
