@@ -709,11 +709,15 @@ stay in agreement with that one.
   The plugin calls `BracketSportSource.place_upcoming` for every bracket
   source at fetch (`_place_in_bracket`). It matches each row to its bracket
   game by `game_id` (else `fd_id`), exactly and only when the team pair agrees
-  and the id is unique, then merges `_sim_extra` (the ONE builder of a
-  simulated row's extra, shared with `_emit_remaining_games_for_tie`) under
-  the row's own keys, storing the bracket's game number as
-  `bracket_game_index`, which `apply_result` prefers over `matchday` (the
-  source's `matchday` is what the EPG text shows). Playoff-only shapes
+  and the id is unique, then applies `_sim_extra` (the ONE builder of a
+  simulated row's extra, shared with `_emit_remaining_games_for_tie`): the
+  bracket overrides the simulator's keys (a fetched stage can be None or
+  stale, a fetched double-elim `grouping_key` can name the wrong
+  sub-bracket), the source keeps its pass-through keys and its `matchday`
+  (the EPG text shows it), and the bracket's game number goes in
+  `bracket_game_index`, which `apply_result` prefers. It builds its own
+  bracket rather than reading `initial_state()`, which would cache an empty
+  one if the season fetch failed at fetch time and defeat scoring's retry. Playoff-only shapes
   (`ALL_ROWS_POSTSEASON`) flag every row `postseason` first, so a failed
   bracket fetch cannot demote them. A new bracket source needs an id on its
   upcoming rows equal to its bracket games' (`tests/test_match_identity_contract.py`

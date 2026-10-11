@@ -217,12 +217,13 @@ class BracketSportSource(SportSource):
           can end level.
 
         Everything comes from `_sim_extra` on the bracket's tie, the same
-        builder the replayed rows use. Matched on the row's own id
-        (`game_id`, else `fd_id`), compared exactly (simulation compares
-        exactly too, so a "123" row is not 123), and only when the team pair
-        agrees and the id names one bracket game: a wrong placement files the
-        result into the wrong tie, which is worse than none. Keys the row
-        already has are kept.
+        builder the replayed rows use, and overrides what the row had: once
+        matched, the bracket is authoritative for the simulator's keys. It is
+        matched on the row's own id (`game_id`, else `fd_id`), compared
+        exactly (simulation compares exactly too, so a "123" row is not 123),
+        and only when the team pair agrees and the id names one bracket game:
+        a wrong placement files the result into the wrong tie, which is worse
+        than none.
 
         Rows of an ALL_ROWS_POSTSEASON source are flagged `postseason` first,
         so a failed bracket fetch cannot make them look like regular season.
@@ -230,9 +231,12 @@ class BracketSportSource(SportSource):
         if self.ALL_ROWS_POSTSEASON:
             for g in games:
                 g.extra["postseason"] = True
-        # Index every game the bracket knows, with its tie, by id.
+        # Index every game the bracket knows, with its tie, by id. Built here
+        # rather than read from initial_state(): that caches, and a season
+        # fetch that fails NOW would pin an empty bracket for the whole run,
+        # defeating the retry scoring gets (soccer.allow_scoring_retry).
         by_id: Dict[Any, Optional[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
-        for ties in self.initial_state().get("_bracket", {}).values():
+        for ties in self._build_bracket(self._fetch_bracket_games()).values():
             for tie_meta in ties:
                 for game in tie_meta.get("games") or []:
                     gid = game.get("game_id")
@@ -254,14 +258,23 @@ class BracketSportSource(SportSource):
                 if not isinstance(extra.get("stage"), str):
                     unplaced += 1
                 continue
-            sim = self._sim_extra(*hit)
+            tie_meta, game = hit
+            sim = self._sim_extra(tie_meta, game)
+            passthrough = game.get("extra") or {}
             extra["bracket_game_index"] = sim.pop("matchday")
-            if isinstance(extra.get("stage"), str):
-                sim.pop("stage")
-            # The source's own keys win (its matchday is what the EPG text
-            # shows); the bracket fills in what the simulator needs.
             for key, value in sim.items():
-                extra.setdefault(key, value)
+                if key in passthrough:
+                    # Source metadata riding along on the bracket record: the
+                    # fetched row's own copy stands.
+                    extra.setdefault(key, value)
+                else:
+                    # A key the simulator reads. The bracket is authoritative
+                    # for a game it has matched by id and teams: a fetched
+                    # stage can be None or stale, and a fetched grouping_key
+                    # can name the wrong sub-bracket (the upcoming sweep
+                    # classifies against its own window, not opening day).
+                    extra[key] = value
+            # The fetched matchday is left alone: the EPG text renders it.
             extra.setdefault("matchday", extra["bracket_game_index"])
         return unplaced
 

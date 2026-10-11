@@ -105,12 +105,36 @@ def test_unplaced_row_is_counted_and_left_alone(mlb):
     assert "stage" not in stray.extra
 
 
-def test_a_stage_the_source_set_itself_is_kept(mlb):
+@pytest.mark.parametrize("fetched_stage", [None, "LDS"])
+def test_a_matched_game_takes_the_brackets_stage(mlb, fetched_stage):
+    """Once a row matches its bracket game by id and teams, the bracket wins
+    on what the simulator reads: a fetched stage can be None (Football-Data
+    rows always carry the key) or stale, and a fetched grouping_key can name
+    the wrong double-elimination sub-bracket. The fetched matchday, which the
+    EPG text shows, is left alone."""
     rows = mlb.fetch_upcoming(days_ahead=7)
     game3 = _by_pk(rows)[3]
-    game3.extra["stage"] = "SOURCE_OWN"
+    game3.extra["stage"] = fetched_stage
+    game3.extra["matchday"] = 99
     mlb.place_upcoming(rows)
-    assert game3.extra["stage"] == "SOURCE_OWN"
+    assert game3.extra["stage"] == "LCS"
+    assert game3.extra["bracket_game_index"] == 3
+    assert game3.extra["matchday"] == 99
+
+
+def test_a_failed_fetch_at_placement_does_not_pin_an_empty_bracket(mlb, monkeypatch):
+    """Scoring retries a failed season fetch; placement must not cache the
+    empty bracket that the retry would otherwise have replaced."""
+    real = mlb._fetch_bracket_games
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        return [] if len(calls) == 1 else real()
+    monkeypatch.setattr(mlb, "_fetch_bracket_games", flaky)
+    rows = mlb.fetch_upcoming(days_ahead=7)
+    assert mlb.place_upcoming(rows) == len(rows)
+    assert mlb.initial_state()["_bracket"]["LCS"]
 
 
 def test_postseason_mode_keeps_a_playoff_game_without_a_favorite(mlb, refresh_env):
@@ -168,7 +192,7 @@ def test_an_id_on_two_bracket_games_is_not_placed(mlb, monkeypatch):
         "LDS": [{"stage": "LDS", "games": [game("LDS")]}],
         "LCS": [{"stage": "LCS", "games": [game("LCS")]}],
     }
-    monkeypatch.setattr(mlb, "initial_state", lambda: {"_bracket": bracket})
+    monkeypatch.setattr(mlb, "_build_bracket", lambda _games: bracket)
     row = _row("Cleveland Guardians", "Tampa Bay Rays", game_id=3)
     assert mlb.place_upcoming([row]) == 1
     assert "stage" not in row.extra
