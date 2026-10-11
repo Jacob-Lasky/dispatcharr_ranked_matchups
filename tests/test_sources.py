@@ -23,6 +23,7 @@ from dispatcharr_ranked_matchups.sources import (
 )
 from dispatcharr_ranked_matchups.sources.base import MatchResult, SportSource
 from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
+from tests.conftest import stub_requests_get
 
 
 class TestNcaafConstants:
@@ -150,7 +151,7 @@ class TestNcaafFetchGamesAppliesFilter:
             def json():
                 return list(payload)
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResp())
         src = ncaaf_mod.NcaafSource(api_key="x", divisions=divisions)
         return {g["id"] for g in src._fetch_games(2026, days_ahead=7)}
 
@@ -185,7 +186,7 @@ class TestNcaafFetchGamesAppliesFilter:
             def json():
                 return list(payload)
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResp())
         src = ncaaf_mod.NcaafSource(api_key="x")
         assert src._fetch_games(2026, days_ahead=7) == []
 
@@ -223,7 +224,7 @@ class TestNcaafSimulatedUniverseMatchesEmitted:
             def json():
                 return list(TestNcaafSimulatedUniverseMatchesEmitted._RAW)
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResp())
         src = ncaaf_mod.NcaafSource(api_key="x", divisions=divisions)
         return {m["id"] for m in src._fetch_full_season_games()}
 
@@ -314,7 +315,7 @@ class TestNcaafEmittedTeamsAreSimulated:
             def json():
                 return list(payload)
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResp())
 
         # No `divisions` kwarg: this must construct on the broken revision too.
         src = ncaaf_mod.NcaafSource(api_key="x")
@@ -368,7 +369,7 @@ class TestNcaafOutcomeEligibility:
             def json():
                 return list(TestNcaafOutcomeEligibility._RAW)
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResp())
         return ncaaf_mod.NcaafSource(api_key="x", divisions=divisions)
 
     def test_fbs_excludes_the_fcs_opponent(self, monkeypatch):
@@ -444,7 +445,7 @@ class TestNcaafSeasonFetchIsSharedAndCached:
             calls.append(url)
             return FakeResp()
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         src = ncaaf_mod.NcaafSource(api_key="x")
         year = src._current_season_year()
         src._fetch_games(year, days_ahead=7)
@@ -474,7 +475,7 @@ class TestNcaafSeasonFetchIsSharedAndCached:
                 raise RuntimeError("boom")
             return FakeResp()
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         src = ncaaf_mod.NcaafSource(api_key="x")
         assert src._fetch_raw_season(2026) == []
         assert len(src._fetch_raw_season(2026)) == 1
@@ -613,7 +614,6 @@ class TestNcaamRankingsShape:
     AP poll out correctly without falling back to early-season weeks."""
 
     def test_latest_week_wins(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         class FakeResp:
             status_code = 200
@@ -633,31 +633,29 @@ class TestNcaamRankingsShape:
             # Different poll type: should be ignored
             {"week": 15, "pollType": "Coaches Poll", "team": "Other", "ranking": 1},
         ]
-        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp(payload))
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp(payload))
 
         src = NcaamSource(api_key="x")
         ranks = src._fetch_rankings(2026)
         assert ranks == {"Latest #1": 1, "Latest #2": 2}
 
     def test_empty_response_returns_none(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         class FakeResp:
             def raise_for_status(self): pass
             def json(self): return []
 
-        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp())
         assert NcaamSource(api_key="x")._fetch_rankings(2026) is None
 
     def test_unknown_poll_type_returns_none(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         class FakeResp:
             def raise_for_status(self): pass
             def json(self):
                 return [{"week": 1, "pollType": "Coaches Poll", "team": "X", "ranking": 1}]
 
-        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp())
         # We default to AP Top 25: Coaches Poll doesn't match.
         assert NcaamSource(api_key="x")._fetch_rankings(2026) is None
 
@@ -666,7 +664,6 @@ class TestNcaamGamesShape:
     """CBB /games has no `week` field, uses startDateRange/endDateRange."""
 
     def test_uses_date_range_params(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         captured = {}
 
@@ -679,7 +676,7 @@ class TestNcaamGamesShape:
             captured["params"] = params
             return FakeResp()
 
-        monkeypatch.setattr(ncaam_mod.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
 
         src = NcaamSource(api_key="x")
         start = datetime(2025, 2, 1, tzinfo=timezone.utc)
@@ -701,7 +698,6 @@ class TestNcaamSpreadsShape:
     """CBB /lines is keyed by gameId, not id. Use date-range, not week."""
 
     def test_keyed_by_game_id(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         payload = [
             {"gameId": 100, "lines": [{"provider": "ESPN BET", "spread": 3.5}]},
@@ -715,7 +711,7 @@ class TestNcaamSpreadsShape:
             def raise_for_status(self): pass
             def json(self): return payload
 
-        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp())
 
         src = NcaamSource(api_key="x")
         start = datetime(2025, 2, 1, tzinfo=timezone.utc)
@@ -2138,8 +2134,7 @@ class TestNcaafFullSeasonFilter:
                 "startDate": "2026-01-01T20:00:00.000Z",
             },
         ]
-        monkeypatch.setattr(ncaaf_mod.requests, "get",
-                            lambda *a, **kw: FakeResp(payload))
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp(payload))
         src = ncaaf_mod.NcaafSource(api_key="fake")
         games = src._fetch_full_season_games()
         ids = {g["id"] for g in games}
@@ -2161,8 +2156,7 @@ class TestNcaamFullSeasonFilter:
         src = ncaam_mod.NcaamSource(api_key="fake")
         monkeypatch.setattr(src, "_fetch_rankings", lambda _season: None)
         called = []
-        monkeypatch.setattr(ncaam_mod.requests, "get",
-                            lambda *a, **kw: called.append(1))
+        stub_requests_get(monkeypatch, lambda *a, **kw: called.append(1))
         out = src._fetch_full_season_games()
         assert out == []
         assert called == []  # never hit /games
@@ -2203,8 +2197,7 @@ class TestNcaamFullSeasonFilter:
                 "startDate": "2025-11-25T19:00:00.000Z",
             },
         ]
-        monkeypatch.setattr(ncaam_mod.requests, "get",
-                            lambda *a, **kw: FakeResp(payload))
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp(payload))
         games = src._fetch_full_season_games()
         ids = [g["id"] for g in games]
         assert 101 in ids
@@ -2235,7 +2228,7 @@ class TestNcaamFullSeasonFilter:
         src = ncaam_mod.NcaamSource(api_key="fake")
         monkeypatch.setattr(src, "_current_season_year", lambda: 2026)
         monkeypatch.setattr(src, "_fetch_rankings", lambda _season: {"Duke": 1})
-        monkeypatch.setattr(ncaam_mod.requests, "get", capture_get)
+        stub_requests_get(monkeypatch, capture_get)
         src._fetch_full_season_games()
         assert len(captured) == 3
         # Chunk boundaries: end of chunk N + 1 day = start of chunk N+1.
@@ -10257,7 +10250,7 @@ class TestFdCacheBatching:
                 {"competition": {"code": "PL"}, "id": 6},
             ]})
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
 
         # Each source independently asks for its own fixtures.
         for comp in ("epl", "championship", "bundesliga", "la_liga", "serie_a"):
@@ -10289,7 +10282,7 @@ class TestFdCacheBatching:
             def raise_for_status(self): pass
             def json(self): return payload
 
-        monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: FakeResponse())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResponse())
 
         pl_src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
         elc_src = soccer.SoccerSource("championship", fd_api_key="testkey", odds_api_key="")
@@ -10319,7 +10312,7 @@ class TestFdCacheBatching:
                     {"competition": {"code": "PL"}, "id": 25},
                 ]}
 
-        monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: FakeResponse())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResponse())
 
         src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
         out = src._fetch_fixtures(days_ahead=7)
@@ -10334,7 +10327,7 @@ class TestFdCacheBatching:
         def raising_get(*a, **k):
             raise soccer.requests.RequestException("boom")
 
-        monkeypatch.setattr(soccer.requests, "get", raising_get)
+        stub_requests_get(monkeypatch, raising_get)
 
         src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
         assert src._fetch_fixtures(days_ahead=7) == []
@@ -10344,7 +10337,7 @@ class TestFdCacheBatching:
         from dispatcharr_ranked_matchups.sources import soccer
 
         calls = []
-        monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: calls.append(1) or None)
+        stub_requests_get(monkeypatch, lambda *a, **k: calls.append(1) or None)
 
         src = soccer.SoccerSource("epl", fd_api_key="", odds_api_key="")
         assert src._fetch_fixtures(days_ahead=7) == []
@@ -10375,7 +10368,7 @@ class TestFdCacheBatching:
             call_log.append(url)
             return FakeResponse()
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
 
         groups = soccer.GroupStageSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
         knockout = soccer.KnockoutSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
@@ -10407,7 +10400,7 @@ class TestFdCacheBatching:
                     {"competition": {"code": "PL"}, "id": 50},
                 ]}
 
-        monkeypatch.setattr(soccer.requests, "get", lambda url, **k: (call_log.append(url), FakeResponse())[1])
+        stub_requests_get(monkeypatch, lambda url, **k: (call_log.append(url), FakeResponse())[1])
 
         src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
 
@@ -10435,7 +10428,7 @@ class TestFdCacheBatching:
         def boom_get(*a, **k):
             raise AssertionError("HTTP should never be called when instance cache is set")
 
-        monkeypatch.setattr(soccer.requests, "get", boom_get)
+        stub_requests_get(monkeypatch, boom_get)
 
         src = soccer.GroupStageSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
         injected = [{"id": 999, "stage": "GROUP_STAGE"}]
@@ -10466,7 +10459,7 @@ class TestFdCacheBatching:
                 return FakeResponse("EC")
             raise AssertionError(f"unexpected URL: {url}")
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
 
         wc = soccer.GroupStageSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
         ec = soccer.GroupStageSoccerSource("euros", fd_api_key="testkey", odds_api_key="")
@@ -10522,7 +10515,7 @@ class TestTierFixturesChunkingForLongWindows:
             call_log.append(kwargs.get("params"))
             return FakeResponse()
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
         src._fetch_fixtures(days_ahead=7)
         assert len(call_log) == 1, "7-day window should be one call, not chunked"
@@ -10552,7 +10545,7 @@ class TestTierFixturesChunkingForLongWindows:
             code = f"CHUNK_{len(call_log)}"
             return FakeResponse(code)
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
 
         out = soccer._fetch_tier_fixtures("testkey", days_ahead=17)
         # Two chunks: [today, today+10] and [today+11, today+17].
@@ -10588,7 +10581,7 @@ class TestTierFixturesChunkingForLongWindows:
             call_log.append(kwargs.get("params") or {})
             return FakeResponse()
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         soccer._fetch_tier_fixtures("testkey", days_ahead=25)
 
         for params in call_log:
@@ -10628,7 +10621,7 @@ class TestTierFixturesChunkingForLongWindows:
             # quota when it does not return a clean 429.
             raise soccer.requests.RequestException("simulated 429")
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         out = soccer._fetch_tier_fixtures("testkey", days_ahead=20)
 
         assert call_count["n"] == 1 + soccer._FD_MAX_ATTEMPTS
@@ -10657,7 +10650,7 @@ class TestTierFixturesChunkingForLongWindows:
                 raise soccer.requests.RequestException("transient drop")
             return FakeResponse()
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         out = soccer._fetch_tier_fixtures("testkey", days_ahead=0)
 
         assert calls["n"] == 2          # failed once, succeeded on retry
@@ -10695,7 +10688,7 @@ class TestFdRequestPacing:
                 return Resp(item[0], item[1])
             return Resp(item)
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         return slept
 
     def test_paces_between_consecutive_calls(self, monkeypatch):
@@ -10763,7 +10756,11 @@ class TestFdRequestPacing:
         code = "\n".join(
             ln for ln in src.split("\n") if not ln.lstrip().startswith("#")
         )
-        bare = re.findall(r"requests\.get\(\s*\n?\s*f?\"\{FD_BASE\}", code)
+        # get_within_deadline (#271) is the only other way to make the call,
+        # and it bounds the response without pacing it.
+        bare = re.findall(
+            r"(?:requests\.get|get_within_deadline)\(\s*(?:requests,\s*)?f?\"\{FD_BASE\}", code,
+        )
         assert not bare, (
             f"{len(bare)} bare requests.get against FD_BASE; route them through "
             "_fd_get so they are paced and retried (#159)"
@@ -10807,10 +10804,9 @@ def _friendly_event(eid, home, away, *, hours_from_now=2.0, completed=False):
 
 
 def _patch_friendlies_http(monkeypatch, events):
-    """Stub the friendlies module's requests.get to serve `events` for every
+    """Stub the requests transport to serve `events` for every
     date bucket. Returns the list of `dates=` values the sweep asked for, so a
     caller can assert on the window as well as on the rows."""
-    from dispatcharr_ranked_matchups.sources import friendlies as friendlies_mod
 
     requested_dates = []
 
@@ -10822,7 +10818,7 @@ def _patch_friendlies_http(monkeypatch, events):
         requested_dates.append(url.split("dates=")[1][:8])
         return FakeResp()
 
-    monkeypatch.setattr(friendlies_mod.requests, "get", _get)
+    stub_requests_get(monkeypatch, _get)
     return requested_dates
 
 
@@ -11163,7 +11159,7 @@ def _cup_event(eid, home, away, season_slug, *, hours_from_now=2.0,
 
 
 def _patch_cup_http_per_bucket(monkeypatch, buckets):
-    """Stub english_cup's requests.get so each `dates=` bucket gets its OWN
+    """Stub the requests transport so each `dates=` bucket gets its OWN
     payload, rather than every bucket receiving the same events.
 
     Needed because the interesting dedupe defects are about DISAGREEMENT
@@ -11177,7 +11173,6 @@ def _patch_cup_http_per_bucket(monkeypatch, buckets):
     handed out payloads by arrival could give the stale copy to the later
     bucket and pass without testing the premise.
     """
-    from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
     from dispatcharr_ranked_matchups.sources import _espn
 
     # Pin the sweep's clock to the instant the buckets are laid out, so a run
@@ -11202,14 +11197,13 @@ def _patch_cup_http_per_bucket(monkeypatch, buckets):
         i = (day - first).days
         return FakeResp(buckets[i] if 0 <= i < len(buckets) else [])
 
-    monkeypatch.setattr(cup_mod.requests, "get", _get)
+    stub_requests_get(monkeypatch, _get)
 
 
 def _patch_cup_http(monkeypatch, events):
-    """Stub english_cup's requests.get to serve `events` for every date bucket.
+    """Stub the requests transport to serve `events` for every date bucket.
     Returns the list of `dates=` values asked for, so a caller can assert on
     the sweep window as well as on the rows."""
-    from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
 
     requested_dates = []
 
@@ -11221,7 +11215,7 @@ def _patch_cup_http(monkeypatch, events):
         requested_dates.append(url.split("dates=")[1][:8])
         return FakeResp()
 
-    monkeypatch.setattr(cup_mod.requests, "get", _get)
+    stub_requests_get(monkeypatch, _get)
     return requested_dates
 
 
@@ -11502,13 +11496,12 @@ class TestEnglishCupFetch:
         """A refresh must survive ESPN being down: _build_sources runs every
         source in one loop and an exception here would be caught, but the cup
         would report `error (...)` in the summary instead of 0 games."""
-        from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
         import requests as _rq
 
         def _boom(url, *a, **kw):
             raise _rq.RequestException("connection reset")
 
-        monkeypatch.setattr(cup_mod.requests, "get", _boom)
+        stub_requests_get(monkeypatch, _boom)
         assert EflCupSource().fetch_upcoming(days_ahead=1) == []
 
 
@@ -11608,10 +11601,9 @@ class TestCupRivalryThroughRefresh:
 
     @staticmethod
     def _serve(monkeypatch, by_slug):
-        """One `requests.get` stub for all three sources. They share the
-        `requests` module object, so patching it per source (as the per-module
-        helpers above do) would leave only the last stub in place."""
-        import requests
+        """One transport stub for all three sources. The stub is global
+        (`requests.Session.get`), so stubbing per source would leave only the
+        last one in place."""
 
         class FakeResp:
             status_code = 200
@@ -11628,7 +11620,7 @@ class TestCupRivalryThroughRefresh:
                     return FakeResp(events)
             return FakeResp([])
 
-        monkeypatch.setattr(requests, "get", _get)
+        stub_requests_get(monkeypatch, _get)
 
     def test_a_cup_derby_scores_the_bonus_and_a_club_friendly_does_not(
             self, refresh_env, monkeypatch):

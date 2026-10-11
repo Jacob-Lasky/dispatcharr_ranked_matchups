@@ -1,7 +1,7 @@
 """#193: every source's `_http_get` is a thin wrapper over `_util.http_get_json`.
 
 The wrappers stay, one per module, because they are the patch points the
-source tests stub (`<module>._http_get`, `get` on `<module>.requests`) and
+source tests stub (`<module>._http_get`, `<module>.requests` itself) and
 because each feed logs under its own logger. What these tests pin:
 
   - every `_http_get` in `sources/` is exactly that wrapper, so an 18th
@@ -89,6 +89,29 @@ class FakeRequests:
         if self._raises is not None:
             raise self._raises
         return self._response
+
+    def Session(self):  # noqa: N802 - mirrors requests.Session, the transport (#271)
+        return _FakeSession(self)
+
+
+class _FakeSession:
+    """What `requests.Session()` returns: mounts are ignored, GETs go to the
+    fake module's `get`, so `calls` records them exactly as before."""
+
+    def __init__(self, module):
+        self._module = module
+
+    def mount(self, prefix, adapter):
+        pass
+
+    def get(self, url, **kwargs):
+        return self._module.get(url, **kwargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 def _call(module_name, monkeypatch, fake, url="https://example.test/feed"):
@@ -190,8 +213,8 @@ class TestWrapperBehaviour:
 
 def test_params_and_headers_are_forwarded_only_when_given():
     """A wrapper that never took params must keep making the exact
-    `requests.get(url, timeout=...)` call it always did: some test stubs
-    elsewhere accept only (url, timeout)."""
+    `GET url, timeout=...` call it always did: some test stubs elsewhere
+    accept only (url, timeout)."""
     from dispatcharr_ranked_matchups._util import http_get_json
 
     fake = FakeRequests()

@@ -32,6 +32,7 @@ import requests
 from .base import GameRow, report_lost_day_range
 from .points_based import PointsBasedSportSource
 from ._espn import upcoming_window
+from .._http import get_within_deadline
 from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaam")
@@ -161,8 +162,8 @@ class NcaamSource(PointsBasedSportSource):
         unless `raise_on_failure`, which `fetch_upcoming` sets so a failure is
         not read as a preseason (see there)."""
         try:
-            r = requests.get(
-                f"{CBB_BASE}/rankings",
+            r = get_within_deadline(
+                requests, f"{CBB_BASE}/rankings",
                 headers=self._headers,
                 params={"season": season},
                 timeout=15,
@@ -205,8 +206,8 @@ class NcaamSource(PointsBasedSportSource):
         games): the caller reports the window's days as lost on None.
         """
         try:
-            r = requests.get(
-                f"{CBB_BASE}/games",
+            r = get_within_deadline(
+                requests, f"{CBB_BASE}/games",
                 headers=self._headers,
                 params={
                     "startDateRange": start.strftime("%Y-%m-%d"),
@@ -230,8 +231,8 @@ class NcaamSource(PointsBasedSportSource):
         """Same date-range as /games. Returns {gameId: abs(spread)}."""
         out: Dict[int, float] = {}
         try:
-            r = requests.get(
-                f"{CBB_BASE}/lines",
+            r = get_within_deadline(
+                requests, f"{CBB_BASE}/lines",
                 headers=self._headers,
                 params={
                     "startDateRange": start.strftime("%Y-%m-%d"),
@@ -304,8 +305,8 @@ class NcaamSource(PointsBasedSportSource):
         all_games: List[Dict[str, Any]] = []
         for start, end in chunks:
             try:
-                r = requests.get(
-                    f"{CBB_BASE}/games",
+                r = get_within_deadline(
+                    requests, f"{CBB_BASE}/games",
                     headers=self._headers,
                     params={
                         "startDateRange": start.strftime("%Y-%m-%d"),

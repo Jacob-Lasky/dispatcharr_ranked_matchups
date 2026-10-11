@@ -17,6 +17,7 @@ ours while a curated game is near; and the pipeline child starts no threads.
 """
 
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -546,6 +547,18 @@ class TestNoThreadsInThePipelineChild:
         monkeypatch.setattr(tasks_mod.subprocess, "run", fake_run)
         tasks_mod.run_pipeline_subprocess(tasks_mod.ACTION_REFRESH, {})
         assert seen["env"][tasks_mod.PIPELINE_CHILD_ENV] == "1"
+        # #271: the child is told when it will be killed, 25 minutes out.
+        left = float(seen["env"][tasks_mod.PIPELINE_DEADLINE_ENV]) - time.monotonic()
+        assert 1490 < left <= 1500
+
+    def test_seconds_left_reads_the_deadline(self, tasks_mod, monkeypatch):
+        monkeypatch.delenv(tasks_mod.PIPELINE_DEADLINE_ENV, raising=False)
+        assert tasks_mod.pipeline_child_seconds_left() is None
+        monkeypatch.setenv(tasks_mod.PIPELINE_DEADLINE_ENV, repr(time.monotonic() + 600))
+        assert 590 < tasks_mod.pipeline_child_seconds_left() <= 600
+        for junk in ("garbage", "nan", "inf", "-inf"):
+            monkeypatch.setenv(tasks_mod.PIPELINE_DEADLINE_ENV, junk)
+            assert tasks_mod.pipeline_child_seconds_left() is None, junk
 
     def test_plugin_in_the_child_starts_no_threads(self, plugin, monkeypatch):
         monkeypatch.setenv(plugin.tasks.PIPELINE_CHILD_ENV, "1")

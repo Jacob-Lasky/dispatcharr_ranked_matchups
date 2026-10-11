@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from tests.conftest import stub_requests_get
 
 UTC = timezone.utc
 SOURCES = Path(__file__).resolve().parent.parent / "sources"
@@ -527,7 +528,7 @@ class TestFootballDataChunksReportLostDays:
                 ]})
             return _Resp({"standings": [], "matches": []})
 
-        monkeypatch.setattr(soccer.requests, "get", get)
+        stub_requests_get(monkeypatch, get)
         return soccer, ranged
 
     def _fetch(self, soccer, config_key):
@@ -607,7 +608,7 @@ class TestCbbRangeReportsLostDays:
                 return games() if callable(games) else _Resp(games)
             return _Resp([])  # /lines
 
-        monkeypatch.setattr(ncaam.requests, "get", get)
+        stub_requests_get(monkeypatch, get)
         return ncaam, ranged
 
     def _refused(self):
@@ -900,17 +901,12 @@ def _drive_every_source(plugin, monkeypatch, answer, fails=lambda days: True):
     failed request the source did not report, over-reported a day it
     reported that no failed request of its own covered (one that answered,
     or one never asked for)."""
-    import socket
 
     import requests
     from dispatcharr_ranked_matchups.sources import soccer
     from dispatcharr_ranked_matchups.sources.base import recording_lost_days
     from tests.test_mapped_prefixes import _all_on_settings
 
-    def _offline(*_a, **_kw):
-        raise socket.gaierror("network disabled in tests/test_hold_failed_days.py")
-
-    monkeypatch.setattr(socket, "getaddrinfo", _offline)
     failed: dict = {}
     # Requests made while the sources are BUILT (strength seeding, MLS's
     # conference map, which it then keeps) get the same answers, filed under
@@ -926,7 +922,7 @@ def _drive_every_source(plugin, monkeypatch, answer, fails=lambda days: True):
             raise requests.ConnectionError("this dated request fails in this test")
         return _Resp([] if "collegebasketballdata" in url else _EMPTY_DATED)
 
-    monkeypatch.setattr(requests, "get", get)
+    stub_requests_get(monkeypatch, get)
     sources = plugin._build_sources(_all_on_settings())
     unreported, overreported = {}, {}
     for src in sources:

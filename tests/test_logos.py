@@ -1,7 +1,7 @@
 """Tests for the SportsDB matchup-thumbnail resolver (logos.py).
 
-Network-dependent paths are exercised via monkey-patched urlopen: no live
-HTTP. The cache-file and stale-sweep paths use tmp_path fixtures.
+Network-dependent paths are exercised through a stubbed urllib transport
+(`tests.conftest.stub_urlopen`): no live HTTP. The cache-file and stale-sweep paths use tmp_path fixtures.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from tests.conftest import stub_urlopen
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG_NAME = "dispatcharr_ranked_matchups"
@@ -193,8 +194,7 @@ class TestResolveThumbUrl:
     def test_field_event_short_circuits(self, monkeypatch):
         # away="Field" means single-event sport (F1, golf, UFC, tennis).
         called = []
-        monkeypatch.setattr(logos.urllib.request, "urlopen",
-                            lambda *a, **k: called.append(1))
+        stub_urlopen(monkeypatch, lambda *a, **k: called.append(1))
         url = logos.resolve_thumb_url(
             "Heineken Chinese GP", "Field",
             datetime(2026, 4, 15, tzinfo=timezone.utc), "F1", "3",
@@ -218,7 +218,7 @@ class TestResolveThumbUrl:
             "strSport": "Soccer",
             "strThumb": "https://r2.thesportsdb.com/images/media/event/thumb/foo.jpg",
         }]}
-        monkeypatch.setattr(logos.urllib.request, "urlopen", _fake_urlopen(payload))
+        stub_urlopen(monkeypatch, _fake_urlopen(payload))
         url = logos.resolve_thumb_url(
             "Manchester City", "Aston Villa",
             datetime(2026, 5, 24, tzinfo=timezone.utc), "EPL", "3",
@@ -233,7 +233,7 @@ class TestResolveThumbUrl:
             "strLeague": "English Premier League",
             "strThumb": "https://example.com/wrong.jpg",
         }]}
-        monkeypatch.setattr(logos.urllib.request, "urlopen", _fake_urlopen(payload))
+        stub_urlopen(monkeypatch, _fake_urlopen(payload))
         url = logos.resolve_thumb_url(
             "Manchester City", "Aston Villa",
             datetime(2026, 5, 24, tzinfo=timezone.utc), "EPL", "3",
@@ -250,7 +250,7 @@ class TestResolveThumbUrl:
             "strSport": "Baseball",
             "strThumb": "https://example.com/wrong.jpg",
         }]}
-        monkeypatch.setattr(logos.urllib.request, "urlopen", _fake_urlopen(payload))
+        stub_urlopen(monkeypatch, _fake_urlopen(payload))
         url = logos.resolve_thumb_url(
             "Some Team", "Other Team",
             datetime(2025, 11, 29, tzinfo=timezone.utc), "CFB", "3",
@@ -258,7 +258,7 @@ class TestResolveThumbUrl:
         assert url is None
 
     def test_empty_event_list(self, monkeypatch):
-        monkeypatch.setattr(logos.urllib.request, "urlopen", _fake_urlopen({"event": None}))
+        stub_urlopen(monkeypatch, _fake_urlopen({"event": None}))
         url = logos.resolve_thumb_url(
             "Garbage", "Other",
             datetime(2026, 5, 24, tzinfo=timezone.utc), "EPL", "3",
@@ -271,7 +271,7 @@ class TestResolveThumbUrl:
             "strLeague": "English Premier League",
             "strThumb": "",  # event exists but no thumb yet
         }]}
-        monkeypatch.setattr(logos.urllib.request, "urlopen", _fake_urlopen(payload))
+        stub_urlopen(monkeypatch, _fake_urlopen(payload))
         url = logos.resolve_thumb_url(
             "Manchester City", "Aston Villa",
             datetime(2026, 5, 24, tzinfo=timezone.utc), "EPL", "3",
@@ -281,7 +281,7 @@ class TestResolveThumbUrl:
     def test_http_failure_returns_none(self, monkeypatch):
         def boom(req, timeout=None):
             raise OSError("network down")
-        monkeypatch.setattr(logos.urllib.request, "urlopen", boom)
+        stub_urlopen(monkeypatch, boom)
         url = logos.resolve_thumb_url(
             "Manchester City", "Aston Villa",
             datetime(2026, 5, 24, tzinfo=timezone.utc), "EPL", "3",
@@ -397,8 +397,7 @@ class TestDownloadThumb:
         # image, so the old b"FAKE JPEG BYTES" placeholder no longer stands in
         # for one. Contract update, not a regression.
         body = b"\xff\xd8\xff\xe0" + b"FAKE JPEG BYTES"
-        monkeypatch.setattr(logos.urllib.request, "urlopen",
-                            lambda req, timeout=None: _FakeHttpResponse(body))
+        stub_urlopen(monkeypatch, lambda req, timeout=None: _FakeHttpResponse(body))
         dest = str(tmp_path / "out.jpg")
         ok = logos.download_thumb("https://example.com/x.jpg", dest)
         assert ok is True
@@ -408,8 +407,7 @@ class TestDownloadThumb:
         assert not any(p.endswith(".tmp") or ".tmp." in p for p in os.listdir(tmp_path) if p != "out.jpg")
 
     def test_http_error_returns_false(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(logos.urllib.request, "urlopen",
-                            lambda req, timeout=None: _FakeHttpResponse(b"", status=500))
+        stub_urlopen(monkeypatch, lambda req, timeout=None: _FakeHttpResponse(b"", status=500))
         dest = str(tmp_path / "out.jpg")
         ok = logos.download_thumb("https://example.com/x.jpg", dest)
         assert ok is False
@@ -418,7 +416,7 @@ class TestDownloadThumb:
     def test_network_failure_cleans_up_tmp(self, tmp_path, monkeypatch):
         def boom(req, timeout=None):
             raise OSError("dropped")
-        monkeypatch.setattr(logos.urllib.request, "urlopen", boom)
+        stub_urlopen(monkeypatch, boom)
         dest = str(tmp_path / "out.jpg")
         ok = logos.download_thumb("https://example.com/x.jpg", dest)
         assert ok is False
@@ -438,8 +436,7 @@ class TestRejectsNonImage200:
     """
 
     def _download(self, tmp_path, monkeypatch, body):
-        monkeypatch.setattr(logos.urllib.request, "urlopen",
-                            lambda req, timeout=None: _FakeHttpResponse(body))
+        stub_urlopen(monkeypatch, lambda req, timeout=None: _FakeHttpResponse(body))
         dest = str(tmp_path / "out.png")
         return logos.download_to_file("https://example.com/x.png", dest), dest
 
@@ -553,16 +550,15 @@ class TestResolveLeagueBadgeUrl:
     def test_returns_badge_url(self, monkeypatch):
         payload = {"leagues": [{"strLeague": "English Premier League",
                                 "strBadge": "https://example.test/epl.png"}]}
-        monkeypatch.setattr(logos.urllib.request, "urlopen", _fake_urlopen(payload))
+        stub_urlopen(monkeypatch, _fake_urlopen(payload))
         assert logos.resolve_league_badge_url(4328, "3") == "https://example.test/epl.png"
 
     def test_no_leagues_returns_none(self, monkeypatch):
-        monkeypatch.setattr(logos.urllib.request, "urlopen", _fake_urlopen({"leagues": None}))
+        stub_urlopen(monkeypatch, _fake_urlopen({"leagues": None}))
         assert logos.resolve_league_badge_url(4328, "3") is None
 
     def test_missing_badge_field_returns_none(self, monkeypatch):
-        monkeypatch.setattr(logos.urllib.request, "urlopen",
-                            _fake_urlopen({"leagues": [{"strLeague": "X"}]}))
+        stub_urlopen(monkeypatch, _fake_urlopen({"leagues": [{"strLeague": "X"}]}))
         assert logos.resolve_league_badge_url(4328, "3") is None
 
 
@@ -646,7 +642,7 @@ class TestApiKeyNeverReachesTheLog:
         def _boom(req, timeout=None):
             raise exc
 
-        monkeypatch.setattr(logos.urllib.request, "urlopen", _boom)
+        stub_urlopen(monkeypatch, _boom)
         url = f"https://www.thesportsdb.com/api/v1/json/{self.SECRET}/searchevents.php?e=x"
         assert logos._http_get_json(url, "searchevents") is None
         return "\n".join(records)

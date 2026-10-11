@@ -29,6 +29,7 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
+from ._http import urlopen_read
 from ._util import is_field_event, redact_secrets, write_json_atomic
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,12 @@ _SEARCH_URL = "https://www.thesportsdb.com/api/v1/json/{key}/searchevents.php?e=
 
 _HTTP_TIMEOUT_S = 10.0
 _DOWNLOAD_TIMEOUT_S = 15.0
+# Largest image download_to_file accepts. The body is held in memory until it
+# is validated (#271), so an oversized or runaway response has to stop here
+# rather than in the pipeline child's memory. SportsDB's 960x540 thumbnails
+# and league badges are tens to hundreds of KB (a badge measured 58,687 bytes
+# 2026-10-11); 10 MiB is far above any real one.
+_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
 _USER_AGENT = "dispatcharr_ranked_matchups"
 
 # SportsDB returns a date string; allow ±2 days to absorb timezone wobble between
@@ -330,10 +337,10 @@ def _http_get_json(url: str, endpoint: str) -> Optional[dict]:
     """
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
-            if resp.status != 200:
-                return None
-            return json.load(resp)
+        status, body = urlopen_read(req, timeout=_HTTP_TIMEOUT_S)
+        if status != 200:
+            return None
+        return json.loads(body)
     except Exception as e:
         # The exception can embed the request URL (HTTPError stringifies it), so
         # it still goes through the redactor. See #156.
@@ -435,19 +442,13 @@ def download_to_file(
     # _util.write_json_atomic: two threads in one worker share a pid.
     tmp_path = f"{dest_path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                return resp.status, None
-            first = b""
-            with open(tmp_path, "wb") as f:
-                while True:
-                    chunk = resp.read(64 * 1024)
-                    if not chunk:
-                        break
-                    if not first:
-                        first = chunk[:16]
-                    f.write(chunk)
-        if not _looks_like_image(first):
+        # The whole download is bounded by `timeout` (#271) and read before
+        # anything is written, so a transfer cut at the deadline never reaches
+        # the temp file, let alone the cache.
+        status, body = urlopen_read(req, timeout=timeout, max_bytes=_MAX_DOWNLOAD_BYTES)
+        if status != 200:
+            return status, None
+        if not _looks_like_image(body[:16]):
             # A 200 carrying non-image bytes (captive portal, proxy error page,
             # HTML 200 from a misconfigured reverse proxy) must NOT be written:
             # callers treat the file's existence as the cache, so a corrupt file
@@ -455,10 +456,11 @@ def download_to_file(
             # Reported as a transient failure, so the next apply retries.
             logger.warning(
                 "download %s returned 200 but not an image (%r); discarding",
-                redact_secrets(url), first[:8],
+                redact_secrets(url), body[:8],
             )
-            _unlink_quietly(tmp_path)
             return None, None
+        with open(tmp_path, "wb") as f:
+            f.write(body)
         os.replace(tmp_path, dest_path)
         return 200, None
     except urllib.error.HTTPError as e:

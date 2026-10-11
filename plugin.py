@@ -2834,15 +2834,37 @@ def _build_weights(settings: Dict[str, Any]):
 
 DEFAULT_MAX_GAMES = 25
 
-# Worst-case seconds apply's network pre-pass can spend on ONE game, as the sum
-# of the timeouts it can hit: the LLM description (llm_descriptions
-# ANTHROPIC_TIMEOUT_S = 30) plus the SportsDB thumb search (logos
-# _HTTP_TIMEOUT_S = 10) and its download (logos _DOWNLOAD_TIMEOUT_S = 15).
+# Seconds of network time apply's pre-pass may spend per game, ENFORCED as a
+# total: the pre-pass gets this times the number of games as one wall-clock
+# budget (_http.NetworkBudget, #271), and once it is spent every remaining
+# cosmetic fetch (LLM description, SportsDB thumb, game-thumbs composite,
+# league badge) is skipped and takes the fallback its own failure already
+# takes. The figure is the SportsDB path's sum of timeouts: the LLM description
+# (llm_descriptions ANTHROPIC_TIMEOUT_S = 30), the thumb search (logos
+# _HTTP_TIMEOUT_S = 10) and its download (logos _DOWNLOAD_TIMEOUT_S = 15). It
+# is NOT an estimate of one game's worst case any more: a game that also falls
+# through to game-thumbs and the badge can spend more, and the budget is what
+# stops a slate of those from outrunning the lock. The pre-pass can overrun the
+# total by at most the one call in flight when it runs out (30s).
+#
+# Inside the pipeline child the allowance is also capped at the child's
+# remaining life minus APPLY_WRITE_RESERVE_SECONDS: tasks.py kills the child at
+# _SUBPROCESS_TIMEOUT_SECONDS (25 min) whatever this says, and auto_pipeline
+# spends part of that on refresh first. Without the cap a large slate (28+
+# games x 55s > 1500s) would run the child out before the budget ever
+# skipped anything, and apply would die without publishing.
 #
 # A named constant because MAX_GAMES_CEILING is DERIVED from it and a test
 # asserts the derivation still holds; leaving it as a literal in a comment let
 # the two drift silently. Re-derive both if any of those three timeouts change.
 APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME = 30 + 10 + 15
+
+# What apply keeps for itself after the pre-pass, inside the pipeline child:
+# the one fetch in flight when the budget runs out (up to 30s) plus the DB
+# writes. Generous on purpose: the writes are a 0.55s transaction (#137) plus
+# the sweeps, and a whole live auto_pipeline (refresh AND apply) took 382s on
+# 2026-10-11.
+APPLY_WRITE_RESERVE_SECONDS = 120
 
 # Hard ceiling on max_games, derived from the scheduler-lock budget rather than
 # picked for roundness.
@@ -6887,6 +6909,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             matchup_logos.LOGO_DIR, matchup_logos.badge_filename(league_id),
         )
         if not os.path.exists(badge_path):
+            if not prepass_budget.allow():
+                return None
             badge_url = matchup_logos.resolve_league_badge_url(league_id, sportsdb_api_key)
             if not badge_url:
                 return None
@@ -6895,7 +6919,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             except OSError as e:
                 logger.warning("[ranked_matchups] cannot mkdir %s: %s", matchup_logos.LOGO_DIR, e)
                 return None
-            if not matchup_logos.download_thumb(badge_url, badge_path):
+            if not prepass_budget.allow() or not matchup_logos.download_thumb(badge_url, badge_path):
                 return None
         return _logo_id_for_file(
             badge_path, f"League badge: {game.get('sport_prefix', '?')}",
@@ -6933,6 +6957,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 away=game.get("away", ""),
                 home=game.get("home", ""),
                 dest_path=local_path,
+                allow=prepass_budget.allow,
             )
             if url is None:
                 # Only a DEFINITIVE miss is cached. A transient failure (429,
@@ -6983,6 +7008,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 # game-thumbs resolves purely from the team pair, so an
                 # unparseable start time still gets a real matchup image.
                 return _gamethumbs_or_badge()
+            if not prepass_budget.allow():
+                # Out of budget: NOT a miss, so nothing is cached and the next
+                # apply asks SportsDB again.
+                return _gamethumbs_or_badge()
             thumb_url = matchup_logos.resolve_thumb_url(
                 home=game.get("home", ""),
                 away=game.get("away", ""),
@@ -7004,7 +7033,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             matchup_logos.LOGO_DIR, matchup_logos.marker_to_filename(marker),
         )
         if not os.path.exists(local_path):
-            if not matchup_logos.download_thumb(thumb_url, local_path):
+            if not prepass_budget.allow() or not matchup_logos.download_thumb(thumb_url, local_path):
                 return _gamethumbs_or_badge()
         return _logo_id_for_file(local_path, _matchup_logo_name(game)), "matchup"
 
@@ -7021,9 +7050,22 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # placeholder / bad-start-time semantics of the write loop exactly (same
     # marker key, same seen_markers set, same counters) so the two stay in lockstep.
     from types import SimpleNamespace
+    from ._http import NetworkBudget
     from .matcher import _strong_team_keywords, select_streams_for_game
     from .scoring import pick_tagline
     prep_by_marker: Dict[str, Any] = {}
+    # ONE wall-clock allowance for every cosmetic fetch below (#271), see
+    # APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME. DO NOT gate anything on it that
+    # decides WHICH channels publish or what streams they carry: the stream
+    # pool and the placeholder decision make no network call, and must never
+    # start to depend on one that can be skipped.
+    prepass_allowance = APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME * len(games)
+    child_seconds_left = tasks.pipeline_child_seconds_left()
+    if child_seconds_left is not None:
+        prepass_allowance = max(
+            0.0, min(prepass_allowance, child_seconds_left - APPLY_WRITE_RESERVE_SECONDS),
+        )
+    prepass_budget = NetworkBudget(prepass_allowance)
     prepass_now = datetime.now(timezone.utc)
     recording_channel_ids = {
         r.channel_id for r in Recording.objects.filter(
@@ -7196,6 +7238,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 cache=llm_cache,
                 boundary_summary=_boundary,
                 marker=marker,
+                allow_network=prepass_budget.allow,
                 # Supplies the outcome-band cutoffs the prompt needs to state
                 # each team's exact distance from relegation / Europe rather
                 # than leaving the model to infer it from a table slice (#209).
@@ -7224,6 +7267,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             logo_id=resolved_logo_id,
             source_streams=source_streams,
             start_dt=start_dt,
+        )
+    if prepass_budget.skipped:
+        logger.warning(
+            "[ranked_matchups] apply's network budget (%gs for %d games) ran out; "
+            "skipped %d cosmetic fetch(es) (descriptions, logos), which keep their "
+            "fallback until the next apply",
+            prepass_budget.seconds, len(games), prepass_budget.skipped,
         )
 
     # Set by step 8 inside the transaction; stays None on a dry run so the

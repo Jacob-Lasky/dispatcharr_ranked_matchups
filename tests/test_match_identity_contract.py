@@ -224,8 +224,8 @@ class TestTheScopeItselfIsRight:
 class TestSharedSweepDoesNotOwnTheHttpCall:
     """`_espn.sweep_upcoming_scoreboard` must take its getter INJECTED.
 
-    Every ESPN-backed source's tests stub `<module>.requests.get`. If the
-    shared sweep ever called `requests.get` itself, all of those stubs would
+    Every ESPN-backed source's tests stub `<module>._http_get` or the requests
+    transport. If the shared sweep ever made the call itself, those stubs would
     become silent no-ops that reach the REAL ESPN API instead of failing, and a
     test asserting "no fixtures returns empty" would then be asserting against
     whatever ESPN happens to be serving. That is the worst shape of test
@@ -252,7 +252,7 @@ class TestSharedSweepDoesNotOwnTheHttpCall:
         sig = src[i:src.index(") -> ", i)]
         assert "http_get" in sig, (
             "sweep_upcoming_scoreboard no longer takes an injected http_get; "
-            "every source's requests.get stub is now a silent no-op"
+            "every source's HTTP stub is now a silent no-op"
         )
 
     def test_espn_module_never_imports_or_calls_requests(self):

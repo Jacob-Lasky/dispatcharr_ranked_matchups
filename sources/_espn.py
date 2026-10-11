@@ -513,10 +513,11 @@ def sweep_upcoming_scoreboard(
 
     `http_get` is injected rather than called directly for two reasons, and the
     second one is the load-bearing one: each source keeps logging under its OWN
-    logger name, AND each source keeps its own `requests` symbol, which is the
-    patch point every source's tests stub. Calling `requests.get` from in here
-    would turn all of those stubs into silent no-ops that hit the real network
-    rather than failing. DO NOT "simplify" this into a direct call.
+    logger name, AND each source keeps its own `_http_get`, the patch point
+    its tests stub. Making the call from in here would bypass those stubs and
+    hit the real network rather than failing (the suite's `_no_live_network`
+    guard now turns that into a failure, but the stubs would still be dead).
+    DO NOT "simplify" this into a direct call.
 
     Returns the records (plus whatever `extras_fn` adds) in sweep order.
     Callers apply their own additional filtering (e.g. the friendlies
