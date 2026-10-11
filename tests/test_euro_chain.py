@@ -398,7 +398,8 @@ class TestEuroGroupGameGetsKnockoutLeverage:
     def test_chain_active_gives_nonzero_knockout_leverage(self, monkeypatch):
         _pts, notes, hit = self._score(monkeypatch, paired=True)
         knockout_hit = [lbl for lbl in hit if lbl in self.KNOCKOUT_LABELS]
-        assert {"round_of_16", "quarterfinal"} <= set(knockout_hit), (notes, hit)
+        assert {"round_of_16", "quarterfinal", "semifinal", "final", "winner"} <= set(
+            knockout_hit), (notes, hit)
         assert any("quarterfinal:" in n for n in notes), notes
 
     def test_unpaired_source_scores_advance_only(self, monkeypatch):
@@ -564,3 +565,72 @@ class TestChainNeedsASeedableFeed:
         assert groups.cross_source_chain() is None
         warnings = [r for r in caplog.records if "knockout leverage is off" in r.getMessage()]
         assert len(warnings) == 1
+
+    def test_group_with_a_tbd_team_keeps_the_chain_off(self):
+        # Codex review, round 2: three named teams per group are enough to
+        # fill every slot, but a three-team group simulated against full
+        # ones skews both the table and the best-third race.
+        matches = _reopen_matchday_3(
+            _ec_2024_matches(), datetime(2024, 6, 25, 16, tzinfo=timezone.utc),
+        )
+        for m in matches:
+            for side in ("homeTeam", "awayTeam"):
+                if m[side]["name"] == "Scotland":
+                    m[side] = {"name": None}
+        groups, knockout = _euro_pair(matches)
+        groups.set_paired_knockout_source(knockout)
+        assert groups.cross_source_chain() is None
+
+
+def _play_out(knockout, state, winner_is_home=True):
+    """Drain a seeded bracket with 1-0 results; return games played per stage."""
+    from dispatcharr_ranked_matchups.sources.base import MatchResult
+    played: Dict[str, int] = {}
+    result = MatchResult(home_goals=1, away_goals=0) if winner_is_home \
+        else MatchResult(home_goals=0, away_goals=1)
+    while True:
+        rem = knockout.remaining_matches(state)
+        if not rem:
+            break
+        for m in rem:
+            played[m.extra["stage"]] = played.get(m.extra["stage"], 0) + 1
+            state = knockout.apply_result(state, m, result)
+    return played, state
+
+
+class TestSeededBracketPlaysToTheFinal:
+    """Codex review, round 2: a tie created mid-simulation got no leg count,
+    defaulted to two legs, and never completed, so a seeded bracket stopped
+    one round after its entry round (EURO: no semi-final, final or winner;
+    WC 2026: nothing after the round of 16)."""
+
+    def test_euro_seed_plays_every_round(self):
+        matches = _ec_2024_matches()
+        groups, knockout = _euro_pair(matches)
+        state = knockout.seed_from_chain(groups._build_bracket_seed(_uefa_final_state(groups)))
+        played, end = _play_out(knockout, state)
+        assert played == {"LAST_16": 8, "QUARTER_FINALS": 4, "SEMI_FINALS": 2, "FINAL": 1}
+        # Home side wins every game: Match 1's home team (Spain, WB) wins
+        # QF1, SF1 and the final.
+        assert knockout.terminal_outcomes(end)["Spain"] == [
+            "round_of_16", "quarterfinal", "semifinal", "final", "winner",
+        ]
+
+    def test_world_cup_seed_plays_every_round(self):
+        from dispatcharr_ranked_matchups.sources.soccer import (
+            GroupStageSoccerSource, KnockoutSoccerSource,
+        )
+        groups = GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+        knockout = KnockoutSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+        letters = "ABCDEFGHIJKL"
+        team_group = {f"G{g}{n}": f"GROUP_{g}" for g in letters for n in (1, 2, 3, 4)}
+        teams = {}
+        for g in letters:
+            for n, pts in ((1, 9), (2, 6), (3, 3 + letters.index(g) % 2), (4, 0)):
+                teams[f"G{g}{n}"] = {"played": 3, "points": pts, "gf": pts, "ga": 0}
+        state = {"_applied": frozenset(), "_team_group": team_group, "_teams": teams,
+                 "_results": ()}
+        seeded = knockout.seed_from_chain(groups._build_bracket_seed(state))
+        played, _end = _play_out(knockout, seeded, winner_is_home=False)
+        assert played == {"LAST_32": 16, "LAST_16": 8, "QUARTER_FINALS": 4,
+                          "SEMI_FINALS": 2, "FINAL": 1}

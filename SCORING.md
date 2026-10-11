@@ -486,8 +486,14 @@ visible in the score.
 Each competition's bracket lives in one `_CHAIN_BRACKETS` entry in
 `sources/soccer.py`. The chain stays off when a season's group letters
 are not that format's (an older World Cup, a draw not made yet), or
-when the feed is too incomplete to fill every bracket slot, so a bracket
-is never seeded from the wrong shape. It runs for as long as any
+when a group is missing one of its four named teams (a play-off place
+still TBD), so a bracket is never seeded from the wrong shape.
+
+The simulated bracket plays every round to the final. Until #78 it
+stopped one round after its entry round: a tie whose participants the
+simulation itself decided was recorded as a two-leg tie, so a single-leg
+quarter-final (WC: round of 16) never finished, and the World Cup chain
+only ever reached its `round_of_16` band. It runs for as long as any
 group game is unplayed, and does not wait for football-data.org to leave
 the knockout fixtures blank: their teams fill in as feeder groups
 finish, while other groups still have their decisive final matchday.

@@ -2509,15 +2509,16 @@ class _TournamentBracket(NamedTuple):
     """One tournament's group -> knockout bracket, as consumed by
     `GroupStageSoccerSource._build_bracket_seed` (#53, #78).
 
-    `groups` is the exact set of group letters the format has. The chain
-    refuses to run against a season whose groups differ (a 32-team WC, an
-    older EURO, a fixture list whose groups are not drawn yet), because
-    seeding a bracket from the wrong format produces confidently wrong
-    leverage rather than an error.
+    `groups` is the exact set of group letters the format has and
+    `teams_per_group` the size of each. The chain refuses to run against a
+    season that differs (a 32-team WC, an older EURO, groups not drawn yet,
+    a TBD team), because seeding a bracket from the wrong shape produces
+    confidently wrong leverage rather than an error.
 
     `downstream` lists the later rounds in order; each round's feeder is
     the round before it (the first one's feeder is `entry_stage`)."""
     groups: FrozenSet[str]
+    teams_per_group: int
     entry_stage: str
     entry_pairings: List[Tuple[Tuple[str, Any], Tuple[str, Any]]]
     third_placer_table: Dict[FrozenSet[str], Tuple[Tuple[int, str, str], ...]]
@@ -2529,6 +2530,7 @@ class _TournamentBracket(NamedTuple):
 _CHAIN_BRACKETS: Dict[str, _TournamentBracket] = {
     "WC": _TournamentBracket(
         groups=frozenset("ABCDEFGHIJKL"),
+        teams_per_group=4,
         entry_stage="LAST_32",
         entry_pairings=_WC2026_LAST_32_PAIRINGS,
         third_placer_table=_WC2026_THIRD_PLACER_SLOT_TABLE,
@@ -2541,6 +2543,7 @@ _CHAIN_BRACKETS: Dict[str, _TournamentBracket] = {
     ),
     "EC": _TournamentBracket(
         groups=frozenset("ABCDEF"),
+        teams_per_group=4,
         entry_stage="LAST_16",
         entry_pairings=_EURO2028_LAST_16_PAIRINGS,
         third_placer_table=_EURO2028_THIRD_PLACER_SLOT_TABLE,
@@ -3049,20 +3052,15 @@ class GroupStageSoccerSource(SoccerSource):
         self._paired_knockout = knockout
 
     def _chain_bracket(self) -> Optional[_TournamentBracket]:
-        """This competition's published bracket, or None when there is none
-        to seed from: no `_CHAIN_BRACKETS` entry for its FD.org code, a
-        season whose group letters are not the format's (e.g. a 32-team WC
-        season under the 48-team bracket, or groups not drawn yet), or a
-        feed too incomplete to fill every entry slot (a group with one
-        named team cannot supply a runner-up).
-
-        The last check seeds the bracket once from the current table.
-        Whether every slot can be filled depends only on which named teams
-        each group has, never on results, so one successful seed proves
-        every simulated season will seed too. Without it the chain would
-        switch on, `_build_bracket_seed` would raise in every simulation,
-        and each group game would lose its importance outright instead of
-        keeping its single-source `advance` leverage.
+        """This competition's published bracket, or None when the season
+        does not have that bracket's shape: no `_CHAIN_BRACKETS` entry for
+        its FD.org code, group letters that are not the format's (a 32-team
+        WC season under the 48-team bracket, groups not drawn yet), or a
+        group without its full complement of named teams (a play-off place
+        still TBD). The last case would simulate a three-team group against
+        full ones, and a group with one named team cannot even supply a
+        runner-up, which would make `_build_bracket_seed` raise in every
+        simulated season and cost each group game its importance outright.
 
         Memoised per instance, like `_team_group_map` it rests on: the
         scorer asks once per group game, and the warning should not repeat."""
@@ -3070,16 +3068,19 @@ class GroupStageSoccerSource(SoccerSource):
             return self._chain_bracket_memo
         bracket = _CHAIN_BRACKETS.get(self.config.fd_code)
         if bracket is not None:
-            letters = {
-                self._display_group_letter(g) for g in self._team_group_map().values()
-            }
-            if letters != bracket.groups:
+            sizes: Dict[str, int] = {}
+            for group in self._team_group_map().values():
+                letter = self._display_group_letter(group)
+                sizes[letter] = sizes.get(letter, 0) + 1
+            if set(sizes) != bracket.groups:
                 bracket = None
-        if bracket is not None:
-            try:
-                self._build_bracket_seed(self.initial_state(), bracket)
-            except ValueError as e:
-                logger.warning("%s; knockout leverage is off for this refresh", e)
+            elif any(n != bracket.teams_per_group for n in sizes.values()):
+                logger.warning(
+                    "[soccer:%s] group sizes %s do not match the %d-team groups "
+                    "of the published bracket; knockout leverage is off for this refresh",
+                    self.config.fd_code, dict(sorted(sizes.items())),
+                    bracket.teams_per_group,
+                )
                 bracket = None
         self._chain_bracket_memo: Optional[_TournamentBracket] = bracket
         return bracket
