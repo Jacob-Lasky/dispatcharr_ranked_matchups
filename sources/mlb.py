@@ -175,11 +175,14 @@ class MlbRegularSource(PointsBasedSportSource):
         late West Coast game vanished, BEFORE first pitch as well as during it.
         The window's drops then apply: a FINISHED game (`abstractGameState`
         "Final", which is also how a postponed or cancelled game reads) and a
-        stale one. A postponed game is also listed again on its makeup date
-        under the same gamePk (29 such in the 2026 season), hence the dedupe, in
-        which the LATEST admitted listing wins: a game moved to a later date can
-        still carry a not-yet-retagged copy under its old date, and keeping that
-        one would publish the abandoned slot.
+        stale one. A moved game is listed TWICE under one gamePk (29 such in
+        the 2026 season, measured 2026-10-11): the listing it moved away from
+        carries `rescheduleDate` (postponed, 28) or `resumeDate` (suspended, 1),
+        and the one it moved to carries `rescheduledFrom` / `resumedFrom`. The
+        moved-away listing is skipped by that marker, whatever its state says and
+        whichever date it sits under, because a game can move earlier as well as
+        later; DO NOT replace it with "first" or "last listing wins", which picks
+        the abandoned slot for one of the two directions.
         """
         window = upcoming_window(days_ahead)
         url = (
@@ -193,8 +196,10 @@ class MlbRegularSource(PointsBasedSportSource):
         for date_entry in data.get("dates", []) or []:
             for g in date_entry.get("games", []) or []:
                 gid = g.get("gamePk")
-                if gid is None:
+                if gid is None or gid in by_pk:
                     continue
+                if g.get("rescheduleDate") or g.get("resumeDate"):
+                    continue  # the slot this game moved away from
                 teams = g.get("teams") or {}
                 home = ((teams.get("home") or {}).get("team") or {}).get("name")
                 away = ((teams.get("away") or {}).get("team") or {}).get("name")

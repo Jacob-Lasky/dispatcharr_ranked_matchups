@@ -110,7 +110,15 @@ def _evening(**shape):
     }
 
 
-def _serve_buckets(monkeypatch, module, buckets, requested=None):
+_LEAGUE_PATH = {
+    "nba": "basketball/nba", "nfl": "football/nfl", "wnba": "basketball/wnba",
+    "ncaaw_basketball": "basketball/womens-college-basketball",
+    "ncaa_baseball": "baseball/college-baseball", "ncaa_softball": "baseball/college-softball",
+    "mls": "soccer/usa.1", "mls_cup": "soccer/usa.1", "mls_standings": "soccer/usa.1",
+}
+
+
+def _serve_buckets(monkeypatch, module, buckets, requested=None, urls=None):
     """Stub `module._http_get`: a scoreboard request gets the events filed
     under its `dates=` bucket; anything else (rankings, standings) gets an
     empty dict, which every source reads as "no data"."""
@@ -118,6 +126,8 @@ def _serve_buckets(monkeypatch, module, buckets, requested=None):
         m = re.search(r"dates=(\d{8})", url)
         if not m:
             return {}
+        if urls is not None:
+            urls.append(url)
         if requested is not None:
             requested.append(m.group(1))
         return {"events": list(buckets.get(m.group(1), []))}
@@ -147,6 +157,11 @@ class TestTheWindow:
         assert not w.admits(datetime(2026, 10, 10, 19, 59, tzinfo=timezone.utc), over=False)
         assert not w.admits(datetime(2026, 10, 11, 0, 30, tzinfo=timezone.utc), over=True)
         assert not w.admits(None, over=False)
+
+    def test_a_missing_competition_status_falls_back_to_the_events(self):
+        ev = {"status": {"type": {"state": "post", "completed": True}},
+              "competitions": [{"competitors": []}]}
+        assert _espn.scoreboard_event_over(ev)
 
     def test_a_postponed_game_is_over(self):
         # ESPN's postponed/cancelled shape: `post` without `completed`.
@@ -211,6 +226,14 @@ class TestTheSharedSweep:
         out, _ = self._sweep(monkeypatch, {LOOKBACK_BUCKET: [live], TODAY_BUCKET: [live]})
         assert out == ["live-1"]
 
+    def test_an_id_less_game_renamed_between_buckets_is_one_row(self, monkeypatch):
+        kickoff = datetime(2026, 10, 11, 3, 0, tzinfo=timezone.utc)
+        a = _event(None, "H1", "A1", kickoff, "pre")
+        b = dict(_event(None, "H1", "A1", kickoff, "pre"), name="A1 @ H1 (rescheduled)")
+        out, _ = self._sweep(monkeypatch, {LOOKBACK_BUCKET: [a], TODAY_BUCKET: [b]},
+                             convert=lambda ev: ev["name"])
+        assert out == ["A1 at H1"]
+
     def test_id_less_events_are_not_merged(self, monkeypatch):
         kickoff = datetime(2026, 10, 11, 3, 0, tzinfo=timezone.utc)
         a = _event(None, "H1", "A1", kickoff, "pre")
@@ -218,12 +241,6 @@ class TestTheSharedSweep:
         out, _ = self._sweep(monkeypatch, {TODAY_BUCKET: [a, b]},
                              convert=lambda ev: ev["name"])
         assert out == ["A1 at H1", "A2 at H2"]
-
-    def test_observe_sees_every_event_finished_ones_included(self, monkeypatch):
-        seen = []
-        out, _ = self._sweep(monkeypatch, _evening(), observe=lambda ev: seen.append(ev["id"]))
-        assert out == ["live-1"]
-        assert seen == ["live-1", "done-1", "stale-1"]
 
     def test_field_events_filter_only_the_lookback_buckets(self, monkeypatch):
         # A tournament's status describes the current day's play: the forward
@@ -248,6 +265,8 @@ def _src(module_name, cls_name, **kw):
 
 
 # (module, class, constructor kwargs, event shape for the source's own filter)
+# The league path is a LITERAL, not the module's ESPN_BASE: the witness must
+# fail if a source sweeps the right days of the wrong league.
 _ESPN_TEAM_SWEEPS = [
     ("nba", "NbaRegularSource", {}, {"season_type": 2}),
     ("nba", "NbaPlayoffSource", {}, {"season_type": 3}),
@@ -285,18 +304,23 @@ class TestEveningGameIsFound:
             self, monkeypatch, module_name, cls_name, kwargs, shape):
         mod, src = _src(module_name, cls_name, **kwargs)
         _pin_clock(monkeypatch)
-        _serve_buckets(monkeypatch, mod, _evening(**shape))
+        urls = []
+        _serve_buckets(monkeypatch, mod, _evening(**shape), urls=urls)
         rows = src.fetch_upcoming(days_ahead=1)
         assert _homes(rows) == ["Home Live"]
+        league = _LEAGUE_PATH[module_name]
+        assert urls and all(f"/apis/site/v2/sports/{league}/scoreboard?" in u for u in urls)
 
     def test_mls_conference_sweep_finds_it(self, monkeypatch):
         mod, src = _src("mls_standings", "MlsEastSource")
         _pin_clock(monkeypatch)
-        _serve_buckets(monkeypatch, mod, _evening())
+        urls = []
+        _serve_buckets(monkeypatch, mod, _evening(), urls=urls)
         monkeypatch.setattr(src, "_own_conf_teams",
                             lambda: {"Home Live", "Home Done", "Home Stale"})
         monkeypatch.setattr(src, "_fetch_closeness", lambda: {})
         assert _homes(src.fetch_upcoming(days_ahead=1)) == ["Home Live"]
+        assert urls and all("/apis/site/v2/sports/soccer/usa.1/scoreboard?" in u for u in urls)
 
     def test_ufc_main_card_is_found_after_midnight_utc(self, monkeypatch):
         # 03:30Z (23:30 EDT): the card listed at 22:00Z is filed under the
@@ -335,42 +359,51 @@ class TestEveningGameIsFound:
         ("ncaa_softball", "NcaaSoftballPlayoffBracketSource",
          "Women's College World Series - Double Elimination Round", "WCWS_sub1", "WCWS_sub2"),
     ])
-    def test_world_series_game_keeps_its_sub_bracket_after_the_opener_ends(
-            self, monkeypatch, module_name, cls_name, headline, sub1, sub2):
-        """Opening night: one opener FINISHED (18:00Z), the other live
-        (23:00Z). The sub-brackets come from opening-day pairings, so the
-        finished opener's teams must still be classified, or their Day 3
-        game has no sub-bracket and is dropped (codex review of #256).
-        Literal keys: Day 1 pairs are sub-bracket 1, Day 2 pairs sub-bracket 2."""
-        mod, src = _src(module_name, cls_name)
-        _pin_clock(monkeypatch, datetime(2026, 6, 13, 23, 30, tzinfo=timezone.utc))
+    @pytest.mark.parametrize("now", [
+        datetime(2026, 6, 5, 23, 30, tzinfo=timezone.utc),  # opening night, one opener over
+        datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),   # Day 3: opening day out of the window
+    ], ids=["opening-night", "day-3"])
+    def test_world_series_games_survive_and_get_the_brackets_sub_bracket(
+            self, monkeypatch, module_name, cls_name, headline, sub1, sub2, now):
+        """The sub-brackets are read off opening-day pairings, which the
+        upcoming window cannot see once they are FINISHED or a day old. The
+        sweep must neither drop a game for that nor guess: rows carry no key
+        until place_upcoming stamps the bracket's (built from the whole
+        calendar). Before the codex review fixes, the opener's teams were
+        unknown on opening night and Day 1 was outside the window on Day 3,
+        and their games were dropped. Literal keys: Day 1 pairs are
+        sub-bracket 1, Day 2 pairs sub-bracket 2."""
+        mod, src = _src(module_name, cls_name, season_year=2026)
+        _pin_clock(monkeypatch, now)
         shape = {"season_type": 5, "headline": headline}
+        june = lambda d, h: datetime(2026, 6, d, h, 0, tzinfo=timezone.utc)  # noqa: E731
+        # Inside BOTH bracket calendars (softball's ends June 15).
+        day2 = "post" if now.day == 7 else "pre"
+        day1_late = "in" if now.day == 5 else "post"
         _serve_buckets(monkeypatch, mod, {
-            "20260613": [
-                _event("op-1", "Arizona", "Coastal Carolina",
-                       datetime(2026, 6, 13, 18, 0, tzinfo=timezone.utc), "post", **shape),
-                _event("op-2", "Louisville", "Oregon State",
-                       datetime(2026, 6, 13, 23, 0, tzinfo=timezone.utc), "in", **shape),
+            "20260605": [
+                _event("op-1", "Arizona", "Coastal Carolina", june(5, 18), "post", **shape),
+                _event("op-2", "Louisville", "Oregon State", june(5, 23), day1_late, **shape),
             ],
-            "20260614": [
-                _event("d2-1", "Murray State", "UCLA",
-                       datetime(2026, 6, 14, 18, 0, tzinfo=timezone.utc), "pre", **shape),
-                _event("d2-2", "LSU", "Arkansas",
-                       datetime(2026, 6, 14, 23, 0, tzinfo=timezone.utc), "pre", **shape),
+            "20260606": [
+                _event("d2-1", "Murray State", "UCLA", june(6, 18), day2, **shape),
+                _event("d2-2", "LSU", "Arkansas", june(6, 23), day2, **shape),
             ],
-            "20260615": [
-                _event("d3-1", "Arizona", "Coastal Carolina",
-                       datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc), "pre", **shape),
+            "20260607": [
+                _event("d3-1", "Arizona", "Coastal Carolina", june(7, 18), "pre", **shape),
+            ],
+            "20260608": [
+                _event("d4-1", "Louisville", "Oregon State", june(8, 18), "pre", **shape),
             ],
         })
         rows = src.fetch_upcoming(days_ahead=3)
+        assert all(r.extra["grouping_key"] is None for r in rows)
+        assert src.place_upcoming(rows) == 0
         keys = {(r.home, r.start_time.day): r.extra["grouping_key"] for r in rows}
-        assert keys == {
-            ("Louisville", 13): sub1,
-            ("Murray State", 14): sub2,
-            ("LSU", 14): sub2,
-            ("Arizona", 15): sub1,
-        }
+        expected = {("Arizona", 7): sub1, ("Louisville", 8): sub1}
+        if now.day == 5:
+            expected.update({("Louisville", 5): sub1, ("Murray State", 6): sub2, ("LSU", 6): sub2})
+        assert keys == expected
 
     def test_nhl_late_game_is_found(self, monkeypatch):
         from dispatcharr_ranked_matchups.sources import nhl
@@ -438,23 +471,53 @@ class TestEveningGameIsFound:
         assert _homes(rows) == ["Mariners", "Padres"]
         assert "startDate=2026-10-10&endDate=2026-10-18" in urls[0]
 
-    def test_mlb_keeps_the_latest_listing_of_a_moved_game(self, monkeypatch):
-        """One gamePk under its old date (not yet retagged) and its new one:
-        the later listing is where the game will be played (codex review)."""
+    def test_nhl_walk_does_not_skip_days_a_short_week_left_out(self, monkeypatch):
+        """A gameWeek that comes back short or gapped (here: only 10-17 for a
+        10-10 request) must not move the walk past 10-11..10-16 (codex)."""
+        from dispatcharr_ranked_matchups.sources import nhl
+        _pin_clock(monkeypatch)
+        requested = []
+
+        def fake(url, *a, **k):
+            day = url.rsplit("/", 1)[1]
+            requested.append(day)
+            if day == "2026-10-10":
+                return {"gameWeek": [{"date": "2026-10-17", "games": []}]}
+            return {"gameWeek": [{"date": day, "games": [{
+                "id": int(day.replace("-", "")), "gameType": 2, "gameState": "FUT",
+                "startTimeUTC": f"{day}T23:00:00Z",
+                "homeTeam": {"placeName": {"default": "H" + day[-2:]}, "commonName": {"default": "X"}},
+                "awayTeam": {"placeName": {"default": "A"}, "commonName": {"default": "Y"}}}]}]}
+        monkeypatch.setattr(nhl, "_http_get", fake)
+        rows = nhl.NhlRegularSource().fetch_upcoming(days_ahead=2)
+        assert requested == ["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13"]
+        assert _homes(rows) == ["H11 X", "H12 X", "H13 X"]
+
+    @pytest.mark.parametrize("old_day,old_start,new_day,new_start", [
+        ("2026-10-10", "2026-10-11T03:00:00Z", "2026-10-12", "2026-10-12T23:00:00Z"),  # moved later
+        ("2026-10-10", "2026-10-11T03:00:00Z", "2026-10-11", "2026-10-11T17:00:00Z"),  # moved earlier
+    ], ids=["moved-later", "moved-earlier"])
+    @pytest.mark.parametrize("old_first", [True, False], ids=["old-listed-first", "old-listed-last"])
+    def test_mlb_publishes_the_slot_a_moved_game_moved_to(
+            self, monkeypatch, old_day, old_start, new_day, new_start, old_first):
+        """statsapi lists a moved game under both dates with one gamePk; the
+        abandoned listing carries `rescheduleDate` (measured on all 28
+        postponements of 2026). Whatever the order and the direction, and
+        while both copies still read Preview, the new slot is published
+        (codex review)."""
         from dispatcharr_ranked_matchups.sources import mlb
         _pin_clock(monkeypatch)
 
-        def listing(day, start):
+        def listing(day, start, **marks):
             return {"date": day, "games": [{
                 "gamePk": 7, "gameDate": start, "status": {"abstractGameState": "Preview"},
-                "teams": {"home": {"team": {"name": "Padres"}}, "away": {"team": {"name": "Giants"}}}}]}
-        monkeypatch.setattr(mlb, "_http_get", lambda *a, **k: {"dates": [
-            listing("2026-10-10", "2026-10-11T03:00:00Z"),
-            listing("2026-10-12", "2026-10-12T23:00:00Z"),
-        ]})
+                "teams": {"home": {"team": {"name": "Padres"}}, "away": {"team": {"name": "Giants"}}},
+                **marks}]}
+        old = listing(old_day, old_start, rescheduleDate=new_start, rescheduleGameDate=new_day)
+        new = listing(new_day, new_start, rescheduledFrom=old_start, rescheduledFromDate=old_day)
+        monkeypatch.setattr(mlb, "_http_get", lambda *a, **k: {"dates": [old, new] if old_first else [new, old]})
         rows = mlb.MlbRegularSource().fetch_upcoming(days_ahead=7)
-        assert [r.start_time.isoformat() for r in rows] == ["2026-10-12T23:00:00+00:00"]
-
+        assert [r.start_time.isoformat() for r in rows] == [new_start.replace("Z", "+00:00")]
 
 # ---------------------------------------------------------------- class guard
 

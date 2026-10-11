@@ -112,7 +112,7 @@ def _upcoming_schedule_games(days_ahead: int) -> List[Dict[str, Any]]:
 
     `schedule/{date}` answers with a whole `gameWeek` (seven days from
     `date`, measured the same day), so the walk asks again only for the
-    first day past what came back, rather than once per day: the old
+    first day past the run of days that came back, rather than once per day: the old
     per-day loop made `days_ahead + 1` requests for one or two weeks of
     data, and kept every game of every week it got back, up to 13 days out
     on a 7-day lookahead. Days outside the window are skipped now.
@@ -123,13 +123,12 @@ def _upcoming_schedule_games(days_ahead: int) -> List[Dict[str, Any]]:
     day = window.first_day
     while day <= window.last_day:
         data = _http_get(f"{NHL_API_BASE}/schedule/{day.isoformat()}")
-        next_day = day + timedelta(days=1)
+        covered: set = set()
         for week in (data or {}).get("gameWeek", []) or []:
             week_day = _parse_week_date(week.get("date"))
             if week_day is None:
                 continue
-            if week_day >= next_day:
-                next_day = week_day + timedelta(days=1)
+            covered.add(week_day)
             if not (window.first_day <= week_day <= window.last_day):
                 continue
             for g in week.get("games", []) or []:
@@ -141,7 +140,13 @@ def _upcoming_schedule_games(days_ahead: int) -> List[Dict[str, Any]]:
                     continue
                 seen.add(gid)
                 out.append(g)
-        day = next_day
+        # Ask next for the first day this answer did NOT cover, counting
+        # only days contiguous from the one requested: a short or gapped
+        # gameWeek (a failed request, a week starting later than asked) must
+        # not skip the days it left out.
+        day += timedelta(days=1)
+        while day in covered:
+            day += timedelta(days=1)
     return out
 
 

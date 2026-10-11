@@ -249,11 +249,21 @@ def scoreboard_event_over(event: Dict[str, Any]) -> bool:
     The ONE reading of ESPN's game status. `extract_espn_scoreboard_event`
     classifies FINISHED with it, and the upcoming sweeps drop with it. A
     postponed or cancelled game is `post` without being `completed`, so it is
-    over too: it is not going to be played at the time it is listed.
+    over too: it is not going to be played at the time it is listed (DO NOT
+    "keep it in case ESPN moved it": a moved game gets a new `date` and goes
+    back to `pre`, while one postponed ahead of time keeps its old slot as
+    `post`, and keeping that would publish a game nobody will play). A
+    competition with no status falls back to the event's own, which ESPN
+    carries on every scoreboard event, so a missing block cannot pass a
+    finished game as upcoming.
     """
     comps = event.get("competitions") or []
     comp = comps[0] if comps and isinstance(comps[0], dict) else {}
-    status_type = (comp.get("status") or {}).get("type") or {}
+    status_type = (
+        (comp.get("status") or {}).get("type")
+        or (event.get("status") or {}).get("type")
+        or {}
+    )
     state = (status_type.get("state") or "").lower()
     return bool(status_type.get("completed")) or state == "post"
 
@@ -296,11 +306,17 @@ def _event_identity(event: Dict[str, Any]) -> Any:
         return eid
     comps = event.get("competitions") or []
     competitors = (comps[0].get("competitors") or []) if comps and isinstance(comps[0], dict) else []
-    teams = tuple(
-        ((c.get("team") or {}).get("displayName") or (c.get("team") or {}).get("name") or "")
+    teams = tuple(sorted(
+        ((c.get("team") or {}).get("id") or (c.get("team") or {}).get("displayName")
+         or (c.get("team") or {}).get("name") or "")
         for c in competitors if isinstance(c, dict)
-    )
-    return ("no-id", event.get("name") or event.get("shortName"), event.get("date"), teams)
+    ))
+    # Teams and kickoff, NOT the event's display name: the two overlapping
+    # buckets are separate cache entries, and a name edited between them
+    # would otherwise make one game two rows. The name stands in only for a
+    # field event, which has no two competitors.
+    who = teams if any(teams) else (event.get("name") or event.get("shortName"))
+    return ("no-id", who, event.get("date"))
 
 
 T = TypeVar("T")
@@ -313,7 +329,6 @@ def sweep_upcoming_events(
     convert: Callable[[Dict[str, Any]], Optional[T]],
     *,
     field_events: bool = False,
-    observe: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> List[T]:
     """THE upcoming sweep for every ESPN scoreboard source (#256):
     `convert(event)` for each event in `upcoming_window(days_ahead)` that is
@@ -329,13 +344,6 @@ def sweep_upcoming_events(
         lag) are dropped wherever they sit.
       - `field_events=True`: only the lookback buckets are filtered, by
         `_field_event_current`; see it for why the forward ones cannot be.
-
-    `observe(event)`, when given, sees EVERY event in the window, in date
-    order, before admission: finished ones included, a duplicate once per
-    bucket it appears in. It is for context a source needs from games already
-    played, never for rows: the NCAA baseball and softball bracket sources
-    learn the College World Series sub-brackets from opening-day pairings
-    that are usually FINISHED by the time the next game is upcoming.
 
     Admission runs BEFORE the dedupe, and an event's key is claimed only once
     `convert` keeps it, and both orders are load-bearing. The overlapping
@@ -359,8 +367,6 @@ def sweep_upcoming_events(
         for event in data.get("events") or []:
             if not isinstance(event, dict):
                 continue
-            if observe is not None:
-                observe(event)
             if field_events:
                 if day < window.today and not _field_event_current(event, window):
                     continue

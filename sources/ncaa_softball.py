@@ -653,9 +653,9 @@ def _classify_wcws_sub_brackets(
 def _wcws_meta_from_raw_events(
     raw_events: List[Tuple[Dict[str, Any], str, Optional[str]]],
 ) -> List[Dict[str, Any]]:
-    """(home, away, start_time) projection for WCWS events, shared
-    between fetch_upcoming and _fetch_bracket_games. See the baseball
-    sibling helper for context."""
+    """(home, away, start_time) projection for WCWS events, for
+    _fetch_bracket_games only. See the baseball sibling helper for why
+    fetch_upcoming does not classify."""
     out: List[Dict[str, Any]] = []
     for event, stage, _key in raw_events:
         if stage != "WCWS":
@@ -747,39 +747,17 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
                 return None
             return event, stage, partial_key
 
-        # The WCWS sub-brackets are read off opening-day pairings, which
-        # are FINISHED by the time the next game is upcoming, so they are
-        # classified from EVERY bracket event in the window (`observe`),
-        # not only from the upcoming ones the sweep keeps: from those alone
-        # a team whose opener has ended has no sub-bracket and its next game
-        # was dropped (#256 review). place_upcoming still overwrites the
-        # provisional key with the bracket's own.
-        played: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
-
-        def observe(event: Dict[str, Any]) -> None:
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
             tagged = staged(event)
-            if tagged is not None:
-                played.append(tagged)
+            return self._event_to_game_row(*tagged) if tagged is not None else None
 
-        raw_events = sweep_upcoming_events(
-            _http_get, f"{ESPN_BASE}/scoreboard", days_ahead, staged, observe=observe,
-        )
-        wcws_sub_by_team = _classify_wcws_sub_brackets(
-            _wcws_meta_from_raw_events(played)
-        )
-        out: List[GameRow] = []
-        for event, stage, partial_key in raw_events:
-            row = self._event_to_game_row(event, stage, partial_key, wcws_sub_by_team)
-            if row is not None:
-                out.append(row)
-        return out
+        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
 
     def _event_to_game_row(
         self,
         event: Dict[str, Any],
         stage: str,
         partial_key: Optional[str],
-        wcws_sub_by_team: Dict[str, str],
     ) -> Optional[GameRow]:
         comps = event.get("competitions") or []
         if not comps:
@@ -802,12 +780,16 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
         if start is None:
             return None
 
-        if stage == "SB_REG":
-            grouping_key = partial_key
-        else:  # WCWS
-            grouping_key = wcws_sub_by_team.get(home_team) or wcws_sub_by_team.get(away_team)
-        if grouping_key is None:
-            return None
+        # A Regional's site is in its own headline. A WCWS game's sub-bracket is
+        # NOT knowable from the upcoming window: it is read off opening-day
+        # pairings, which by Day 3 are outside the window (and FINISHED, so
+        # swept out of it, before that). DO NOT guess it here: the old
+        # window-relative guess labelled whatever came first in the window
+        # sub-bracket 1, and dropped a game whose teams it had not seen (#256
+        # review). Leave it None. place_upcoming stamps the bracket's own key
+        # on every row it places, and a row it cannot place resolves its tie
+        # by team set in `_find_tie_meta`, which a WRONG key would defeat.
+        grouping_key = partial_key if stage == "SB_REG" else None
 
         headline = ""
         for note in (comp.get("notes") or []):
