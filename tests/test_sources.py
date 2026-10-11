@@ -5327,6 +5327,10 @@ class TestNcaaSoccerCupSource:
         )
         src = NcaaSoccerCupSource(gender=gender, season_year=2024)
         src._bracket_games_cache = bracket_games or []
+        # No season calendar: these tests pin the event's OWN round slug
+        # (signal 1) and must never reach the network for the calendar.
+        # Calendar routing is pinned in tests/test_college_cup_routing.py.
+        src._season_windows_by_year = {2024: None}
         return src
 
     # ---------- identity + parametrization ----------
@@ -5406,9 +5410,6 @@ class TestNcaaSoccerCupSource:
         assert SLUG_TO_STAGE["college-cup"] == "NCG"
 
     def test_extract_bracket_record_filters_non_tournament_slugs(self):
-        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
-            NcaaSoccerCupSource,
-        )
         # Regular-season game with the regular-season slug should be
         # filtered out entirely (return None), not silently coerced
         # into a bracket stage.
@@ -5424,16 +5425,13 @@ class TestNcaaSoccerCupSource:
                 ],
             }],
         }
-        assert NcaaSoccerCupSource._extract_bracket_record(event) is None
+        assert self._make()._extract_bracket_record(event) is None
 
     def test_extract_bracket_record_routes_third_round_to_s16(self):
         """ESPN's 'third-round' slug is what humans call Sweet 16:
         confirm the routing so a label mismatch surfaces here, not via
         an importance-band silently misfiring on production data.
         """
-        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
-            NcaaSoccerCupSource,
-        )
         event = {
             "id": "s16-1",
             "date": "2024-11-30T19:00:00Z",
@@ -5446,7 +5444,7 @@ class TestNcaaSoccerCupSource:
                 ],
             }],
         }
-        rec = NcaaSoccerCupSource._extract_bracket_record(event)
+        rec = self._make()._extract_bracket_record(event)
         assert rec is not None
         assert rec["stage"] == "S16"
         assert rec["home"] == "Stanford"
@@ -5457,9 +5455,6 @@ class TestNcaaSoccerCupSource:
         assert rec["matchday"] == 1  # SERIES_LENGTH=1 means single game per "tie"
 
     def test_extract_bracket_record_scheduled_has_no_score(self):
-        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
-            NcaaSoccerCupSource,
-        )
         event = {
             "id": "qf-1",
             "date": "2030-12-07T19:00:00Z",
@@ -5472,7 +5467,7 @@ class TestNcaaSoccerCupSource:
                 ],
             }],
         }
-        rec = NcaaSoccerCupSource._extract_bracket_record(event)
+        rec = self._make()._extract_bracket_record(event)
         assert rec is not None
         assert rec["stage"] == "E8"
         assert rec["status"] == "SCHEDULED"
@@ -5758,6 +5753,14 @@ class TestNcaaSoccerCupSource:
         # and next() is atomic where `n += 1` then a read is not.
         first_call = itertools.count()
         def fake_get(url, *_a, **_kw):
+            if "/seasons/" in url:
+                # ESPN's season calendar (#235): one regular-season phase
+                # covering the board, so the untagged event is placed in it
+                # and filtered as not-a-round.
+                return {"types": {"count": 1, "items": [{
+                    "slug": "regular", "type": 1,
+                    "startDate": "2030-08-01T04:00Z", "endDate": "2030-12-31T04:59Z",
+                }]}}
             if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
