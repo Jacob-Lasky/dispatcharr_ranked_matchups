@@ -1,0 +1,312 @@
+"""#182: every ESPN scoreboard request is ONE DAY with an explicit page size.
+
+Measured live 2026-10-11 (full numbers at `_espn.SCOREBOARD_EVENT_LIMIT`):
+
+  - a bare `?dates=YYYYMMDD` pages silently at 100 events (225 games of the
+    2026 women's NCAA soccer season never reached the simulator);
+  - `limit` above 1000 silently answers with a 25-event page;
+  - `dates=<start>-<end>` answers HTTP 400 for team sports, and for racing
+    it drops the window's last day;
+  - `dates=YYYYMM` silently returned 742 of 1033 NCAAW games.
+
+`EspnEmulator` below reproduces the first and third behaviours so the
+witnesses fail as assertions against the old code, not only as URL checks.
+"""
+from __future__ import annotations
+
+import ast
+import importlib
+import logging
+import re
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+
+SOURCES = Path(__file__).resolve().parent.parent / "sources"
+PKG = "dispatcharr_ranked_matchups.sources"
+DAY_URL = re.compile(r"/scoreboard\?dates=\d{8}&limit=1000$")
+
+
+class EspnEmulator:
+    """Serves a scoreboard the way ESPN did on 2026-10-11.
+
+    `by_day` maps "YYYYMMDD" to that bucket's events. A one-day request
+    returns at most `limit` events (default page 100, and an over-1000 limit
+    falls back to 25). A `dates=A-B` range request returns None, which is what
+    a source's `_http_get` hands back for ESPN's HTTP 400 on that form. Any
+    other URL (rankings, standings) gets an empty dict.
+    """
+
+    def __init__(self, by_day=None):
+        self.by_day = by_day or {}
+        self.urls = []
+
+    def __call__(self, url, *_a, **params):
+        self.urls.append(url)
+        if "/scoreboard" not in url:
+            return {}
+        q = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
+        q.update({k: str(v) for k, v in params.items() if k in ("dates", "limit")})
+        dates = q.get("dates", "")
+        if "-" in dates:
+            return None
+        limit = int(q.get("limit", 100))
+        if limit > 1000:
+            limit = 25
+        return {"events": list(self.by_day.get(dates, []))[:limit]}
+
+
+def _event(eid, home, away, when, *, completed=False, slug="regular-season", season_type=2):
+    return {
+        "id": str(eid),
+        "date": when,
+        "name": f"{away} at {home}",
+        "shortName": f"{away} @ {home}",
+        "season": {"slug": slug, "type": season_type},
+        "competitions": [{
+            "status": {"type": {"completed": completed, "state": "post" if completed else "pre"}},
+            "competitors": [
+                {"homeAway": "home", "team": {"displayName": home, "location": home},
+                 "score": "2" if completed else None},
+                {"homeAway": "away", "team": {"displayName": away, "location": away},
+                 "score": "1" if completed else None},
+            ],
+        }],
+    }
+
+
+# ---------------------------------------------------------------------------
+# The URL contract
+# ---------------------------------------------------------------------------
+
+class TestDayUrl:
+    def test_shape_is_one_day_with_the_page_limit(self):
+        from dispatcharr_ranked_matchups.sources._espn import scoreboard_day_url
+        assert scoreboard_day_url("https://x.test/a/scoreboard", date(2026, 10, 25)) == (
+            "https://x.test/a/scoreboard?dates=20261025&limit=1000"
+        )
+
+    def test_limit_is_exactly_the_largest_espn_honours(self):
+        """1000, literally: 1001 or more silently returns a 25-event page."""
+        from dispatcharr_ranked_matchups.sources import _espn
+        assert _espn.SCOREBOARD_EVENT_LIMIT == 1000
+
+    def test_full_page_is_reported(self, monkeypatch, caplog):
+        from dispatcharr_ranked_matchups.sources import _espn
+        monkeypatch.setattr(_espn, "SCOREBOARD_EVENT_LIMIT", 3)
+        full = {"events": [{"id": 1}, {"id": 2}, {"id": 3}]}
+        with caplog.at_level(logging.WARNING, logger=_espn.logger.name):
+            out = _espn.fetch_scoreboard_day(lambda url: full, "https://x.test/scoreboard",
+                                             date(2026, 10, 25))
+        assert out is full
+        assert any("may be truncated" in r.getMessage() for r in caplog.records)
+
+    def test_short_page_is_quiet(self, caplog):
+        from dispatcharr_ranked_matchups.sources import _espn
+        with caplog.at_level(logging.WARNING, logger=_espn.logger.name):
+            _espn.fetch_scoreboard_day(lambda url: {"events": [{"id": 1}]},
+                                       "https://x.test/scoreboard", date(2026, 10, 25))
+            _espn.fetch_scoreboard_day(lambda url: None,
+                                       "https://x.test/scoreboard", date(2026, 10, 25))
+        assert caplog.records == []
+
+
+def _docstring_nodes(tree):
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = getattr(node, "body", [])
+            if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                out.add(id(body[0].value))
+    return out
+
+
+def test_no_source_builds_a_scoreboard_query_itself():
+    """Every `scoreboard?dates=` URL comes from `_espn.scoreboard_day_url`.
+    AST, not text: docstrings explaining the forms must not trip it, and an
+    f-string split across lines must."""
+    offenders = []
+    for path in sorted(SOURCES.glob("*.py")):
+        if path.name == "_espn.py":
+            continue
+        tree = ast.parse(path.read_text(), filename=path.name)
+        docs = _docstring_nodes(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.JoinedStr):
+                text = "".join(v.value for v in node.values
+                               if isinstance(v, ast.Constant) and isinstance(v.value, str))
+            elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                  and id(node) not in docs):
+                text = node.value
+            else:
+                continue
+            if "dates=" in text or "scoreboard?" in text:
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert offenders == [], (
+        "build ESPN scoreboard URLs with _espn.fetch_scoreboard_day / "
+        f"scoreboard_day_url, not by hand: {offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Every ESPN sweep, run against the emulator: only one-day, limited URLs
+# ---------------------------------------------------------------------------
+
+def _sweeps():
+    """(id, module, factory, method). Every code path that walks an ESPN
+    scoreboard, so a new path that bypasses the helper shows up here."""
+    S = []
+
+    def add(mod, cls, *methods, **kw):
+        for m in methods:
+            S.append((f"{mod}.{cls}.{m}", mod, cls, kw, m))
+
+    add("nba", "NbaRegularSource", "fetch_upcoming", "_fetch_full_season_games")
+    add("nba", "NbaPlayoffSource", "fetch_upcoming", "_fetch_bracket_games")
+    add("wnba", "WnbaRegularSource", "fetch_upcoming", "_fetch_full_season_games")
+    add("wnba", "WnbaPlayoffSource", "fetch_upcoming", "_fetch_bracket_games")
+    add("nfl", "NflRegularSource", "fetch_upcoming", "_fetch_full_season_games")
+    add("nfl", "NflPlayoffSource", "fetch_upcoming", "_fetch_bracket_games")
+    add("ncaaw_basketball", "NcaawBasketballRegularSource", "fetch_upcoming", "_fetch_full_season_games")
+    add("ncaaw_basketball", "NcaawBasketballPlayoffSource", "fetch_upcoming", "_fetch_bracket_games")
+    add("ncaa_baseball", "NcaaBaseballRegularSource", "fetch_upcoming", "_fetch_full_season_games")
+    add("ncaa_baseball", "NcaaBaseballPlayoffSource", "fetch_upcoming", "_fetch_bracket_games")
+    add("ncaa_baseball", "NcaaBaseballPlayoffBracketSource", "fetch_upcoming", "_fetch_bracket_games")
+    add("ncaa_softball", "NcaaSoftballRegularSource", "fetch_upcoming", "_fetch_full_season_games")
+    add("ncaa_softball", "NcaaSoftballPlayoffSource", "fetch_upcoming", "_fetch_bracket_games")
+    add("ncaa_softball", "NcaaSoftballPlayoffBracketSource", "fetch_upcoming", "_fetch_bracket_games")
+    add("ncaa_soccer", "NcaaSoccerSource", "fetch_upcoming", "_fetch_full_season_games")
+    add("ncaa_soccer_cup", "NcaaSoccerCupSource", "fetch_upcoming", "_fetch_bracket_games")
+    add("mls_cup", "MlsCupSource", "fetch_upcoming", "_fetch_bracket_games")
+    add("mls", "MlsSource", "fetch_upcoming")
+    add("nwsl", "NwslSource", "fetch_upcoming", http_module="mls")
+    add("liga_mx", "LigaMxSource", "fetch_upcoming", http_module="mls")
+    add("mls_standings", "MlsEastSource", "fetch_upcoming", "_fetch_full_season_games")
+    add("friendlies", "InternationalFriendliesSource", "fetch_upcoming")
+    add("friendlies", "ClubFriendliesSource", "fetch_upcoming")
+    add("english_cup", "EflCupSource", "fetch_upcoming")
+    add("english_cup", "FaCupSource", "fetch_upcoming")
+    for cls in ("F1Source", "NascarSource", "GolfSource", "UfcSource", "AtpSource", "WtaSource"):
+        add("field_event", cls, "fetch_upcoming")
+    return S
+
+
+def _run_sweep(monkeypatch, mod_name, cls_name, kw, method, emulator):
+    mod = importlib.import_module(f"{PKG}.{mod_name}")
+    http_mod = importlib.import_module(f"{PKG}.{kw.get('http_module', mod_name)}")
+    monkeypatch.setattr(http_mod, "_http_get", emulator)
+    if mod_name == "mls_standings":
+        monkeypatch.setattr(mod, "_fetch_conference_map", lambda: {"A": "East", "B": "East"})
+    src = getattr(mod, cls_name)()
+    if hasattr(src, "_fetch_closeness"):
+        monkeypatch.setattr(src, "_fetch_closeness", lambda: {})
+    if hasattr(src, "_fetch_rankings"):
+        monkeypatch.setattr(src, "_fetch_rankings", lambda *a, **k: {})
+    return getattr(src, method)()
+
+
+@pytest.mark.parametrize("sweep", _sweeps(), ids=lambda s: s[0])
+def test_every_espn_sweep_asks_for_single_limited_days(sweep, monkeypatch):
+    _id, mod_name, cls_name, kw, method = sweep
+    emu = EspnEmulator()
+    _run_sweep(monkeypatch, mod_name, cls_name, kw, method, emu)
+    boards = [u for u in emu.urls if "/scoreboard" in u]
+    assert boards, f"{_id} made no scoreboard request"
+    bad = [u for u in boards if not DAY_URL.search(u)]
+    assert bad == [], f"{_id} built a scoreboard URL without the per-day limit: {bad[:3]}"
+
+
+# ---------------------------------------------------------------------------
+# Behavioural witnesses: the old code returned the wrong ROWS
+# ---------------------------------------------------------------------------
+
+def test_busy_day_past_espns_default_page_reaches_the_season_walk(monkeypatch):
+    """The live case: 101 women's NCAA soccer games on 2026-10-25. Without
+    `limit`, ESPN serves 100 and game 101 never reaches the simulator."""
+    events = [_event(9000 + i, f"Home {i}", f"Away {i}", "2026-10-25T23:00Z")
+              for i in range(101)]
+    emu = EspnEmulator({"20261025": events})
+    from dispatcharr_ranked_matchups.sources import ncaa_soccer
+    monkeypatch.setattr(ncaa_soccer, "_http_get", emu)
+    games = ncaa_soccer.NcaaSoccerSource(gender="w", season_year=2026)._fetch_full_season_games()
+    assert len(games) == 101
+
+
+def test_busy_day_reaches_the_upcoming_sweep(monkeypatch):
+    from dispatcharr_ranked_matchups.sources import ncaa_soccer
+    today = datetime.now(timezone.utc)
+    when = (today + timedelta(days=1)).replace(hour=23, minute=0, second=0, microsecond=0)
+    events = [_event(9000 + i, f"Home {i}", f"Away {i}", when.strftime("%Y-%m-%dT%H:%MZ"))
+              for i in range(101)]
+    emu = EspnEmulator({when.strftime("%Y%m%d"): events})
+    monkeypatch.setattr(ncaa_soccer, "_http_get", emu)
+    src = ncaa_soccer.NcaaSoccerSource(gender="w")
+    monkeypatch.setattr(src, "_fetch_rankings", lambda *a, **k: {})
+    assert len(src.fetch_upcoming(days_ahead=7)) == 101
+
+
+def test_field_event_on_the_last_day_of_the_window_is_found(monkeypatch):
+    """The racing range form dropped the window's last day (Phoenix,
+    2026-10-18, missing from 20261011-20261018). The per-day walk asks for
+    that day like every other."""
+    from dispatcharr_ranked_matchups.sources import field_event
+    today = datetime.now(timezone.utc).date()
+    last = today + timedelta(days=7)
+    race = {"id": "R7", "name": "NASCAR Cup Series at Phoenix",
+            "shortName": "Phoenix", "date": f"{last.isoformat()}T19:00Z"}
+    emu = EspnEmulator({last.strftime("%Y%m%d"): [race]})
+    monkeypatch.setattr(field_event, "_http_get", emu)
+    rows = field_event.NascarSource().fetch_upcoming(days_ahead=7)
+    assert [r.home for r in rows] == ["NASCAR Cup Series at Phoenix"]
+
+
+def test_multi_day_field_event_is_emitted_once(monkeypatch):
+    """A tournament sits in every day bucket it spans; one row, not seven."""
+    from dispatcharr_ranked_matchups.sources import field_event
+    today = datetime.now(timezone.utc).date()
+    open_ = {"id": "T1", "name": "Shanghai Masters", "shortName": "Shanghai",
+             "date": f"{today.isoformat()}T03:00Z"}
+    emu = EspnEmulator({(today + timedelta(days=i)).strftime("%Y%m%d"): [open_]
+                        for i in range(7)})
+    monkeypatch.setattr(field_event, "_http_get", emu)
+    rows = field_event.AtpSource().fetch_upcoming(days_ahead=7)
+    assert [r.home for r in rows] == ["Shanghai Masters"]
+
+
+def test_mls_upcoming_survives_espn_rejecting_the_range_form(monkeypatch):
+    """`mls_standings.fetch_upcoming` used the range form too, so the live
+    400s emptied MLS East/West's emitted games as well as their season."""
+    from dispatcharr_ranked_matchups.sources import mls_standings
+    when = (datetime.now(timezone.utc) + timedelta(days=2)).replace(
+        hour=23, minute=30, second=0, microsecond=0)
+    emu = EspnEmulator({when.strftime("%Y%m%d"): [
+        _event(77, "A", "B", when.strftime("%Y-%m-%dT%H:%MZ"))]})
+    monkeypatch.setattr(mls_standings, "_http_get", emu)
+    monkeypatch.setattr(mls_standings, "_fetch_conference_map",
+                        lambda: {"A": "East", "B": "East"})
+    src = mls_standings.MlsEastSource()
+    monkeypatch.setattr(src, "_fetch_closeness", lambda: {})
+    rows = src.fetch_upcoming(days_ahead=7)
+    assert [(r.home, r.away) for r in rows] == [("A", "B")]
+
+
+def test_mls_season_keeps_date_order_and_first_occurrence(monkeypatch):
+    """The per-day walk is concurrent; results must still come back in date
+    order so the caller's first-occurrence dedupe keeps the EARLIER copy."""
+    from dispatcharr_ranked_matchups.sources import mls_standings
+    early = _event(5, "A", "B", "2025-04-01T19:00Z", completed=True)
+    late = _event(5, "A", "B", "2025-04-02T19:00Z")
+    other = _event(6, "B", "A", "2025-03-01T19:00Z", completed=True)
+    emu = EspnEmulator({"20250301": [other], "20250401": [early], "20250402": [late]})
+    monkeypatch.setattr(mls_standings, "_http_get", emu)
+    events = mls_standings._fetch_scoreboard_range(date(2025, 2, 1), date(2025, 11, 30))
+    assert [(e["id"], e["date"]) for e in events] == [
+        ("6", "2025-03-01T19:00Z"), ("5", "2025-04-01T19:00Z"), ("5", "2025-04-02T19:00Z"),
+    ]
+    monkeypatch.setattr(mls_standings, "_fetch_conference_map",
+                        lambda: {"A": "East", "B": "East"})
+    games = mls_standings.MlsEastSource(season_year=2025)._fetch_full_season_games()
+    by_id = {g["id"]: g for g in games}
+    assert by_id["5"]["status"] == "FINISHED"

@@ -252,14 +252,24 @@ For the score signals to work fully:
 
 ### If your source reads ESPN's site API
 
-Don't hand-roll the scoreboard parsing or the sweep window.
-`sources/_espn.py` owns both:
+Don't hand-roll the scoreboard parsing, the request URL or the sweep
+window. `sources/_espn.py` owns all three. Your module's `_http_get` is a
+one-line wrapper over `_util.http_get_json` that passes your module's own
+`requests` and logger (see that function's docstring for why the wrapper
+stays):
 
 - `extract_espn_scoreboard_event` normalises one scoreboard event into
   home / away / start_time / status.
+- `fetch_scoreboard_day(http_get, scoreboard_url, day)` is the ONLY way
+  to request a scoreboard: one day, with `&limit=1000`
+  (`SCOREBOARD_EVENT_LIMIT`). A bare `?dates=YYYYMMDD` pages silently at
+  100 events, which lost 225 games of the 2026 women's NCAA soccer
+  season; `tests/test_espn_scoreboard.py` fails any `scoreboard?dates=`
+  URL built anywhere else in `sources/`.
 - `sweep_upcoming_scoreboard` is the whole per-day sweep for a source
-  that wants upcoming fixtures only. It walks one day at a time (ESPN's
-  date-range syntax silently caps at 25 events), reaches one day back
+  that wants upcoming fixtures only. It walks one day at a time (the
+  multi-day `dates=` forms 400 or silently drop events; see
+  `SCOREBOARD_EVENT_LIMIT`), reaches one day back
   because ESPN buckets by US Eastern date, drops finished and
   stale-but-still-SCHEDULED games, and dedupes by event id. Pass your
   module's own `_http_get` as `http_get`: each source keeps its own

@@ -54,13 +54,14 @@ from __future__ import annotations
 import logging
 import random
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 
 from .base import GameRow, MatchResult
+from ._espn import fetch_scoreboard_day
 from .bracket import BestOfNSeriesSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .._util import parse_iso_utc, poisson_sample as _poisson, http_get_json
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_soccer_cup")
 
@@ -100,18 +101,8 @@ SLUG_TO_STAGE: Dict[str, str] = {
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
-    """ESPN endpoints return dicts; the wrapper type is Optional[Any]
-    rather than Optional[Dict] to keep the contract honest about the
-    None failure path. Caller checks isinstance(data, dict)."""
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[ncaa_soccer_cup] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[ncaa_soccer_cup] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="ncaa_soccer_cup", timeout=timeout)
 
 
 # Bracket dedup helpers are shared with mls_cup -- canonical impls live
@@ -120,7 +111,6 @@ def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
 # module still find it.
 from ._soccer_bracket_helpers import (
     dedupe_pk_shootout_pairs as _dedupe_pk_shootout_pairs,
-    pick_decisive_event as _pick_decisive_event,
 )
 
 
@@ -273,9 +263,9 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Emit upcoming tournament games (any stage). Per-day sweep:
-        ESPN's date-range syntax silently caps at 25 events, same trap
-        as ncaa_baseball.py / ncaa_soccer.py. Postseason games carry
+        """Emit upcoming tournament games (any stage). Per-day sweep
+        (`_espn.fetch_scoreboard_day`; see `_espn.SCOREBOARD_EVENT_LIMIT`
+        for why not a date range). Postseason games carry
         a `season.slug` of one of the SLUG_TO_STAGE keys; non-tournament
         games are filtered out so only bracket games surface here.
         """
@@ -284,10 +274,7 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(
-                f"{ESPN_BASE}/{self._espn_slug}/scoreboard?"
-                f"dates={day.strftime('%Y%m%d')}"
-            )
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard", day)
             if not isinstance(data, dict):
                 continue
             for event in data.get("events") or []:
@@ -356,10 +343,7 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
         )
         day = start
         while day <= end:
-            data = _http_get(
-                f"{ESPN_BASE}/{self._espn_slug}/scoreboard?"
-                f"dates={day.strftime('%Y%m%d')}"
-            )
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard", day)
             if isinstance(data, dict):
                 for event in data.get("events") or []:
                     rec = self._extract_bracket_record(event)

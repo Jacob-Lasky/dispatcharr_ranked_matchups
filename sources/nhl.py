@@ -42,10 +42,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult, SportSource
+from .base import GameRow, MatchResult
 from .bracket import BestOfNSeriesSource
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .._util import parse_iso_utc, poisson_sample as _poisson, http_get_json
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.nhl")
 
@@ -93,18 +93,8 @@ def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    """Wrapper around requests.get with logging on non-2xx and a single
-    retry on connection errors. Returns the parsed JSON dict or None.
-    """
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[nhl] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[nhl] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="nhl", timeout=timeout)
 
 
 def _default_season() -> str:

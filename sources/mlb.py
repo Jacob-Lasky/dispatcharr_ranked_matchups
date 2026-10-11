@@ -14,8 +14,8 @@ Two source classes:
 API quirks captured here:
   - `/api/v1/schedule?sportId=1&season=YYYY&gameType=R` returns the entire
     regular season in a single response (≈2430 games). No per-day or
-    per-team iteration needed: unlike ESPN unofficial endpoints where
-    multi-day ranges silently cap at 25 events.
+    per-team iteration needed, unlike the ESPN scoreboard, which has to be
+    walked one day at a time (see `_espn.SCOREBOARD_EVENT_LIMIT`).
   - `/api/v1/schedule/postseason?season=YYYY` returns every postseason
     game with `seriesDescription` ("AL Wild Card Series", "NL Division
     Series", "World Series", etc.) and `seriesGameNumber` (1..N) per game.
@@ -49,7 +49,7 @@ import requests
 from .base import GameRow, MatchResult
 from .bracket import BestOfNSeriesSource
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .._util import parse_iso_utc, poisson_sample as _poisson, http_get_json
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mlb")
 
@@ -103,18 +103,11 @@ _WS_BOT_SENTINEL = "LCS_NL_WINNER"
 
 
 def _http_get(url: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
-    """Wrapper around requests.get with logging on non-2xx. Returns
-    the parsed JSON dict or None. Timeout is 20s (season schedule is
-    ~2MB JSON; default 15s sometimes flakes from pocket-dev's egress)."""
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[mlb] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[mlb] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`.
+
+    Timeout is 20s, not the usual 15: the season schedule is ~2MB of JSON
+    and 15s sometimes flaked from pocket-dev's egress."""
+    return http_get_json(requests, url, log=logger, tag="mlb", timeout=timeout)
 
 
 def _default_season() -> int:

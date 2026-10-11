@@ -20,9 +20,10 @@ Two source classes ship under the `enable_ncaa_baseball` toggle:
 
 API endpoints used:
   - /apis/site/v2/sports/baseball/college-baseball/scoreboard
-    - Daily scoreboard. `dates=YYYYMMDD` returns all games for that day
-      (the `dates=YYYYMMDD-YYYYMMDD` range form silently caps at 25
-      events). Used by both fetch_upcoming and _fetch_full_season_games.
+    - Daily scoreboard, `dates=YYYYMMDD&limit=1000` via
+      `_espn.fetch_scoreboard_day` (the multi-day forms 400 or silently
+      drop events; see `_espn.SCOREBOARD_EVENT_LIMIT`). Used by both
+      fetch_upcoming and _fetch_full_season_games.
       Postseason events carry `season.type=3` and `competition.notes[]
       .headline` like "NCAA Baseball Championship - Auburn Super Regional
       - Game 2".
@@ -55,8 +56,9 @@ from .._util import (
     extract_game_number_after_marker,
     parse_iso_utc,
     poisson_sample as _poisson,
+    http_get_json,
 )
-from ._espn import extract_espn_scoreboard_event, fetch_days
+from ._espn import extract_espn_scoreboard_event, fetch_days, fetch_scoreboard_day
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_baseball")
 
@@ -76,20 +78,8 @@ _DEFAULT_RUNS_AGAINST = 6.0
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    """ESPN unofficial API wrapper. Returns the parsed JSON or None on
-    any error (4xx / 5xx / connection failure / JSON decode). Logs at
-    WARNING so silent degradation is observable in the dispatcharr log
-    when the API misbehaves.
-    """
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[ncaa_baseball] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[ncaa_baseball] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="ncaa_baseball", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -190,9 +180,8 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
         """Hit the scoreboard endpoint per-day covering today through
         `days_ahead` days. Populate rank_home/rank_away from the
         D1Baseball.com Top 25 so the rank-pair signal fires for marquee
-        matchups. Per-day rather than range because ESPN's range
-        endpoint silently caps at 25 events (see _fetch_full_season_games
-        comment).
+        matchups. Per-day, never a date range: see
+        `_espn.SCOREBOARD_EVENT_LIMIT`.
         """
         rankings = self._fetch_rankings()
         today = datetime.now(timezone.utc).date()
@@ -200,7 +189,7 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -245,12 +234,12 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
         endpoint. Dedupe by event id. Returns the canonical shape
         PointsBasedSportSource expects.
 
-        DO NOT use the `dates=YYYYMMDD-YYYYMMDD` range syntax: empirically
-        ESPN's scoreboard endpoint silently caps range responses at 25
-        events regardless of the `limit` parameter. Single-day queries
-        (`dates=YYYYMMDD`) return ALL games for that day (~70-100 during
-        peak season). Per-day iteration is ~110 calls Feb-now, ~10s total
-        for a refresh.
+        DO NOT use a multi-day `dates=` form: `YYYYMMDD-YYYYMMDD` answers
+        HTTP 400 and `YYYYMM` silently drops events (measured 2026-10-11,
+        see `_espn.SCOREBOARD_EVENT_LIMIT`). A peak Saturday carries up to
+        ~150 games, past ESPN's default 100-event page, which is why every
+        day goes through `fetch_scoreboard_day` and its explicit `limit`.
+        ~150 days, fetched concurrently by `fetch_days`.
         """
         seen: Dict[Any, Dict[str, Any]] = {}
         season_start = datetime(self.season_year, SEASON_START_MONTH, 1, tzinfo=timezone.utc).date()
@@ -266,7 +255,7 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
         end = season_end
 
         def day_board(day):
-            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            return fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
 
         for _day, data in fetch_days(season_start, end, day_board):
             if data:
@@ -496,7 +485,7 @@ class NcaaBaseballPlayoffSource(_BaseballPlayoffStrengthsMixin, BestOfNSeriesSou
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -581,7 +570,7 @@ class NcaaBaseballPlayoffSource(_BaseballPlayoffStrengthsMixin, BestOfNSeriesSou
         season_end = datetime(self.season_year, 7, 1, tzinfo=timezone.utc).date()
         day = season_start
         while day <= season_end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if data:
                 for event in data.get("events") or []:
                     if not _is_postseason_event(event):
@@ -905,7 +894,7 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
         raw_events: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -1011,7 +1000,7 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
         day = season_start
         seen_ids: set = set()
         while day <= season_end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if data:
                 for event in data.get("events") or []:
                     if not _is_postseason_event(event):

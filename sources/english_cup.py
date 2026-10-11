@@ -88,6 +88,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from .._util import http_get_json
 from .base import GameRow, SportSource
 from ._espn import sweep_upcoming_scoreboard
 
@@ -147,34 +148,8 @@ FA_CUP_ROUNDS: Tuple[Tuple[str, str], ...] = (
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    """DELIBERATELY a per-module copy, not a shared helper.
-
-    Seventeen sources define a near-identical `_http_get`, and the similarity is
-    textual rather than shared knowledge: these copies do not have to agree for
-    anything to be correct, and two things make the duplication load-bearing.
-
-      - The logger name. Each source logs under its own
-        `plugins.dispatcharr_ranked_matchups.<source>` channel, which is how a
-        failing feed is attributed in the Dispatcharr log.
-      - The patch point. Every source's tests stub `<module>.requests.get`, so
-        the module needs its OWN `requests` symbol. Routing through a shared
-        getter would make those stubs silent no-ops that hit the real network
-        instead of failing, which is the worst kind of test regression.
-
-    `sweep_upcoming_scoreboard` therefore takes `http_get` INJECTED rather than
-    calling requests itself. The genuinely shared knowledge (the sweep window
-    and its filters) lives there; this stays local. Repo-wide consolidation of
-    all seventeen is tracked separately.
-    """
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[english_cup] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[english_cup] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="english_cup", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:

@@ -26,10 +26,10 @@ Rankings poll: ESPN exposes the ESPN.com/USA Softball Collegiate
 Top 25 (the canonical D1 softball poll). Used for the rank-pair
 signal on upcoming matchups.
 
-Per-day iteration is required: ESPN's range syntax silently caps
-at 25 events. D1 softball can produce 60+ games on a Saturday
-during peak season; per-day single-date queries return all of
-them.
+Per-day iteration with an explicit page size is required: a peak
+Saturday carries ~150 games, past ESPN's default 100-event page, and
+the multi-day `dates=` forms either 400 or silently drop events. See
+`_espn.SCOREBOARD_EVENT_LIMIT`.
 
 Team-name canonicalization uses ESPN's `team.location` (school name:
 "Oklahoma", "Texas") rather than the mascot ("Sooners", "Longhorns")
@@ -53,8 +53,9 @@ from .._util import (
     extract_game_number_after_marker,
     parse_iso_utc,
     poisson_sample as _poisson,
+    http_get_json,
 )
-from ._espn import fetch_days
+from ._espn import fetch_days, fetch_scoreboard_day
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_softball")
 
@@ -73,17 +74,8 @@ _DEFAULT_RUNS_AGAINST = 5.0
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    """ESPN unofficial wrapper. Returns parsed JSON or None on any
-    failure. Logs at WARNING so silent degradation is observable."""
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[ncaa_softball] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[ncaa_softball] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="ncaa_softball", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -205,7 +197,7 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -267,9 +259,8 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
         return ranks_by_team
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
-        """Per-day iteration from season start (Feb 1) through
-        min(today + 7d, end of season). Same trap as ncaa_baseball.py:
-        ESPN range syntax caps at 25 events, daily queries don't.
+        """Per-day iteration from season start (Feb 1) through the end
+        of the season (#229), via `_espn.fetch_scoreboard_day`.
         """
         seen: Dict[Any, Dict[str, Any]] = {}
         season_start = datetime(self.season_year, SEASON_START_MONTH, 1,
@@ -287,7 +278,7 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
         end = season_end
 
         def day_board(day):
-            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            return fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
 
         for _day, data in fetch_days(season_start, end, day_board):
             if data:
@@ -449,7 +440,7 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -531,7 +522,7 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
         season_end = datetime(self.season_year, 6, 15, tzinfo=timezone.utc).date()
         day = season_start
         while day <= season_end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if data:
                 for event in data.get("events") or []:
                     if not _is_postseason_event(event):
@@ -790,7 +781,7 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
         raw_events: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -894,7 +885,7 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
         day = season_start
         seen_ids: set = set()
         while day <= season_end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if data:
                 for event in data.get("events") or []:
                     if not _is_postseason_event(event):

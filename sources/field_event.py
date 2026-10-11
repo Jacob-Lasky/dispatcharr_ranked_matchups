@@ -21,9 +21,8 @@ Design:
 Subclasses parameterize the league via class attrs (ESPN_SLUG,
 SPORT_PREFIX, SPORT_LABEL, MAJOR_REGEX). The base does all the work.
 
-ESPN doesn't enforce a 25-event range cap on these endpoints because
-volumes are low (F1: 24 GPs/year, NASCAR: 36 races/year, PGA: ~45
-tour events/year). Range queries are safe.
+Fetched one scoreboard day at a time like every other ESPN source; see
+`FieldEventSource.fetch_upcoming` for why the range form is not used.
 """
 
 from __future__ import annotations
@@ -36,7 +35,8 @@ from typing import Any, List, Optional, Pattern
 import requests
 
 from .base import GameRow, SportSource
-from .._util import FIELD_AWAY_SENTINEL, field_event_extra, parse_iso_utc
+from ._espn import fetch_scoreboard_day
+from .._util import FIELD_AWAY_SENTINEL, field_event_extra, http_get_json, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.field_event")
 
@@ -77,23 +77,30 @@ class FieldEventSource(SportSource):
         return f"https://site.api.espn.com/apis/site/v2/sports/{self.ESPN_SLUG}"
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Pull events scheduled in the next N days via the ESPN
-        scoreboard range endpoint. Field-event sports have low enough
-        volume that range queries (which silently cap at 25 for team
-        sports) work fine: ESPN returns the whole window unfiltered.
+        """Pull events in the day buckets today..today+days_ahead, one
+        scoreboard request per day (`_espn.fetch_scoreboard_day`).
+
+        DO NOT go back to one `dates=<today>-<end>` range call. It is the
+        form ESPN now rejects with HTTP 400 for every team sport, and on
+        these feeds, where it still answers, it EXCLUDES the window's last
+        day: measured 2026-10-11, `racing/nascar-premier` 20261011-20261018
+        returned the Charlotte race but not Phoenix on Oct 18, which the
+        per-day walk finds (#182; see `_espn.SCOREBOARD_EVENT_LIMIT`). A
+        multi-day event (a golf or tennis tournament) appears in every day's
+        bucket it spans, so the id dedupe below keeps its first copy.
         """
         today = datetime.now(timezone.utc).date()
-        end = today + timedelta(days=days_ahead)
-        url = (
-            f"{self._espn_base()}/scoreboard"
-            f"?dates={today.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
-        )
-        data = _http_get(url)
-        if not isinstance(data, dict):
-            return []
+        scoreboard_url = f"{self._espn_base()}/scoreboard"
+        events: List[Any] = []
+        for offset in range(days_ahead + 1):
+            data = fetch_scoreboard_day(
+                _http_get, scoreboard_url, today + timedelta(days=offset),
+            )
+            if isinstance(data, dict):
+                events.extend(data.get("events") or [])
         out: List[GameRow] = []
         seen_ids: set = set()
-        for event in data.get("events") or []:
+        for event in events:
             eid = event.get("id")
             if eid in seen_ids:
                 continue
@@ -130,17 +137,8 @@ class FieldEventSource(SportSource):
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
-    """ESPN unofficial API wrapper. Returns parsed JSON or None on
-    any error. Shared across all field-event subclasses."""
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[field_event] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[field_event] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="field_event", timeout=timeout)
 
 
 # =====================================================================

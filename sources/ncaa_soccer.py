@@ -32,17 +32,18 @@ import requests
 
 from .base import GameRow
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc
-from ._espn import extract_espn_scoreboard_event, fetch_days
+from .._util import http_get_json
+from ._espn import extract_espn_scoreboard_event, fetch_days, fetch_scoreboard_day
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_soccer")
 
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 
-# NCAA soccer regular season: August through early December (College
-# Cup wraps mid-December). Walk Aug 1 through Dec 31 day-by-day to
-# avoid ESPN's silent 25-event cap on date-range scoreboard queries
-# (see ncaa_baseball.py for the same trap).
+# NCAA soccer season starts in August. The importance walk runs Aug 1
+# through `_REGULAR_SEASON_END` below, one scoreboard day at a time with an
+# explicit page size: a busy women's Saturday carries 100+ games, past ESPN's
+# default 100-event page (225 games of the 2026 season were missing before
+# `_espn.fetch_scoreboard_day` added the limit, #182).
 SEASON_START_MONTH = 8   # August
 
 # Last day of each gender's regular season (conference tournaments included),
@@ -61,15 +62,8 @@ _DEFAULT_GOALS_AGAINST = 1.5
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[ncaa_soccer] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[ncaa_soccer] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="ncaa_soccer", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -138,17 +132,15 @@ class NcaaSoccerSource(PointsBasedSportSource):
     # ---------- fetch_upcoming ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Per-day scoreboard sweep (ESPN's date-range syntax silently
-        caps at 25 events: see ncaa_baseball.py)."""
+        """Per-day scoreboard sweep (`_espn.fetch_scoreboard_day`; see
+        `_espn.SCOREBOARD_EVENT_LIMIT` for why not a date range)."""
         rankings = self._fetch_rankings()
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(
-                f"{ESPN_BASE}/{self._espn_slug}/scoreboard?dates={day.strftime('%Y%m%d')}"
-            )
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -184,8 +176,8 @@ class NcaaSoccerSource(PointsBasedSportSource):
     # ---------- _fetch_full_season_games ----------
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
-        """Per-day sweep across the season. Roughly Aug-Dec = ~150
-        days × ~100ms = ~15s. Acceptable for a 6-hour refresh budget.
+        """Per-day sweep across the regular season (~100 days from Aug 1),
+        fetched concurrently by `fetch_days`.
         """
         seen: Dict[Any, Dict[str, Any]] = {}
         season_start = datetime(self.season_year, SEASON_START_MONTH, 1, tzinfo=timezone.utc).date()
@@ -206,7 +198,7 @@ class NcaaSoccerSource(PointsBasedSportSource):
         end = season_end
 
         def day_board(day):
-            return _http_get(f"{ESPN_BASE}/{self._espn_slug}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            return fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard", day)
 
         for _day, data in fetch_days(season_start, end, day_board):
             if data:

@@ -28,10 +28,9 @@ API quirks captured here:
     Semifinals - Game 2", "East Finals - Game 1", "NBA Finals - Game 6".
     No structured field exposes the round; the headline regex is the
     only way to map games to bracket stages.
-  - Per-day iteration is required for the full season schedule. ESPN
-    silently caps `dates=YYYYMMDD-YYYYMMDD` range responses at 25
-    events; single-date queries return ALL games for that day. Same
-    trap as `ncaa_baseball.py`.
+  - The scoreboard is walked one day at a time with an explicit page
+    size (`_espn.fetch_scoreboard_day`). The multi-day `dates=` forms
+    either 400 or silently drop events; see `_espn.SCOREBOARD_EVENT_LIMIT`.
   - Team names use `team.displayName` (e.g., "Oklahoma City Thunder")
     because that's what NBA EPG provider titles typically use, and
     they're unambiguous as the canonical join key.
@@ -52,8 +51,8 @@ import requests
 from .base import GameRow
 from .bracket import BestOfNSeriesSource
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc
-from ._espn import fetch_days
+from .._util import parse_iso_utc, http_get_json
+from ._espn import fetch_days, fetch_scoreboard_day
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.nba")
 
@@ -67,25 +66,16 @@ _DEFAULT_POINTS_AGAINST = 115.0
 
 # NBA season starts mid-to-late October, ends in mid-April (regular).
 # Postseason runs mid-April through mid-June (Finals Game 7 latest).
-# We iterate Oct 1 through max(today + 7d, Jun 30 of season-end year).
+# The regular-season walk runs Oct 1 through Apr 30 of the season-end year
+# (#229); the playoff walk runs Apr 1 through Jul 1.
 # ESPN's `season.year` field uses the ENDING calendar year (e.g., "2025"
 # means the 2024-25 season).
 SEASON_START_MONTH = 10  # October
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    """ESPN unofficial API wrapper. Returns parsed JSON or None on any
-    error. Logs at WARNING so silent degradation is observable in the
-    dispatcharr log."""
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[nba] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[nba] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="nba", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -271,7 +261,7 @@ class NbaRegularSource(PointsBasedSportSource):
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Pull the next-N-day schedule via per-day scoreboard queries
-        (the date-range syntax silently caps at 25 events). Restricted
+        (`_espn.fetch_scoreboard_day`). Restricted
         to regular-season games here; the playoff source has its own
         fetch_upcoming that filters on season.type == 3.
         """
@@ -280,7 +270,7 @@ class NbaRegularSource(PointsBasedSportSource):
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -319,12 +309,11 @@ class NbaRegularSource(PointsBasedSportSource):
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
         """Walk every day from season start (Oct 1 of season_end_year-1)
-        through min(today + 7d, end of regular season). Filter on
+        through the end of the regular season (#229). Filter on
         season.type == 2 so postseason games don't leak into the
         regular-season importance calculation.
 
-        Per-day rather than date-range because ESPN's range query
-        silently caps at 25 events.
+        Per-day, never a date range: see `_espn.SCOREBOARD_EVENT_LIMIT`.
         """
         seen: Dict[Any, Dict[str, Any]] = {}
         # NBA season: starts mid-late October of (end_year - 1),
@@ -348,7 +337,7 @@ class NbaRegularSource(PointsBasedSportSource):
         end = regular_end
 
         def day_board(day):
-            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            return fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
 
         for _day, data in fetch_days(season_start, end, day_board):
             if data:
@@ -428,7 +417,7 @@ class NbaPlayoffSource(BestOfNSeriesSource):
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -512,7 +501,7 @@ class NbaPlayoffSource(BestOfNSeriesSource):
         end = datetime(self.season_end_year, 7, 1, tzinfo=timezone.utc).date()
         day = start
         while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)

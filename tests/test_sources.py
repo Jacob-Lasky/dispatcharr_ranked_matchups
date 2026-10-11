@@ -6875,19 +6875,16 @@ class TestMlsStandingsFixtureWindow:
         calls = self._capture_calls(monkeypatch, mod, [])
         # season_year in the past so "now" cannot influence the window.
         MlsEastSource(season_year=2025)._fetch_full_season_games()
-        assert len(calls) == 1, (
-            f"expected ONE range call for the whole season, got {len(calls)}"
-        )
-        _, params = calls[0]
-        assert params["dates"] == "20250201-20251130", (
-            "importance sweep must span the full Feb-Nov season window, "
-            f"got dates={params['dates']!r}"
-        )
+        days = sorted(url.split("dates=")[1][:8] for url, _ in calls)
+        # Literals: Feb 1 - Nov 30 2025 is 303 days, one request each (#182).
+        assert (days[0], days[-1], len(days), len(set(days))) == (
+            "20250201", "20251130", 303, 303,
+        ), "importance sweep must request every day of the Feb-Nov season"
 
     def test_season_fetch_passes_the_paging_limit(self, monkeypatch):
-        """Without `limit` ESPN silently returns only the first page of a
-        date range, which would truncate the season back to a partial
-        fixture list -- the same starvation, harder to spot."""
+        """Without `limit` ESPN pages a scoreboard silently (100 events per
+        day), which would truncate the season back to a partial fixture
+        list -- the same starvation, harder to spot."""
         from dispatcharr_ranked_matchups.sources.mls_standings import (
             MlsEastSource,
         )
@@ -6897,10 +6894,44 @@ class TestMlsStandingsFixtureWindow:
         )
         calls = self._capture_calls(monkeypatch, mod, [])
         MlsEastSource(season_year=2025)._fetch_full_season_games()
-        _, params = calls[0]
-        assert params.get("limit") == mod.SCOREBOARD_EVENT_LIMIT, (
-            f"scoreboard range call must pass limit, got params={params!r}"
+        assert calls and all(url.endswith("&limit=1000") for url, _ in calls), (
+            f"every scoreboard call must pass limit=1000, got {calls[:2]!r}"
         )
+
+    def test_season_fetch_survives_espn_rejecting_the_range_form(
+        self, monkeypatch,
+    ):
+        """WITNESS for the live outage (#182): ESPN answers the
+        `dates=<start>-<end>` form with HTTP 400 for team sports (measured
+        2026-10-11; the plugin log shows it from 2026-10-07), and the old
+        single ranged call turned that into an EMPTY MLS season. Emulate
+        ESPN exactly: range URL -> None (what `_http_get` returns on a 400),
+        one-day URL -> that day's events."""
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map", lambda: {"A": "East", "B": "East"},
+        )
+        fixture = {"id": "S9", "date": "2025-10-25T19:00:00Z",
+                   "season": {"slug": "regular-season"},
+                   "competitions": [{
+                       "status": {"type": {"completed": False, "state": "pre"}},
+                       "competitors": [
+                           {"homeAway": "home", "team": {"displayName": "A"}},
+                           {"homeAway": "away", "team": {"displayName": "B"}},
+                       ],
+                   }]}
+
+        def espn(url, *_a, **params):
+            dates = params.get("dates") or url.split("dates=")[1].split("&")[0]
+            if "-" in dates:
+                return None
+            return {"events": [fixture] if dates == "20251025" else []}
+        monkeypatch.setattr(mod, "_http_get", espn)
+        games = MlsEastSource(season_year=2025)._fetch_full_season_games()
+        assert [g["id"] for g in games] == ["S9"]
 
     def test_far_future_fixture_reaches_remaining_matches(self, monkeypatch):
         """End-to-end pin on the behaviour #65 is about: a fixture months
@@ -6940,28 +6971,6 @@ class TestMlsStandingsFixtureWindow:
         ids = {(m.extra or {}).get("game_id") for m in remaining}
         assert ids == {"S1"}, (
             f"far-future fixture must survive into remaining_matches, got {ids}"
-        )
-
-    def test_range_helper_warns_when_response_hits_the_limit(
-        self, monkeypatch, caplog,
-    ):
-        """A response exactly at the limit is the only symptom ESPN gives
-        for a truncated page: it must not pass silently."""
-        import logging
-        from dispatcharr_ranked_matchups.sources import mls_standings as mod
-        monkeypatch.setattr(mod, "SCOREBOARD_EVENT_LIMIT", 3)
-        monkeypatch.setattr(
-            mod, "_http_get",
-            lambda *_a, **_k: {"events": [{"id": 1}, {"id": 2}, {"id": 3}]},
-        )
-        with caplog.at_level(logging.WARNING, logger=mod.logger.name):
-            events = mod._fetch_scoreboard_range(
-                date(2025, 2, 1), date(2025, 11, 30),
-            )
-        assert len(events) == 3
-        messages = [r.getMessage() for r in caplog.records]
-        assert any("truncated" in m for m in messages), (
-            f"expected a truncation warning, got {messages}"
         )
 
     def test_range_helper_returns_empty_for_inverted_window(self):
@@ -10783,7 +10792,7 @@ def _patch_friendlies_http(monkeypatch, events):
         def json(self): return {"events": events}
 
     def _get(url, *a, **kw):
-        requested_dates.append(url.split("dates=")[1])
+        requested_dates.append(url.split("dates=")[1][:8])
         return FakeResp()
 
     monkeypatch.setattr(friendlies_mod.requests, "get", _get)
@@ -11166,7 +11175,7 @@ def _patch_cup_http(monkeypatch, events):
         def json(self): return {"events": events}
 
     def _get(url, *a, **kw):
-        requested_dates.append(url.split("dates=")[1])
+        requested_dates.append(url.split("dates=")[1][:8])
         return FakeResp()
 
     monkeypatch.setattr(cup_mod.requests, "get", _get)

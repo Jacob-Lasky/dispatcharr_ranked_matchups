@@ -39,16 +39,92 @@ sweeps differ on purpose. See #190.
 """
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .._util import parse_iso_utc
 
+logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.espn")
+
 # ESPN's soccer competition root. Every soccer slug this plugin sweeps
 # (eng.1, eng.league_cup, eng.fa, fifa.friendly, club.friendly,
 # usa.ncaa.m.1, ...) hangs off it.
 ESPN_SOCCER_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+
+# Every ESPN scoreboard request goes ONE DAY AT A TIME with an explicit page
+# size, through `scoreboard_day_url` / `fetch_scoreboard_day`. Three measured
+# facts (2026-10-11, #182) decide that, and each rules out a shortcut:
+#
+#   1. A single day PAGES silently at 100 events. `dates=20261025` on
+#      `soccer/usa.ncaa.w.1` returned 100; `&limit=1000` returned 101. Over the
+#      2026 women's NCAA soccer regular season the bare per-day walk saw 3001
+#      games and the limited one 3226: 225 games missing from the season the
+#      importance simulator replays, with nothing logged. `limit` is why
+#      SCOREBOARD_EVENT_LIMIT exists, and it applies to every per-day call.
+#   2. `limit` above 1000 does NOT raise the cap. ESPN silently answers with
+#      a 25-event page instead: one `soccer/usa.ncaa.w.1` query returned 999
+#      events at limit=999, 1000 at limit=1000 and 25 at limit=1001. A
+#      25-event page is the likely origin of the old "range queries cap at
+#      25" comments. DO NOT raise this constant past 1000.
+#   3. The multi-day forms are not a substitute for the per-day walk:
+#        - `dates=YYYYMMDD-YYYYMMDD` (with or without `limit`) answers
+#          HTTP 400 "Failed to get events endpoint." for every team sport
+#          tried: NBA, NFL, NHL, MLS, Premier League, NCAA soccer. It worked
+#          for MLS on 2026-08-15 (#65), and the live plugin log shows
+#          `mls_standings` getting 400s on it since at least 2026-10-07 (the
+#          oldest retained log). It still answers for racing and tennis, but
+#          EXCLUDES the window's last day (`racing/nascar-premier`
+#          20261011-20261018 omitted the Oct 18 race) and missed an
+#          in-progress tournament the per-day buckets carry (`tennis/atp`,
+#          the Shanghai Masters on 2026-10-11).
+#        - `dates=YYYYMM` returned 742 of the 1033 games the per-day walk
+#          found for the 2025-26 women's college basketball season, WITHOUT
+#          reaching the limit, so "count == limit" cannot detect it.
+#      A form that fails loudly costs a fallback request; a form that drops
+#      events quietly costs correctness with no symptom. Neither is worth the
+#      requests it saves while the per-day walk runs concurrently (fetch_days)
+#      on every long window.
+#
+# A per-day page that still comes back AT the limit is logged by
+# `fetch_scoreboard_day`, since that is the only symptom truncation gives.
+SCOREBOARD_EVENT_LIMIT = 1000
+
+
+def scoreboard_day_url(scoreboard_url: str, day: date) -> str:
+    """The one-day scoreboard URL for `day`, with the explicit page size.
+
+    `scoreboard_url` is the league's `.../scoreboard` endpoint, no query.
+    Every source builds its day URLs here; `tests/test_espn_scoreboard.py`
+    fails any `scoreboard?dates=` literal elsewhere in `sources/`, because a
+    URL without `limit` silently loses events past the 100th of a busy day.
+    """
+    return f"{scoreboard_url}?dates={day.strftime('%Y%m%d')}&limit={SCOREBOARD_EVENT_LIMIT}"
+
+
+def fetch_scoreboard_day(
+    http_get: Callable[[str], Optional[Dict[str, Any]]],
+    scoreboard_url: str,
+    day: date,
+) -> Optional[Dict[str, Any]]:
+    """`http_get(scoreboard_day_url(...))`, warning when the page is full.
+
+    `http_get` is injected for the same reason as everywhere in this module:
+    it is the source's own `_http_get`, the patch point its tests stub.
+    Returns whatever `http_get` returned (a dict, or None on failure).
+    """
+    data = http_get(scoreboard_day_url(scoreboard_url, day))
+    if isinstance(data, dict):
+        n = len(data.get("events") or [])
+        if n >= SCOREBOARD_EVENT_LIMIT:
+            logger.warning(
+                "[espn] %s dates=%s returned %d events, at the page limit of "
+                "%d: that day may be truncated",
+                scoreboard_url, day.strftime("%Y%m%d"), n, SCOREBOARD_EVENT_LIMIT,
+            )
+    return data
+
 
 # How many extra days BEHIND today-UTC the sweep reaches. ESPN buckets its
 # scoreboard by US EASTERN calendar date, not UTC, so the `dates=YYYYMMDD`
@@ -185,10 +261,10 @@ def sweep_upcoming_scoreboard(
     Shared by `friendlies.py` and `english_cup.py`; see the module docstring
     for why the bracket sources deliberately do NOT use it.
 
-    ESPN's date-RANGE syntax silently caps at 25 events, so this walks ONE DAY
-    AT A TIME (the same trap documented in `ncaa_baseball.py` and
-    `ncaa_soccer.py`). The BUCKETS run from `SCOREBOARD_LOOKBACK_DAYS` before
-    today-UTC through `days_ahead` after it.
+    Walks ONE DAY AT A TIME through `fetch_scoreboard_day`; see
+    SCOREBOARD_EVENT_LIMIT for why no multi-day form replaces that. The
+    BUCKETS run from `SCOREBOARD_LOOKBACK_DAYS` before today-UTC through
+    `days_ahead` after it.
 
     `days_ahead` bounds the buckets requested, NOT the kickoff timestamps
     returned, and the two are not the same thing. ESPN buckets by US Eastern
@@ -228,9 +304,7 @@ def sweep_upcoming_scoreboard(
     seen_ids: set = set()
     for offset in range(days_ahead + SCOREBOARD_LOOKBACK_DAYS + 1):
         day = start_day + timedelta(days=offset)
-        data = http_get(
-            f"{base}/{slug}/scoreboard?dates={day.strftime('%Y%m%d')}"
-        )
+        data = fetch_scoreboard_day(http_get, f"{base}/{slug}/scoreboard", day)
         if not data:
             continue
         for event in data.get("events") or []:

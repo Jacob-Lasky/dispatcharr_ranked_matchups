@@ -554,6 +554,61 @@ def redact_secrets(value: Any) -> str:
     return text
 
 
+def http_get_json(
+    requests_mod: Any,
+    url: str,
+    *,
+    log: Any,
+    tag: str,
+    timeout: float = 15.0,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+) -> Optional[Any]:
+    """GET `url` and return its parsed JSON, or None after logging a WARNING.
+
+    The ONE body behind every source module's `_http_get` (#193). A status of
+    400 or above, any `requests` exception and an unparseable body all come
+    back as None, which every caller already reads as "no data from this
+    feed". Both log lines go through `redact_secrets`, on the URL AND on the
+    exception text, because `requests` renders the full URL (query string
+    included) into its exception messages and no caller can sanitise those.
+
+    DO NOT import `requests` in this module, and DO NOT "simplify" the
+    per-module `_http_get` wrappers away. Each source keeps a thin
+    `_http_get` that passes ITS OWN module-level `requests` symbol and logger:
+
+      - The `requests` symbol is the patch point. Source tests replace
+        `<module>._http_get`, or `get` on `<module>.requests`, and a source
+        that stopped resolving its own symbol at call time would turn a
+        test stub into a live call against ESPN / NHL / MLB that the suite
+        cannot see. `requests_mod.get` is looked up per call, so a stub
+        installed after import is honoured.
+        `tests/test_sources_http.py` pins this for every wrapper.
+      - The logger and `tag` keep each failing feed attributed to its own
+        `plugins.dispatcharr_ranked_matchups.<source>` channel.
+
+    `params` and `headers` are forwarded only when given, so a wrapper that
+    never took them makes the same `requests.get(url, timeout=...)` call it
+    always did.
+    """
+    kwargs: Dict[str, Any] = {"timeout": timeout}
+    if params is not None:
+        kwargs["params"] = params
+    if headers is not None:
+        kwargs["headers"] = headers
+    try:
+        r = requests_mod.get(url, **kwargs)
+        if r.status_code >= 400:
+            log.warning("[%s] %s -> %d", tag, redact_secrets(url), r.status_code)
+            return None
+        return r.json()
+    except (requests_mod.RequestException, ValueError) as exc:
+        log.warning(
+            "[%s] %s failed: %s", tag, redact_secrets(url), redact_secrets(exc),
+        )
+        return None
+
+
 _ORDINAL_SUFFIXES = ("th", "st", "nd", "rd")
 
 

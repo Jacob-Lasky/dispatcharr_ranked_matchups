@@ -57,8 +57,9 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 import requests
 
 from .base import GameRow, MatchResult
+from ._espn import fetch_scoreboard_day
 from .bracket import BestOfNSeriesSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .._util import parse_iso_utc, poisson_sample as _poisson, http_get_json
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_cup")
 
@@ -110,15 +111,8 @@ SLUG_TO_STAGE: Dict[str, str] = {
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[mls_cup] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[mls_cup] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="mls_cup", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -266,9 +260,7 @@ class MlsCupSource(BestOfNSeriesSource):
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(
-                f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}"
-            )
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not isinstance(data, dict):
                 continue
             for event in data.get("events") or []:
@@ -339,9 +331,7 @@ class MlsCupSource(BestOfNSeriesSource):
         ).date()
         day = start
         while day <= end:
-            data = _http_get(
-                f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}"
-            )
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if isinstance(data, dict):
                 for event in data.get("events") or []:
                     # Pass matchday=None: the inference loop below
@@ -450,7 +440,6 @@ class MlsCupSource(BestOfNSeriesSource):
 # `_dedupe_pk_shootout_pairs` in this module still find it.
 from ._soccer_bracket_helpers import (
     dedupe_pk_shootout_pairs as _dedupe_pk_shootout_pairs,
-    pick_decisive_event as _pick_decisive_event,
 )
 
 

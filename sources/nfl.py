@@ -37,8 +37,8 @@ import requests
 from .base import GameRow
 from .bracket import BestOfNSeriesSource
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc
-from ._espn import fetch_days
+from .._util import parse_iso_utc, http_get_json
+from ._espn import fetch_days, fetch_scoreboard_day
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.nfl")
 
@@ -58,15 +58,8 @@ PLAYOFF_END_MONTH = 2    # February (Super Bowl)
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[nfl] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[nfl] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="nfl", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -223,7 +216,7 @@ class NflRegularSource(PointsBasedSportSource):
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -276,7 +269,7 @@ class NflRegularSource(PointsBasedSportSource):
         end = regular_end
 
         def day_board(day):
-            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            return fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
 
         for _day, data in fetch_days(season_start, end, day_board):
             if data:
@@ -344,7 +337,7 @@ class NflPlayoffSource(BestOfNSeriesSource):
         seen_ids: set = set()
         for offset in range(days_ahead + 1):
             day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -407,7 +400,7 @@ class NflPlayoffSource(BestOfNSeriesSource):
         end = datetime(self.season_end_year, 2, 28, tzinfo=timezone.utc).date()
         day = start
         while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)
