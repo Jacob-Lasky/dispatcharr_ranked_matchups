@@ -741,7 +741,11 @@ expected before judging the whole guide.
   most twice per refresh rather than once per simulated season, and a
   competition that gives up is reported in the refresh summary as
   `<code> season fixtures (stakes not simulated)`, so the zero is visible
-  rather than passing for a real result.
+  rather than passing for a real result. Playoff brackets work the same
+  way: a bracket fetch in which any request failed (one missing day of a
+  scoreboard sweep is a wrong series score) is not used, is retried, and a
+  bracket that gives up is reported as `<label> bracket (stakes not
+  simulated)`.
 - **In-progress games** are treated as SCHEDULED (not FINISHED) for
   state-building so the simulator doesn't seed wins/losses from
   mid-game state. Once the game ends and the source's API updates,
