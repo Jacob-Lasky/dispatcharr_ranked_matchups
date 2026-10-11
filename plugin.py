@@ -384,30 +384,57 @@ EPG_POST_HOURS = 4    # 4 hours after game starts (default; covers OT)
 # the reaper may remove the channel and, through _live_window's min() with
 # EPG_POST_HOURS, where the Live EPG block and the auto-record window end.
 #
-# Soccer leagues / international tournaments. Soccer games run ~95-120 min
-# (90 reg + halftime + stoppage); add ~10 min for extra time + penalties
-# in knockouts. 5 min pre + 2.5h post covers the actual broadcast window
-# without sweeping in pre-game preview shows from earlier in the day.
+# Soccer. A 90-minute match with stoppage and a 15-minute half time is over
+# about 1 h 55 m after kickoff, so 5 min pre + 2.5 h post covers the broadcast
+# without sweeping in the preview shows from earlier in the day (#4).
+#
+# A tie that can go to extra time and penalties cannot fit 2.5 h: 90 +
+# stoppage + 15 half time + 5 break + 30 extra time + stoppage + a shootout
+# ends about 2 h 45 m after kickoff (#257). Such a game gets
+# _SOCCER_KNOCKOUT_POST_HOURS instead, keeping the tight 5-minute PRE window,
+# which is the part that guards recall. DO NOT shorten it below 2 h 45 m: the
+# post window dates the game's end, so a short one ends the Live block and the
+# auto-record before the shootout, and with a small
+# remove_finished_after_minutes the reaper deletes the channel during it.
+#
+# Which games: a soccer prefix whose games include knockouts gets the long
+# window per GAME, from the row itself: _is_postseason_extra, the same rule the
+# favorites-only gate uses, which reads a postseason `extra["stage"]` (WC /
+# EURO / UCL rounds, MLS Cup rounds, the College Cup) or, for the ESPN sources
+# that carry no stage (NWSL, Liga MX), a playoff `season_slug`. DO NOT key it
+# on the prefix for those: WC, EURO, UCL, MLS, NWSL and Liga MX are mostly
+# group or league games, which keep 2.5 h.
+#
+# A prefix in _SOCCER_EVERY_GAME_LONG_WINDOW gets the long window for EVERY
+# game, because its rows cannot tell a game that may need extra time from one
+# that cannot. EFLCUP and FACUP are cups (every tie is decided on the day; a
+# round the slug map has not seen yet arrives with no stage at all). NCAA
+# soccer's regular-season source also carries the conference tournaments,
+# which go to two overtimes and penalties, with nothing on the ESPN event to
+# tell them apart: measured 2026-10-11, October 2025 games were all "FT" while
+# November's carried "AET", "AGT" and "FT-Pens" under the same season slug,
+# `altGameNote` and empty `notes`. Friendlies (FRIENDLY, FRIENDLYW,
+# CLUBFRIENDLY) never play extra time, so they are plain league-window soccer.
 #
 # Every member must be a sport_prefix a source emits; tests/
-# test_mapped_prefixes.py fails on a dead one (#183). "NCAAMS"/"NCAAWS" sat
-# here from #4 until #183, never matching the NCAA soccer sources' real
-# "NCAAMSOC"/"NCAAWSOC", so NCAA soccer has always had the default window.
-# DO NOT just add NCAAMSOC/NCAAWSOC, EFLCUP/FACUP or the friendlies here:
-# those games currently get the 4h default, and a knockout that goes to extra
-# time and penalties runs past kickoff + 2.5h, so moving them would end their
-# Live block, auto-record and reap time before a shootout. That already
-# happens to the WC, EURO and UCL knockouts in this set. Decide the knockout
-# window first (#257).
+# test_mapped_prefixes.py fails on a dead one (#183), and fails on a soccer
+# prefix a source emits that is missing here (#257: NCAAMSOC/NCAAWSOC, the
+# English cups and the friendlies all fell back to the 4 h gridiron window).
+_SOCCER_KNOCKOUT_POST_HOURS = 3.0
+_SOCCER_EVERY_GAME_LONG_WINDOW = frozenset({"EFLCUP", "FACUP", "NCAAMSOC", "NCAAWSOC"})
 _SOCCER_PREFIXES = frozenset({
     "EPL", "EFL", "UCL",
     "BL1", "LaLiga", "SerieA", "Ligue1",
     "Eredivisie", "PrimeiraLiga", "BSA",
     "WC", "EURO",
     "MLS", "NWSL", "LigaMX",
-})
+    "FRIENDLY", "FRIENDLYW", "CLUBFRIENDLY",
+}) | _SOCCER_EVERY_GAME_LONG_WINDOW
 _MATCH_WINDOW_OVERRIDE_PRE_MIN: Dict[str, int] = {p: 5 for p in _SOCCER_PREFIXES}
-_MATCH_WINDOW_OVERRIDE_POST_HOURS: Dict[str, float] = {p: 2.5 for p in _SOCCER_PREFIXES}
+_MATCH_WINDOW_OVERRIDE_POST_HOURS: Dict[str, float] = {
+    p: (_SOCCER_KNOCKOUT_POST_HOURS if p in _SOCCER_EVERY_GAME_LONG_WINDOW else 2.5)
+    for p in _SOCCER_PREFIXES
+}
 
 # Boxing (BOX) gets a WIDE window, the opposite of soccer's tight one. The
 # Boxing Data API's start times are unreliable: some cards are date-only and
@@ -420,15 +447,24 @@ _MATCH_WINDOW_OVERRIDE_PRE_MIN["BOX"] = 12 * 60   # 12h before
 _MATCH_WINDOW_OVERRIDE_POST_HOURS["BOX"] = 24.0   # 24h after
 
 
-def _epg_match_window(sport_prefix: Optional[str]) -> Tuple[int, float]:
-    """Returns (pre_min, post_hours) for the EPG match-window pre-filter.
+def _epg_match_window(
+    sport_prefix: Optional[str], extra: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, float]:
+    """Returns (pre_min, post_hours) for one game's EPG match window.
 
-    Defaults to the NCAAF/NFL-tuned (30, 4); soccer prefixes get (5, 2.5);
-    unknown prefixes fall back to the default. See #4.
+    Defaults to the NCAAF/NFL-tuned (30, 4); soccer gets (5, 2.5), or
+    (5, _SOCCER_KNOCKOUT_POST_HOURS) for a knockout (`extra` is the game's
+    `extra` dict, read by _is_postseason_extra) or a prefix in
+    _SOCCER_EVERY_GAME_LONG_WINDOW; unknown prefixes fall back to the
+    default. See #4 and #257.
     """
-    pre = _MATCH_WINDOW_OVERRIDE_PRE_MIN.get(sport_prefix or "", EPG_PRE_MIN)
-    post = _MATCH_WINDOW_OVERRIDE_POST_HOURS.get(sport_prefix or "", float(EPG_POST_HOURS))
+    prefix = sport_prefix or ""
+    pre = _MATCH_WINDOW_OVERRIDE_PRE_MIN.get(prefix, EPG_PRE_MIN)
+    post = _MATCH_WINDOW_OVERRIDE_POST_HOURS.get(prefix, float(EPG_POST_HOURS))
+    if prefix in _SOCCER_PREFIXES and _is_postseason_extra(extra):
+        post = _SOCCER_KNOCKOUT_POST_HOURS
     return pre, post
+
 
 # Marker we put in tvg_id of cloned channels so we can find/clean them up later
 # without needing a custom_properties field on the Channel model.
@@ -2009,8 +2045,8 @@ def _live_window(g: Dict[str, Any], start_dt: datetime) -> Tuple[datetime, datet
     prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
     # DO NOT compute this as start_dt + EPG_POST_HOURS. That is a flat
     # 4h for every sport, while the reaper dates a game's end with the
-    # PER-SPORT window (_game_end_utc -> _epg_match_window: 2.5h for
-    # soccer, 24h for boxing). The two disagreed, so a soccer channel
+    # PER-GAME window (_game_end_utc -> _epg_match_window: 2.5h for
+    # league soccer, 3h for a soccer knockout, 24h for boxing). The two disagreed, so a soccer channel
     # was reaped at start+2.5h+remove_after while its own live programme
     # still claimed the match ran to start+4h: exactly the failure
     # _game_end_utc's docstring warns about, and a second duration table
@@ -2023,10 +2059,12 @@ def _live_window(g: Dict[str, Any], start_dt: datetime) -> Tuple[datetime, datet
     # the match window's generosity into a user-facing duration.
     # _epg_match_window is a MATCH-RECALL prefilter: boxing's +24h
     # absorbs a feed whose start times can be a day off, and using it
-    # raw here would label a card "live" for 24 hours. Soccer's 2.5h is
-    # genuinely shorter than the 4h default, so the min still fixes the
-    # soccer case that motivated this (a channel reaped 30 minutes
-    # before its own live row ended).
+    # raw here would label a card "live" for 24 hours. Soccer's windows
+    # (2.5h league, 3h knockout, #257) are genuinely shorter than the
+    # 4h default, so the min still fixes the soccer case that motivated
+    # this (a channel reaped 30 minutes before its own live row ended).
+    # _published_guide_end reads prog_end from here too; DO NOT recompute
+    # it there.
     _display_end = start_dt + timedelta(hours=EPG_POST_HOURS)
     _sport_end = _game_end_utc(g)
     prog_end = min(_sport_end, _display_end) if _sport_end else _display_end
@@ -2564,6 +2602,23 @@ _NON_POSTSEASON_STAGES = frozenset({
     "EVENT",           # field-event regular tour stop (weekly golf/F1/NASCAR)
 })
 
+# ESPN `season.slug` values that are NOT postseason, for the rows that carry a
+# slug and no stage (sources/mls.py: NWSL and Liga MX, whose playoffs are not
+# bracket sources). Any OTHER non-empty slug on a stage-less row is a playoff
+# round, for the same reason as _NON_POSTSEASON_STAGES: the vocabulary is
+# open-ended (measured 2026-10-11: NWSL "playoffs---quarterfinals" ..
+# "playoffs---championship", Liga MX "apertura---8th-seed-game" ..
+# "apertura---finals"), and over-including an unknown slug costs a rescued
+# game and a 30-minute-longer soccer window, where under-including drops a
+# playoff game and cuts its recording off before the shootout (#257). Only
+# soccer sources write `season_slug` today.
+_NON_POSTSEASON_SEASON_SLUGS = frozenset({
+    "regular-season",   # MLS, NWSL
+    "preseason",        # exhibitions, where ESPN lists them
+    "torneo-apertura",  # Liga MX fall table
+    "torneo-clausura",  # Liga MX spring table
+})
+
 
 def _empty_refresh_result(msg: str, src_summary: List[str], slate_known: bool) -> Dict[str, Any]:
     """Log `msg`, persist an empty cache (so a stale prior cache doesn't keep
@@ -2618,19 +2673,27 @@ def _place_in_bracket(src: Any, games: List[Any], *, for_scoring: bool) -> None:
 
 def _is_postseason_game(game: Any) -> bool:
     """True when this game is a postseason/playoff round (vs regular season,
-    group stage, or a weekly field event). Reads the source-set
-    `extra["stage"]`; see `_NON_POSTSEASON_STAGES` for the taxonomy. A row
-    flagged `postseason` by a playoff-only source counts whatever its stage,
-    so a failed bracket fetch cannot demote it (#243)."""
-    extra = getattr(game, "extra", None) or {}
+    group stage, or a weekly field event). See _is_postseason_extra."""
+    return _is_postseason_extra(getattr(game, "extra", None))
+
+
+def _is_postseason_extra(extra: Optional[Dict[str, Any]]) -> bool:
+    """_is_postseason_game on a game's `extra` dict, so a cache row (where it
+    is a key, not an attribute) is judged by the same rule. Reads the
+    source-set `extra["stage"]`; see `_NON_POSTSEASON_STAGES` for the
+    taxonomy. A row flagged `postseason` by a playoff-only source counts
+    whatever its stage, so a failed bracket fetch cannot demote it (#243)."""
+    extra = extra or {}
     if extra.get("postseason") is True:
         return True
     stage = extra.get("stage")
     if not stage:
-        # No stage = regular-season league play. The NFL/NBA/NHL/MLB/WNBA/
-        # NCAAW playoff sources do not stamp one themselves: _place_in_bracket
-        # does, at fetch, from the source's own bracket (#243).
-        return False
+        # No stage = regular-season league play, unless an ESPN season slug
+        # says otherwise (see _NON_POSTSEASON_SEASON_SLUGS). The NFL/NBA/NHL/
+        # MLB/WNBA/NCAAW playoff sources do not stamp a stage themselves:
+        # _place_in_bracket does, at fetch, from the source's own bracket (#243).
+        slug = str(extra.get("season_slug") or "").strip().lower()
+        return bool(slug) and slug not in _NON_POSTSEASON_SEASON_SLUGS
     return str(stage).strip().upper() not in _NON_POSTSEASON_STAGES
 
 
@@ -3812,10 +3875,13 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
     stats = {"stale_dated_streams_dropped": 0, "policy_streams_excluded": 0}
 
     def lookup(game) -> List[ChannelCandidate]:
-        # Per-sport match window: soccer needs a tighter window to avoid
+        # Per-game match window: soccer needs a tighter window to avoid
         # false-matching pre-game preview shows earlier in the day; NCAAF
         # / NFL keep the wide default for long pre-game shows + OT. See #4.
-        pre_min, post_hours = _epg_match_window(game.sport_prefix)
+        # A soccer knockout's longer post window comes from its own `extra`
+        # (#257), so pass it, not just the prefix.
+        pre_min, post_hours = _epg_match_window(
+            game.sport_prefix, getattr(game, "extra", None))
         window_start = game.start_time - timedelta(minutes=pre_min)
         window_end = game.start_time + timedelta(hours=post_hours)
 
@@ -4057,9 +4123,10 @@ def _game_end_utc(game: Dict[str, Any]) -> Optional[datetime]:
     """Best estimate of when a cached game FINISHES, in UTC.
 
     There is no real end time in any feed we consume, so this reuses the SAME
-    per-sport post-game window the EPG matcher already trusts
-    (_epg_match_window): 4 hours for gridiron sports, 2.5 for soccer, and so
-    on. DO NOT introduce a second duration table for reaping. The window is
+    per-game post-game window the EPG matcher already trusts
+    (_epg_match_window): 4 hours for gridiron sports, 2.5 for league soccer, 3
+    for a soccer knockout that can go to penalties (#257), and so on. DO NOT
+    introduce a second duration table for reaping. The window is
     deliberately generous because it also has to cover overtime, and a reaper
     that fired earlier than the EPG window would delete a channel while its
     own programme entry still claimed the game was on air.
@@ -4070,7 +4137,8 @@ def _game_end_utc(game: Dict[str, Any]) -> Optional[datetime]:
     start = parse_iso_utc(start_raw)
     if start is None:
         return None
-    _pre_min, post_hours = _epg_match_window(game.get("sport_prefix") or "")
+    _pre_min, post_hours = _epg_match_window(
+        game.get("sport_prefix") or "", game.get("extra"))
     return start + timedelta(hours=float(post_hours))
 
 
@@ -5322,9 +5390,7 @@ def _published_guide_end(game: Dict[str, Any], settings: Dict[str, Any]) -> Opti
     start = parse_iso_utc(game.get("start_time_utc"))
     if start is None:
         return None
-    sport_end = _game_end_utc(game)
-    display_end = start + timedelta(hours=EPG_POST_HOURS)
-    prog_end = min(sport_end, display_end) if sport_end else display_end
+    _prog_start, prog_end = _live_window(game, start)
     remove_after = _reap_settings(settings)
     return _compute_past_slot_end(
         prog_end, settings,
@@ -7655,7 +7721,7 @@ def _diagnose_annotation(channel_name, title, home, away, home_kws, away_kws,
 
 
 def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_kws,
-                            field=False):
+                            field=False, extra=None):
     """Return rows of candidate programming airing in the chosen game's window,
     so a human can spot the game sitting under a spelling our keywords miss.
 
@@ -7672,12 +7738,15 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
 
     rows: list of (channel_name, program_title, annotation), one per channel,
     ordered with naming channels first.
+
+    `extra` is the game's cache-row `extra`, so the window searched is the one
+    the matcher used for it (a soccer knockout's is longer, #257).
     """
     from apps.epg.models import ProgramData
     from apps.channels.models import Channel
     from django.db.models import Q
 
-    pre_min, post_hours = _epg_match_window(sport_prefix)
+    pre_min, post_hours = _epg_match_window(sport_prefix, extra)
     win_start = start_dt - timedelta(minutes=pre_min)
     win_end = start_dt + timedelta(hours=post_hours)
 
@@ -7887,7 +7956,7 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 rows = _diagnose_window_sample(
                     start_dt, target.get("sport_prefix"), home, away,
-                    home_kws, away_kws, field=field)
+                    home_kws, away_kws, field=field, extra=target.get("extra"))
             except Exception:  # diagnostic must never raise
                 rows = []
             # Single most relevant listing that names a team (both > one); an

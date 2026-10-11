@@ -32,7 +32,10 @@ import inspect
 import json
 import os
 import pkgutil
+import re
 import socket
+import sys
+import types
 
 import pytest
 
@@ -47,6 +50,7 @@ PREFIX_TABLES = (
     ("logos", "SPORTSDB_LEAGUE_IDS"),
     ("logos", "SPORTSDB_TOURNAMENT_LEAGUE_IDS"),
     ("plugin", "_SOCCER_PREFIXES"),
+    ("plugin", "_SOCCER_EVERY_GAME_LONG_WINDOW"),
     ("plugin", "_MATCH_WINDOW_OVERRIDE_PRE_MIN"),
     ("plugin", "_MATCH_WINDOW_OVERRIDE_POST_HOURS"),
     ("gamethumbs", "GAMETHUMBS_LEAGUE_SLUGS"),
@@ -215,6 +219,111 @@ def test_the_maps_are_populated():
     assert len(_table("plugin", "_SOCCER_PREFIXES")) >= 10
     assert len(_table("gamethumbs", "GAMETHUMBS_LEAGUE_SLUGS")) >= 20
     assert len(_table("rivalries", "_RIVALRIES_BY_SPORT")) >= 15
+
+
+# A soccer API endpoint, as a FULL URL. Docstrings that mention an endpoint
+# without its scheme ("sports.core.api.espn.com/v2/sports/soccer/...") do not
+# count, so a non-soccer module explaining soccer cannot be classified as one.
+_SOCCER_API_URL = re.compile(
+    r"https://[^\s\"']*(/sports/soccer|football-data\.org)")
+
+
+def _code_strings(code):
+    """Every string constant in a code object and the ones nested in it (an
+    f-string URL built inside a method, a lambda, a comprehension)."""
+    for const in code.co_consts:
+        if isinstance(const, str):
+            yield const
+        elif isinstance(const, types.CodeType):
+            yield from _code_strings(const)
+
+
+def _soccer_api_evidence(src):
+    """Where a built source's own code names a soccer API endpoint, or None.
+
+    Read off the classes in the source's MRO that live in the sources
+    package: their attribute strings and method constants, and their
+    modules' globals, including the string defaults of helpers they import
+    (friendlies.py and english_cup.py reach ESPN soccer only through
+    `_espn.sweep_upcoming_scoreboard`'s default `base`). This is the sport
+    the source FETCHES, which is what makes it soccer, so it needs no list of
+    soccer sources that a new one could be missing from."""
+    for cls in type(src).__mro__:
+        if not cls.__module__.startswith(f"{PKG_NAME}.sources."):
+            continue
+        for name, attr in vars(cls).items():
+            if isinstance(attr, str) and _SOCCER_API_URL.search(attr):
+                return f"{cls.__name__}.{name}"
+            fn = getattr(attr, "fget", None) or getattr(attr, "__func__", None) or attr
+            code = getattr(fn, "__code__", None)
+            if code is not None and any(_SOCCER_API_URL.search(c) for c in _code_strings(code)):
+                return f"{cls.__name__}.{name}"
+        mod = sys.modules[cls.__module__]
+        for name, val in vars(mod).items():
+            if name.startswith("__"):
+                continue
+            if isinstance(val, str) and _SOCCER_API_URL.search(val):
+                return f"{cls.__module__}.{name}"
+            if inspect.isfunction(val):
+                for param in inspect.signature(val).parameters.values():
+                    if isinstance(param.default, str) and _SOCCER_API_URL.search(param.default):
+                        return f"{cls.__module__}.{name}({param.name}=)"
+    return None
+
+
+def _soccer_prefixes_emitted(sources):
+    return {s.sport_prefix for s in sources if _soccer_api_evidence(s)}
+
+
+def test_every_soccer_prefix_a_source_emits_gets_the_soccer_window(built_sources, plugin):
+    """#257: NCAAMSOC, NCAAWSOC, EFLCUP, FACUP and the three friendly prefixes
+    were emitted for months while the soccer window never heard of them, so
+    every one fell back to the 4 h gridiron window #4 said lets soccer
+    false-match the day's preview shows. The emitted soccer set comes from
+    what each built source fetches, and must equal the window's set in both
+    directions: a soccer prefix outside it gets the gridiron window, and a
+    non-soccer prefix inside it gets a soccer one."""
+    soccer = _soccer_prefixes_emitted(built_sources)
+    assert soccer == set(plugin._SOCCER_PREFIXES), (
+        f"missing from plugin._SOCCER_PREFIXES: {sorted(soccer - plugin._SOCCER_PREFIXES)}; "
+        f"in it but not soccer: {sorted(plugin._SOCCER_PREFIXES - soccer)}"
+    )
+    for prefix in soccer:
+        assert plugin._epg_match_window(prefix)[0] == 5, prefix
+
+
+def test_the_soccer_derivation_sorts_the_known_leagues(built_sources):
+    """Instrument check, in literals: an over- or under-inclusive derivation
+    would make the test above agree with a wrong table."""
+    soccer = _soccer_prefixes_emitted(built_sources)
+    assert {
+        "EPL", "UCL", "WC", "EURO", "BSA",          # FD.org
+        "MLS", "NWSL", "LigaMX",                     # ESPN usa.1 / nwsl / mex.1
+        "NCAAMSOC", "NCAAWSOC",                      # ESPN NCAA soccer
+        "EFLCUP", "FACUP",                           # only via the sweep's default base
+        "FRIENDLY", "FRIENDLYW", "CLUBFRIENDLY",
+    } <= soccer
+    assert not soccer & {"NFL", "CFB", "CBB", "NHL", "MLB", "NBA", "WNBA",
+                         "F1", "PGA", "UFC", "BOX", "ATP"}
+
+
+def test_the_soccer_derivation_finds_a_new_soccer_source(built_sources, monkeypatch):
+    """Mutation: a new source whose only soccer marker is a URL built inside
+    its fetch method is classified as soccer, and its prefix is reported
+    missing from the window."""
+    mod = types.ModuleType(f"{PKG_NAME}.sources._probe_new_soccer")
+
+    class NewSoccerSource:
+        sport_prefix = "SPL"
+
+        def fetch_upcoming(self, days_ahead=7):
+            return f"https://site.api.espn.com/apis/site/v2/sports/soccer/sco.1?d={days_ahead}"
+
+    NewSoccerSource.__module__ = mod.__name__
+    monkeypatch.setitem(sys.modules, mod.__name__, mod)
+    src = NewSoccerSource()
+    assert _soccer_api_evidence(src) == "NewSoccerSource.fetch_upcoming"
+    assert "SPL" in _soccer_prefixes_emitted(list(built_sources) + [src])
 
 
 def _prefix_like_tables(emitted):
