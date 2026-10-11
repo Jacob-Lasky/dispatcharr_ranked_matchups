@@ -712,17 +712,21 @@ def scenario_marker_must_be_true_not_truthy(env):
 
 # --------------------------------------------------------- pytest driver ---
 
-SCENARIOS = sorted(
-    name[len("scenario_"):] for name, obj in list(globals().items())
-    if name.startswith("scenario_") and callable(obj)
-)
+def collect_scenarios(namespace):
+    """The `scenario_*` functions in a test module's globals, without the prefix."""
+    return sorted(
+        name[len("scenario_"):] for name, obj in list(namespace.items())
+        if name.startswith("scenario_") and callable(obj)
+    )
 
 
-@pytest.fixture(scope="module")
-def harness_results(tmp_path_factory):
+def run_harness(tmp_path_factory, test_file, scenarios):
+    """Run `scenarios` from `test_file` in the ORM harness subprocess and return
+    {name: None | traceback}. Shared with the other harness-driven test files
+    (test_apply_group_rename.py), which load this module by path."""
     out = tmp_path_factory.mktemp("orm_harness") / "results.json"
     proc = subprocess.run(
-        [sys.executable, RUNNER, str(out), os.path.abspath(__file__), *SCENARIOS],
+        [sys.executable, RUNNER, str(out), os.path.abspath(test_file), *scenarios],
         capture_output=True, text=True, timeout=600,
         env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
     )
@@ -730,6 +734,14 @@ def harness_results(tmp_path_factory):
         f"harness did not run (rc={proc.returncode})\n{proc.stdout[-4000:]}\n{proc.stderr[-4000:]}"
     )
     return json.loads(out.read_text(encoding="utf-8"))
+
+
+SCENARIOS = collect_scenarios(globals())
+
+
+@pytest.fixture(scope="module")
+def harness_results(tmp_path_factory):
+    return run_harness(tmp_path_factory, __file__, SCENARIOS)
 
 
 @pytest.mark.parametrize("name", SCENARIOS)
@@ -752,3 +764,64 @@ def test_read_cache_keeps_a_damaged_stamped_file_for_show_state(plugin, tmp_path
     cache = plugin._read_cache()
     assert cache["summary"] == ["NCAA Football: error (HTTP 525)"]
     assert cache["refreshed_at"] == "2026-10-11T12:00:00+00:00"
+
+
+def _module_level_json_paths():
+    """{(module, NAME): file name} for every public module-level `NAME_PATH = ...` in the
+    plugin's own code whose value names a `.json` file: the state files it
+    writes beside itself. Private `_..._PATH` names are the shipped data files
+    it only reads (team_aliases.json, rivalries.json, ...)."""
+    import ast
+    repo = os.path.dirname(HERE)
+    found = {}
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in {"tests", "tools", ".git", "__pycache__"}]
+        for fn in files:
+            if not fn.endswith(".py"):
+                continue
+            path = os.path.join(root, fn)
+            module = os.path.relpath(path, repo)[:-3].replace(os.sep, ".")
+            with open(path, encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            for node in tree.body:
+                if not isinstance(node, ast.Assign):
+                    continue
+                strings = [c.value for c in ast.walk(node.value)
+                           if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+                names = [s for s in strings if s.endswith(".json")]
+                for target in node.targets:
+                    if (isinstance(target, ast.Name) and target.id.endswith("_PATH")
+                            and not target.id.startswith("_") and names):
+                        found[(module, target.id)] = names[-1]
+    return found
+
+
+def test_harness_redirects_every_state_file_the_plugin_writes():
+    """A state file the harness does not redirect is read from and written to
+    the checkout. numbering_state.json was missed: on a clean checkout every
+    scenario failed with "harness wrote into the repo", and on any later run
+    the file left by the first one fed its kickoff floor to every scenario."""
+    import ast
+    with open(RUNNER, encoding="utf-8") as f:
+        tree = ast.parse(f.read())
+    redirected = next(
+        ast.literal_eval(node.value) for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "_REDIRECTED_PATHS" for t in node.targets)
+    )
+    state_files = _module_level_json_paths()
+    # The scan finds the one that was missed, by its literal file name.
+    assert state_files[("plugin", "NUMBERING_STATE_PATH")] == "numbering_state.json"
+    assert state_files[("plugin", "CACHE_PATH")] == "cache.json"
+    assert sorted(set(state_files) - set(redirected)) == []
+
+
+def test_every_state_file_the_plugin_writes_is_gitignored():
+    """Same scan. sportsdb_thumb_cache.json and gamethumbs_cache.json were
+    written beside the code and not ignored, so a local run left them ready
+    to be committed."""
+    with open(os.path.join(os.path.dirname(HERE), ".gitignore"), encoding="utf-8") as f:
+        ignored = set(f.read().split())
+    state_files = _module_level_json_paths()
+    assert state_files[("plugin", "GAMETHUMBS_CACHE_PATH")] == "gamethumbs_cache.json"
+    assert sorted(n for n in state_files.values() if n not in ignored) == []
