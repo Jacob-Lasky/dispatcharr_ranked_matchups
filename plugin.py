@@ -5362,36 +5362,67 @@ def _reserved_channel_numbers(
     channels the nearest FREE integer after all integers are placed, so no
     single integer is predictable. Reserving the floor covers the common case
     without over-reserving the whole band.
+
+    Two more, from the third review round (#219), both about our OWN group:
+
+    RAW NUMBERS OF A STRANGER IN OUR GROUP. The unique constraint is on the RAW
+    ``(channel_group, channel_number)``. A channel someone added to our group by
+    hand at raw 400, overridden to publish as 500, reserves only 500 above; a
+    game handed 400 would then fail the write and roll back every apply.
+
+    OUR OWN OVERRIDDEN CHANNELS. A channel of ours the user overrode publishes
+    under its override, not under the raw number we manage, so that override is
+    somebody else's number as far as the other games are concerned. Only an
+    override that DIFFERS from the raw number is reserved, or the channel would
+    be refused its own number.
     """
     from apps.channels.models import Channel
-    from django.db.models import Q
+    from django.db.models import F, Q
 
-    return _published_numbers(
-        Channel.objects.exclude(_owned_tvg_id_q() & Q(channel_group=target_group)),
-        band_start, band_end,
+    ours_here = _owned_tvg_id_q() & Q(channel_group=target_group)
+    reserved = _published_numbers(Channel.objects.exclude(ours_here), band_start, band_end)
+    reserved |= _published_numbers(
+        Channel.objects.filter(channel_group=target_group).exclude(_owned_tvg_id_q()),
+        band_start, band_end, effective=False,
     )
+    try:
+        overridden = (
+            Channel.objects.filter(ours_here)
+            .filter(override__channel_number__isnull=False)
+            .exclude(override__channel_number=F("channel_number"))
+        )
+        reserved |= _published_numbers(overridden, band_start, band_end)
+    except Exception:
+        # A build without ChannelOverride has no override relation to filter
+        # on, and then no override to reserve either.
+        logger.debug("[ranked_matchups] no ChannelOverride relation", exc_info=True)
+    return reserved
 
 
-def _published_numbers(qs, band_start: int, band_end: Optional[int] = None) -> set:
+def _published_numbers(
+    qs, band_start: int, band_end: Optional[int] = None, effective: bool = True,
+) -> set:
     """The integer channel numbers the channels in `qs` publish under, within
     [band_start, band_end] (no upper bound when band_end is None). EFFECTIVE
     numbers (a ChannelOverride wins, as in every output path) and floored, the
-    reasoning for both is in _reserved_channel_numbers.
+    reasoning for both is in _reserved_channel_numbers. `effective=False` reads
+    the raw column instead, which is what the per-group unique constraint sees.
 
     The upper bound is ``< band_end + 1``, not ``<= band_end``: a channel at
     400.5 publishes as 400 over Xtream Codes, so it must reserve 400 even when
     400 is the top of the band (review finding, #219)."""
     field = "channel_number"
-    try:
-        from apps.channels.managers import with_effective_values
-        qs = with_effective_values(qs)
-        field = "effective_channel_number"
-    except Exception:
-        logger.warning(
-            "[ranked_matchups] with_effective_values unavailable; channel numbering "
-            "is reading raw channel numbers and may miss a ChannelOverride",
-            exc_info=True,
-        )
+    if effective:
+        try:
+            from apps.channels.managers import with_effective_values
+            qs = with_effective_values(qs)
+            field = "effective_channel_number"
+        except Exception:
+            logger.warning(
+                "[ranked_matchups] with_effective_values unavailable; channel numbering "
+                "is reading raw channel numbers and may miss a ChannelOverride",
+                exc_info=True,
+            )
     bounds = {f"{field}__gte": band_start}
     if band_end is not None:
         bounds[f"{field}__lt"] = band_end + 1

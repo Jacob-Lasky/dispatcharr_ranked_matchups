@@ -135,7 +135,11 @@ the reap step's own policy run early) are reserved too, so a new game cannot
 take the number such a channel is restored to after parking. All of it reads
 through `_published_numbers` (effective, floored, upper bound `< top + 1` so a
 400.5 reserves 400), which `_ensure_archive_channel` also uses so the archive
-never takes a number published in ANY group. Reserved numbers are skipped
+never takes a number published in ANY group. Within our own group it also
+reserves the RAW numbers of channels that are not ours (the unique constraint
+is on raw numbers, so a hand-added channel overridden elsewhere would otherwise
+fail the write) and the override of any of OUR channels the user overrode to a
+different number. Reserved numbers are skipped
 (kickoff: never kept by the in-block hold, a fresh game nudges +1 past them); if
 the whole compact band is taken, apply returns an error rather than publishing
 nothing and reaping the group.

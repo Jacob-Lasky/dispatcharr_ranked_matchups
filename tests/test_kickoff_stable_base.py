@@ -488,3 +488,46 @@ class TestArchivePlacementIsGlobal:
         body = ast.get_source_segment(src, fn)
         assert "_published_numbers(" in body
         assert "Channel.objects.exclude(tvg_id=ARCHIVE_TVG_ID), _ARCHIVE_CHANNEL_NUMBER" in body
+
+
+class TestReservedNumbersCoverOurOwnGroup:
+    """Third review round: the per-group unique constraint sees RAW numbers, and
+    an override of one of OUR channels publishes under the override."""
+
+    def _run(self, plugin, monkeypatch, override_raises=False):
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        Channel = MagicMock(name="Channel")
+        if override_raises:
+            Channel.objects.filter.return_value.filter.side_effect = Exception("no override")
+        models = types.ModuleType("apps.channels.models")
+        models.Channel = Channel
+        for name in ("apps", "apps.channels"):
+            monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "apps.channels.models", models)
+
+        calls = []
+        results = iter([{500}, {400}, {6203700}])
+
+        def fake(qs, lo, hi=None, effective=True):
+            calls.append(effective)
+            return next(results)
+
+        monkeypatch.setattr(plugin, "_published_numbers", fake)
+        return plugin._reserved_channel_numbers(object(), 400, 401), calls
+
+    def test_raw_in_group_and_our_overrides_are_reserved(self, plugin, monkeypatch):
+        got, calls = self._run(plugin, monkeypatch)
+        assert got == {500, 400, 6203700}
+        assert calls == [True, False, True], "the in-group query must read RAW numbers"
+
+    def test_a_build_without_overrides_still_reserves_the_rest(self, plugin, monkeypatch):
+        got, calls = self._run(plugin, monkeypatch, override_raises=True)
+        assert got == {500, 400}
+        assert calls == [True, False]
+
+    def test_effective_false_reads_the_raw_column(self, plugin):
+        got = plugin._published_numbers(_FakeQS([400.0, 401.0]), 400, 400, effective=False)
+        assert got == {400}
