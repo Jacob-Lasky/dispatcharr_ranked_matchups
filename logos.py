@@ -22,13 +22,14 @@ import json
 import logging
 import os
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from ._util import is_field_event, redact_secrets
+from ._util import is_field_event, redact_secrets, write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -430,7 +431,9 @@ def download_to_file(
     if not url:
         return None, None
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-    tmp_path = f"{dest_path}.tmp.{os.getpid()}"
+    # Per-writer temp name, pid AND thread, for the reason in
+    # _util.write_json_atomic: two threads in one worker share a pid.
+    tmp_path = f"{dest_path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status != 200:
@@ -510,17 +513,10 @@ class ThumbCache:
             self._data = {}
 
     def save(self) -> None:
-        tmp = f"{self.cache_path}.tmp.{os.getpid()}"
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._data, f)
-            os.replace(tmp, self.cache_path)
+            write_json_atomic(self.cache_path, self._data)
         except Exception as e:
             logger.warning("sportsdb cache save failed: %s", e)
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
 
     def get(self, marker: str) -> tuple[bool, Optional[str]]:
         """Returns (fresh, url_or_None). fresh=False means caller should refetch."""

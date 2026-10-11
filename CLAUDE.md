@@ -76,9 +76,16 @@ State (gitignored, lives in `<plugin_dir>/`):
 - `cache.json` — last refresh result (curated game list with score breakdowns). Carries TWO timestamps: `refreshed_at` (the cache write) and `matched_at` (stamped as matching BEGAN: after scoring, immediately before the EPG/stream sweep). `_match_snapshot_time` reads `matched_at` and falls back to `refreshed_at` for a pre-upgrade cache; anything asking "were these matches taken before X?" must use it, because an M3U refresh that lands DURING a long refresh is older than `refreshed_at` and would never be noticed. Also carries `empty_slate_known` (written by refresh, the reaper, and apply after a real publish), which decides whether apply may publish an EMPTY `games` list (#241, see "An empty `games` list can be a slate" below)
 - `recording_stops.json` — planned stops of RUNNING recordings (#216 phase C): written whole by apply under the scheduler lock, only READ by the live handoff timer in `_reaper_loop` (`_run_due_stops`), so the timer never races apply
 - `recordings_state.json` — auto-record bookkeeping (#216): what the plugin last wrote for each recording it created (so a user edit is recognised and left alone), and tombstones for ones the user deleted so they are not re-created
+- `numbering_state.json` — `{"kickoff_base": N}`, the floor kickoff numbering last used (#219). Written by apply only (under the scheduler lock, after the transaction commits, never on a dry run), read back so auto mode does not re-derive the floor from the lineup. A missing or malformed file is not an error: the next apply infers the same floor from the published channels
 - `odds_cache.json` — The Odds API responses (#200), one entry per `sport_key|region` with its `fetched_at`, plus `exhausted_until` / `exhausted_key` for the out-of-credits backoff and the last `credits_remaining` header. Written by `sources/_odds.py` with the same per-writer temp + atomic replace as the cache. Holds no API key, and a hand-edited or wrong-shaped file is started over rather than failing every league's fetch
 - `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock, with `skipped_reason` (naming the holder, #239) stamped by `skipped_reason_at`. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict AND by `_slot_already_covered` to decide a waiting scheduled slot has already been done for it (see the scheduler section) — so `kind`, `status` and `started_at` steer behaviour, not just display. `kind` is one of the `_run_under_lock` kinds in `RUN_KIND_LABELS` (`auto_pipeline`, `scheduled_auto_pipeline`, `m3u_rematch`, `refresh`; its `apply` and `reap` entries only describe lock holders) — the label is what names WHY a run happened, so a new background trigger needs an entry there or Show current state cannot explain itself, plus a decision about whether it belongs in `_PIPELINE_RUN_KINDS`. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
 - `cfbd_api_key`, `football_data_api_key`, `odds_api_key`, `anthropic_api_key` — file fallback when settings field is blank.
+
+Every JSON state file above (and the LLM-description and SportsDB thumbnail
+caches) is written through `_util.write_json_atomic`: a temp name unique per
+writer (pid AND thread) plus an atomic `os.replace`, with the temp removed on
+any failure. It is the ONE implementation; do not hand-roll another, because a
+shared temp path lets one writer publish another's half-written file.
 
 ## How channels are produced
 
@@ -119,18 +126,51 @@ to sort to the top of group lists):
 
 A 2-phase renumber dance avoids the unique constraint on
 `(channel_group, channel_number)`: park existing channels at
-`_resolve_park_base` (highest target number this apply will write + 1000)
+`_resolve_park_base` (above both the highest target number this apply will write and the highest number any channel in the group holds, + 1000)
 first, then assign target numbers.
 
-In `compact` mode only, apply also collects `_reserved_channel_numbers`:
-every number in the band already published by a channel we do NOT own
+In BOTH modes apply collects `_reserved_channel_numbers` (compact: the band;
+kickoff: everything at or above the lowest number the slate can take under any
+floor, no upper bound, collected BEFORE the floor so the inference sees it, #219):
+every number already published by a channel we do NOT own
 (effective numbers, so a `ChannelOverride` counts; the recordings-archive
 channel counts as somebody else's because it lives in another group). The DB
 constraint is per-group so a duplicate is legal, but the M3U, XMLTV and Xtream
 Codes outputs all key the guide on the bare channel number, so a shared number
-binds the guide arbitrarily for BOTH channels. Reserved numbers are skipped; if
-the whole band is taken, apply returns an error rather than publishing nothing
-and reaping the group.
+binds the guide arbitrarily for BOTH channels. The numbers of stale channels
+this apply will KEEP for an active recording (`_numbers_held_for_recordings`,
+the reap step's own policy run early) are reserved too, so a new game cannot
+take the number such a channel is restored to after parking. All of it reads
+through `_published_numbers` (effective, floored, upper bound `< top + 1` so a
+400.5 reserves 400), which `_ensure_archive_channel` also uses so the archive
+never takes a number published in ANY group. Within our own group it also
+reserves the RAW numbers of channels that are not ours (the unique constraint
+is on raw numbers, so a hand-added channel overridden elsewhere would otherwise
+fail the write; integral raw numbers only). A ChannelOverride on one of OUR
+game channels is deliberately NOT reserved (it would refuse that channel its own
+slot). Reserved numbers are skipped
+(kickoff: never kept by the in-block hold, a fresh game nudges +1 past them); if
+the whole compact band is taken, apply returns an error rather than publishing
+nothing and reaping the group.
+
+**The kickoff floor is remembered, NOT re-derived from the lineup (#219).**
+`_resolve_kickoff_base`: explicit `virtual_channel_base` > the floor in
+`numbering_state.json` > `_infer_kickoff_base` (the floor the published channels
+were numbered from, so upgrading or losing the file moves nothing) > highest
+other channel + 1 (fresh install, nothing published). The inference judges each
+candidate floor by RUNNING `_place_kickoff_numbers`, the one kickoff placement
+`_assign_channel_numbers` also uses, over the whole slate and every number apply
+will reserve (collected before the floor for that reason); counting channels inside their block instead let a same-minute
+nudge past the block's end pick a floor that moved a channel. DO NOT route kickoff mode
+through `_resolve_virtual_base` again: with the time term in the millions the
+floor buys no separation, and following the lineup renumbered every published
+game by the same delta whenever the top of the lineup changed (measured live
+2026-09-26, -53 on all seven unchanged games). The reservation above is what
+keeps kickoff numbers off the user's channels now. Compact auto still follows
+the lineup, because there the base IS the first number. The floor is saved only
+AFTER apply's transaction commits: saved earlier, a failed apply would leave a
+floor no published channel uses, and the next apply would renumber every game
+onto it.
 
 ## The interestingness signals (priority order)
 

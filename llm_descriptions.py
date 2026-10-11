@@ -20,7 +20,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import urllib.error
 import urllib.request
@@ -39,6 +38,7 @@ from ._util import (
     series_record_text,
     series_result_lines,
     trusted_impact_narratives,
+    write_json_atomic,
 )
 from .honours import honours_lines
 
@@ -1436,10 +1436,7 @@ def read_cache(path: str) -> Dict[str, str]:
 
 
 def write_cache(path: str, cache: Dict[str, str]) -> None:
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(cache, f, indent=2, sort_keys=True, ensure_ascii=False)
-    os.replace(tmp, path)
+    write_json_atomic(path, cache, indent=2, sort_keys=True, ensure_ascii=False)
 
 
 def prune_cache(cache: Dict[str, str], live_markers: set) -> Dict[str, str]:

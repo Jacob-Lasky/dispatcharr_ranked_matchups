@@ -1,0 +1,691 @@
+"""Kickoff numbering must not follow the top of the user's lineup (#219).
+
+In the default KICKOFF mode the channel number is ``floor + time term``, with
+the time term in the millions. Auto mode (`virtual_channel_base = 0`) used to
+re-derive the floor as "highest other channel + 1" on EVERY apply, so when a
+provider group shrank (live, 2026-09-26: 6891 -> 6838) every published game moved
+by the same -53, with no kickoff changing. Dispatcharr's outputs bind the guide
+by the bare channel number (#117), so that is the mismatch kickoff mode exists
+to prevent.
+
+The rows here are built the way production builds them: a real `GameRow` (as
+a source's fetch_upcoming returns it) serialised with the same fields the
+refresh writes into cache.json, so the marker and kickoff parse exactly as
+apply sees them.
+"""
+
+import ast
+import json
+import os
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+def _gamerow_cls():
+    from dispatcharr_ranked_matchups.sources.base import GameRow
+    return GameRow
+
+
+def _cache_row(game):
+    """The fields the refresh writes for a game (plugin.py games_payload) that
+    numbering reads: sport_prefix, teams, start_time_utc (isoformat) and extra."""
+    return {
+        "sport_prefix": game.sport_prefix,
+        "sport_label": game.sport_label,
+        "home": game.home,
+        "away": game.away,
+        "rank_home": game.rank_home,
+        "rank_away": game.rank_away,
+        "start_time_utc": game.start_time.isoformat(),
+        "extra": game.extra,
+    }
+
+
+def _slate():
+    """Seven NHL games, as on the live slate in the issue: two share a kickoff
+    minute (so the tiebreak slot matters), the rest are spread over two days."""
+    GameRow = _gamerow_cls()
+    t0 = datetime(2026, 9, 26, 23, 0, tzinfo=timezone.utc)
+    kickoffs = [t0, t0, t0 + timedelta(minutes=30), t0 + timedelta(hours=2),
+                t0 + timedelta(days=1), t0 + timedelta(days=1, hours=3),
+                t0 + timedelta(days=2)]
+    rows = []
+    for i, start in enumerate(kickoffs):
+        gid = 2025010100 + i
+        rows.append(_cache_row(GameRow(
+            sport_prefix="NHL", sport_label="NHL",
+            home=f"Home{i}", away=f"Away{i}", rank_home=None, rank_away=None,
+            start_time=start, extra={"nhl_game_id": gid, "game_id": gid},
+        )))
+    return rows
+
+
+def _published(plugin, games, numbers):
+    """What apply hands _resolve_kickoff_base: (live number, kickoff, marker)."""
+    out = []
+    for g in games:
+        m = plugin._build_marker_key(g)
+        if m in numbers:
+            out.append((numbers[m], plugin.parse_iso_utc(g["start_time_utc"]), m))
+    return out
+
+
+def _apply_numbers(plugin, games, settings, highest_other, existing, tz=timezone.utc):
+    """The numbering half of _action_apply in kickoff mode, minus the ORM:
+    resolve the floor (reading and writing the state file exactly as apply
+    does), then assign."""
+    remembered = plugin._load_kickoff_base()
+    base = plugin._resolve_kickoff_base(
+        settings, highest_other, remembered, _published(plugin, games, existing), tz,
+    )
+    if base != remembered:
+        plugin._save_kickoff_base(base)
+    return base, plugin._assign_channel_numbers(
+        games, base, tz, existing_numbers=existing,
+    )
+
+
+class TestLineupChangeDoesNotRenumber:
+    """WITNESSES. Each fails on the pre-#219 behaviour (floor = highest + 1 on
+    every apply): the second apply's floor would be 6839, not 6892."""
+
+    def test_the_live_repro_with_the_floor_remembered(self, plugin):
+        games = _slate()
+        base1, first = _apply_numbers(plugin, games, {}, 6891, {})
+        assert base1 == 6892
+        base2, second = _apply_numbers(plugin, games, {}, 6838, first)
+        assert base2 == 6892
+        assert second == first
+
+    def test_the_upgrade_apply_infers_the_floor_from_published_channels(self, plugin):
+        """The first apply after upgrading has no state file. It must read the
+        floor off the channels the old version published, not off the lineup,
+        or the upgrade itself is the renumber."""
+        games = _slate()
+        # Published by the old code at floor 6892 (highest other was 6891).
+        old = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        assert plugin._load_kickoff_base() is None
+        base, again = _apply_numbers(plugin, games, {}, 6838, old)
+        assert base == 6892
+        assert again == old
+        assert plugin._load_kickoff_base() == 6892
+
+    def test_a_lineup_that_grows_does_not_move_them_either(self, plugin):
+        games = _slate()
+        _, first = _apply_numbers(plugin, games, {}, 6891, {})
+        _, second = _apply_numbers(plugin, games, {}, 9500, first)
+        assert second == first
+
+    def test_a_lost_state_file_moves_nothing(self, plugin):
+        games = _slate()
+        _, first = _apply_numbers(plugin, games, {}, 6891, {})
+        os.remove(plugin.NUMBERING_STATE_PATH)
+        _, second = _apply_numbers(plugin, games, {}, 100, first)
+        assert second == first
+
+
+class TestReviewFindings:
+    """Second-opinion findings on the first cut, each reproduced red first."""
+
+    def test_two_games_one_rescheduled_keeps_the_unchanged_one(self, plugin):
+        """Two channels name two floors that each keep one channel. The
+        rescheduled game's floor is off by whole hours; the lineup's is not."""
+        games = _slate()[3:5]
+        old = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        moved = dict(games[0])
+        moved["start_time_utc"] = (
+            plugin.parse_iso_utc(moved["start_time_utc"]) + timedelta(hours=2)
+        ).isoformat()
+        now = [moved, games[1]]
+        base, got = _apply_numbers(plugin, now, {}, 6891, old)
+        assert base == 6892
+        m = plugin._build_marker_key(games[1])
+        assert got[m] == old[m]
+
+    def test_no_channel_on_its_hash_slot_still_recovers_a_floor_that_moves_nothing(self, plugin):
+        """Channels re-keyed from the legacy marker (#217) sit on slots their new
+        marker does not name, so no channel names the floor exactly."""
+        games = _slate()[3:5]
+        old = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        held = {}
+        for m, n in old.items():
+            block = n - (n - 6892) % 16
+            held[m] = block + ((n - block + 5) % 16)
+        _, got = _apply_numbers(plugin, games, {}, 6838, held)
+        assert got == held
+
+    def test_parking_clears_a_hand_added_channel_above_our_targets(self, plugin):
+        """A channel the user put in our group at exactly max_target + 1000
+        made the park UPDATE hit the per-group unique constraint."""
+        assert plugin._resolve_park_base(6546427, 6547427.0) > 6547427
+        assert plugin._resolve_park_base(6546427, 0) == 6547427
+        assert plugin._resolve_park_base(6546427, None) == 6547427
+
+
+class TestFloorResolution:
+    def test_explicit_base_wins_over_everything(self, plugin):
+        """Explicit `virtual_channel_base` behaves as it always did."""
+        games = _slate()
+        published = _published(plugin, games, plugin._assign_channel_numbers(games, 6892, timezone.utc))
+        assert plugin._resolve_kickoff_base(
+            {"virtual_channel_base": 400}, 6891, 6892, published, timezone.utc,
+        ) == 400
+
+    def test_remembered_floor_wins_over_inference_and_lineup(self, plugin):
+        games = _slate()
+        published = _published(plugin, games, plugin._assign_channel_numbers(games, 6892, timezone.utc))
+        assert plugin._resolve_kickoff_base({}, 100, 7000, published, timezone.utc) == 7000
+
+    def test_fresh_install_falls_back_to_after_the_lineup(self, plugin):
+        """Nothing remembered and nothing published: no number can move, so the
+        documented auto rule (highest other + 1) still picks the first floor."""
+        assert plugin._resolve_kickoff_base({}, 6891, None, [], timezone.utc) == 6892
+        assert plugin._resolve_kickoff_base({}, 0, None, [], timezone.utc) == 9000
+
+    @pytest.mark.parametrize("raw", [0, "0", "", None, "abc", -5])
+    def test_auto_spellings_are_not_explicit(self, plugin, raw):
+        assert plugin._explicit_virtual_base({"virtual_channel_base": raw}) is None
+
+    def test_garbage_remembered_value_is_ignored(self, plugin):
+        assert plugin._resolve_kickoff_base({}, 6891, 0, [], timezone.utc) == 6892
+
+
+class TestInferKickoffBase:
+    def test_exact_on_a_clean_slate(self, plugin):
+        games = _slate()
+        nums = plugin._assign_channel_numbers(games, 12345, timezone.utc)
+        assert plugin._infer_kickoff_base(_published(plugin, games, nums), timezone.utc) == 12345
+
+    def test_one_rescheduled_game_does_not_drag_the_floor(self, plugin):
+        """A game rescheduled since its channel was numbered names a wildly
+        wrong candidate; the floor the rest agree on must win."""
+        games = _slate()
+        nums = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        moved = dict(games[3])
+        moved["start_time_utc"] = (
+            plugin.parse_iso_utc(moved["start_time_utc"]) + timedelta(hours=5)
+        ).isoformat()
+        games = games[:3] + [moved] + games[4:]
+        assert plugin._infer_kickoff_base(_published(plugin, games, nums), timezone.utc) == 6892
+
+    def test_a_held_off_hash_channel_does_not_drag_the_floor(self, plugin):
+        """#217's in-block hold leaves a channel on a slot its hash no longer
+        names. The floor the other channels name exactly still wins."""
+        games = _slate()
+        nums = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        m = plugin._build_marker_key(games[4])
+        block = nums[m] - (nums[m] - 6892) % 16
+        nums[m] = block + ((nums[m] - block + 7) % 16)
+        assert plugin._infer_kickoff_base(_published(plugin, games, nums), timezone.utc) == 6892
+
+    def test_compact_numbers_are_not_a_kickoff_floor(self, plugin):
+        games = _slate()
+        compact = {plugin._build_marker_key(g): 400 + i for i, g in enumerate(games)}
+        assert plugin._infer_kickoff_base(_published(plugin, games, compact), timezone.utc) is None
+
+    def test_nothing_published(self, plugin):
+        assert plugin._infer_kickoff_base([], timezone.utc) is None
+
+
+class TestStateFile:
+    def test_round_trip(self, plugin):
+        plugin._save_kickoff_base(6892)
+        assert plugin._load_kickoff_base() == 6892
+        with open(plugin.NUMBERING_STATE_PATH, encoding="utf-8") as f:
+            assert json.load(f) == {"kickoff_base": 6892}
+
+    @pytest.mark.parametrize("content", [
+        "not json", "[]", '{"kickoff_base": "6892"}', '{"kickoff_base": true}',
+        '{"kickoff_base": 0}', '{"kickoff_base": -3}', '{"kickoff_base": 6892.5}', "{}",
+    ])
+    def test_a_bad_file_reads_as_nothing(self, plugin, content):
+        with open(plugin.NUMBERING_STATE_PATH, "w", encoding="utf-8") as f:
+            f.write(content)
+        assert plugin._load_kickoff_base() is None
+
+    def test_missing_file(self, plugin):
+        assert plugin._load_kickoff_base() is None
+
+    def test_an_unwritable_path_is_logged_not_raised(self, plugin, tmp_path):
+        plugin._save_kickoff_base(6892, path=str(tmp_path / "no" / "such" / "dir.json"))
+
+    def test_the_state_file_is_gitignored(self):
+        with open(os.path.join(REPO_ROOT, ".gitignore"), encoding="utf-8") as f:
+            assert "numbering_state.json" in f.read().split()
+
+
+class TestKickoffNeverSharesANumberWithAnotherChannel:
+    """With the floor no longer following the lineup, the reservation is what
+    keeps a kickoff number off a number the user's own channels publish under.
+    WITNESSES: kickoff mode ignored `reserved_numbers` before #219."""
+
+    def test_a_fresh_game_steps_off_a_reserved_number(self, plugin):
+        games = _slate()
+        plain = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        m = plugin._build_marker_key(games[5])
+        taken = plain[m]
+        got = plugin._assign_channel_numbers(
+            games, 6892, timezone.utc, reserved_numbers={taken},
+        )
+        assert taken not in got.values()
+        assert got[m] == taken + 1
+        assert {k: v for k, v in got.items() if k != m} == {
+            k: v for k, v in plain.items() if k != m
+        }
+
+    def test_a_held_number_now_reserved_is_released(self, plugin):
+        games = _slate()
+        plain = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        m = plugin._build_marker_key(games[2])
+        got = plugin._assign_channel_numbers(
+            games, 6892, timezone.utc, existing_numbers=plain,
+            reserved_numbers={plain[m]},
+        )
+        assert got[m] != plain[m]
+        assert plain[m] not in got.values()
+        assert len(set(got.values())) == len(games)
+
+    def test_reserved_numbers_elsewhere_change_nothing(self, plugin):
+        games = _slate()
+        plain = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        got = plugin._assign_channel_numbers(
+            games, 6892, timezone.utc, reserved_numbers={1, 2, 6891, 99999999},
+        )
+        assert got == plain
+
+
+def _apply_fn():
+    src = open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8").read()
+    tree = ast.parse(src)
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_action_apply"
+    )
+    return src, fn
+
+
+def _calls(node, name):
+    return [
+        n for n in ast.walk(node)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name
+    ]
+
+
+class TestApplyWiring:
+    """_action_apply needs Django, so pin the call sites by source. Each goes red
+    if the wiring is removed while the helpers above keep passing."""
+
+    def _kickoff_branch(self):
+        _src, fn = _apply_fn()
+        for n in ast.walk(fn):
+            if (isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
+                    and isinstance(n.test.left, ast.Name)
+                    and n.test.left.id == "numbering_mode"
+                    and any(isinstance(c, ast.Name) and c.id == "NUMBERING_MODE_KICKOFF"
+                            for c in n.test.comparators)
+                    and _calls(n, "_resolve_kickoff_base")):
+                return n
+        raise AssertionError("no kickoff branch resolving the floor in _action_apply")
+
+    def test_kickoff_resolves_through_the_remembered_floor(self):
+        branch = self._kickoff_branch()
+        body = ast.Module(body=branch.body, type_ignores=[])
+        assert _calls(body, "_resolve_kickoff_base")
+        assert _calls(body, "_load_kickoff_base")
+        assert not _calls(body, "_resolve_virtual_base"), (
+            "kickoff must not re-derive the floor from the lineup (#219)"
+        )
+
+    def test_compact_keeps_the_lineup_rule(self):
+        branch = self._kickoff_branch()
+        orelse = ast.Module(body=branch.orelse, type_ignores=[])
+        assert _calls(orelse, "_resolve_virtual_base")
+
+    def test_the_floor_is_saved_only_after_commit_and_never_on_a_dry_run(self):
+        """Saved before the channel transaction, a failed apply would leave a
+        floor on disk no published channel uses, and the next auto apply would
+        renumber every game onto it (review finding)."""
+        src, fn = _apply_fn()
+        saves = _calls(fn, "_save_kickoff_base")
+        assert len(saves) == 1
+        guards = [
+            n for n in ast.walk(fn)
+            if isinstance(n, ast.If) and _calls(n, "_save_kickoff_base")
+        ]
+        assert guards and "not dry_run" in ast.unparse(guards[-1].test)
+        assert "NUMBERING_MODE_KICKOFF" in ast.unparse(guards[-1].test)
+        for w in ast.walk(fn):
+            if isinstance(w, ast.With):
+                assert not _calls(w, "_save_kickoff_base"), "must run after the transaction"
+        (invalidate,) = _calls(fn, "_invalidate_epg_output_cache")
+        assert saves[0].lineno > invalidate.lineno
+
+    def test_parking_clears_every_number_in_the_group(self):
+        src, _fn = _apply_fn()
+        i = src.index("highest_in_group = (")
+        block = src[i:src.index("park_base = _resolve_park_base(max_target, highest_in_group)", i)]
+        assert "channel_group=target_group" in block
+        assert '_Max("channel_number")' in block
+
+    def test_reserved_numbers_are_collected_in_both_modes(self):
+        _src, fn = _apply_fn()
+        for n in ast.walk(fn):
+            if isinstance(n, ast.If) and _calls(n, "_reserved_channel_numbers"):
+                yes = _calls(ast.Module(body=n.body, type_ignores=[]), "_reserved_channel_numbers")
+                no = _calls(ast.Module(body=n.orelse, type_ignores=[]), "_reserved_channel_numbers")
+                assert yes and no, "both numbering modes must reserve other channels' numbers"
+                return
+        raise AssertionError("no _reserved_channel_numbers call in _action_apply")
+
+    def test_the_floor_is_resolved_after_existing_channels_are_rekeyed(self):
+        src, _fn = _apply_fn()
+        rekey = src.index("marker_renames = _rekey_legacy_virtuals(existing_virtuals, games)")
+        resolve = src.index("virtual_base = _resolve_kickoff_base(")
+        assert rekey < resolve
+
+
+class _FakeQS:
+    """Just enough queryset for _published_numbers: exclude/filter on one
+    numeric field with __isnull / __gte / __lt / __lte, then values_list."""
+
+    def __init__(self, values):
+        self.values = list(values)
+
+    def exclude(self, *args, **kw):
+        if any(k.endswith("__isnull") for k in kw):
+            return _FakeQS(v for v in self.values if v is not None)
+        return self
+
+    def filter(self, **kw):
+        out = self.values
+        for k, bound in kw.items():
+            op = k.rsplit("__", 1)[1]
+            test = {"gte": lambda v: v >= bound, "lt": lambda v: v < bound,
+                    "lte": lambda v: v <= bound}[op]
+            out = [v for v in out if test(v)]
+        return _FakeQS(out)
+
+    def values_list(self, *_a, **_k):
+        return list(self.values)
+
+
+class TestPublishedNumbers:
+    """The reservation query, driven with a fake queryset (no Django; the
+    effective-number annotation is unavailable here, so the raw column is read,
+    which is what this tests: the bounds and the floor)."""
+
+    def test_a_fraction_at_the_top_of_the_band_reserves_its_floor(self, plugin):
+        """Review finding: `<= band_end` dropped 400.5, which Xtream Codes
+        publishes as 400, so a game could be handed 400 beside it."""
+        got = plugin._published_numbers(_FakeQS([399.0, 400.5, 401.0, None]), 400, 400)
+        assert got == {400}
+
+    def test_no_upper_bound(self, plugin):
+        got = plugin._published_numbers(_FakeQS([5.0, 6892.0, 7000000.25]), 6892)
+        assert got == {6892, 7000000}
+
+
+class TestKeptRecordingChannelsHoldTheirNumbers:
+    """Review finding: a stale channel kept for an active recording went back
+    to its pre-park number only if no new game had been handed it; otherwise it
+    stayed at a parking number mid-recording."""
+
+    def test_only_kept_channels_are_held(self, plugin, monkeypatch):
+        import sys
+        import types
+        from types import SimpleNamespace as NS
+
+        now = datetime.now(timezone.utc)
+        recording = NS(id=11, channel_id=1, start_time=now - timedelta(minutes=30),
+                       end_time=now + timedelta(hours=1), custom_properties={"status": "recording"})
+        done = NS(id=12, channel_id=2, start_time=now - timedelta(hours=3),
+                  end_time=now - timedelta(hours=1), custom_properties={"status": "completed"})
+
+        class _Objects:
+            def filter(self, channel_id__in):
+                return [r for r in (recording, done) if r.channel_id in channel_id__in]
+
+        models = types.ModuleType("apps.channels.models")
+        models.Recording = NS(objects=_Objects())
+        for name in ("apps", "apps.channels"):
+            monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "apps.channels.models", models)
+
+        stale = [NS(id=1, channel_number=6203700.0), NS(id=2, channel_number=6203701.0),
+                 NS(id=3, channel_number=6203702.0), NS(id=4, channel_number=None)]
+        assert plugin._numbers_held_for_recordings(stale, True) == {6203700}
+        # Archive disabled: a channel with only finished recordings is kept too.
+        assert plugin._numbers_held_for_recordings(stale, False) == {6203700, 6203701}
+
+    def test_apply_adds_them_to_the_reservation_in_both_modes(self):
+        src, _fn = _apply_fn()
+        held = src.index("held_for_recordings = _numbers_held_for_recordings(")
+        kickoff = src.index("_reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings")
+        resolve = src.index("virtual_base = _resolve_kickoff_base(")
+        compact = src.index(") | held_for_recordings", resolve)
+        assert held < kickoff < resolve < compact
+        assert compact < src.index("chnum_by_marker = _assign_channel_numbers(")
+
+    def test_a_held_number_is_not_handed_to_a_new_game(self, plugin):
+        games = _slate()
+        plain = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        m = plugin._build_marker_key(games[0])
+        got = plugin._assign_channel_numbers(
+            games, 6892, timezone.utc, reserved_numbers={plain[m]},
+        )
+        assert plain[m] not in got.values()
+
+
+class TestArchivePlacementIsGlobal:
+    def test_the_archive_avoids_numbers_published_anywhere(self):
+        """Review finding: the archive picked the first free number in ITS
+        group, so a compact game (or a user channel) at 9999 elsewhere shared
+        its guide key."""
+        src = open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_ensure_archive_channel")
+        body = ast.get_source_segment(src, fn)
+        assert "_published_numbers(" in body
+        assert "Channel.objects.exclude(tvg_id=ARCHIVE_TVG_ID), _ARCHIVE_CHANNEL_NUMBER" in body
+
+
+class TestReservedNumbersCoverOurOwnGroup:
+    """Third review round: the per-group unique constraint sees RAW numbers."""
+
+    def _run(self, plugin, monkeypatch):
+        import sys
+        import types
+        from unittest.mock import MagicMock
+
+        models = types.ModuleType("apps.channels.models")
+        models.Channel = MagicMock(name="Channel")
+        for name in ("apps", "apps.channels"):
+            monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "apps.channels.models", models)
+
+        calls = []
+        results = iter([{500}, {400}])
+
+        def fake(qs, lo, hi=None, effective=True):
+            calls.append(effective)
+            return next(results)
+
+        monkeypatch.setattr(plugin, "_published_numbers", fake)
+        return plugin._reserved_channel_numbers(object(), 400, 401), calls
+
+    def test_raw_numbers_of_strangers_in_our_group_are_reserved(self, plugin, monkeypatch):
+        got, calls = self._run(plugin, monkeypatch)
+        assert got == {500, 400}
+        assert calls == [True, False], "the in-group query must read RAW numbers"
+
+    def test_effective_false_reads_the_raw_column(self, plugin):
+        got = plugin._published_numbers(_FakeQS([400.0, 401.0]), 400, 400, effective=False)
+        assert got == {400}
+
+    def test_a_fractional_raw_number_does_not_block_its_floor(self, plugin):
+        """Round 4: raw 400.5 is not raw 400 to the unique constraint."""
+        got = plugin._published_numbers(_FakeQS([400.5, 401.0]), 400, 401, effective=False)
+        assert got == {401}
+
+
+def _epl_row(gid, start):
+    GameRow = _gamerow_cls()
+    return _cache_row(GameRow(
+        sport_prefix="EPL", sport_label="Premier League",
+        home=f"Home{gid}", away=f"Away{gid}", rank_home=None, rank_away=None,
+        start_time=start, extra={"fd_id": gid},
+    ))
+
+
+def _saturday_slate(first_id=500000):
+    """Ten Premier League games kicking off in the same minute (a Saturday
+    3pm), then three a minute apart. Same-minute games collide on the 16 hash
+    slots, and some collisions nudge a game past the end of its minute's block."""
+    t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+    return [_epl_row(first_id + i, t0) for i in range(10)] + [
+        _epl_row(first_id + 10 + i, t0 + timedelta(minutes=i + 1)) for i in range(3)
+    ]
+
+
+class TestInferenceRunsTheRealPlacement:
+    """Review finding (verifier, #219): the inference scored candidates by how
+    many channels sat inside their block. A same-minute collision nudges a
+    channel past its block's end, and the true floor reproduces that nudge every
+    apply, so the channel does not move; the proxy counted it as lost and let a
+    floor one or two higher win, which moved the channel on its block's first
+    slot. Measured: 8 of 3000 random slates moved one channel on the upgrade
+    apply; the Saturday slate below is the first realistic one tried."""
+
+    def test_witness_a_saturday_slate_upgrades_without_moving(self, plugin):
+        games = _saturday_slate()
+        old = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        # Precondition: at least one channel was nudged out of its block, the
+        # shape that fooled the in-block proxy.
+        out_of_block = 0
+        for g in games:
+            m = plugin._build_marker_key(g)
+            off = plugin.stable_channel_number(0, plugin.parse_iso_utc(g["start_time_utc"]), m, timezone.utc)
+            blk = 6892 + off - off % 16
+            out_of_block += not (blk <= old[m] < blk + 16)
+        assert out_of_block >= 1
+        base, again = _apply_numbers(plugin, games, {}, 6838, old)
+        assert again == old
+        assert base == 6892
+
+    def test_witness_random_slates_upgrade_without_moving(self, plugin):
+        import random
+        tz = timezone.utc
+        t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+        moved_slates = []
+        for trial in range(400):
+            rng = random.Random(trial)
+            games = [
+                _epl_row(700000 + trial * 100 + i, t0 + timedelta(
+                    minutes=rng.choice([0, 0, 0, 30, 60, 180, 1440]) + 15 * rng.randint(0, 2)))
+                for i in range(rng.randint(2, 30))
+            ]
+            floor = rng.randint(100, 20000)
+            old = plugin._assign_channel_numbers(games, floor, tz)
+            published = _published(plugin, games, old)
+            base = plugin._resolve_kickoff_base({}, floor - 1 + rng.randint(-200, 200), None, published, tz)
+            again = plugin._assign_channel_numbers(games, base, tz, existing_numbers=old)
+            if again != old:
+                moved_slates.append(trial)
+        assert moved_slates == []
+
+    @pytest.mark.parametrize("trial", [38, 84, 105, 135])
+    def test_witness_new_games_and_held_numbers_are_part_of_the_placement(self, plugin, trial):
+        """The upgrade apply also has games with no channel yet, and numbers it
+        holds back for channels kept for a recording. Both change where a nudged
+        channel lands, so a floor judged without them moved one or two channels
+        on these slates (found by search; 38 turns on the held numbers, 84 on
+        the newcomer) while the floor judged with them moves none. Only the
+        PUBLISHED numbers are pinned: the newcomer has none yet, and on 84 the
+        floor that keeps every published channel puts it elsewhere than the
+        seeding floor would, which is the point."""
+        import random
+        tz = timezone.utc
+        t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+        rng = random.Random(trial)
+        n = rng.randint(3, 14)
+        games = [
+            _epl_row(800000 + trial * 20 + i, t0 + timedelta(minutes=rng.choice([0, 0, 0, 1])))
+            for i in range(n)
+        ]
+        plain = plugin._assign_channel_numbers(games, 6892, tz)
+        k = rng.randint(0, 2)
+        newcomers, rest = games[:k], games[k:]
+        held = set(rng.sample(sorted(plain.values()), rng.randint(0, 3)))
+        old = plugin._assign_channel_numbers(rest, 6892, tz, reserved_numbers=held)
+        unpublished = [
+            (plugin.parse_iso_utc(g["start_time_utc"]), plugin._build_marker_key(g))
+            for g in newcomers
+        ]
+        base = plugin._resolve_kickoff_base(
+            {}, 6838, None, _published(plugin, rest, old), tz,
+            unpublished=unpublished, reserved=held,
+        )
+        again = plugin._assign_channel_numbers(
+            games, base, tz, existing_numbers=old, reserved_numbers=held,
+        )
+        assert {m: again[m] for m in old} == old
+
+    def test_a_strangers_number_is_part_of_the_placement(self, plugin):
+        """Second-opinion repro: a channel we do not own sits between two of our
+        published numbers. Judged without it, the inference picked floor 100 and
+        the placement then nudged fd_8 off 6672116; judged with it, nothing moves."""
+        tz = timezone.utc
+        t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+        rows = {gid: _epl_row(gid, t0) for gid in (11, 6, 8, 14, 29, 19)}
+        old = {plugin._build_marker_key(rows[gid]): n
+               for gid, n in ((11, 6672114), (6, 6672109), (8, 6672116))}
+        published = [(n, t0, m) for m, n in old.items()]
+        unpublished = [(t0, plugin._build_marker_key(rows[gid])) for gid in (14, 29, 19)]
+        stranger = {6672115}
+        base = plugin._resolve_kickoff_base(
+            {}, 6672115, None, published, tz, unpublished=unpublished, reserved=stranger,
+        )
+        again = plugin._assign_channel_numbers(
+            list(rows.values()), base, tz, existing_numbers=old, reserved_numbers=stranger,
+        )
+        assert {m: again[m] for m in old} == old
+
+    def test_a_channel_nudged_past_its_block_still_names_its_floor(self, plugin):
+        """Second-opinion repro, round two: a lone published channel nudged off
+        a stranger's number past the end of its block named only floors above
+        the true one, so the hint could not pick it. Nothing published moved
+        either way; the true floor keeps later games where they would have been."""
+        tz = timezone.utc
+        t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+        game = _epl_row(8, t0)
+        m = plugin._build_marker_key(game)
+        natural = plugin.stable_channel_number(6892, t0, m, tz)
+        stranger = {natural}
+        old = plugin._assign_channel_numbers([game], 6892, tz, reserved_numbers=stranger)
+        off = natural - 6892
+        block = 6892 + off - off % 16
+        assert not (block <= old[m] < block + 16), "precondition: nudged past its block"
+        base = plugin._resolve_kickoff_base(
+            {}, 6891, None, [(old[m], t0, m)], tz, reserved=stranger,
+        )
+        assert base == 6892
+
+    def test_apply_hands_the_inference_its_slate_and_held_numbers(self):
+        _src, fn = _apply_fn()
+        (call,) = _calls(fn, "_resolve_kickoff_base")
+        kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
+        assert kw.get("unpublished") == "unpublished"
+        assert kw.get("reserved") == "reserved_numbers"
+
+    def test_one_placement_implementation(self):
+        """_assign_channel_numbers and the inference must share the placement:
+        a second copy would let the floor be judged by rules apply does not run."""
+        tree = ast.parse(open(os.path.join(REPO_ROOT, "plugin.py")).read())
+        fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        for name in ("_assign_channel_numbers", "_infer_kickoff_base"):
+            assert _calls(fns[name], "_place_kickoff_numbers"), name
+            assert not _calls(fns[name], "_first_free_number"), name

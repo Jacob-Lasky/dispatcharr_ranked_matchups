@@ -637,7 +637,7 @@
       "type": "number",
       "label": "Starting channel number (0 = auto)",
       "default": 0,
-      "help_text": "Where our channels begin. What this does depends on 'Channel numbering' below. In Compact mode it is literal: 400 means the group starts at 400, skipping any number already in use elsewhere in your lineup. In Kickoff-time mode it is only a floor and the time-based part of the number dwarfs it, so 400 lands somewhere around 5,548,000 and you will not see 400 anywhere. Set to 0 to auto-pick (the highest existing non-virtual channel + 1) so we slot in after your real channels."
+      "help_text": "Where our channels begin. What this does depends on 'Channel numbering' below. In Compact mode it is literal: 400 means the group starts at 400, skipping any number already in use elsewhere in your lineup. In Kickoff-time mode it is only a floor and the time-based part of the number dwarfs it, so 400 lands somewhere around 5,548,000 and you will not see 400 anywhere. Set to 0 to auto-pick. In Compact mode that means right after your highest existing channel. In Kickoff-time mode the floor is picked once (after your highest existing channel) and then kept, so adding or removing your own channels never renumbers the games. In both modes a number one of your other channels already uses is skipped."
     },
     {
       "id": "channel_numbering_mode",

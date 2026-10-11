@@ -67,6 +67,8 @@ from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
 
+from ._util import write_json_atomic
+
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.tasks")
 
 # Derive PLUGIN_KEY from the folder containing this file so worktrees and
@@ -291,10 +293,7 @@ def _write_last_run(record: Dict[str, Any]) -> None:
     written by a caller that did NOT get the lock (record_skipped_run), so it
     can race the holder's verdict or another worker's skip; a shared temp
     name would let one replace the other's half-written file."""
-    tmp = f"{LAST_RUN_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(record, f)
-    os.replace(tmp, LAST_RUN_PATH)
+    write_json_atomic(LAST_RUN_PATH, record)
 
 
 def _record_last_run(kind: str, task_id: str, started: datetime, result: Dict[str, Any]) -> None:

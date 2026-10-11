@@ -15,11 +15,12 @@ the slot number they will need.
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from ._util import write_json_atomic
 
 # Key the plugin stamps into Recording.custom_properties on every recording it
 # creates. It is the ONLY provenance test for "ours": every update, cancel and
@@ -114,26 +115,14 @@ def load_state(path: str) -> Dict[str, Dict[str, Any]]:
 
 
 def save_state(path: str, state: Dict[str, Dict[str, Any]]) -> None:
-    """Atomic write, per-writer temp name (same reasoning as plugin._write_cache:
-    a shared temp path lets two writers publish a half-written file).
+    """Atomic write (_util.write_json_atomic).
 
     Load-modify-save is only safe because every caller runs inside apply, which
     holds the cross-worker scheduler lock (#155; the reaper takes the same one).
     DO NOT write this file from anywhere that does not hold that lock: two
     writers would each replace the whole file and one's tombstones would be
     lost, re-creating a recording the user deleted."""
-    import threading
-    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, sort_keys=True)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    write_json_atomic(path, state, indent=2, sort_keys=True)
 
 
 def prune_state(state: Dict[str, Dict[str, Any]], live_markers: Iterable[str], now: datetime) -> Dict[str, Dict[str, Any]]:
