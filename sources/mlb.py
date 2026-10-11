@@ -434,7 +434,9 @@ class MlbPlayoffSource(BestOfNSeriesSource):
 
         data = _http_get(f"{MLB_API_BASE}/schedule/postseason?season={self.season}")
         if not data:
-            self._bracket_games_cache = []
+            # NOT cached: a failed request is not an empty postseason, and
+            # caching it would keep the scoring-time retry (#243) from ever
+            # seeing the bracket.
             return []
 
         out: List[Dict[str, Any]] = []

@@ -259,21 +259,18 @@ class BracketSportSource(SportSource):
                     unplaced += 1
                 continue
             tie_meta, game = hit
-            sim = self._sim_extra(tie_meta, game)
-            passthrough = game.get("extra") or {}
-            extra["bracket_game_index"] = sim.pop("matchday")
-            for key, value in sim.items():
-                if key in passthrough:
-                    # Source metadata riding along on the bracket record: the
-                    # fetched row's own copy stands.
-                    extra.setdefault(key, value)
-                else:
-                    # A key the simulator reads. The bracket is authoritative
-                    # for a game it has matched by id and teams: a fetched
-                    # stage can be None or stale, and a fetched grouping_key
-                    # can name the wrong sub-bracket (the upcoming sweep
-                    # classifies against its own window, not opening day).
-                    extra[key] = value
+            # The keys the tie shape itself sets (built without the record's
+            # pass-through extra) are what the simulator reads, and the
+            # bracket is authoritative for them on a game matched by id and
+            # teams: a fetched stage can be None or stale, and a fetched
+            # grouping_key can name the wrong sub-bracket (the upcoming sweep
+            # classifies against its own window, not opening day). The
+            # record's pass-through metadata only fills gaps.
+            own = self._sim_extra(tie_meta, {**game, "extra": {}})
+            extra["bracket_game_index"] = own.pop("matchday")
+            extra.update(own)
+            for key, value in (game.get("extra") or {}).items():
+                extra.setdefault(key, value)
             # The fetched matchday is left alone: the EPG text renders it.
             extra.setdefault("matchday", extra["bracket_game_index"])
         return unplaced

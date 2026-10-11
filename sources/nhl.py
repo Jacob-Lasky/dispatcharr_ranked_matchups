@@ -666,7 +666,8 @@ class NhlPlayoffSource(BestOfNSeriesSource):
             f"{NHL_API_BASE}/playoff-bracket/{self._season_end_year}"
         )
         if not bracket_data:
-            self._bracket_games_cache = []
+            # NOT cached: a failed request is not an empty postseason (see
+            # MlbPlayoffSource._fetch_bracket_games).
             return []
 
         out: List[Dict[str, Any]] = []
