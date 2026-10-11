@@ -57,7 +57,7 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 import requests
 
 from .base import GameRow, MatchResult
-from ._espn import fetch_scoreboard_day
+from ._espn import fetch_scoreboard_days
 from .bracket import BestOfNSeriesSource
 from .._util import parse_iso_utc, poisson_sample as _poisson, http_get_json
 
@@ -258,9 +258,10 @@ class MlsCupSource(BestOfNSeriesSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not isinstance(data, dict):
                 continue
             for event in data.get("events") or []:
@@ -329,9 +330,9 @@ class MlsCupSource(BestOfNSeriesSource):
             self.season_year, PLAYOFF_END_MONTH, PLAYOFF_END_DAY,
             tzinfo=timezone.utc,
         ).date()
-        day = start
-        while day <= end:
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard", start, end,
+        ):
             if isinstance(data, dict):
                 for event in data.get("events") or []:
                     # Pass matchday=None: the inference loop below
@@ -343,7 +344,6 @@ class MlsCupSource(BestOfNSeriesSource):
                         continue
                     seen_ids.add(rec["game_id"])
                     candidates.append(rec)
-            day += timedelta(days=1)
 
         # Second pass: matchday inference for best-of-3 series + PK
         # dedup for single-leg stages.

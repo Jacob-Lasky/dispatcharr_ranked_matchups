@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from ._espn import fetch_scoreboard_day
+from ._espn import fetch_scoreboard_days
 from ._odds import fetch_odds_events
 from .base import GameRow, SportSource
 from .._util import TEAM_SUFFIX_TOKENS, http_get_json, parse_iso_utc
@@ -175,9 +175,10 @@ class MlsSource(SportSource):
         out: List[GameRow] = []
         seen_ids: set = set()
         espn_base = self._espn_base()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = fetch_scoreboard_day(_http_get, f"{espn_base}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{espn_base}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not isinstance(data, dict):
                 continue
             for event in data.get("events") or []:

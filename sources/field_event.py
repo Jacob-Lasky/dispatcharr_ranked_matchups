@@ -35,7 +35,7 @@ from typing import Any, List, Optional, Pattern
 import requests
 
 from .base import GameRow, SportSource
-from ._espn import fetch_scoreboard_day
+from ._espn import fetch_scoreboard_days
 from .._util import FIELD_AWAY_SENTINEL, field_event_extra, http_get_json, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.field_event")
@@ -92,10 +92,9 @@ class FieldEventSource(SportSource):
         today = datetime.now(timezone.utc).date()
         scoreboard_url = f"{self._espn_base()}/scoreboard"
         events: List[Any] = []
-        for offset in range(days_ahead + 1):
-            data = fetch_scoreboard_day(
-                _http_get, scoreboard_url, today + timedelta(days=offset),
-            )
+        for _day, data in fetch_scoreboard_days(
+            _http_get, scoreboard_url, today, today + timedelta(days=days_ahead),
+        ):
             if isinstance(data, dict):
                 events.extend(data.get("events") or [])
         out: List[GameRow] = []

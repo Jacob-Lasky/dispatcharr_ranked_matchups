@@ -38,7 +38,7 @@ from .base import GameRow
 from .bracket import BestOfNSeriesSource
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, http_get_json
-from ._espn import fetch_days, fetch_scoreboard_day
+from ._espn import fetch_scoreboard_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.nfl")
 
@@ -214,9 +214,10 @@ class NflRegularSource(PointsBasedSportSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -268,10 +269,9 @@ class NflRegularSource(PointsBasedSportSource):
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = regular_end
 
-        def day_board(day):
-            return fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
-
-        for _day, data in fetch_days(season_start, end, day_board):
+        for _day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard", season_start, end,
+        ):
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)
@@ -335,9 +335,10 @@ class NflPlayoffSource(BestOfNSeriesSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -398,9 +399,9 @@ class NflPlayoffSource(BestOfNSeriesSource):
         seen_ids: set = set()
         start = datetime(self.season_end_year, 1, 1, tzinfo=timezone.utc).date()
         end = datetime(self.season_end_year, 2, 28, tzinfo=timezone.utc).date()
-        day = start
-        while day <= end:
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard", start, end,
+        ):
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)
@@ -430,6 +431,5 @@ class NflPlayoffSource(BestOfNSeriesSource):
                         "start_time": rec["start_time"],
                         "extra": {"headline": headline},
                     })
-            day += timedelta(days=1)
         self._bracket_games_cache = out
         return out

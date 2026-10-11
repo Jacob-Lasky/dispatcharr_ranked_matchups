@@ -18,6 +18,8 @@ import ast
 import importlib
 import logging
 import re
+import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -216,6 +218,58 @@ def test_every_espn_sweep_asks_for_single_limited_days(sweep, monkeypatch):
     assert boards, f"{_id} made no scoreboard request"
     bad = [u for u in boards if not DAY_URL.search(u)]
     assert bad == [], f"{_id} built a scoreboard URL without the per-day limit: {bad[:3]}"
+
+
+class SlowEmulator(EspnEmulator):
+    """EspnEmulator that holds each request briefly and records how many were
+    in flight at once."""
+
+    def __init__(self, by_day=None, delay=0.01):
+        super().__init__(by_day)
+        self.delay = delay
+        self.inflight = 0
+        self.max_inflight = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, url, *a, **k):
+        with self._lock:
+            self.inflight += 1
+            self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            time.sleep(self.delay)
+            return super().__call__(url, *a, **k)
+        finally:
+            with self._lock:
+                self.inflight -= 1
+
+
+@pytest.mark.parametrize("sweep", _sweeps(), ids=lambda s: s[0])
+def test_every_espn_sweep_fetches_its_days_concurrently(sweep, monkeypatch):
+    """A hung ESPN endpoint costs a 15 s timeout per request. Walked one day
+    after another, a 7-day sweep across ~25 sources overran the pipeline's
+    25-minute ceiling; walked concurrently it costs one timeout per batch."""
+    _id, mod_name, cls_name, kw, method = sweep
+    emu = SlowEmulator()
+    _run_sweep(monkeypatch, mod_name, cls_name, kw, method, emu)
+    assert emu.max_inflight > 1, f"{_id} walked its scoreboard days one at a time"
+
+
+def test_concurrent_walk_returns_days_in_date_order():
+    """Earlier days answer LAST here, so completion order is the reverse of
+    date order; the walk must still hand back date order, which is what the
+    callers' first-occurrence dedupe relies on."""
+    from dispatcharr_ranked_matchups.sources._espn import fetch_scoreboard_days
+
+    def http_get(url):
+        dates = url.split("dates=")[1][:8]
+        time.sleep((31 - int(dates[-2:])) * 0.002)
+        return {"events": [{"id": dates}]}
+    pages = fetch_scoreboard_days(http_get, "https://x.test/scoreboard",
+                                  date(2026, 10, 1), date(2026, 10, 20))
+    assert [d.isoformat() for d, _ in pages] == [
+        f"2026-10-{n:02d}" for n in range(1, 21)]
+    assert [p["events"][0]["id"] for _, p in pages] == [
+        f"202610{n:02d}" for n in range(1, 21)]
 
 
 # ---------------------------------------------------------------------------

@@ -85,7 +85,7 @@ from .mls import (
     _team_canonical_name,
 )
 from .._util import http_get_json
-from ._espn import extract_espn_scoreboard_event, fetch_days, fetch_scoreboard_day
+from ._espn import extract_espn_scoreboard_event, fetch_scoreboard_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_standings")
 
@@ -130,10 +130,7 @@ def _fetch_scoreboard_range(start: date, end: date) -> List[Dict[str, Any]]:
     if end < start:
         return []
     events: List[Dict[str, Any]] = []
-    for _day, data in fetch_days(
-        start, end,
-        lambda day: fetch_scoreboard_day(_http_get, ESPN_SCOREBOARD_URL, day),
-    ):
+    for _day, data in fetch_scoreboard_days(_http_get, ESPN_SCOREBOARD_URL, start, end):
         if isinstance(data, dict):
             events.extend(data.get("events") or [])
     return events

@@ -33,7 +33,7 @@ import requests
 from .base import GameRow
 from .points_based import PointsBasedSportSource
 from .._util import http_get_json
-from ._espn import extract_espn_scoreboard_event, fetch_days, fetch_scoreboard_day
+from ._espn import extract_espn_scoreboard_event, fetch_scoreboard_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_soccer")
 
@@ -138,9 +138,10 @@ class NcaaSoccerSource(PointsBasedSportSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -197,10 +198,9 @@ class NcaaSoccerSource(PointsBasedSportSource):
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = season_end
 
-        def day_board(day):
-            return fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard", day)
-
-        for _day, data in fetch_days(season_start, end, day_board):
+        for _day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard", season_start, end,
+        ):
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)

@@ -84,8 +84,8 @@ ESPN_SOCCER_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 #          reaching the limit, so "count == limit" cannot detect it.
 #      A form that fails loudly costs a fallback request; a form that drops
 #      events quietly costs correctness with no symptom. Neither is worth the
-#      requests it saves while the per-day walk runs concurrently (fetch_days)
-#      on every long window.
+#      requests it saves while every per-day walk runs concurrently
+#      (`fetch_scoreboard_days`).
 #
 # A per-day page that still comes back AT the limit is logged by
 # `fetch_scoreboard_day`, since that is the only symptom truncation gives.
@@ -302,9 +302,10 @@ def sweep_upcoming_scoreboard(
     oldest_kickoff = now - MAX_AGE_AFTER_KICKOFF
     out: List[Dict[str, Any]] = []
     seen_ids: set = set()
-    for offset in range(days_ahead + SCOREBOARD_LOOKBACK_DAYS + 1):
-        day = start_day + timedelta(days=offset)
-        data = fetch_scoreboard_day(http_get, f"{base}/{slug}/scoreboard", day)
+    for _day, data in fetch_scoreboard_days(
+        http_get, f"{base}/{slug}/scoreboard",
+        start_day, start_day + timedelta(days=days_ahead + SCOREBOARD_LOOKBACK_DAYS),
+    ):
         if not data:
             continue
         for event in data.get("events") or []:
@@ -374,9 +375,12 @@ def fetch_days(
     this module: each source's tests stub its own `_http_get`, and a helper
     that made requests itself would turn those stubs into silent no-ops.
     Results come back in date order so callers' "first occurrence wins"
-    dedupe behaves exactly as their old sequential loops did. Runs only on
-    the importance path, inside the pipeline subprocess (never a uwsgi
-    worker), where real threads are fine.
+    dedupe behaves exactly as their old sequential loops did.
+
+    Real threads are fine here because every source fetch runs inside the
+    pipeline subprocess (`_action_refresh` is reached only through
+    `_pipeline_runner.py`), never in a gevent-patched uwsgi worker. DO NOT
+    call a source's fetch from a worker without revisiting that.
     """
     days: List[date] = []
     day = start
@@ -387,3 +391,24 @@ def fetch_days(
         return []
     with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(days)))) as pool:
         return list(zip(days, pool.map(fetch_day, days)))
+
+
+def fetch_scoreboard_days(
+    http_get: Callable[[str], Optional[Dict[str, Any]]],
+    scoreboard_url: str,
+    start: date,
+    end: date,
+) -> List[Tuple[date, Optional[Dict[str, Any]]]]:
+    """`[(day, page), ...]` for every scoreboard day from `start` to `end`
+    inclusive, IN DATE ORDER, each fetched through `fetch_scoreboard_day`
+    and run concurrently by `fetch_days`.
+
+    The one per-day walk every ESPN source uses: upcoming sweeps, full-season
+    walks and bracket walks alike. Concurrency is what keeps a long window
+    affordable when ESPN is slow: a hung endpoint costs one timeout per
+    `_SEASON_WALK_WORKERS` days instead of one per day, and a refresh runs
+    every source inside the pipeline's 25-minute ceiling.
+    """
+    return fetch_days(
+        start, end, lambda day: fetch_scoreboard_day(http_get, scoreboard_url, day),
+    )

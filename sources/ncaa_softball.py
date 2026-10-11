@@ -55,7 +55,7 @@ from .._util import (
     poisson_sample as _poisson,
     http_get_json,
 )
-from ._espn import fetch_days, fetch_scoreboard_day
+from ._espn import fetch_scoreboard_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_softball")
 
@@ -195,9 +195,10 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -277,10 +278,9 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = season_end
 
-        def day_board(day):
-            return fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
-
-        for _day, data in fetch_days(season_start, end, day_board):
+        for _day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard", season_start, end,
+        ):
             if data:
                 for event in data.get("events") or []:
                     if _is_postseason_event(event):
@@ -438,9 +438,10 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -520,9 +521,9 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
         out: List[Dict[str, Any]] = []
         season_start = datetime(self.season_year, 5, 15, tzinfo=timezone.utc).date()
         season_end = datetime(self.season_year, 6, 15, tzinfo=timezone.utc).date()
-        day = season_start
-        while day <= season_end:
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard", season_start, season_end,
+        ):
             if data:
                 for event in data.get("events") or []:
                     if not _is_postseason_event(event):
@@ -530,7 +531,6 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
                     rec = self._event_to_bracket_record(event)
                     if rec is not None:
                         out.append(rec)
-            day += timedelta(days=1)
 
         self._bracket_games_cache = out
         return out
@@ -779,9 +779,10 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
         out: List[GameRow] = []
         seen_ids: set = set()
         raw_events: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -882,10 +883,10 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
         raw: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
         season_start = datetime(self.season_year, 5, 15, tzinfo=timezone.utc).date()
         season_end = datetime(self.season_year, 6, 15, tzinfo=timezone.utc).date()
-        day = season_start
         seen_ids: set = set()
-        while day <= season_end:
-            data = fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", day)
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard", season_start, season_end,
+        ):
             if data:
                 for event in data.get("events") or []:
                     if not _is_postseason_event(event):
@@ -906,7 +907,6 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
                         continue
                     seen_ids.add(eid)
                     raw.append((event, stage, partial_key))
-            day += timedelta(days=1)
 
         wcws_sub_by_team = _classify_wcws_sub_brackets(
             _wcws_meta_from_raw_events(raw)

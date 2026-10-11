@@ -274,12 +274,13 @@ stays):
   stale-but-still-SCHEDULED games, and dedupes by event id. Pass your
   module's own `_http_get` as `http_get`: each source keeps its own
   `requests` symbol so its tests can stub it.
-- `fetch_days(start, end, fetch_day)` is the per-day walk used by
-  `_fetch_full_season_games` (the schedule the importance simulator
-  replays). It fetches the days concurrently, 8 at a time, and returns
-  `[(day, result), ...]` in date order so a "first occurrence wins"
+- `fetch_scoreboard_days(http_get, scoreboard_url, start, end)` is the
+  per-day walk for everything else: upcoming sweeps, `_fetch_full_season_games`
+  (the schedule the importance simulator replays) and bracket walks. It
+  fetches the days concurrently, 8 at a time (via `fetch_days`), and
+  returns `[(day, page), ...]` in date order so a "first occurrence wins"
   dedupe behaves exactly as a sequential loop would. Pass your module's
-  own fetch closure, same reason as above.
+  own `_http_get`, same reason as above.
 
 Bracket-shaped sources deliberately do not use the sweep. They read a
 fixed calendar window and keep finished games, because bracket state is
