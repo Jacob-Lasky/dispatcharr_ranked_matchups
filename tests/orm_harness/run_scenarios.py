@@ -41,6 +41,7 @@ _REDIRECTED_PATHS = (
     ("plugin", "CACHE_PATH"),
     ("plugin", "RECORDING_STATE_PATH"),
     ("plugin", "RECORDING_STOPS_PATH"),
+    ("plugin", "NUMBERING_STATE_PATH"),
     ("plugin", "LLM_DESCRIPTIONS_CACHE_PATH"),
     ("plugin", "SPORTSDB_THUMB_CACHE_PATH"),
     ("plugin", "GAMETHUMBS_CACHE_PATH"),

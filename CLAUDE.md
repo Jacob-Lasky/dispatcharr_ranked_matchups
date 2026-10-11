@@ -752,6 +752,26 @@ says which.
   refresh — exactly the regression that bit #1 live-verify. The user has a
   habit of renaming `Top Matchups` → `!Top Matchups` etc; every rename
   cycle must be a no-op for downstream consumers.
+  The same holds for the guide (#263): our EPGData rows on the old group's
+  EPGSource are MOVED onto the new source (`_move_owned_epg_rows`, same row
+  id), and the old source is deleted only once it is empty. DO NOT go back to
+  `old_src.delete()`: its CASCADE took the ProgramData of a channel kept for
+  an active recording, and a kept channel never passes through the write loop,
+  so its guide stayed blank for the rest of the recording. A moved row is
+  reused by the write loop for a listed game and reaped with its channel once
+  the recording ends. On a marker clash (`unique_together (tvg_id,
+  epg_source)`, renamed away and back) the new source's row keeps its id and
+  every FK to the old row is repointed to it, found with
+  `_meta.get_fields(include_hidden=True)` because `ChannelOverride.epg_data`
+  is `related_name="+"` and `_meta.related_objects` silently omits hidden
+  relations. The programmes kept are the ones one of OUR channels shows, so a
+  second stale old source processed after the live one cannot overwrite the
+  recording's guide. A source with a `url`, a `file_path` or the Schedules
+  Direct type (which fetches with credentials and leaves both blank) is never
+  ours, whatever markers its rows carry (`_never_fetches_q`): it is never swept as
+  an old source, and apply refuses, before any write, a group name that is
+  also the name of such a source, since step 2 would otherwise adopt it.
+  `tests/test_apply_group_rename.py` drives all of it through the real apply.
 - **Soccer team-name suffixes**: Football-Data.org returns "Hull City AFC",
   "Manchester City FC". The favorites matcher uses a `TEAM_QUALIFIER_TOKENS`
   whitelist (FC, AFC, City, United, etc.) so the bare name "Hull" matches
@@ -1003,8 +1023,15 @@ holds field-for-field copies of the Dispatcharr models apply touches and a
 runner that drives the real `plugin.py` over in-memory sqlite, in a subprocess
 so Django never loads into the rest of the suite. `tests/test_apply_empty_slate.py`
 is the worked example: write `scenario_<name>(env)` functions and the module's
-driver runs each against a fresh database. Prefer it to a MagicMock queryset for
-any claim about which rows apply leaves behind.
+driver runs each against a fresh database. A new harness-driven file reuses its
+helpers and driver (`collect_scenarios`, `run_harness`) by loading it by path,
+as `tests/test_apply_group_rename.py` does. Every file the plugin writes beside
+its code must be listed in `_REDIRECTED_PATHS` in `run_scenarios.py` (and in
+`.gitignore`); a test scans for public module-level `*_PATH` `.json` constants
+and fails on one that is missing from either. `numbering_state.json` was
+missed: a clean checkout failed every scenario with "harness wrote into the
+repo", and a dirty one fed the file's kickoff floor to every scenario. Prefer
+it to a MagicMock queryset for any claim about which rows apply leaves behind.
 
 Read live container logs:
 

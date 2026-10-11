@@ -535,7 +535,9 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   default. Narrow that with "Channel Profiles to enable" (see below)
 
 If you rename the target group, the next apply detects the old group + its
-virtual channels (by tvg_id marker `ranked_matchups:`) and migrates them.
+virtual channels (by tvg_id marker `ranked_matchups:`) and migrates them, guide
+entries included, so a channel that is recording when you rename keeps showing
+its programme.
 
 ### Channel numbering
 

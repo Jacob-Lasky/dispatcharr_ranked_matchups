@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -502,6 +503,97 @@ def _owned_tvg_id_q(field_prefix: str = ""):
     )
 
 
+def _never_fetches_q():
+    """Q matching an EPGSource that fetches nothing: blank url AND file_path,
+    and not Schedules Direct (which fetches with credentials and leaves both
+    blank). Every source this plugin creates is one (step 2 of _action_apply
+    sets neither, type EPG_SOURCE_TYPE, or "dummy" before that), so a source
+    that does fetch is fed from somewhere else and is never ours to adopt,
+    empty or delete, whatever markers its rows carry."""
+    from django.db.models import Q
+    return (
+        (Q(url__isnull=True) | Q(url=""))
+        & (Q(file_path__isnull=True) | Q(file_path=""))
+        & ~Q(source_type="schedules_direct")
+    )
+
+
+def _move_owned_epg_rows(old_src, new_src) -> int:
+    """Move the guide entries we own from `old_src` (a source named after a
+    previous live-group name) onto `new_src`, so every channel pointing at one
+    keeps its guide. Returns how many rows ended up on `new_src`.
+
+    DO NOT replace this with `old_src.delete()` or a delete of our rows. That
+    CASCADEs their ProgramData, and a channel the write loop does not visit
+    this apply (kept for an active recording, #146) is never given a new
+    entry, so its guide went blank for the rest of the recording (#263).
+    Moving the row is also what lets the normal cleanup finish the job: the
+    write loop reuses a moved row for a game still on the slate, the stale reap
+    deletes it with its channel once the recording ends, and the orphan sweep
+    takes any row nothing points at.
+
+    `unique_together = (tvg_id, epg_source)`: the new source can already hold a
+    row for a marker (renamed away and back, or a second stale source carrying
+    the same marker). The new source's row keeps its id, so nothing pointing
+    at it is cut off: every foreign key to the old row (Channel.epg_data,
+    ChannelOverride.epg_data, whatever else Dispatcharr adds) is repointed to
+    it and the emptied old row is deleted. Whose PROGRAMMES (and entry name)
+    survive depends on which row one of OUR channels shows: the destination
+    keeps its own only when an owned channel points at it and none points at
+    the old row (a stale old source processed after the live one, which has
+    already moved its row there). Otherwise the old row's replace them, since
+    the old row is what the group that was live until this apply wrote.
+
+    Every repoint here is a queryset .update(), which skips signals, Channel's
+    destructive post_save among them (see the signal note at the step 4 attach).
+    """
+    from apps.channels.models import Channel
+    from apps.epg.models import EPGData, ProgramData
+    from django.db import models as dj_models
+
+    ours = EPGData.objects.filter(_owned_tvg_id_q(), epg_source=old_src)
+    clashes = dict(
+        EPGData.objects.filter(
+            epg_source=new_src, tvg_id__in=list(ours.values_list("tvg_id", flat=True)),
+        ).values_list("tvg_id", "id")
+    )
+    if clashes:
+        # include_hidden: ChannelOverride.epg_data is related_name="+", and
+        # _meta.related_objects leaves hidden relations out.
+        pointers = [
+            rel for rel in EPGData._meta.get_fields(include_hidden=True)
+            if rel.auto_created and not rel.concrete and rel.one_to_many
+            and isinstance(rel.field, dj_models.ForeignKey)
+        ]
+        pairs = list(
+            ours.filter(tvg_id__in=list(clashes)).values_list("id", "tvg_id", "name")
+        )
+        shown = set(
+            Channel.objects.filter(
+                _owned_tvg_id_q(),
+                epg_data_id__in=[i for i, _t, _n in pairs] + list(clashes.values()),
+            ).values_list("epg_data_id", flat=True)
+        )
+        for old_id, tvg_id, old_name in pairs:
+            new_id = clashes[tvg_id]
+            keep_destination = new_id in shown and old_id not in shown
+            if not keep_destination:
+                # The entry's name goes with its programmes: the write loop
+                # never renames a row it does not visit (an off-slate channel).
+                ProgramData.objects.filter(epg_id=new_id).delete()
+                EPGData.objects.filter(id=new_id).update(name=old_name)
+            for rel in pointers:
+                if keep_destination and rel.related_model is ProgramData:
+                    continue  # the old row's programmes go with it below
+                rel.related_model._base_manager.filter(
+                    **{rel.field.name: old_id}
+                ).update(**{rel.field.name: new_id})
+            EPGData.objects.filter(id=old_id).delete()
+    return len(clashes) + EPGData.objects.filter(
+        _owned_tvg_id_q(), epg_source=old_src,
+    ).update(epg_source=new_src)
+
+
 # ---------- DVR recording preservation (#146) ----------
 #
 # A completed DVR recording is FK'd to the matchups game channel it was made on
@@ -733,8 +825,22 @@ DEFAULT_RECORDING_POST_ROLL_MINUTES = 120
 def _int_setting(settings: Dict[str, Any], key: str, default: int) -> int:
     try:
         return int(float(settings.get(key, default)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # Overflow: "inf", 10**400
         return default
+
+
+def _float_setting(settings: Dict[str, Any], key: str, default: float) -> float:
+    """A number setting that cannot raise. The UI field is numeric, but a
+    value saved through the API (or a cleared field) can be a string, None or
+    not finite, and apply reads it AFTER the group-rename cleanup has committed, so a raise
+    there failed the action with the database half-changed."""
+    try:
+        value = float(settings.get(key, default))
+    except (TypeError, ValueError, OverflowError):  # Overflow: an int past 1e308
+        return default
+    # "nan" / "inf" / "1e400" parse, but compare false (or true) against every
+    # score, which silently turns the setting off or on rather than failing.
+    return value if math.isfinite(value) else default
 
 
 class _AutoRecord:
@@ -5999,6 +6105,23 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             recordings_group_name,
         )
     dry_run = _dry_run_enabled(settings)
+    # Our EPGSource is the one named after the live group, and ours never
+    # fetches (blank url and file_path, not Schedules Direct: _never_fetches_q).
+    # If the group is named after a source
+    # that DOES fetch, step 2 would adopt the user's source (switch it inactive)
+    # and the rename cleanup would write our guide rows into it, replacing
+    # programmes on any row that shares a marker. Refuse before any write.
+    clashing_src = (
+        EPGSource.objects.filter(name=group_name).exclude(_never_fetches_q()).first()
+    )
+    if clashing_src is not None:
+        msg = (
+            f"The group name {group_name!r} is also the name of an EPG source that "
+            f"fetches its own guide, so the plugin cannot use it for its guide. "
+            f"Nothing was changed. Rename 'Target group name' (or that EPG source)."
+        )
+        logger.error("[ranked_matchups] %s", msg)
+        return {"status": "error", "message": msg}
     # #206: ordered language preference for each channel's pooled streams. This
     # used to be `bool(settings.get(_WIDEN_STREAM_POOL_SETTING))`, i.e. English
     # ordering was reachable only by turning on an unrelated pool-widening
@@ -6065,9 +6188,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         .filter(_owned_tvg_id_q("channels__"))
         .distinct()
     )
+    # Our sources never fetch anything (blank url and file_path, not Schedules
+    # Direct, see _never_fetches_q). A source that does is fed from somewhere else, even when its rows carry
+    # our marker (a user who added this server's own XMLTV output as a
+    # source), so it is never ours to empty or delete.
     foreign_epg_sources = list(
         EPGSource.objects.exclude(name__in=_protected_group_names)
         .filter(_owned_tvg_id_q("epgs__"))
+        .filter(_never_fetches_q())
         .distinct()
     )
 
@@ -6134,22 +6262,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         old_g.name,
                     )
 
-    # Same for old EPGSources we own
-    deleted_old_sources = 0
-    if not dry_run and foreign_epg_sources:
-        for old_src in foreign_epg_sources:
-            # Only auto-delete if all its EPGData entries are ours (no other plugin owns it)
-            total = EPGData.objects.filter(epg_source=old_src).count()
-            ours = EPGData.objects.filter(_owned_tvg_id_q(), epg_source=old_src).count()
-            if total > 0 and total == ours:
-                old_src.delete()  # cascades EPGData + ProgramData
-                deleted_old_sources += 1
-                logger.info("[ranked_matchups] deleted old EPGSource %r (%d entries)",
-                            old_src.name, total)
-            else:
-                # Mixed: just nuke our entries, leave the source alone
-                EPGData.objects.filter(_owned_tvg_id_q(), epg_source=old_src).delete()
-
     # 2. Ensure our EPGSource exists and is configured to sit out of
     # Dispatcharr's joke-filler path (see EPG_SOURCE_TYPE comment above).
     epg_source = EPGSource.objects.filter(name=group_name).first()
@@ -6184,6 +6296,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 epg_source.save(update_fields=upgrade_fields)
                 logger.info("[ranked_matchups] upgraded EPGSource id=%s fields=%s",
                             epg_source.id, upgrade_fields)
+
+    # Old EPGSources we own, named after a previous live-group name. AFTER
+    # step 2 on purpose: our rows on them MOVE to the current source rather
+    # than being deleted with it, and that needs the current source to exist
+    # (#263, see _move_owned_epg_rows for why a delete blanks a recording
+    # channel's guide). The old source itself goes only when every row on it
+    # was ours; one that also holds another owner's rows stays theirs.
+    deleted_old_sources = 0
+    if not dry_run and foreign_epg_sources and epg_source is not None:
+        for old_src in foreign_epg_sources:
+            with transaction.atomic():
+                moved = _move_owned_epg_rows(old_src, epg_source)
+                if moved:
+                    logger.info(
+                        "[ranked_matchups] moved %d guide row(s) from old EPGSource %r to %r",
+                        moved, old_src.name, epg_source.name,
+                    )
+                if not EPGData.objects.filter(epg_source=old_src).exists():
+                    old_src.delete()  # empty now, so the cascade takes nothing
+                    deleted_old_sources += 1
+                    logger.info("[ranked_matchups] deleted old EPGSource %r", old_src.name)
 
     # 3. Existing virtual channels we'll update or delete
     existing_virtuals = {
@@ -6352,7 +6485,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     kept_for_recording_n = 0    # #146: stale channels kept (active recording)
     seen_markers = set()
 
-    placeholder_threshold = float(settings.get("placeholder_min_score", 5.0))
+    placeholder_threshold = _float_setting(settings, "placeholder_min_score", 5.0)
     placeholder_channels_created = 0
 
     # Optional Claude-rewritten EPG descriptions. Default off; when on, prose

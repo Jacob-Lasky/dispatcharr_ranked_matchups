@@ -90,6 +90,28 @@ class TestActionRefreshClearsFdCaches:
         )
 
 
+class TestNumericSettings:
+    """A number setting never raises, whatever was saved: apply reads them
+    after the group-rename cleanup has committed (#263), so a raise there
+    failed the action half done. Literal defaults, not the plugin's."""
+
+    @pytest.mark.parametrize("raw", [
+        "", None, "five", pytest.param(10 ** 1000, id="int-past-1e308"), [], {},
+        "nan", "inf", "-inf", "1e400",
+    ])
+    def test_float_setting_falls_back(self, plugin, raw):
+        assert plugin._float_setting({"x": raw}, "x", 5.0) == 5.0
+
+    @pytest.mark.parametrize("raw", ["", None, "five", "inf", pytest.param(10 ** 1000, id="int-past-1e308"), "1e400"])
+    def test_int_setting_falls_back(self, plugin, raw):
+        assert plugin._int_setting({"x": raw}, "x", 7) == 7
+
+    def test_valid_values_parse(self, plugin):
+        assert plugin._float_setting({"x": "6.5"}, "x", 5.0) == 6.5
+        assert plugin._float_setting({}, "x", 5.0) == 5.0
+        assert plugin._int_setting({"x": "3.9"}, "x", 7) == 3
+
+
 class TestParseScheduledTimes:
     def test_simple_csv(self, plugin):
         out = plugin._parse_scheduled_times("0400,1000,1600,2200")

@@ -14,6 +14,8 @@ recording_stops.json
 last_run.json
 odds_cache.json
 numbering_state.json
+sportsdb_thumb_cache.json
+gamethumbs_cache.json
 *.tmp
 
 # Python

@@ -59,6 +59,16 @@ class Channel(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
 
+class ChannelOverride(models.Model):
+    """Per-field user overrides. Its epg_data FK is related_name="+", i.e. a
+    HIDDEN reverse relation, which EPGData._meta.related_objects omits."""
+    channel = models.OneToOneField(Channel, on_delete=models.CASCADE, related_name="override")
+    tvg_id = models.CharField(max_length=255, null=True, blank=True)
+    epg_data = models.ForeignKey(
+        "epg.EPGData", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
+
+
 class ChannelProfile(models.Model):
     name = models.CharField(max_length=100, unique=True)
 
