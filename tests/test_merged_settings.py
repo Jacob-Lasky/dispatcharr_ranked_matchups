@@ -595,3 +595,102 @@ class TestManifestMatchesTheMergeTable:
         ids = {f["id"] for f in _manifest_fields()}
         assert ids & set(ms.LEGACY_KEYS) == set()
 
+
+
+class TestNoBareLegacyReads:
+    """Every retired key is read through merged_settings, nowhere else.
+
+    The legacy keys STAY in the stored dict after migration (so a downgrade
+    works), which makes a bare `settings.get("enable_atp")` dangerous rather
+    than merely redundant: on a migrated install it returns the value from
+    before the upgrade, not what the user has since picked in the Tennis
+    select. The only allowed use of a legacy id outside merged_settings.py is
+    a LEAGUE id as the argument of `league_enabled(settings, "<id>")`; the
+    retired `ncaaf_divisions` and `weight_<name>` ids are never allowed
+    (league_enabled would read the first as a plain stored toggle). A key
+    assembled from pieces (`f"weight_{name}"`, `"enable_" + x`) is flagged too,
+    and so is any other constant equal to a legacy id, even one that only
+    labels something: such a table outside merged_settings is a second copy of
+    the merge table."""
+
+    @staticmethod
+    def _offences(src, filename):
+        import ast
+        tree = ast.parse(src, filename)
+        league_ids = set(ms.LEGACY_KEYS) - {"ncaaf_divisions"} - {
+            k for k in ms.LEGACY_KEYS if k.startswith(ms.LEGACY_WEIGHT_PREFIX)
+        }
+        # Heads that can only be building a league toggle or a weight id. NOT
+        # "ncaaf_": an f"ncaaf_{season}" cache key is legitimate, and the one
+        # legacy id it could build (ncaaf_divisions) is caught as a constant.
+        prefixes = {
+            k[:i + 1] for k in ms.LEGACY_KEYS for i, ch in enumerate(k)
+            if ch == "_" and k.startswith(("enable_", ms.LEGACY_WEIGHT_PREFIX))
+        }
+        allowed = set()
+        offences = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", getattr(node.func, "attr", None)) == "league_enabled"
+                    and len(node.args) == 2
+                    and isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value in league_ids):
+                allowed.add(id(node.args[1]))
+            # A key built from a constant head: f"weight_{n}" or "enable_" + x.
+            head = None
+            if isinstance(node, ast.JoinedStr) and node.values and isinstance(node.values[0], ast.Constant):
+                head = node.values[0].value
+            elif (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
+                    and isinstance(node.left, ast.Constant) and isinstance(node.left.value, str)):
+                head = node.left.value
+            if isinstance(head, str) and head in prefixes:
+                offences.append(f"{filename}:{node.lineno} {head!r}+...")
+        legacy = set(ms.LEGACY_KEYS)
+        offences += [
+            f"{filename}:{node.lineno} {node.value!r}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and node.value in legacy and id(node) not in allowed
+        ]
+        return offences
+
+    def _runtime_files(self):
+        skip = {"tests", "__pycache__", "venv", "node_modules"}
+        for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+            dirnames[:] = [d for d in dirnames if d not in skip and not d.startswith(".")]
+            for name in filenames:
+                path = os.path.join(dirpath, name)
+                if name.endswith(".py") and os.path.relpath(path, REPO_ROOT) != "merged_settings.py":
+                    yield path
+
+    def test_the_screen_catches_a_bare_read(self):
+        # The screen must fail on purpose before its clean result is believed.
+        bad = (
+            'def f(settings, name, x):\n'
+            '    a = settings.get("enable_atp", False)\n'
+            '    b = settings["weight_rank"]\n'
+            '    c = league_enabled(settings, "ncaaf_divisions")\n'
+            '    d = settings.get(f"weight_{name}")\n'
+            '    e = settings.get("enable_" + x)\n'
+            '    ok = league_enabled(settings, "enable_wta")\n'
+            '    fine = settings.get("enable_epl", False)\n'
+            '    key = f"ncaaf_{name}"\n'
+        )
+        assert sorted(self._offences(bad, "probe.py")) == [
+            "probe.py:2 'enable_atp'",
+            "probe.py:3 'weight_rank'",
+            "probe.py:4 'ncaaf_divisions'",
+            "probe.py:5 'weight_'+...",
+            "probe.py:6 'enable_'+...",
+        ]
+
+    def test_runtime_code_reads_no_legacy_key_directly(self):
+        scanned, offences = set(), []
+        for path in self._runtime_files():
+            rel = os.path.relpath(path, REPO_ROOT)
+            with open(path, encoding="utf-8") as fh:
+                offences += self._offences(fh.read(), rel)
+            scanned.add(rel)
+        # The walk really reached the files that read settings.
+        assert {"plugin.py", "tasks.py", os.path.join("sources", "ncaaf.py")} <= scanned
+        assert offences == []

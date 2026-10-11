@@ -117,17 +117,19 @@ the **Test naming convention** action to preview a template before applying it.
 ### NCAA Football divisions
 
 CFBD's feed carries every NCAA division, not just Division I. The
-**NCAA Football (CFBD)** dropdown turns the sport on and selects what
-actually reaches the guide:
+**NCAA Football (CFBD)** setting both switches the league on and selects what
+actually reaches the guide (before #208 these were two settings, an on/off
+toggle and a divisions dropdown):
 
 | Setting | What is pulled |
 |---|---|
-| `Off` (default) | Nothing; NCAA Football is disabled |
-| `D1 FBS only (recommended)` | Games where either side is FBS, including FBS-vs-FCS |
-| `D1 FBS + FCS` | The above, plus FCS-vs-FCS |
+| `Off` (default) | Nothing; NCAA Football is not fetched |
+| `D1 FBS only (recommended)` | Games where either side is FBS, including FBS-vs-FCS (and the rare FBS-vs-Division II) |
+| `D1 FBS + FCS` | Games where either side is FBS or FCS: the above, plus FCS-vs-FCS and FCS against a Division II or III opponent |
 
-Division II and III are never pulled under either setting. They are not
-merely uninteresting: the Monte Carlo importance simulation replays only the
+A game is kept when EITHER side is in the selected divisions, so a game
+between two Division II or III teams is never pulled under either setting.
+Those games are not merely uninteresting: the Monte Carlo importance simulation replays only the
 selected divisions' season, so a team outside it scores 0.00 every time while
 still being played out in every simulated season. Opening week 2026 returned
 157 games in a seven-day window of which 27 involved an FBS team, so the
@@ -140,7 +142,7 @@ an FCS game can still score on stakes alone. Under `D1 FBS + FCS` those
 stakes are measured with FBS win-count bands (6 wins = bowl eligible,
 10+ = playoff contender), which FCS's own postseason does not work that
 way — treat FCS importance as an approximation rather than a like-for-like
-comparison with FBS. This is why FBS-only is the recommended setting.
+comparison with FBS. This is why FBS-only is the recommended choice.
 
 
 Adding a sport is a new file in `sources/` implementing the `SportSource`

@@ -136,9 +136,18 @@ Inside the `fields` array, under the "Sport Sources" section:
 Inside `_build_sources`, add:
 
 ```python
-if settings.get("enable_la_liga", False) and fd_key:
+if league_enabled(settings, "enable_la_liga") and fd_key:
     sources.append(SoccerSource("la_liga", fd_api_key=fd_key, odds_api_key=odds_key))
 ```
+
+Ask through `league_enabled` (from `merged_settings.py`), never a bare
+`settings.get("enable_...")`. Since #208 some leagues share one four-way select
+(`merged_settings.LEAGUE_PAIRS`) and pre-#208 installs still carry their old
+`enable_*` keys, so a bare read of a paired league's id returns a stale value
+instead of what the user picked. `tests/test_merged_settings.py`
+(`TestNoBareLegacyReads`) fails on a bare read that names a merged league's id; it
+cannot tell a bare read of an unmerged league like this one, so the rule is
+yours to keep there.
 
 ### Step 5: test
 
