@@ -1137,7 +1137,12 @@ def _read_stops() -> Dict[str, Dict[str, Any]]:
             data = json.load(f)
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    # Entry by entry too: one non-dict entry made recording.next_stop_delay
+    # raise on every reaper tick, a 10-minute crash loop that stopped the
+    # handoffs, the reaping and the scheduler-staleness check with it.
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
 
 
 def _autorecord_finish(ar: "_AutoRecord", games: List[Dict[str, Any]], dry_run: bool) -> str:
@@ -2281,7 +2286,7 @@ def _compute_past_slot_end(
     if not settings.get("auto_refresh_enabled", False):
         return _bounded(prog_end_utc + _PAST_SLOT_DEFAULT_DURATION)
     tz = _resolve_tz(settings.get("local_timezone", "UTC"))
-    times = _parse_scheduled_times(settings.get("scheduled_times", ""))
+    times = _parse_scheduled_times(settings.get("scheduled_times", _DEFAULT_SCHEDULED_TIMES))
     if not times:
         return _bounded(prog_end_utc + _PAST_SLOT_DEFAULT_DURATION)
     prog_end_local = prog_end_utc.astimezone(tz)
@@ -7662,6 +7667,7 @@ def _run_health_lines(
     cache: Dict[str, Any], last_run: Optional[Dict[str, Any]], tz,
     inflight: Optional[Dict[str, Any]] = None,
     run_lock: Optional[Tuple[str, Optional[str]]] = None,
+    scheduler_stale: Optional[str] = None,
 ) -> Tuple[List[str], List[str]]:
     """The verdict block that ends Show current state (#227): did the last
     background run work, is one running now, and did the result contain
@@ -7688,7 +7694,12 @@ def _run_health_lines(
     in a process whose INFO log never reaches the container log (a Celery
     worker) holds it without writing the inflight key. An UNREACHABLE Redis is
     said outright, because every run now refuses to start without the lock
-    (#199) and the guide stops updating until Redis is back."""
+    (#199) and the guide stops updating until Redis is back.
+
+    `scheduler_stale` is _scheduler_staleness's line (#252). It goes LAST,
+    after the run verdict: "Last run OK" is true and still the wrong answer
+    when no scheduler has run since, so the line that says nothing will run
+    again on its own must be the one the toast always shows."""
     out = [
         f"WARNING: {problem}."
         for problem in _slate_problems(cache.get("summary") or [], cache.get("games") or [])
@@ -7742,6 +7753,8 @@ def _run_health_lines(
             verdict.append(
                 f"NOTE: {skipped} requested {_fmt_run_time(skipped_at, tz)} did not run: {why}."
             )
+    if scheduler_stale:
+        verdict.append(scheduler_stale)
     return out, verdict
 
 
@@ -7792,7 +7805,8 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     # works at all is what a confused user needs most. See _run_health_lines.
     status_tz = _resolve_tz((settings or {}).get("local_timezone", "UTC"))
     data_warnings, run_verdict = _run_health_lines(
-        cache, tasks.read_last_run(), status_tz, inflight, _read_run_lock())
+        cache, tasks.read_last_run(), status_tz, inflight, _read_run_lock(),
+        scheduler_stale=_scheduler_staleness(settings or {}))
     notices = data_warnings + notices + run_verdict
 
     games = cache.get("games", [])
@@ -8285,14 +8299,19 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # Scheduler state (the running thread + its stop Event) lives in a registry
 # stashed in sys.modules under a synthetic key, NOT in module globals, so it
-# SURVIVES a plugin reload. #110: the loader's force_reload path (reload
-# endpoint / .reload_token / settings-save) unloads this module by file path and
-# re-imports it WITHOUT calling stop() — it only calls stop() on disable/delete.
+# SURVIVES a plugin reload. #110: the loader's force_reload paths (install,
+# repo update, and every OTHER worker reacting to .reload_token) unload this
+# module by file path and re-import it WITHOUT calling stop(). Only disable /
+# delete and the reload endpoint itself (stop_all_plugins(reason="reload"),
+# then discover_plugins(force_reload=True), read in the live loader 2026-10-11)
+# call stop() first.
 # Module globals reset on reload, so the new incarnation could never see the
 # thread the old one started, orphaning it (and its DB connection) every reload.
 # That re-leaks the exact thread #82's stop() was meant to reclaim. Keeping the
-# state in a reload-stable registry lets the new incarnation's __init__ find and
-# tear down the prior thread before starting its own. The synthetic module has
+# state in a reload-stable registry lets the new incarnation's __init__ find the
+# prior thread: it KEEPS a healthy one (no churn, #82/#136; it runs the old code
+# until the process exits) and replaces one that stop() signaled
+# (_thread_running, bounded by _MAX_RETIRING_THREADS). The synthetic module has
 # no __file__/__path__ under the plugin dir, so the loader's _unload_path_modules
 # leaves it in place across reloads.
 _SCHEDULER_REGISTRY_KEY = "_dispatcharr_ranked_matchups_scheduler_state"
@@ -8314,7 +8333,7 @@ def _stop_scheduler(thread, stop_event, reason: str) -> None:
     The loop polls its own stop_event between work units (and on every park via
     _scheduler_sleep), so setting it drops the loop out at its next wake-up
     (immediate: set() wakes a thread waiting on the Event); the loop's finally
-    then closes its DB connection. Only stop() (disable/delete) calls this now:
+    then closes its DB connection. Only stop() (disable/delete/reload) calls this:
     __init__ is idempotent and leaves a healthy thread running rather than
     restarting it (#82/#136), so there is no longer a reload path that needed the
     old non-blocking (join=False) variant.
@@ -8333,12 +8352,15 @@ def _stop_scheduler(thread, stop_event, reason: str) -> None:
 def _clear_if_exited(reg, reason: str) -> None:
     """Signal a registry's thread and clear the slot ONLY if it actually died.
 
-    DO NOT unconditionally null the registry. A thread that is mid-work (the
-    reaper can be parked on a subprocess for minutes) outlives the 5s join, and
-    a cleared slot makes the next __init__ believe none exists and spawn a
-    SECOND one. Leaving the live reference is the safer failure: the loop is
-    already signaled and exits at its next wake-up, and until then the
-    idempotence check correctly reports a live thread.
+    A thread that is mid-work (a scheduled pipeline or a reap runs for
+    minutes) outlives the 5s join. Its reference stays, so a second stop()
+    still finds and joins it; it is already signaled, finishes the work in
+    hand and exits at its next check. It does NOT count as running for the
+    next __init__ (see _thread_running): the reload endpoint calls stop() and
+    then rebuilds the Plugin in the same worker, and a signaled thread left
+    standing as "the" scheduler meant that worker had none once it exited
+    (#252; with the threads confined to uwsgi workers, a single-worker install
+    then had no scheduler at all).
     """
     _stop_scheduler(reg.thread, reg.stop_event, reason)
     if reg.thread is None or not reg.thread.is_alive():
@@ -8346,9 +8368,59 @@ def _clear_if_exited(reg, reason: str) -> None:
         reg.stop_event = None
 
 
-def _parse_scheduled_times(raw: str) -> List[Tuple[int, int]]:
+def _thread_running(reg) -> bool:
+    """Whether a registry holds a thread that will keep running: alive AND
+    not told to stop. A signaled thread is on its way out (its loop checks the
+    event after the work in hand) and will never fire another slot or reap, so
+    __init__ must start a replacement rather than keep it."""
+    if reg.thread is None or not reg.thread.is_alive():
+        return False
+    return reg.stop_event is None or not reg.stop_event.is_set()
+
+
+# How many signaled-but-still-alive threads one registry may leave behind
+# before __init__ stops replacing them. Each can hold a Django DB connection
+# until its work in hand returns (a reaper blocked on a row lock, say), so
+# replacing on every reload without a bound is the #82 connection leak with
+# a different trigger. Past the bound the worker runs without that thread
+# until one exits, and says so; the staleness check covers the scheduler.
+_MAX_RETIRING_THREADS = 2
+
+
+def _may_start(reg, what: str) -> bool:
+    """Whether __init__ may start a new thread for `reg`: none is running
+    (_thread_running), and the signaled ones still finishing their work are
+    within _MAX_RETIRING_THREADS. Records a signaled live thread as retiring
+    before it is replaced, since the registry slot is about to drop it."""
+    if _thread_running(reg):
+        return False
+    retiring = [t for t in (getattr(reg, "retiring", None) or []) if t.is_alive()]
+    if reg.thread is not None and reg.thread.is_alive() and reg.thread not in retiring:
+        retiring.append(reg.thread)
+    reg.retiring = retiring
+    if len(retiring) > _MAX_RETIRING_THREADS:
+        logger.warning(
+            "[ranked_matchups] not starting a new %s thread (pid=%s): %d stopped ones "
+            "are still finishing their work; it starts on a discovery after one exits",
+            what, os.getpid(), len(retiring))
+        return False
+    return True
+
+
+# plugin.json's default for scheduled_times. Every reader that falls back
+# when the stored settings lack the key uses THIS, because the modal shows the
+# manifest default for a missing value: the scheduler used to fall back to
+# "0400" and the expiry maths to "", so a key that was never stored ran once a
+# day while the UI said four times. tests/test_thread_host.py pins it to the
+# manifest.
+_DEFAULT_SCHEDULED_TIMES = "0400,1000,1600,2200"
+
+
+def _parse_scheduled_times(raw: str, quiet: bool = False) -> List[Tuple[int, int]]:
     """Parse 'HHMM,HHMM,...' into [(hour, minute), ...], sorted, deduped.
-    Tolerates whitespace / colons / 'HH:MM'. Bad entries are skipped."""
+    Tolerates whitespace / colons / 'HH:MM'. Bad entries are skipped, with a
+    warning unless `quiet` (the staleness check reads the setting on every
+    discovery and must not repeat the scheduler's warning each time)."""
     out: List[Tuple[int, int]] = []
     if not raw:
         return out
@@ -8359,14 +8431,24 @@ def _parse_scheduled_times(raw: str) -> List[Tuple[int, int]]:
         if len(s) == 3:
             s = "0" + s
         if len(s) != 4 or not s.isdigit():
-            logger.warning("[ranked_matchups] bad scheduled_times token: %r", tok)
+            if not quiet:
+                logger.warning("[ranked_matchups] bad scheduled_times token: %r", tok)
             continue
         h, m = int(s[:2]), int(s[2:])
         if 0 <= h < 24 and 0 <= m < 60:
             out.append((h, m))
-        else:
+        elif not quiet:
             logger.warning("[ranked_matchups] out-of-range scheduled_times token: %r", tok)
     return sorted(set(out))
+
+
+def _slots_on(day, times: List[Tuple[int, int]], tz) -> List[datetime]:
+    """The scheduled slots of one local calendar day, built exactly as the
+    scheduler builds the slot it claims. The claim key is the slot's
+    isoformat(), so anything that looks a claim up (_scheduler_staleness)
+    must build its slot through here too, or the strings differ."""
+    return [datetime.combine(day, datetime.min.time(), tz).replace(hour=h, minute=m)
+            for h, m in times]
 
 
 def _next_fire_time(times: List[Tuple[int, int]], tz, now: Optional[datetime] = None) -> Optional[datetime]:
@@ -8376,16 +8458,27 @@ def _next_fire_time(times: List[Tuple[int, int]], tz, now: Optional[datetime] = 
     if now is None:
         now = datetime.now(tz)
     today = now.date()
-    candidates = [datetime.combine(today, datetime.min.time(), tz).replace(hour=h, minute=m)
-                  for h, m in times]
-    candidates += [datetime.combine(today + timedelta(days=1), datetime.min.time(), tz).replace(hour=h, minute=m)
-                   for h, m in times]
+    candidates = _slots_on(today, times, tz) + _slots_on(today + timedelta(days=1), times, tz)
     # Compare and pick in UTC, NOT in `tz`: two datetimes sharing one ZoneInfo
     # compare by WALL time, so on the night clocks fall back a slot that already
     # passed (01:30 EDT) reads as later than 01:00 EST and is picked again.
     now_utc = now.astimezone(timezone.utc)
     future = [c for c in candidates if c.astimezone(timezone.utc) > now_utc]
     return min(future, key=lambda c: c.astimezone(timezone.utc)) if future else None
+
+
+def _previous_fire_time(times: List[Tuple[int, int]], tz, now: datetime) -> Optional[datetime]:
+    """The most recent slot at or before `now`, compared in UTC for the same
+    fall-back reason as _next_fire_time. `now` may be in any zone; its date is
+    taken in `tz`, and yesterday's slots are included so a time before the
+    day's first slot finds the previous evening's."""
+    if not times:
+        return None
+    today = now.astimezone(tz).date()
+    candidates = _slots_on(today - timedelta(days=1), times, tz) + _slots_on(today, times, tz)
+    now_utc = now.astimezone(timezone.utc)
+    past = [c for c in candidates if c.astimezone(timezone.utc) <= now_utc]
+    return max(past, key=lambda c: c.astimezone(timezone.utc)) if past else None
 
 
 def _scheduler_close_db():
@@ -8438,7 +8531,8 @@ def _scheduler_loop(plugin_ref, stop_event):
                     _scheduler_sleep(stop_event, 300)
                     continue
                 tz = _resolve_tz(settings.get("local_timezone", "UTC"))
-                times = _parse_scheduled_times(settings.get("scheduled_times", "0400"))
+                times = _parse_scheduled_times(
+                    settings.get("scheduled_times", _DEFAULT_SCHEDULED_TIMES))
                 if not times:
                     logger.warning("[ranked_matchups] no valid scheduled_times; idling 5m")
                     _scheduler_sleep(stop_event, 300)
@@ -8499,8 +8593,11 @@ def _scheduler_loop(plugin_ref, stop_event):
 # is exactly the apply hammering that wedges Dispatcharr's login worker.
 _SCHEDULER_SLOT_KEY_PREFIX = f"plugins:{PLUGIN_KEY}:scheduler:slot:"
 # Long enough that no worker can re-claim a slot it already ran, short
-# enough that the keys clean themselves up.
-_SCHEDULER_SLOT_CLAIM_TTL_SECONDS = 24 * 3600
+# enough that the keys clean themselves up, AND longer than a day plus
+# _SCHEDULER_STALE_GRACE_SECONDS: _scheduler_staleness reads the claim of the
+# most recent slot, which with a single daily time can be that long ago, and
+# an expired claim would read as "no scheduler ran it". DO NOT cut back to 24h.
+_SCHEDULER_SLOT_CLAIM_TTL_SECONDS = 48 * 3600
 _SCHEDULED_RETRY_SECONDS = 60
 # How long the slot's owner keeps retrying before giving up and recording
 # the skip. Also capped at the next slot (see _scheduled_retry_deadline), so a
@@ -8554,7 +8651,7 @@ def _scheduled_retry_deadline(slot: datetime, times: List[Tuple[int, int]], tz) 
 
 
 # Run kinds that do a scheduled slot's whole job (refresh + apply).
-_PIPELINE_RUN_KINDS = frozenset({"auto_pipeline", "scheduled_auto_pipeline", "m3u_rematch"})
+_PIPELINE_RUN_KINDS = frozenset({"auto_pipeline", tasks.SCHEDULED_RUN_KIND, "m3u_rematch"})
 
 
 def _slot_already_covered(slot: datetime) -> bool:
@@ -8605,7 +8702,7 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
         if datetime.now(timezone.utc) <= deadline:
             tasks.run_scheduled_pipeline(settings)
         else:
-            tasks.record_skipped_run("scheduled_auto_pipeline", late)
+            tasks.record_skipped_run(tasks.SCHEDULED_RUN_KIND, late)
         return False
     attempted = False
     while True:
@@ -8621,7 +8718,7 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
                 "[ranked_matchups] scheduled run for %s did NOT run (deadline %s): %s. "
                 "The next scheduled time picks it up.",
                 slot.isoformat(), deadline.isoformat(), reason)
-            tasks.record_skipped_run("scheduled_auto_pipeline", reason)
+            tasks.record_skipped_run(tasks.SCHEDULED_RUN_KIND, reason)
             return False
         logger.info("[ranked_matchups] scheduled run for %s waiting %ds for the run lock",
                     slot.isoformat(), _SCHEDULED_RETRY_SECONDS)
@@ -8994,6 +9091,9 @@ def _reaper_loop(plugin_ref, stop_event):
                     return
                 settings = plugin_ref.get_current_settings()
                 _run_due_stops(settings)
+                # Never raises. Catches a scheduler thread that died while
+                # this one lives; one log line per missed slot (#252).
+                _warn_if_scheduler_stale(settings)
                 # Its own try: a failure here must not cost this tick's reap.
                 try:
                     _maybe_rematch_after_m3u(settings)
@@ -9039,11 +9139,9 @@ def _process_label() -> str:
     "short arguments" or "arguments that look like flags": `-p hunter2` and
     `--token=abc` are both short, and a `manage.py shell -c "<script>"` exec
     can carry anything."""
-    try:
-        import uwsgi  # type: ignore[import-not-found]  # only importable under uwsgi
-        return f"uwsgi worker {uwsgi.worker_id()}"
-    except Exception:
-        pass
+    wid = _uwsgi_worker_id()
+    if wid is not None:
+        return f"uwsgi worker {wid}" if wid > 0 else "uwsgi (not a worker)"
     argv = [str(a) for a in (sys.argv or [])]
     if not argv:
         return "?"
@@ -9056,6 +9154,207 @@ def _process_label() -> str:
             if prev == "-Q" and _QUEUE_LIST_RE.fullmatch(arg):
                 parts.append(arg)
     return " ".join(parts)[:120] or "?"
+
+
+def _uwsgi_worker_id() -> Optional[int]:
+    """uwsgi.worker_id() when this process runs inside uwsgi, else None.
+
+    The `uwsgi` module is built into the uwsgi binary's embedded interpreter
+    and exists nowhere else: measured on Tower 2026-10-11, the venv python
+    that runs Celery, daphne and manage.py finds no `uwsgi` module (pip's
+    uWSGI ships only `uwsgidecorators.py`, which imports it). So this, NOT an
+    environment variable, is the test. DO NOT switch to UWSGI_* variables:
+    uwsgi exports UWSGI_ORIGINAL_PROC_NAME and UWSGI_RELOADS to its
+    attach-daemons, so Celery and daphne carry them and the workers do not.
+
+    0 is the master (or a mule), 1..N a worker. A uwsgi process whose id
+    cannot be read returns 0 too, so callers treat it as "not certainly a
+    worker"."""
+    try:
+        import uwsgi  # type: ignore[import-not-found]  # only importable under uwsgi
+    except ImportError:
+        return None
+    try:
+        return int(uwsgi.worker_id())
+    except Exception:  # noqa: BLE001 - any failure means "cannot tell"
+        return 0
+
+
+# Programs whose processes run plugin discovery but serve no plugin requests:
+# Celery's worker_process_init discovers in every prefork child and in the
+# thread-pool worker, daphne at Django start. None of them may run the
+# scheduler or the reaper (#252).
+_THREADLESS_PROGRAMS = frozenset({"celery", "daphne"})
+# Programs that serve Dispatcharr's web app outside uwsgi (the legacy
+# entrypoint.aio.sh runs gunicorn). They run the threads, as uwsgi workers do.
+_WEB_SERVER_PROGRAMS = frozenset({"gunicorn"})
+
+
+def _program_name(argv: Sequence[str]) -> str:
+    """The program a process was started as: argv[0]'s basename, or the
+    package for `python -m <pkg>` (argv[0] is then <pkg>/__main__.py)."""
+    if not argv:
+        return ""
+    first = str(argv[0])
+    name = os.path.basename(first)
+    if name == "__main__.py":
+        name = os.path.basename(os.path.dirname(first))
+    return name
+
+
+def _thread_host() -> Tuple[bool, bool]:
+    """Should THIS process run the scheduler and reaper? (start, certain).
+
+    Only the processes that serve plugin requests run them: uwsgi workers (or
+    gunicorn / runserver, where Dispatcharr is served that way). Before #252
+    every process that ran plugin discovery started both threads: every
+    Celery prefork child, the Celery thread worker, daphne and any
+    `manage.py` exec. Those copies took part in every scheduled slot on code
+    the plugin reload never reaches, and a Celery copy that won a slot logged
+    nothing, because Celery drops this plugin's INFO lines.
+
+    A WRONG "no" here means no scheduler anywhere, which is worse than an
+    extra copy (the slot claim makes an extra copy harmless). So only
+    processes positively identified as non-serving decline; anything the
+    function cannot place (uwsgi with worker id 0, an unknown program)
+    STARTS the threads and returns certain=False so the caller logs a
+    WARNING. DO NOT invert that default to "decline unless sure". The
+    pipeline child is handled before this is called (PIPELINE_CHILD_ENV)."""
+    wid = _uwsgi_worker_id()
+    if wid is not None:
+        return True, wid > 0
+    argv = [str(a) for a in (sys.argv or [])]
+    prog = _program_name(argv)
+    if prog in _THREADLESS_PROGRAMS:
+        return False, True
+    if prog in _WEB_SERVER_PROGRAMS:
+        return True, True
+    if prog == "manage.py":
+        return (len(argv) > 1 and argv[1] == "runserver"), True
+    return True, False
+
+
+# ---------- is any scheduler running at all? (#252) ----------
+#
+# With the threads confined to uwsgi workers, a detection that is wrong
+# everywhere would leave NO scheduler running, and nothing else would say so:
+# the guide just stops changing. So the claim every firing scheduler makes
+# (_claim_scheduled_slot) doubles as a heartbeat. If the most recent slot that
+# should have fired (allowing the grace below) has no claim, no process ran
+# its scheduler then, and Show current state and the log say so.
+#
+# The watch key records WHEN this check started expecting claims for the
+# current schedule, so a fresh install, a Redis restart, or a schedule just
+# turned on or changed does not count slots from before it as missed.
+_SCHEDULER_WATCH_KEY = f"plugins:{PLUGIN_KEY}:scheduler:watch"
+# A scheduler claims its slot the moment it wakes; this covers a late wake
+# and Dispatcharr's RedisClient retrying its connect.
+_SCHEDULER_STALE_GRACE_SECONDS = 15 * 60
+
+
+def _scheduler_staleness(settings: Dict[str, Any],
+                         now: Optional[datetime] = None) -> Optional[str]:
+    """A WARNING line when no scheduler claimed the most recent slot it should
+    have, else None. None also when the answer is unknown (Redis unreachable:
+    Show current state already reports that through the run lock line).
+
+    `settings` must resolve auto_refresh_enabled, scheduled_times and
+    local_timezone as the scheduler does, which the context settings
+    (manifest defaults merged in) and the raw stored dict both do, because
+    the scheduler falls back to the manifest defaults. Never raises."""
+    try:
+        enabled = bool(settings.get("auto_refresh_enabled", False))
+        tz = _resolve_tz(settings.get("local_timezone", "UTC"))
+        times = _parse_scheduled_times(
+            settings.get("scheduled_times", _DEFAULT_SCHEDULED_TIMES), quiet=True)
+        now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        from core.utils import RedisClient
+        # ONE connect attempt. DO NOT use get_client()'s default retries:
+        # Dispatcharr's RedisClient sleeps 1+2+4+8 s between them when Redis
+        # is down, and this status line runs inside Show current state (after
+        # _read_run_lock has already waited that out once) and inside Celery's
+        # worker_process_init. A failed attempt is not cached, so the next
+        # caller retries normally; a live client is cached whatever the args.
+        r = RedisClient.get_client(max_retries=1)
+        if r is None:
+            return None
+        # Built from RESOLVED values: the reaper reads the raw stored dict and
+        # Show current state the merged one, and two spellings of the same
+        # schedule would otherwise keep resetting each other's watch.
+        sig = json.dumps([enabled, times, str(tz)])
+        watch: Dict[str, Any] = {}
+        try:
+            raw = r.get(_SCHEDULER_WATCH_KEY)
+            watch = json.loads(raw) if raw else {}
+        except ValueError:
+            watch = {}
+        if not isinstance(watch, dict) or watch.get("sig") != sig:
+            r.set(_SCHEDULER_WATCH_KEY, json.dumps({"sig": sig, "since": now_utc.isoformat()}))
+            return None
+        if not enabled or not times:
+            return None
+        expected = _previous_fire_time(
+            times, tz, now_utc - timedelta(seconds=_SCHEDULER_STALE_GRACE_SECONDS))
+        since = parse_iso_utc(watch.get("since"))
+        if expected is None or since is None or since > expected.astimezone(timezone.utc):
+            return None
+        if r.exists(_SCHEDULER_SLOT_KEY_PREFIX + expected.isoformat()):
+            return None
+        # A SCHEDULED run in progress can be the scheduler itself, still
+        # inside an earlier slot's pipeline when this one came due (a single
+        # worker with close-together times): busy, not missing. Only that
+        # kind: a manual run or a reap holding the lock says nothing about
+        # whether any scheduler is alive, and would otherwise hide a dead one
+        # for as long as people keep clicking.
+        holder = r.get(_SCHEDULER_LOCK_KEY)
+        try:
+            holder_kind = json.loads(holder).get("kind") if holder else None
+        except (ValueError, AttributeError):
+            holder_kind = None
+        if holder_kind == tasks.SCHEDULED_RUN_KIND:
+            return None
+        # The same case once that run has ended: the busy scheduler picks its
+        # next slot from the run's END (_next_fire_time from now), so it never
+        # claims the slot it was busy through. A scheduled run that started
+        # before `expected` and finished after it (less a minute for the lock
+        # release and cleanup after finished_at is stamped) accounts for the
+        # missing claim; the next slot is judged on its own. A finish in the
+        # FUTURE is a bad clock or file, never a finished run: it must not
+        # hide every later slot.
+        last = tasks.read_last_run() or {}
+        if last.get("kind") == tasks.SCHEDULED_RUN_KIND:
+            began = parse_iso_utc(last.get("started_at"))
+            ended = parse_iso_utc(last.get("finished_at"))
+            due = expected.astimezone(timezone.utc)
+            if (began is not None and ended is not None and ended <= now_utc
+                    and began <= due <= ended + timedelta(seconds=60)):
+                return None
+    except Exception:  # noqa: BLE001 - a status line must never break its caller
+        return None
+    when = _fmt_run_time(expected.astimezone(timezone.utc).isoformat(), tz)
+    return (
+        f"WARNING: no scheduler started the {when} run: no process claimed that "
+        "slot, so automatic Refresh + apply may not be running anywhere. If "
+        "Dispatcharr was not running then, the next scheduled run clears this; "
+        "otherwise check the log for 'scheduler thread started' (one per uwsgi "
+        "worker) and restart Dispatcharr."
+    )
+
+
+def _warn_if_scheduler_stale(settings: Dict[str, Any]) -> None:
+    """Log _scheduler_staleness at WARNING, once per missed slot per process.
+
+    Called on every reaper tick, and from Plugin.__init__ in the processes
+    that start no threads (Celery's WARNING lines reach the log, its INFO
+    lines do not), so a scheduler that is missing everywhere is still
+    reported by the processes that are not supposed to run one."""
+    line = _scheduler_staleness(settings)
+    reg = _scheduler_registry()
+    if line is None or getattr(reg, "stale_warned", None) == line:
+        return
+    reg.stale_warned = line
+    logger.warning("[ranked_matchups] %s (pid=%s, %s)", line[len("WARNING: "):],
+                   os.getpid(), _process_label())
 
 
 # What _process_label may copy out of argv. See its docstring.
@@ -9443,15 +9742,16 @@ class Plugin:
         #     leaked a DB connection per poll until max_connections was hit (the
         #     #82 lock-up). This early return is what prevents that churn.
         #   - The reload endpoint: the loader calls stop() FIRST (loader.py), which
-        #     clears reg.thread, so we fall through and start a fresh one; the old
-        #     thread was already signaled and releases its DB connection in
-        #     _scheduler_loop's finally, and the new one parks holding none.
+        #     signals the thread (and clears reg.thread once it has exited); a
+        #     signaled thread is not running (_thread_running), so we fall
+        #     through and start a fresh one. The old thread releases its DB
+        #     connection in _scheduler_loop's finally, and the new one parks
+        #     holding none; _MAX_RETIRING_THREADS bounds the stuck ones.
         # Either way no connection leaks. A kept thread DOES run stale code after
         # a deploy: only a container restart gives every process fresh threads.
         # The reload endpoint restarts them in the one worker serving it, and
-        # the copies in the other workers, daphne and the Celery workers (all
-        # run discovery) keep their code until the process exits. See
-        # CLAUDE.md, "The run lock".
+        # the copies in the other workers keep their code until the process
+        # exits. See CLAUDE.md, "The run lock".
         # START THE REAPER FIRST, and unconditionally. It is a SEPARATE thread
         # with its own registry, so it must not sit behind the scheduler's
         # early return: on the common path (a discovery where the scheduler is
@@ -9470,8 +9770,34 @@ class Plugin:
         # only run on a cold worker. Discovery runs before the plugins list is
         # served, so the modal loads already-migrated settings.
         _migrate_stored_settings()
+        # ONLY PROCESSES THAT SERVE PLUGIN REQUESTS RUN THE THREADS (#252):
+        # uwsgi workers, not Celery or daphne or a manage.py exec. See
+        # _thread_host for why an unplaceable process starts them anyway.
+        start, certain = _thread_host()
+        where = _process_label()
+        if not start:
+            # A long-lived process that runs no scheduler checks that SOME
+            # process does: Celery children start throughout the day and their
+            # WARNING lines reach the log, so they report a scheduler missing
+            # everywhere. Not in the thread-running processes: their reaper
+            # tick checks instead. And NOT in a one-shot `manage.py` command:
+            # the AIO entrypoint runs `manage.py migrate` (its post_migrate
+            # discovery builds this Plugin) BEFORE uwsgi starts Redis, so the
+            # check there could only fail, on every container boot.
+            if _program_name(sys.argv or []) in _THREADLESS_PROGRAMS:
+                _warn_if_scheduler_stale(self.get_current_settings())
+            logger.info("[ranked_matchups] no scheduler or reaper in this process "
+                        "(pid=%s, %s): only the web workers run them", os.getpid(), where)
+            return
+        if not certain and not getattr(reg, "host_warned", False):
+            reg.host_warned = True
+            logger.warning(
+                "[ranked_matchups] cannot tell whether this process (pid=%s, %s) serves "
+                "Dispatcharr's web requests; starting the scheduler and reaper here "
+                "anyway, since a scheduler that runs nowhere is the worse failure",
+                os.getpid(), where)
         self._start_reaper()
-        if reg.thread is not None and reg.thread.is_alive():
+        if not _may_start(reg, "scheduler"):
             return
         stop_event = threading.Event()
         t = threading.Thread(target=_scheduler_loop, args=(self, stop_event), daemon=True,
@@ -9479,7 +9805,7 @@ class Plugin:
         t.start()
         reg.thread = t
         reg.stop_event = stop_event
-        logger.info("[ranked_matchups] scheduler thread started (pid=%s)", os.getpid())
+        logger.info("[ranked_matchups] scheduler thread started (pid=%s, %s)", os.getpid(), where)
 
     def _start_reaper(self):
         """Start the finished-game reaper (#196), idempotently.
@@ -9490,7 +9816,7 @@ class Plugin:
         churned a thread and leaked a DB connection per poll in #82.
         """
         reg = _reaper_registry()
-        if reg.thread is not None and reg.thread.is_alive():
+        if not _may_start(reg, "reaper"):
             return
         stop_event = threading.Event()
         t = threading.Thread(
@@ -9500,7 +9826,8 @@ class Plugin:
         t.start()
         reg.thread = t
         reg.stop_event = stop_event
-        logger.info("[ranked_matchups] reaper thread started (pid=%s)", os.getpid())
+        logger.info("[ranked_matchups] reaper thread started (pid=%s, %s)",
+                    os.getpid(), _process_label())
 
     def get_current_settings(self) -> Dict[str, Any]:
         """The raw stored settings (no manifest defaults merged in), migrated
@@ -9513,9 +9840,10 @@ class Plugin:
 
     def stop(self, context: Optional[Dict[str, Any]] = None) -> None:
         """Tear down the scheduler thread when the loader disables / deletes the
-        plugin. The loader calls stop() on disable/delete (NOT on reload, see
-        #110), so the reload-orphan reclaim lives in __init__; this path handles
-        the explicit-teardown case. Without it the thread keeps polling Postgres
+        plugin, and the reload endpoint calls it before rediscovering. The
+        other force_reload paths (install, repo update, other workers reacting
+        to the reload token) do NOT call it (#110), so the reload-stable
+        registry is what lets __init__ find a prior incarnation's thread. Without it the thread keeps polling Postgres
         on a 5-min loop, leaking a DB connection per worker until max_connections
         is hit and every API request 500s with "too many clients" (#82).
 
