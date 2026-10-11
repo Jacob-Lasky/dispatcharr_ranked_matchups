@@ -224,11 +224,20 @@ def _odd_row_prefixes(paths):
         fname = os.path.basename(path)
         with open(path, encoding="utf-8") as f:
             tree = ast.parse(f.read())
+        # `from .base import GameRow as Row` / `from dataclasses import
+        # replace as copy_row`: an alias is the same callable under a new name.
+        alias = {"GameRow": "GameRow", "replace": "replace", "setattr": "setattr"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for a in node.names:
+                    if a.name in ("GameRow", "replace") and a.asname:
+                        alias[a.asname] = a.name
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 func = node.func
-                name = func.id if isinstance(func, ast.Name) else (
+                raw_name = func.id if isinstance(func, ast.Name) else (
                     func.attr if isinstance(func, ast.Attribute) else "")
+                name = alias.get(raw_name, "")
                 # A positional GameRow puts sport_prefix FIRST (its first
                 # field), and a `**mapping` can carry it under any value, so
                 # neither can be checked: both are reported, which makes the
@@ -247,15 +256,22 @@ def _odd_row_prefixes(paths):
                             odd.append((fname, node.lineno, text))
                     elif name == "replace":
                         odd.append((fname, node.lineno, ast.unparse(node)))
-                if (name == "setattr" and len(node.args) >= 2
+                # setattr naming sport_prefix, or hiding its arguments
+                # behind *args where the name cannot be read.
+                if name == "setattr" and (
+                    any(isinstance(a, ast.Starred) for a in node.args)
+                    or (len(node.args) >= 2
                         and isinstance(node.args[1], ast.Constant)
-                        and node.args[1].value == "sport_prefix"):
+                        and node.args[1].value == "sport_prefix")):
                     odd.append((fname, node.lineno, ast.unparse(node)))
             targets = []
             if isinstance(node, ast.Assign):
                 targets = node.targets
-            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For,
+                                   ast.AsyncFor, ast.comprehension)):
                 targets = [node.target]
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                targets = [i.optional_vars for i in node.items if i.optional_vars]
             for t in targets:
                 for sub in ast.walk(t):
                     if isinstance(sub, ast.Attribute) and sub.attr == "sport_prefix":
@@ -303,7 +319,15 @@ def test_the_row_prefix_scan_flags_every_restamp_shape(tmp_path):
         'GameRow("NCAAB", "NCAA", "A", "B", None, None, start)\n'
         'dataclasses.replace(row, **{"sport_prefix": "NCAAB"})\n'
         'GameRow(**fields)\n'
+        'from .base import GameRow as Row\n'
+        'Row("NCAAB", "NCAA", "A", "B", None, None, start)\n'
+        'from dataclasses import replace as copy_row\n'
+        'copy_row(row, **{"sport_prefix": "NCAAB"})\n'
+        'setattr(row, *("sport_prefix", "NCAAB"))\n'
+        'for row.sport_prefix in ["NCAAB"]: pass\n'
+        'with ctx() as row.sport_prefix: pass\n'
     )
     odd, seen = _odd_row_prefixes([str(fake)])
     assert seen == 3
-    assert sorted(line for _f, line, _t in odd) == [3, 4, 5, 6, 7, 8, 9]
+    assert sorted(line for _f, line, _t in odd) == [
+        3, 4, 5, 6, 7, 8, 9, 11, 13, 14, 15, 16]

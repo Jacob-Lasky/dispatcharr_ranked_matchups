@@ -340,14 +340,17 @@ class TestEveryEntryResolvesToARealTeam:
         assert sum(len(v) for v in rosters.values()) > 250
         assert "Ole Miss" in rosters["CFB"], "the school the Egg Bowl entry got wrong"
 
-    # Rosters a given sport's entries may resolve against. Soccer pools,
-    # because promotion and relegation move a club between competitions and an
-    # EPL derby entry legitimately names a club currently in the Championship.
-    # Everything else stands alone: pooling let an NFL name validate a CFB
-    # entry, which is how a global rename turned the Apple Cup's "Washington"
-    # into "Washington Commanders" and the check said nothing.
-    SOCCER = ("EPL", "EFL", "BL1", "LaLiga", "SerieA", "Ligue1",
-              "BSA", "Eredivisie", "PrimeiraLiga", "MLS", "LigaMX")
+    # Rosters a given sport's entries may resolve against: its own, plus the
+    # other rosters of the SAME football pyramid, because promotion and
+    # relegation move a club between them and an EPL derby entry legitimately
+    # names a club currently in the Championship. Never across sports: pooling
+    # let an NFL name validate a CFB entry, which is how a global rename turned
+    # the Apple Cup's "Washington" into "Washington Commanders" and the check
+    # said nothing. And never across pyramids either: pooling EVERY soccer
+    # league let an English club validate a LaLiga entry (["Arsenal", "Real
+    # Madrid"] passed), the same failure one level down. Only England has more
+    # than one roster here; every other league stands alone.
+    ENGLISH_LEAGUES = ("EPL", "EFL")
 
     # The ESPN English cup rosters: between them, EVERY club either cup can
     # draw, so a name in neither is a misspelling, never a club that dropped
@@ -359,23 +362,28 @@ class TestEveryEntryResolvesToARealTeam:
     # entry that simply never meets in the EFL Cup. It is NOT checked against
     # Football-Data.org's rosters: a cup row carries ESPN's spelling, so an
     # entry resolving only against FD.org's would fire in the league and
-    # never in the cup (#192).
-    #
-    # The ENGLISH league prefixes also accept the cup rosters, for the same
-    # reason SOCCER pools: a club outside the two FD.org divisions is still
-    # spelled right if ESPN confirms it, and can be promoted into view. Only
-    # the English ones: an English non-league club cannot appear in LaLiga,
-    # so the cup rosters must not validate a LaLiga entry.
+    # never in the cup (#192). The English league prefixes accept the cup
+    # rosters too: a club outside FD.org's two divisions is still spelled
+    # right if ESPN confirms it, and can be promoted into view.
     COMPLETE = ("EFLCUP", "FACUP")
-    ENGLISH_LEAGUES = ("EPL", "EFL")
 
     def _candidates(self, prefix, rosters):
         if prefix in self.COMPLETE:
-            return [n for p in self.COMPLETE for n in rosters.get(p, [])]
-        if prefix in self.SOCCER:
-            extra = self.COMPLETE if prefix in self.ENGLISH_LEAGUES else ()
-            return [n for p in self.SOCCER + extra for n in rosters.get(p, [])]
-        return rosters.get(prefix, [])
+            group = self.COMPLETE
+        elif prefix in self.ENGLISH_LEAGUES:
+            group = self.ENGLISH_LEAGUES + self.COMPLETE
+        else:
+            group = (prefix,)
+        return [n for p in group for n in rosters.get(p, [])]
+
+    def test_another_pyramids_club_does_not_validate(self):
+        """The cross-pyramid mutation: an English club must not validate a
+        LaLiga entry, nor a Spanish club an EPL one."""
+        rosters = self._fixture()
+        assert self._resolves("Arsenal", self._candidates("EPL", rosters))
+        assert not self._resolves("Arsenal", self._candidates("LaLiga", rosters))
+        assert self._resolves("Real Madrid CF", self._candidates("LaLiga", rosters))
+        assert not self._resolves("Real Madrid CF", self._candidates("EPL", rosters))
 
     def _resolves(self, name, candidates):
         return any(
