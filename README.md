@@ -545,10 +545,16 @@ differs is what the numbers look like and how much of your lineup they need.
 tiebreak`. Two consequences. The list sorts by day then start time (a crowded
 minute can push its last game a number or two past the next minute's first), and
 a game's number is fixed while its kickoff time holds, so a number is only ever
-handed on between games kicking off in the same minute. Two games in one minute
-that land on the same tiebreak get neighbouring numbers, and each keeps its
-number on later refreshes while the games numbered below it in that minute stay,
-even when another game joins that minute. A rescheduled game moves
+handed on between games kicking off in the same minute (or, once a game has
+been pushed past its minute's last number, to a game in a later minute).
+Two games in one minute that land on the same tiebreak get neighbouring
+numbers, and each keeps its number on later refreshes, even when another game
+joins that minute. One exception: a game pushed past its minute's last number
+keeps it only while every number between its own tiebreak and it stays taken,
+by a channel still on the slate (a game kicking off a minute later included) or
+by one of your other channels. If one of those games leaves first, for example
+by finishing earlier, the pushed game is placed again from its tiebreak and
+usually moves. A rescheduled game moves
 to its new time slot on the same channel: channels are identified by the source's
 own event id (for every source that publishes one), not by kickoff time, so a
 reschedule does not create a second channel. The cost is that the numbers are

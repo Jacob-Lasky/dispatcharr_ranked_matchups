@@ -87,7 +87,10 @@ CHANNEL_NUMBER_ORIGIN = date(2026, 1, 1)
 # 16 keeps numbers compact while making same-minute hash collisions uncommon
 # (~6% per simultaneous pair); the rare residual is resolved by the deterministic
 # +1 nudge in plugin._place_kickoff_numbers, which also holds a nudged channel on
-# its number on later applies, even past its minute's block (#267). Raising this
+# its number on later applies, even past its minute's block (#267), as long as
+# every number the nudge walked over is still taken by a channel kept this apply
+# or a reserved number, and its own number is not reserved (a game below it
+# leaving can release a channel past its block, see the DO NOT there). Raising this
 # renumbers every published channel once. Because the value is < the per-minute
 # stride, it never reorders games across minute boundaries.
 CHANNEL_NUMBER_TIEBREAK_SLOTS = 16
