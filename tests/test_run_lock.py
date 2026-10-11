@@ -122,6 +122,18 @@ class TestRefreshFailsClosed:
         assert last.startswith("WARNING: Redis is unreachable, so no refresh, apply or reap can run")
 
 
+    def test_a_client_that_never_connected_counts_as_unreachable(self, plugin_mod, monkeypatch):
+        # Dispatcharr's RedisClient.get_client returns None, not raises, once
+        # its connect retries are exhausted.
+        fake_core = MagicMock()
+        fake_core.RedisClient.get_client.return_value = None
+        monkeypatch.setitem(sys.modules, "core", MagicMock())
+        monkeypatch.setitem(sys.modules, "core.utils", fake_core)
+        assert plugin_mod._read_run_lock()[0] == "unreachable"
+        assert plugin_mod._try_acquire_scheduler_lock("refresh") is None
+        assert "Redis is unreachable" in _status(plugin_mod).splitlines()[-1]
+
+
 class TestHolderRecord:
     def test_lock_value_names_the_holder(self, plugin_mod, redis, monkeypatch):
         monkeypatch.setattr(plugin_mod.os, "getpid", lambda: 411)
@@ -168,6 +180,20 @@ class TestHolderRecord:
         assert plugin_mod._describe_lock_holder(raw, now) == (
             "Refresh + apply, task abc, pid 7 (celery -A dispatcharr worker), held 6m 12s"
         )
+
+    @pytest.mark.parametrize("raw", [
+        '{"acquired_at": 7}', '{"kind": ["x"], "pid": {"a": 1}}', '[1, 2]', b"\xff\xfe", "null",
+    ])
+    def test_a_malformed_holder_never_raises(self, plugin_mod, raw):
+        # Written by whichever version took the lock; read on a daemon
+        # thread's contended path, where an escape kills the thread before
+        # it records the skip.
+        assert isinstance(plugin_mod._describe_lock_holder(raw), str)
+
+    def test_contention_with_a_malformed_holder_still_returns_none(self, plugin_mod, redis):
+        redis.store[plugin_mod._SCHEDULER_LOCK_KEY] = '{"acquired_at": 7}'
+        assert plugin_mod._try_acquire_scheduler_lock("auto_pipeline", "t") is None
+        assert plugin_mod._run_lock_unavailable_reason().startswith("the run lock is held by")
 
     def test_a_bare_token_is_named_as_old_code(self, plugin_mod):
         # A process the reload did not reach still writes the old bare uuid.
@@ -244,6 +270,30 @@ class TestHolderSurfaces:
         assert '_action_reap_locked(settings, task_id=f"reaper-{os.getpid()}")' in src
 
 
+class TestKindsHaveLabels:
+    def test_every_lock_kind_in_the_source_has_a_label(self, plugin_mod, tasks_mod):
+        """The holder record is described through RUN_KIND_LABELS, so a kind
+        with no entry reaches a toast as its raw id. Scans the real call sites
+        rather than a list kept in this test."""
+        import inspect
+        import re
+        src = inspect.getsource(plugin_mod) + inspect.getsource(tasks_mod)
+        kinds = set(re.findall(r'_try_acquire_scheduler_lock\(\s*"(\w+)"', src))
+        kinds |= set(re.findall(r'_run_under_lock,\s*args=\(\s*"(\w+)"', src))
+        kinds |= set(re.findall(r'_run_under_lock\(\s*"(\w+)"', src))
+        assert {"apply", "reap", "auto_pipeline", "refresh",
+                "scheduled_auto_pipeline", "m3u_rematch"} <= kinds, kinds  # the scan works
+        assert kinds <= set(tasks_mod.RUN_KIND_LABELS), kinds - set(tasks_mod.RUN_KIND_LABELS)
+
+
+def test_parse_iso_utc_returns_none_for_a_non_string(plugin_mod):
+    # Its docstring promised None "on any parse failure"; a number raised
+    # AttributeError from .replace instead.
+    from dispatcharr_ranked_matchups._util import parse_iso_utc
+    assert parse_iso_utc(7) is None
+    assert parse_iso_utc(["2026-10-10"]) is None
+
+
 class TestProcessLabel:
     def test_uwsgi_worker_is_named_by_worker_id(self, plugin_mod, monkeypatch):
         monkeypatch.setitem(sys.modules, "uwsgi", MagicMock(worker_id=lambda: 3))
@@ -259,3 +309,13 @@ class TestProcessLabel:
                             ["/dispatcharrpy/bin/celery", "--quiet", "-A", "dispatcharr", "worker",
                              "-Q", "dvr", "-n", "dvr@%h", "--pool=threads"])
         assert plugin_mod._process_label() == "celery --quiet -A dispatcharr worker -Q dvr -n dvr@%h"
+
+    def test_short_secrets_are_not_copied(self, plugin_mod, monkeypatch):
+        monkeypatch.setitem(sys.modules, "uwsgi", None)
+        monkeypatch.setattr(plugin_mod.sys, "argv",
+                            ["/x/bin/python", "probe.py", "--token=abc123", "--password", "hunter2",
+                             "--api-key", "k1", "run"])
+        label = plugin_mod._process_label()
+        assert label == "python probe.py run"
+        for secret in ("abc123", "hunter2", "k1"):
+            assert secret not in label

@@ -418,10 +418,16 @@ rematch). Two properties are load-bearing:
   by the reap's write. Redis dropping mid-run is exactly when a destructive
   holder is still running, so "no lock" is not "nobody is writing". DO NOT
   reintroduce a fail-open path. Show current state says "Redis is unreachable"
-  so the refusal is never silent.
+  so the refusal is never silent. The guarantee holds only once EVERY process
+  runs this code: a process still on an older version keeps the fail-open
+  refresh, so shipping this needs a container restart, not just a plugin
+  reload (see the process paragraph below).
 - **The lock VALUE is a JSON holder record** (#239): `kind`, `task_id`, `pid`,
   `process` (`uwsgi worker N`, or the argv of a Celery/daphne process),
-  `thread`, plugin `version`, `acquired_at`, plus a unique `token`. Release
+  `thread`, plugin `version`, `acquired_at`, plus a unique `token`. The
+  `process` label keeps only bare words and flags (`_SAFE_ARG_RE`) because it
+  is copied into Redis, logs, toasts and `last_run.json`; do not loosen it to
+  a length filter, `--token=abc` is short. Release
   compares the WHOLE string, so ownership works as before. A contended acquire
   logs the holder at INFO, take and release are logged at INFO, the busy apply
   toast and the skipped-run note name the holder

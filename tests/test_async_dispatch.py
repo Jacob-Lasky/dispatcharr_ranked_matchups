@@ -449,7 +449,7 @@ class TestSchedulerLockOwnership:
     def test_concurrent_holders_in_one_process_keep_separate_tokens(self, plugin_mod, monkeypatch):
         """The scheduler daemon thread and an HTTP greenlet can both be in the
         lock functions inside the SAME worker. Tokens must not be shared state:
-        a module global let the second caller's fail-open path wipe the first
+        a module global let a second caller's acquire overwrite the first
         caller's token, turning its release into a no-op and leaking the lock
         until the TTL."""
         store = self._fake_redis(plugin_mod, monkeypatch)

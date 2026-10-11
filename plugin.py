@@ -8091,20 +8091,40 @@ def _process_label() -> str:
     whose Django start discovers plugins builds a Plugin and starts its
     threads, Celery workers and daphne included, and those keep whatever code
     they loaded until the container restarts. A pid alone does not say which
-    of them holds the lock. Arguments longer than 40 characters are dropped,
-    so a `manage.py shell -c "<script>"` exec never copies its script (or
-    anything secret in it) into Redis and the log."""
+    of them holds the lock.
+
+    The label is copied into Redis, the log, toasts and last_run.json, so it
+    keeps only arguments that cannot carry a value: plain words and bare flags
+    of up to 24 characters (`worker`, `-Q`, `dvr`, `--quiet`). DO NOT loosen
+    this to a length filter: `--token=abc123` is short, and a
+    `manage.py shell -c "<script>"` exec can carry anything. The argument
+    after a flag that names a secret is dropped too (`--password hunter2`)."""
     try:
         import uwsgi  # type: ignore[import-not-found]  # only importable under uwsgi
         return f"uwsgi worker {uwsgi.worker_id()}"
     except Exception:
         pass
-    argv = list(sys.argv or [])
+    argv = [str(a) for a in (sys.argv or [])]
     if not argv:
         return "?"
-    parts = [os.path.basename(str(argv[0]))]
-    parts += [str(a) for a in argv[1:9] if len(str(a)) <= 40]
+    parts = [os.path.basename(argv[0])]
+    skip_next = False
+    for arg in argv[1:9]:
+        if skip_next:
+            skip_next = False
+            continue
+        if _SECRET_FLAG_RE.search(arg):
+            # `--token=x` carries its own value; a bare `--token` takes the next.
+            skip_next = "=" not in arg
+            continue
+        if _SAFE_ARG_RE.fullmatch(arg):
+            parts.append(arg)
     return " ".join(parts)[:120] or "?"
+
+
+# What _process_label keeps and what makes it drop the following argument.
+_SAFE_ARG_RE = re.compile(r"-{0,2}[A-Za-z0-9][A-Za-z0-9_.@%:-]{0,23}")
+_SECRET_FLAG_RE = re.compile(r"(?i)^-.*(pass|secret|token|key|auth|cred)")
 
 
 def _new_lock_value(kind: str, task_id: str) -> str:
@@ -8153,7 +8173,18 @@ def _fmt_duration(seconds: float) -> str:
 
 
 def _describe_lock_holder(raw: Any, now: Optional[datetime] = None) -> str:
-    """One line naming whoever holds the run lock, for logs and toasts."""
+    """One line naming whoever holds the run lock, for logs and toasts.
+
+    NEVER raises: it runs on the contended path of a daemon thread (and inside
+    Show current state and the busy apply toast), and the value it reads was
+    written by whichever plugin version, in whichever process, took the lock."""
+    try:
+        return _describe_lock_record(raw, now)
+    except Exception:  # noqa: BLE001 - see docstring
+        return "a holder whose lock value could not be read"
+
+
+def _describe_lock_record(raw: Any, now: Optional[datetime]) -> str:
     rec = _parse_lock_value(raw)
     if rec is None:
         return ("a plugin version from before holder records (#239), so no "
@@ -8182,14 +8213,22 @@ _LOCK_UNKNOWN = "unknown"
 
 
 def _read_run_lock() -> Tuple[str, Optional[str]]:
-    """(state, holder description) for the run lock right now. UNKNOWN when
-    there is no Redis client at all (no Dispatcharr, as in the tests), which
-    says nothing, unlike UNREACHABLE, where the client exists and the read
-    failed. Never raises."""
-    r = tasks._redis()
-    if r is None:
+    """(state, holder description) for the run lock right now. Never raises.
+
+    UNKNOWN only when Dispatcharr's Redis helper cannot even be imported (the
+    tests), which says nothing. Everything else that fails is UNREACHABLE,
+    including get_client() returning None: Dispatcharr's RedisClient gives up
+    after its connect retries and returns None rather than raising, so DO NOT
+    read this through tasks._redis(), which folds that case into "no client"
+    and would hide exactly the outage this exists to report."""
+    try:
+        from core.utils import RedisClient
+    except ImportError:
         return _LOCK_UNKNOWN, None
     try:
+        r = RedisClient.get_client()
+        if r is None:
+            return _LOCK_UNREACHABLE, "no Redis connection"
         raw = r.get(_SCHEDULER_LOCK_KEY)
     except Exception as e:
         return _LOCK_UNREACHABLE, str(e)
