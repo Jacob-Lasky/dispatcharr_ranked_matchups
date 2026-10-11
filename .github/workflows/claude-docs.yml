@@ -29,7 +29,7 @@ name: Auto-Document PR
 # not on every push. To refresh docs after later pushes, use "Re-run jobs":
 # checkout is by branch name, so a re-run diffs the CURRENT branch tip.
 #
-# Actions are pinned to reviewed commit SHAs (claude-code-action v1.0.216,
+# Actions are pinned to reviewed commit SHAs (claude-code-action v1.0.248,
 # checkout v7.0.1) because a moving tag is incompatible with a hard boundary.
 # DO NOT swap either SHA for a tag (`@v1`, `@v7`, `@main`): the boundary below
 # is only as strong as the exact code that was reviewed, and an upstream owner
@@ -106,7 +106,7 @@ jobs:
               documents.
             - If the documentation is already accurate, change nothing and say so.
           claude_args: >-
-            --model claude-opus-5
+            --model claude-opus-5-5
             --allowedTools "Read,Glob,Grep,Edit(**/*.md),Write(**/*.md)"
             --disallowedTools "Bash"
 
