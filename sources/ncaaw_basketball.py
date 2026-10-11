@@ -15,7 +15,8 @@ API patterns:
   - /scoreboard?dates=YYYYMMDD for per-day games (range syntax caps at
     25 events).
   - /rankings exposes AP Top 25 + Coaches Poll. Prefer AP.
-  - Tournament stage in competition.notes[0].headline, e.g.
+  - Tournament stage in competition.notes[0].headline, e.g. (2025 wording;
+    from 2026 ESPN writes "NCAA Women's Basketball Championship - ...", #268)
       "NCAA Women's Championship - Regional 2 in Birmingham - 1st Round"
       "NCAA Women's Championship - Regional 2 in Birmingham - Sweet 16"
       "NCAA Women's Championship - Final Four"
@@ -88,8 +89,13 @@ def _default_season_end_year() -> int:
 # Tournament-stage regex. Matches the round suffix on ESPN's headline.
 # The "Regional N in {City}" prefix only appears for R64..E8; F4 and NCG
 # have no regional prefix. Both formats handled here.
+# The prefix has changed once already: "NCAA Women's Championship - ..."
+# through 2025, "NCAA Women's Basketball Championship - ..." from the 2026
+# tournament (#268). A headline that does not match drops the game from the
+# bracket AND from fetch_upcoming, so a wording change empties the whole
+# tournament with no error; tests/test_ncaaw_headlines.py pins every form.
 _HEADLINE_RE = re.compile(
-    r"NCAA\s+Women'?s?\s+Championship\s*-\s*"
+    r"NCAA\s+Women'?s?\s+(?:Basketball\s+)?Championship\s*-\s*"
     r"(?:Regional\s+\d+\s+in\s+[^-]+\s*-\s*)?"
     r"(?P<round>1st\s+Round|2nd\s+Round|Sweet\s*16|Elite\s*8|Final\s+Four|National\s+Championship)",
     re.IGNORECASE,
