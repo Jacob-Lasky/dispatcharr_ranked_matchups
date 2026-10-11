@@ -733,7 +733,15 @@ def every_source_under_a_pinned_clock(plugin, monkeypatch):
     current["earliest"] = {}
     for src in sources:
         current["name"] = type(src).__name__
-        src.fetch_upcoming(days_ahead=2)
+        try:
+            src.fetch_upcoming(days_ahead=2)
+        except Exception:
+            # A source whose GATING request got this stub's `{}` raises, as it
+            # does for a real failure (#261: NCAAM /rankings, MLS /standings
+            # need a list / conference tables). It is judged by the dated
+            # requests it made before raising, if any; the reach assertion
+            # below names the ones that must get that far.
+            pass
     return current["earliest"]
 
 
@@ -745,8 +753,9 @@ class TestEverySourceStartsAtTheLookbackDay:
     that drifted back would admit the day before as well)."""
 
     def test_the_instrument_reaches_the_dated_sweeps(self, every_source_under_a_pinned_clock):
-        # mls_standings is absent on purpose: with no standings it returns
-        # before sweeping (its sweep is pinned by the witness above).
+        # mls_standings is absent on purpose: with no standings it raises
+        # before sweeping (its sweep is pinned by the witness above), and
+        # so is NCAAM, whose /rankings gate gets no poll from this stub.
         expected = {
             "NbaRegularSource", "NbaPlayoffSource", "NflRegularSource", "NflPlayoffSource",
             "WnbaRegularSource", "WnbaPlayoffSource", "NhlRegularSource", "NhlPlayoffSource",

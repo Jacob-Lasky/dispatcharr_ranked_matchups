@@ -6798,14 +6798,15 @@ class TestMlsStandingsConferenceFilter:
 
     def test_conference_map_returns_empty_on_endpoint_failure(self, monkeypatch):
         """When _http_get returns None (ESPN down / network error /
-        4xx), the conference map MUST be empty rather than partial.
-        An empty map cascades to 0 emitted games: graceful degradation
-        rather than misclassified teams getting the wrong conference's
-        threshold bands.
+        4xx), the conference map MUST be empty rather than partial:
+        None, no map at all, rather than misclassified teams getting the
+        wrong conference's threshold bands. None and not {}, so the
+        upcoming fetch can tell the outage from an answer with no clubs
+        and raise instead of reading the conference as quiet (#261).
         """
         from dispatcharr_ranked_matchups.sources import mls_standings as mod
         monkeypatch.setattr(mod, "_http_get", lambda *_a, **_k: None)
-        assert mod._fetch_conference_map() == {}
+        assert mod._fetch_conference_map() is None
 
     def test_filters_out_non_regular_season(self, monkeypatch):
         """Playoff games (season.slug != 'regular-season') must be filtered

@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow
+from .base import GameRow, report_lost_day_range
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, http_get_json
@@ -190,10 +190,17 @@ class MlbRegularSource(PointsBasedSportSource):
             f"&startDate={window.first_day.isoformat()}&endDate={window.last_day.isoformat()}"
         )
         data = _http_get(url)
-        if not data:
+        if not (isinstance(data, dict) and isinstance(data.get("dates"), list)):
+            # The ONE request for every day of the window failed (None) or
+            # answered something that is not a schedule: each of those days is
+            # lost, not quiet, so the refresh keeps the games it had published
+            # for them (#261, see base.report_lost_day_range). An answer with
+            # no games still carries the list, `"dates": []` (measured
+            # 2026-10-11 over 2026-12-20..23), and is a real empty slate.
+            report_lost_day_range(window.first_day, window.last_day)
             return []
         by_pk: Dict[Any, GameRow] = {}
-        for date_entry in data.get("dates", []) or []:
+        for date_entry in data["dates"]:
             for g in date_entry.get("games", []) or []:
                 gid = g.get("gamePk")
                 if gid is None or gid in by_pk:
