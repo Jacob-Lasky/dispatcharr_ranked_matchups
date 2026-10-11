@@ -507,6 +507,10 @@ first). EURO's best-third ranking adds wins after goals scored (Article
 football-data.org's free data, so teams level after every modelled
 criterion keep a fixed order. That is the one EURO 2024 difference:
 Denmark and Slovenia finished Group C level on everything but cards.
+EURO's Article 20.02 penalty shoot-out (two teams level on points and
+goals that draw their last group match against each other, with no
+third team on the same points) is not modelled either: the pair keeps
+the same fixed order rather than a 50/50 split.
 
 
 ## Stage 3: raw sum + compress to 0-10 ★
@@ -761,7 +765,10 @@ expected before judging the whole guide.
 - **Group tiebreakers stop before fair play** for WC and EURO group
   stages: disciplinary points, the qualifiers / FIFA ranking and drawing
   of lots are not in football-data.org's free data, so teams level on
-  every earlier criterion keep a fixed order.
+  every earlier criterion keep a fixed order. The same holds for EURO's
+  Article 20.02 penalty shoot-out between two level teams that draw
+  their last group match against each other (when no third team is on
+  the same points).
 - **A failed season fetch zeroes importance for that competition**, for
   the run. The simulator replays the competition's full fixture list, so
   if football-data.org cannot be reached for it the games score no

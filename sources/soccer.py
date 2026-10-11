@@ -2891,6 +2891,12 @@ class GroupStageSoccerSource(SoccerSource):
                difference, then goals scored, in all group matches.
         g-h (disciplinary points, qualifiers ranking) are not in FD.org's
         free data; teams still level after f keep their input order.
+        Paragraph 20.02 is not modelled either: when two teams level on
+        points, goals scored and conceded draw their LAST group match against
+        each other, and no other team in the group finishes on the same
+        points, UEFA decides them by a penalty shoot-out (a coin flip to the
+        simulator). `_results` carries no matchday and this ranking takes no
+        rng, so that pair also keeps its input order today.
         """
         names = {team for team, _row in block}
         mini: Dict[str, List[int]] = {team: [0, 0, 0] for team in names}

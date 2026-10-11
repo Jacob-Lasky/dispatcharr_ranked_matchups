@@ -16,7 +16,7 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 - **The simulated World Cup / EURO bracket plays every round to the final.**
   It used to stop one round after the entry round, so World Cup group games
-  only ever showed round-of-32 leverage. (#78)
+  never showed leverage beyond the round of 16. (#78)
 - **Group tables break ties on head-to-head first**, then overall goal
   difference and goals scored, as the UEFA and FIFA regulations do; EURO's
   best-third ranking also counts wins. (#78)

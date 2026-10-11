@@ -166,8 +166,9 @@ class LeagueContext:
     boundary_summary: str = ""   # e.g. "Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation"
     format: str = "league"       # "league" | "knockout" | "win_count" | "points_count"
     # Only meaningful for format="group_advance" (WC_GS / EC_GS). N > 0 means
-    # the top N third-place teams across ALL groups also advance via the FIFA
-    # tiebreaker chain (points → goal_diff → goals_for → alphabetical fallback).
+    # the top N third-place teams across ALL groups also advance, ranked by
+    # points → goal_diff → goals_for (→ wins for EURO, UEFA Article 19.04) →
+    # alphabetical fallback; see GroupStageSoccerSource._compute_group_standings.
     # Default 0 = strict top-2-per-group, no third-place advancement. See #52.
     #   WC 2026: 12 groups, top 2 + 8 best 3rds = 32 advancing → best_third_place_count=8
     #   EURO 2024: 6 groups, top 2 + 4 best 3rds = 16 advancing → best_third_place_count=4
