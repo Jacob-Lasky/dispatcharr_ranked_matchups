@@ -270,17 +270,18 @@ class TestBoxingSchedulePages:
         assert len(lost) == 8
 
     def test_a_card_on_two_pages_means_the_schedule_moved(self, monkeypatch):
-        """WITNESS (Codex round 3): a card added ahead of page 1 between the
-        two requests pushes page 1's last card onto page 2 under the same
-        page and card counts. Its repeat was deduped silently, and the card
-        that moved past the boundary was never seen. The repeat now fails the
-        read, so the schedule's days are reported."""
+        """WITNESS (Codex round 3): between the two requests one card was
+        added ahead of page 1 and another dropped, so both counts still read
+        two pages and 28 cards, but page 1's last card shows again at the top
+        of page 2. Its repeat was deduped silently, and the read vouched for
+        a schedule it did not see whole (a card can move past the boundary
+        unseen). The repeat now fails the read, so the days are reported."""
         page1 = self._cards(0, 25)
-        page2 = [page1[-1]] + self._cards(25, 2)
+        page2 = [page1[-1]] + self._cards(25, 3)
         rows, lost, _asked = self._run(monkeypatch, {
             1: self._page(page1, 1, 2, 28), 2: self._page(page2, 2, 2, 28),
         })
-        assert len(rows) == 27
+        assert len(rows) == 28
         assert len(lost) == 8
 
     def test_a_last_page_short_of_the_listed_cards_is_reported(self, monkeypatch):
