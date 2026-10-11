@@ -2119,11 +2119,117 @@ def _resolve_key(settings: Dict[str, Any], setting_id: str, *fallback_paths: str
 
 
 def _read_cache() -> Dict[str, Any]:
+    """The last refresh's cache, or the empty shape when there is none to read.
+
+    Missing, unreadable (bad JSON, bad UTF-8) and non-object files all return
+    `{"games": [], "refreshed_at": None}`, so every caller can `.get()` without
+    guarding. DO NOT add `_EMPTY_SLATE_KNOWN_KEY` to this shape: its absence
+    is what stops apply publishing it as an empty slate and deleting every
+    channel the plugin owns (_cache_has_slate), and the `None` stamp is what
+    apply's toast reads to say "run refresh first".
+    """
     try:
         with open(CACHE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"games": [], "refreshed_at": None}
+            data = json.load(f)
+    except (FileNotFoundError, ValueError):
+        # ValueError covers json.JSONDecodeError and UnicodeDecodeError.
+        data = None
+    if isinstance(data, dict):
+        return data
+    return {"games": [], "refreshed_at": None}
+
+
+# True on a cache whose writer KNEW what the slate it replaced held, which is
+# what makes an EMPTY `games` list safe to publish (#241). See _cache_has_slate.
+_EMPTY_SLATE_KNOWN_KEY = "empty_slate_known"
+
+
+def _cache_has_slate(cache: Dict[str, Any]) -> bool:
+    """True when `cache` is a slate apply may publish, EVEN AN EMPTY ONE (#241).
+
+    A non-empty `games` list is a slate, as it always was. An EMPTY one is a
+    slate only when its writer set `_EMPTY_SLATE_KNOWN_KEY`: a refresh that
+    either built on a vouched cache or heard back from every source
+    (`_slate_known`), and the reaper, which carries forward the answer of the
+    slate it is emptying (`_cache_vouched`), which apply stamps once it has
+    published that slate for real (`_vouch_published_slate`). Publishing an empty slate
+    deletes every channel the plugin owns, and the only defence against doing
+    that during a source outage is _rows_to_hold carrying the previous games
+    forward, which needs the previous slate. Everything else is refused:
+    `_read_cache`'s shape for a missing or unreadable file, `games` not a list,
+    a pre-#241 empty cache (no key: nothing says how it was written), and an
+    empty refresh after the cache was lost (cache.json gone when the plugin
+    folder is replaced on upgrade) with a source failing.
+
+    DO NOT relax this to "games is a list" or "refreshed_at is set": each of
+    those accepts a cache an outage could have produced.
+    """
+    games = cache.get("games")
+    if not isinstance(games, list):
+        return False
+    return bool(games) or cache.get(_EMPTY_SLATE_KNOWN_KEY) is True
+
+
+def _cache_vouched(cache: Dict[str, Any]) -> bool:
+    """Whether `cache` lists everything the plugin may have on air, so a later
+    writer that starts from it can vouch for an empty result too.
+
+    Stricter than _cache_has_slate: a NON-empty slate is published whatever
+    its key says, but one written `empty_slate_known: false` (cache lost during
+    an outage) may omit a live channel, and that doubt must travel with it to
+    the reaper and to the next refresh, until an apply publishes it and
+    stamps it (_vouch_published_slate). DO NOT use _cache_has_slate here: it
+    launders the doubt away, and an empty slate built on such a cache would
+    delete the channel it omitted. A cache from before the key existed is
+    vouched when non-empty (its own refresh read the cache before it) and not
+    when empty (nothing says how it was written)."""
+    games = cache.get("games")
+    if not isinstance(games, list):
+        return False
+    return cache.get(_EMPTY_SLATE_KNOWN_KEY, bool(games)) is True
+
+
+def _vouch_published_slate(cache: Dict[str, Any]) -> bool:
+    """Record that apply has just published `cache` for real, so it now lists
+    everything the plugin has on air and `_cache_vouched` holds (#241).
+
+    Why apply may vouch: its stale reap deletes every plugin channel the slate
+    does not list, so once a non-dry-run apply has finished with no stale
+    channel kept for an active recording (the caller checks), no channel on
+    air can be missing from the slate. Without this, an unvouched slate (cache.json
+    lost, which Dispatcharr's plugin import does on every upgrade by replacing
+    the folder) stays unvouched for good: a real install always has a source
+    answering with no games (a tournament out of season), so `_slate_known`
+    never sees zero outages, and every later refresh and reap inherits the
+    doubt, which re-opens #241 for as long as the install runs.
+
+    Writes only when the cache on disk is still the one apply read (same
+    `refreshed_at` and `reaped_at`; refresh and reap each change one of those
+    whenever they change `games`). Apply runs under the scheduler lock, so a
+    mismatch means the lock failed open and another writer got in; vouching
+    for ITS slate would be a guess, so this leaves it alone. Returns whether
+    the stamp was written."""
+    on_disk = _read_cache()
+    identity = ("refreshed_at", "reaped_at")
+    if any(on_disk.get(k) != cache.get(k) for k in identity):
+        logger.warning(
+            "[ranked_matchups] apply: cache.json changed during apply; not "
+            "marking the slate it published as vouched (#241)"
+        )
+        return False
+    on_disk[_EMPTY_SLATE_KNOWN_KEY] = True
+    _write_cache(on_disk)
+    return True
+
+
+def _slate_known(prior_cache: Dict[str, Any], outage_labels: set) -> bool:
+    """Whether a refresh can vouch for an empty result (`_EMPTY_SLATE_KNOWN_KEY`).
+
+    Yes when the previous cache was vouched (so _rows_to_hold could carry
+    anything a failed source dropped), or when no source failed or came back
+    empty (so there is nothing an outage could have dropped). `outage_labels`
+    is the set _rows_to_hold treats as an outage."""
+    return _cache_vouched(prior_cache) or not outage_labels
 
 
 def _write_cache(data: Dict[str, Any]) -> None:
@@ -2424,11 +2530,17 @@ _NON_POSTSEASON_STAGES = frozenset({
 })
 
 
-def _empty_refresh_result(msg: str, src_summary: List[str]) -> Dict[str, Any]:
+def _empty_refresh_result(msg: str, src_summary: List[str], slate_known: bool) -> Dict[str, Any]:
     """Log `msg`, persist an empty cache (so a stale prior cache doesn't keep
     serving games that no longer pass the curator), and return the action's
     ok-with-message payload. Shared by the no-games-fetched and
-    everything-filtered-out exits so the two can't drift."""
+    everything-filtered-out exits so the two can't drift.
+
+    `slate_known` (see _slate_known) decides whether apply may publish this
+    empty slate and take the old channels down (#241). When it is False the
+    cache is still written, for Show current state, but apply leaves the
+    guide alone until a refresh that can vouch for its result.
+    """
     # WARNING, not info: an empty slate is either a real off-day or upstream
     # breakage, and in the background-run log the two must not look routine.
     logger.warning("[ranked_matchups] %s", msg)
@@ -2436,6 +2548,7 @@ def _empty_refresh_result(msg: str, src_summary: List[str]) -> Dict[str, Any]:
         "games": [],
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
         "summary": src_summary,
+        _EMPTY_SLATE_KNOWN_KEY: slate_known,
     })
     return {"status": "ok", "message": msg}
 
@@ -3137,12 +3250,15 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # air (#240). See _rows_to_hold. `held` is keyed by marker; the ones this
     # fetch still lists are protected from the cap below, the rest are carried
     # over from the previous cache and re-matched after the main match.
+    prior_cache = _read_cache()
+    outage_labels = raised_labels | {label for label, n in pulled_by_label.items() if n == 0}
+    slate_known = _slate_known(prior_cache, outage_labels)
     held = _rows_to_hold(
-        _read_cache().get("games") or [],
+        prior_cache.get("games") or [],
         datetime.now(timezone.utc),
         _reap_settings(settings),
         settings,
-        raised_labels | {label for label, n in pulled_by_label.items() if n == 0},
+        outage_labels,
     )
     held_ids = {id(g) for g in all_games if _gamerow_marker(g) in held}
     fetched_markers = {_gamerow_marker(g) for g in all_games}
@@ -3169,6 +3285,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         return _empty_refresh_result(
             "No games found in lookahead window. " + " | ".join(src_summary),
             src_summary,
+            slate_known,
         )
 
     # 1a. Series dedup. Best-of-N playoff sources (NHL, NBA, MLB, NCAA
@@ -3225,6 +3342,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 "Favorites-only filter dropped every game in the lookahead "
                 "window. " + " | ".join(src_summary),
                 src_summary,
+                slate_known,
             )
 
     # 2. Score. The Lahvička Monte Carlo importance signal covers three
@@ -3581,6 +3699,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         "weights": asdict(weights),
         "games": applied_payload,
         "bench": bench_payload,
+        _EMPTY_SLATE_KNOWN_KEY: slate_known,
     }
     _write_cache(cache)
 
@@ -5101,6 +5220,15 @@ def _carry_forward(
     return out
 
 
+def _carry_apply_vouch(cache: Dict[str, Any], apply_result: Dict[str, Any]) -> None:
+    """Keep the stamp apply just wrote (`slate_vouched`, see
+    _vouch_published_slate) in the reaper's copy of the cache, which it
+    writes back after apply returns. DO NOT drop this: the reaper's write
+    would erase the stamp and leave the slate unvouched (#241)."""
+    if apply_result.get("slate_vouched") is True:
+        cache[_EMPTY_SLATE_KNOWN_KEY] = True
+
+
 def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Drop finished games from the guide, and backfill from the bench.
 
@@ -5115,7 +5243,9 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     EPGData cleanup, and the signal-safe queryset deletes. A second deletion
     path here would be a copy that has to stay in agreement with that one,
     and the two would drift silently: see the plugin's own history of
-    exactly that failure mode. So: edit the cache, then call apply.
+    exactly that failure mode. So: edit the cache, then call apply. That holds
+    for the LAST game too: a reap can leave `games` empty, and apply must run
+    on that empty slate rather than treat it as "no cache" (#241).
     """
     remove_after = _reap_settings(settings)
     if remove_after <= 0:
@@ -5137,6 +5267,7 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("[ranked_matchups] reap: retrying an apply left pending")
         retry = _action_apply(settings)
         if str(retry.get("status", "ok")).lower() != "error":
+            _carry_apply_vouch(cache, retry)
             cache["reap_apply_pending"] = False
             _write_cache(cache)
         else:
@@ -5168,9 +5299,18 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
         promoted_ids = {id(g) for g in promoted}
         bench = [g for g in bench if id(g) not in promoted_ids]
 
+    # Whether apply may publish the slate if this leaves it EMPTY (#241). The
+    # reaper only removes finished games, so the answer is whatever the slate
+    # it started from could vouch for (_cache_vouched), read BEFORE the games
+    # are replaced. DO NOT set True outright: a refresh that lost the previous
+    # cache during an outage writes False on a non-empty slate, the DB can
+    # still hold a live channel that slate omits, and emptying it would have
+    # apply delete that channel.
+    vouched = _cache_vouched(cache)
     cache["games"] = live + promoted
     cache["bench"] = bench
     cache["reaped_at"] = now.isoformat()
+    cache[_EMPTY_SLATE_KNOWN_KEY] = vouched
     _write_cache(cache)
 
     logger.info(
@@ -5189,6 +5329,7 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     apply_result = _action_apply(settings)
     failed = str(apply_result.get("status", "ok")).lower() == "error"
     if not failed:
+        _carry_apply_vouch(cache, apply_result)
         cache["reap_apply_pending"] = False
         _write_cache(cache)
     else:
@@ -5327,9 +5468,24 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from .scoring import format_channel_name
 
     cache = _read_cache()
-    games, dup_dropped = _unique_by_marker(cache.get("games", []))
-    if not games:
+    # Return early ONLY when there is no slate at all (see _cache_has_slate).
+    # DO NOT narrow this back to `if not games`. A real cache with no games
+    # (the reaper took the last one off, #241; or a refresh found nothing to
+    # air) is a slate like any other, and the stale reap, the orphan-EPG sweep
+    # and the auto-record bookkeeping below all have to run for it. Returning
+    # on it left the last finished game's channel on air until the next
+    # refresh that produced games.
+    if not _cache_has_slate(cache):
+        if cache.get("refreshed_at") and isinstance(cache.get("games"), list):
+            # An empty slate nobody could vouch for: say so, rather than
+            # "run refresh", which is what produced it.
+            return {"status": "ok", "message": (
+                "The cache lists no games but cannot rule out a source "
+                "outage, so no channels were removed. They are rechecked on "
+                "the next refresh that finds games."
+            )}
         return {"status": "ok", "message": "Cache empty; run refresh first."}
+    games, dup_dropped = _unique_by_marker(cache.get("games", []))
     if dup_dropped:
         logger.warning(
             "[ranked_matchups] apply: dropped %d cached game(s) sharing a marker "
@@ -6568,6 +6724,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         f"{profile_msg} "
         f"WHY descriptions written to EPG source."
     )
+    if not games:
+        # Otherwise the toast reads like a normal run that happened to delete
+        # everything, with no hint of why the group just emptied (#241).
+        msg = f"No games to air (the cache is empty). {msg}"
     # The "[dry] " prefix alone reads as a label, not as "and therefore your
     # channels do not exist"; state the consequence and the fix (#170).
     msg = _dry_run_report(msg, dry_run)
@@ -6576,7 +6736,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # the ones they configured, and that is the most important thing in
         # this message (#126).
         msg = f"WARNING: {tmpl_problem}\n\n{msg}"
-    return {"status": "ok", "message": msg}
+    result = {"status": "ok", "message": msg}
+    # The DB now matches this slate, so it can vouch for an empty one built on
+    # it (#241, see _vouch_published_slate). Only for a real run that left
+    # nothing behind: a dry run deleted nothing, and a stale channel kept for
+    # its active recording is on air without being in the slate (it may be a
+    # live game whose source was failing when the cache was lost).
+    # `slate_vouched` tells the reaper, which rewrites the cache after this
+    # returns and would otherwise drop the stamp.
+    if (not dry_run and not kept_for_recording_n and not _cache_vouched(cache)
+            and _vouch_published_slate(cache)):
+        result["slate_vouched"] = True
+    return result
 
 
 # ---------- auto pipeline ----------

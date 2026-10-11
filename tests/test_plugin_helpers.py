@@ -524,11 +524,45 @@ class TestEmptyRefreshResult:
     def test_returns_ok_and_persists_empty_cache(self, plugin, monkeypatch):
         captured = {}
         monkeypatch.setattr(plugin, "_write_cache", lambda c: captured.update(c))
-        out = plugin._empty_refresh_result("nothing here", ["NFL: 0 games"])
+        out = plugin._empty_refresh_result("nothing here", ["NFL: 0 games"], True)
         assert out == {"status": "ok", "message": "nothing here"}
         assert captured["games"] == []
         assert captured["summary"] == ["NFL: 0 games"]
         assert "refreshed_at" in captured
+        assert captured["empty_slate_known"] is True
+        assert plugin._cache_has_slate(captured) is True
+
+    def test_an_unvouched_empty_cache_is_not_a_slate(self, plugin, monkeypatch):
+        """#241: apply must not publish this one; see _cache_has_slate."""
+        captured = {}
+        monkeypatch.setattr(plugin, "_write_cache", lambda c: captured.update(c))
+        plugin._empty_refresh_result("nothing here", [], False)
+        assert captured["empty_slate_known"] is False
+        assert plugin._cache_has_slate(captured) is False
+
+
+class TestSlateKnown:
+    """When a refresh may vouch for an empty result (#241)."""
+
+    PRIOR = {"games": [{"sport_prefix": "CFB"}], "refreshed_at": "2026-10-11T12:00:00+00:00"}
+
+    def test_read_the_previous_slate(self, plugin):
+        assert plugin._slate_known(self.PRIOR, {"NCAA Football"}) is True
+
+    def test_every_source_answered(self, plugin):
+        assert plugin._slate_known({"games": [], "refreshed_at": None}, set()) is True
+
+    def test_lost_cache_and_a_source_failed(self, plugin):
+        assert plugin._slate_known({"games": [], "refreshed_at": None}, {"NCAA Football"}) is False
+
+    def test_doubt_travels_with_a_non_empty_unvouched_slate(self, plugin):
+        prior = {**self.PRIOR, "empty_slate_known": False}
+        assert plugin._cache_has_slate(prior) is True
+        assert plugin._slate_known(prior, {"NCAA Football"}) is False
+
+    def test_pre_marker_caches(self, plugin):
+        assert plugin._cache_vouched(self.PRIOR) is True
+        assert plugin._cache_vouched({"games": [], "refreshed_at": "2026-10-11T12:00:00+00:00"}) is False
 
 
 class TestBuildMarkerKey:
