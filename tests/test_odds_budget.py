@@ -14,7 +14,8 @@ import pytest
 
 UTC = timezone.utc
 NOW = datetime(2026, 10, 11, 3, 0, tzinfo=UTC)
-EVENTS = [{"home_team": "Liverpool", "away_team": "Man City", "bookmakers": []}]
+EVENTS = [{"home_team": "Liverpool", "away_team": "Man City", "bookmakers": [],
+           "commence_time": "2026-10-12T15:30:00Z"}]
 KEY = "k3y-that-must-never-be-logged"
 
 
@@ -160,3 +161,50 @@ def test_every_caller_asks_for_exactly_one_region(module, build, monkeypatch):
     monkeypatch.setattr(mod, "fetch_odds_events", fake)
     build(mod)._fetch_closeness()
     assert len(seen) == 1 and "," not in seen[0] and seen[0]
+
+
+def test_new_key_is_not_held_by_the_old_keys_backoff(odds, http):
+    calls, queue = http
+    queue.append(FakeResp(401, {"error_code": "OUT_OF_USAGE_CREDITS"}, remaining="0"))
+    _fetch(odds)
+    odds.fetch_odds_events("soccer_epl", "a-brand-new-key", "eu", log_tag="t",
+                           now=NOW + timedelta(minutes=5))
+    assert len(calls) == 2
+
+
+def test_backoff_does_not_store_the_key(odds, http):
+    _calls, queue = http
+    queue.append(FakeResp(401, {"error_code": "OUT_OF_USAGE_CREDITS"}, remaining="0"))
+    _fetch(odds)
+    assert KEY not in open(odds.CACHE_PATH, encoding="utf-8").read()
+
+
+def test_stale_fallback_drops_fixtures_already_played(odds, http, monkeypatch):
+    """A week-old cached line for Liverpool v Man City must not be lent to
+    their next meeting."""
+    _fetch(odds)
+    monkeypatch.setattr(odds.requests, "get",
+                        lambda *a, **k: FakeResp(503, {}))
+    assert _fetch(odds, now=NOW + timedelta(days=7)) == []
+
+
+def test_wrong_shaped_cache_file_does_not_break_the_fetch(odds, http):
+    open(odds.CACHE_PATH, "w").write('{"entries": []}')
+    assert _fetch(odds) == EVENTS
+
+
+def test_far_future_backoff_is_ignored(odds, http):
+    import json
+    calls, _ = http
+    json.dump({"entries": {}, "exhausted_until": "2099-01-01T00:00:00+00:00",
+               "exhausted_key": odds._key_id(KEY)}, open(odds.CACHE_PATH, "w"))
+    _fetch(odds)
+    assert len(calls) == 1
+
+
+def test_rejection_body_is_redacted(odds, http, caplog):
+    _calls, queue = http
+    queue.append(FakeResp(401, {"error_code": f"BAD apiKey={KEY}"}))
+    with caplog.at_level(logging.WARNING):
+        _fetch(odds)
+    assert KEY not in caplog.text

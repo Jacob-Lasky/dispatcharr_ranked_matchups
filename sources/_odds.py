@@ -29,6 +29,7 @@ them would move every score on one side. This module returns raw events.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -54,6 +55,32 @@ CACHE_PATH = os.path.join(
 )
 
 _OUT_OF_CREDITS = "OUT_OF_USAGE_CREDITS"
+# Events that kicked off longer ago than this are dropped from what is
+# returned, so a stale fallback cannot lend a past fixture's line to the next
+# meeting of the same two teams (callers match on the team pair alone).
+_MAX_AGE_AFTER_KICKOFF = timedelta(hours=6)
+
+
+def _key_id(api_key: str) -> str:
+    """A non-reversible tag for the key, so the backoff belongs to the key that
+    ran out: a user who pastes a new key is not kept waiting a day. Never the
+    key itself: this file is plain JSON in the plugin folder."""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+
+
+def _current(events: Any, now: datetime) -> Optional[List[Dict[str, Any]]]:
+    if not isinstance(events, list):
+        return None
+    oldest = now - _MAX_AGE_AFTER_KICKOFF
+    out = []
+    for ev in events:
+        raw = str(ev.get("commence_time") or "") if isinstance(ev, dict) else ""
+        start = _parse_time(raw.replace("Z", "+00:00")) if raw else None
+        # Keep an event with no parseable time: dropping it would turn a
+        # format change upstream into a silent loss of every line.
+        if start is None or start >= oldest:
+            out.append(ev)
+    return out
 
 
 def _load() -> Dict[str, Any]:
@@ -104,16 +131,23 @@ def fetch_odds_events(
     now = now or datetime.now(timezone.utc)
     entry_key = f"{sport_key}|{region}"
     data = _load()
-    entries = data.setdefault("entries", {})
+    if not isinstance(data.get("entries"), dict):
+        # A hand-edited or foreign file: start the entries over rather than
+        # failing every league's fetch on it.
+        data["entries"] = {}
+    entries = data["entries"]
     entry = entries.get(entry_key) if isinstance(entries.get(entry_key), dict) else None
-    cached = entry.get("events") if entry else None
+    cached = _current(entry.get("events"), now) if entry else None
 
     fetched_at = _parse_time(entry.get("fetched_at")) if entry else None
     if fetched_at is not None and now - fetched_at < ODDS_CACHE_TTL and isinstance(cached, list):
         return cached
 
     exhausted_until = _parse_time(data.get("exhausted_until"))
-    if exhausted_until is not None and now < exhausted_until:
+    # Bounded by EXHAUSTED_BACKOFF so a corrupt far-future value (or a clock
+    # that went backwards) cannot suppress requests indefinitely.
+    if (exhausted_until is not None and now < exhausted_until <= now + EXHAUSTED_BACKOFF
+            and data.get("exhausted_key") == _key_id(api_key)):
         return cached
 
     try:
@@ -137,6 +171,7 @@ def fetch_odds_events(
             code = None
         if code == _OUT_OF_CREDITS:
             data["exhausted_until"] = (now + EXHAUSTED_BACKOFF).isoformat()
+            data["exhausted_key"] = _key_id(api_key)
             _save(data)
             logger.warning(
                 "[odds] The Odds API monthly credits are used up; no odds requests "
@@ -144,7 +179,10 @@ def fetch_odds_events(
                 "itself is fine.", data["exhausted_until"],
             )
         else:
-            logger.warning("[%s] The Odds API rejected the key (401, %s)", log_tag, code)
+            # redact_secrets: the body is the API's text, and nothing stops it
+            # echoing the request back.
+            logger.warning("[%s] The Odds API rejected the key (401, %s)", log_tag,
+                           redact_secrets(code))
         return cached
     if r.status_code >= 400:
         logger.warning("[%s] odds fetch failed: HTTP %d", log_tag, r.status_code)
@@ -159,9 +197,15 @@ def fetch_odds_events(
 
     entries[entry_key] = {"fetched_at": now.isoformat(), "events": events}
     data.pop("exhausted_until", None)
+    data.pop("exhausted_key", None)
     if remaining is not None:
         data["credits_remaining"] = remaining
     _save(data)
-    logger.info("[%s] odds fetched (%d events; %s credits left this month)",
-                log_tag, len(events), remaining if remaining is not None else "?")
-    return events
+    # "with bookmakers" is the coverage check: one region per league means a
+    # region that does not price a competition yields events with no lines,
+    # and this count is where that would show.
+    priced = sum(1 for ev in events if isinstance(ev, dict) and ev.get("bookmakers"))
+    logger.info("[%s] odds fetched (%d events, %d with bookmakers; %s credits left "
+                "this month)", log_tag, len(events), priced,
+                remaining if remaining is not None else "?")
+    return _current(events, now)
