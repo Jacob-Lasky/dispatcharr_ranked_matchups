@@ -119,7 +119,7 @@ to sort to the top of group lists):
 
 A 2-phase renumber dance avoids the unique constraint on
 `(channel_group, channel_number)`: park existing channels at
-`_resolve_park_base` (highest target number this apply will write + 1000)
+`_resolve_park_base` (above both the highest target number this apply will write and the highest number any channel in the group holds, + 1000)
 first, then assign target numbers.
 
 In BOTH modes apply collects `_reserved_channel_numbers` (compact: the band;

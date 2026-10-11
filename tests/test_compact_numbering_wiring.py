@@ -234,7 +234,7 @@ class TestUnplaceableGamesAreDroppedBeforeThePrePass:
         is the first thing that depends on the final slate."""
         src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
         filt = src.index("placeable = [g for g in games if _build_marker_key(g) in chnum_by_marker]")
-        park = src.index("park_base = _resolve_park_base(max_target)")
+        park = src.index("park_base = _resolve_park_base(max_target, highest_in_group)")
         assert filt < park, "the placeable filter must precede park_base resolution"
 
     def test_the_filter_reassigns_games(self):

@@ -127,6 +127,44 @@ class TestLineupChangeDoesNotRenumber:
         assert second == first
 
 
+class TestReviewFindings:
+    """Second-opinion findings on the first cut, each reproduced red first."""
+
+    def test_two_games_one_rescheduled_keeps_the_unchanged_one(self, plugin):
+        """Two channels name two floors that each keep one channel. The
+        rescheduled game's floor is off by whole hours; the lineup's is not."""
+        games = _slate()[3:5]
+        old = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        moved = dict(games[0])
+        moved["start_time_utc"] = (
+            plugin.parse_iso_utc(moved["start_time_utc"]) + timedelta(hours=2)
+        ).isoformat()
+        now = [moved, games[1]]
+        base, got = _apply_numbers(plugin, now, {}, 6891, old)
+        assert base == 6892
+        m = plugin._build_marker_key(games[1])
+        assert got[m] == old[m]
+
+    def test_no_channel_on_its_hash_slot_still_recovers_a_floor_that_moves_nothing(self, plugin):
+        """Channels re-keyed from the legacy marker (#217) sit on slots their new
+        marker does not name, so no channel names the floor exactly."""
+        games = _slate()[3:5]
+        old = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        held = {}
+        for m, n in old.items():
+            block = n - (n - 6892) % 16
+            held[m] = block + ((n - block + 5) % 16)
+        _, got = _apply_numbers(plugin, games, {}, 6838, held)
+        assert got == held
+
+    def test_parking_clears_a_hand_added_channel_above_our_targets(self, plugin):
+        """A channel the user put in our group at exactly max_target + 1000
+        made the park UPDATE hit the per-group unique constraint."""
+        assert plugin._resolve_park_base(6546427, 6547427.0) > 6547427
+        assert plugin._resolve_park_base(6546427, 0) == 6547427
+        assert plugin._resolve_park_base(6546427, None) == 6547427
+
+
 class TestFloorResolution:
     def test_explicit_base_wins_over_everything(self, plugin):
         """Explicit `virtual_channel_base` behaves as it always did."""
@@ -306,14 +344,31 @@ class TestApplyWiring:
         orelse = ast.Module(body=branch.orelse, type_ignores=[])
         assert _calls(orelse, "_resolve_virtual_base")
 
-    def test_the_floor_is_not_saved_on_a_dry_run(self):
-        branch = self._kickoff_branch()
-        saves = [
-            n for n in ast.walk(branch)
+    def test_the_floor_is_saved_only_after_commit_and_never_on_a_dry_run(self):
+        """Saved before the channel transaction, a failed apply would leave a
+        floor on disk no published channel uses, and the next auto apply would
+        renumber every game onto it (review finding)."""
+        src, fn = _apply_fn()
+        saves = _calls(fn, "_save_kickoff_base")
+        assert len(saves) == 1
+        guards = [
+            n for n in ast.walk(fn)
             if isinstance(n, ast.If) and _calls(n, "_save_kickoff_base")
-            and "dry_run" in ast.unparse(n.test)
         ]
-        assert saves, "_save_kickoff_base must sit under a `not dry_run` guard"
+        assert guards and "not dry_run" in ast.unparse(guards[-1].test)
+        assert "NUMBERING_MODE_KICKOFF" in ast.unparse(guards[-1].test)
+        for w in ast.walk(fn):
+            if isinstance(w, ast.With):
+                assert not _calls(w, "_save_kickoff_base"), "must run after the transaction"
+        (invalidate,) = _calls(fn, "_invalidate_epg_output_cache")
+        assert saves[0].lineno > invalidate.lineno
+
+    def test_parking_clears_every_number_in_the_group(self):
+        src, _fn = _apply_fn()
+        i = src.index("highest_in_group = (")
+        block = src[i:src.index("park_base = _resolve_park_base(max_target, highest_in_group)", i)]
+        assert "channel_group=target_group" in block
+        assert '_Max("channel_number")' in block
 
     def test_reserved_numbers_are_collected_in_both_modes(self):
         _src, fn = _apply_fn()

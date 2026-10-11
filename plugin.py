@@ -4054,19 +4054,28 @@ def _explicit_virtual_base(settings: Dict[str, Any]) -> Optional[int]:
 
 
 def _infer_kickoff_base(
-    published: List[Tuple[Any, datetime, str]], tz,
+    published: List[Tuple[Any, datetime, str]], tz, hint: Optional[int] = None,
 ) -> Optional[int]:
     """Recover the floor the published KICKOFF channels were numbered from.
 
     `published` is (live channel number, the game's kickoff, its marker) for
     every game that already has a channel. A kickoff number is
-    ``base + stable_channel_number(0, kickoff, marker)``, so each channel names
-    a candidate base exactly. Channels that were nudged off their hash slot, held
-    in-block across the #217 marker migration, or rescheduled since they were
-    numbered name a slightly or wildly wrong one, so the candidate that keeps the
-    MOST channels inside their own kickoff minute's block wins (then the one most
-    channels name exactly, then the lowest). Candidates below 1 are ignored:
-    those are COMPACT numbers, not a kickoff floor.
+    ``base + minutes * SLOTS + slot``, so each channel admits SLOTS candidate
+    floors that put it inside its own kickoff minute's block, and
+    _assign_channel_numbers keeps any channel whose number is in its block. The
+    winner is therefore the candidate that keeps the MOST channels in-block,
+    i.e. moves the fewest. Ties go to the candidate most channels name exactly
+    (a channel on its marker's hash slot), then to the one nearest `hint` (the
+    floor auto mode would otherwise pick), then the lowest.
+
+    Why every block candidate and not just the exact ones: a channel can sit
+    off its hash slot (a same-minute nudge, or the #217 hold after its marker
+    was re-keyed from the legacy hash), and when no channel names the true floor
+    exactly, an exact-only search cannot find it. Why the `hint`: two channels,
+    one of them rescheduled since it was numbered, name two floors that each keep
+    one channel; the rescheduled one is off by whole hours (1920 per two hours),
+    while the hint is off by at most the lineup's drift since the last apply.
+    Candidates below 1 are ignored: those are COMPACT numbers, not a floor.
 
     Only consulted when NUMBERING_STATE_PATH has no floor (the first apply after
     upgrading, or a lost file), so that apply keeps every published number
@@ -4079,14 +4088,17 @@ def _infer_kickoff_base(
             continue
         offset = stable_channel_number(0, start_dt, marker, tz)
         rows.append((int(number), offset, offset - offset % slots))
-    candidates = {n - off for n, off, _ in rows if n - off >= 1}
+    candidates = {
+        n - blk - s for n, _off, blk in rows for s in range(slots) if n - blk - s >= 1
+    }
     if not candidates:
         return None
 
-    def score(c: int) -> Tuple[int, int, int]:
+    def score(c: int) -> Tuple[int, int, int, int]:
         in_block = sum(1 for n, _off, blk in rows if c + blk <= n < c + blk + slots)
         exact = sum(1 for n, off, _blk in rows if n - off == c)
-        return (in_block, exact, -c)
+        near = -abs(c - hint) if hint is not None else 0
+        return (in_block, exact, near, -c)
 
     return max(candidates, key=score)
 
@@ -4128,10 +4140,9 @@ def _resolve_kickoff_base(
         return explicit
     if remembered is not None and int(remembered) >= 1:
         return int(remembered)
-    inferred = _infer_kickoff_base(published, tz)
-    if inferred is not None:
-        return inferred
-    return _resolve_virtual_base(settings, highest_non_virtual)
+    lineup_floor = _resolve_virtual_base(settings, highest_non_virtual)
+    inferred = _infer_kickoff_base(published, tz, hint=lineup_floor)
+    return inferred if inferred is not None else lineup_floor
 
 
 def _load_kickoff_base(path: Optional[str] = None) -> Optional[int]:
@@ -4160,17 +4171,23 @@ def _save_kickoff_base(base: int, path: Optional[str] = None) -> None:
         logger.warning("[ranked_matchups] could not save kickoff numbering floor to %s: %s", path, e)
 
 
-def _resolve_park_base(max_target_number: int) -> int:
+def _resolve_park_base(max_target_number: int, highest_in_group: float = 0) -> int:
     """Pick a parking range that's guaranteed past every target number we'll
-    write. Parking + writing happens in one transaction within our own group,
-    so we only need to clear our own target range; +1000 slack keeps the
-    parking range comfortably out of the highest target we're about to assign.
+    write AND every number a channel in the group already holds. Parking +
+    writing happens in one transaction within our own group, so only the group
+    matters to the unique (channel_group, channel_number) constraint; +1000 slack
+    keeps the parking range comfortably clear of both.
 
     `max_target_number` is the largest channel number this apply will write
     (channel numbers are kickoff-time based, so the ceiling is driven by how far
     ahead the slate reaches, NOT by the game count). Callers pass the target
-    base itself when the slate is empty so the result stays sane."""
-    return int(max_target_number) + 1000
+    base itself when the slate is empty so the result stays sane.
+
+    `highest_in_group` is the highest number any channel in the target group
+    holds now. Without it, a channel the user added to our group by hand above
+    our targets could sit exactly on a parking number, and the park UPDATE would
+    hit the constraint and roll back every apply (found in review, #219)."""
+    return int(max(max_target_number, int(highest_in_group or 0))) + 1000
 
 
 def _resolve_numbering_mode(settings: Dict[str, Any]) -> str:
@@ -5668,8 +5685,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         virtual_base = _resolve_kickoff_base(
             settings, highest_other, remembered_base, published, apply_tz,
         )
-        if not dry_run and virtual_base != remembered_base:
-            _save_kickoff_base(virtual_base)
     else:
         virtual_base = _resolve_virtual_base(settings, highest_other)
     band_size = _resolve_compact_band_size(settings, len(games))
@@ -5745,7 +5760,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         games = placeable
 
     max_target = max(chnum_by_marker.values(), default=virtual_base)
-    park_base = _resolve_park_base(max_target)
+    # Park above every number ANY channel in the group holds (see
+    # _resolve_park_base): a hand-added channel in our group is reserved from
+    # assignment, but not from the parking range.
+    highest_in_group = (
+        Channel.objects.filter(channel_group=target_group)
+        .aggregate(m=_Max("channel_number"))["m"] or 0
+    ) if target_group is not None else 0
+    park_base = _resolve_park_base(max_target, highest_in_group)
     logger.info(
         "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r, "
         "remembered=%s), mode=%s, band_size=%d, max_target=%d, park_base=%d",
@@ -6588,6 +6610,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # function (see _action_reap). #201.
     if not dry_run:
         _invalidate_epg_output_cache()
+
+    # Remember the kickoff floor (#219) only now that the channels carrying it
+    # have COMMITTED. Saving it before the transaction would let a failed apply
+    # leave a floor on disk that no published channel uses, and the next auto
+    # apply would renumber every game onto it.
+    if (
+        not dry_run
+        and numbering_mode == NUMBERING_MODE_KICKOFF
+        and virtual_base != remembered_base
+    ):
+        _save_kickoff_base(virtual_base)
 
     # Persist the LLM-description cache (prune entries whose marker is no
     # longer in this refresh; keep file bounded to live games). Save outside
