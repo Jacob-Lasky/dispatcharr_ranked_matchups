@@ -168,9 +168,10 @@ def rivalry_name(home: str, away: str, sport_prefix: str) -> Optional[str]:
 
 
 def _strip_suffix(name: str) -> str:
-    """Drop club-type tokens ('fc', 'afc', 'cf', 'sc') from either end so the
-    Football-Data.org form 'manchester city fc' compares equal to a stored
-    'Manchester City'."""
+    """Drop every club-type token ('fc', 'afc', 'cf', 'sc'), wherever it sits
+    in the name, so the Football-Data.org form 'manchester city fc' compares
+    equal to a stored 'Manchester City' and 'fc bayern munchen' to 'bayern
+    munchen'. Whole tokens only: 'fcsb' and 'sco' are untouched."""
     parts = [p for p in name.split() if p not in TEAM_SUFFIX_TOKENS]
     return " ".join(parts)
 

@@ -17,6 +17,12 @@ each instance it builds.
 The check is one-directional on purpose. Every MAPPED key must be real; a real
 prefix with no mapping is fine (the friendlies and NCAA sub-sports are unmapped
 deliberately, see logos.py).
+
+It covers EVERY table keyed on sport_prefix, not only the logos.py ones the
+issue named: plugin.py's soccer match-window set carried two of #104's dead
+keys ("NCAAMS", "NCAAWS") from #4 until this guard was widened to it, which is
+the same rot one file over. `test_every_prefix_keyed_table_is_registered`
+finds such tables by their contents, so a new one cannot be missed silently.
 """
 from __future__ import annotations
 
@@ -33,9 +39,52 @@ import pytest
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG_NAME = "dispatcharr_ranked_matchups"
 
-# The logos.py tables keyed on sport_prefix. SPORTSDB_TOURNAMENT_LEAGUE_IDS is
-# empty today, and is here so its first entry is checked like the others.
-LOGO_MAPS = ("_SPORT_HINT", "SPORTSDB_LEAGUE_IDS", "SPORTSDB_TOURNAMENT_LEAGUE_IDS")
+# Every module-level table keyed on (or a set of) sport_prefix, as (module,
+# attribute). SPORTSDB_TOURNAMENT_LEAGUE_IDS is empty today, and is here so its
+# first entry is checked like the others.
+PREFIX_TABLES = (
+    ("logos", "_SPORT_HINT"),
+    ("logos", "SPORTSDB_LEAGUE_IDS"),
+    ("logos", "SPORTSDB_TOURNAMENT_LEAGUE_IDS"),
+    ("plugin", "_SOCCER_PREFIXES"),
+    ("plugin", "_MATCH_WINDOW_OVERRIDE_PRE_MIN"),
+    ("plugin", "_MATCH_WINDOW_OVERRIDE_POST_HOURS"),
+    ("gamethumbs", "GAMETHUMBS_LEAGUE_SLUGS"),
+    ("gamethumbs", "_TEAM_ALIASES"),
+    ("rivalries", "_RIVALRIES_BY_SPORT"),
+)
+
+# Tables whose keys overlap the prefix space but are a DIFFERENT key space, so
+# a key that is not an emitted prefix is correct there. Each with its reason.
+NOT_PREFIX_KEYED = {
+    # Keyed on a league-CONTEXT code: the FD.org competition code for soccer
+    # ("PL", "ELC", "CL", "EC"), a source's `league_context_code` or
+    # `_league_context_code()` otherwise ("MLS_EAST", "NHL_PO"). Several equal
+    # the source's prefix by convention ("CBB", "NHL", "WC"), never by lookup.
+    # Its own dead-key guard is test_every_league_context_is_one_a_source_uses.
+    ("scoring", "LEAGUE_CONTEXTS"),
+    # Keyed on the honours.json competition key ("WC", "EURO", "COPA", "UCL"),
+    # reached through honours._COMPETITION_MAP from an FD.org code.
+    ("honours", "_HONOURS"),
+    # Keyed on the FD.org competition code ("WC", "EC", "CL").
+    ("honours", "_COMPETITION_MAP"),
+    # Keyed on a LEAGUE_CONTEXTS outcome-band label; "UCL" is the
+    # Champions-League-places band, not the UCL prefix.
+    ("plugin", "_BAND_DISPLAY"),
+    # Keyed on a knockout stage name; "WC" there is a stage, not the World Cup.
+    ("scoring", "KNOCKOUT_ROUND_DEPTH"),
+    # Keyed on an MLB postseason round; "WC" is the Wild Card Series.
+    ("sources.mlb", "_MLB_SERIES_LENGTHS"),
+}
+
+# JSON data files whose top-level keys are sport prefixes, with the metadata
+# keys each one legitimately carries. Their loaders skip every "_" key, so a
+# league key accidentally written with an underscore would silently load as
+# nothing; checking the RAW keys, not the loaded table, is what catches that.
+PREFIX_KEYED_JSON = {
+    "rivalries.json": {"_comment", "_pools"},
+    "gamethumbs_aliases.json": {"_comment", "_method", "_not_needed"},
+}
 
 # Concrete SportSource classes that `_build_sources` never instantiates
 # directly, each for a stated reason. Anything else missing from the build is a
@@ -51,8 +100,22 @@ NOT_BUILT_DIRECTLY = {
 }
 
 
+def _module(name):
+    """A package module by its name relative to the package. plugin.py and
+    tasks.py cannot be imported normally (the package __init__ pulls Django),
+    so they come from the conftest loaders like everywhere else."""
+    if name in ("plugin", "tasks"):
+        from tests.conftest import _load_plugin_module, _load_tasks_module
+        return _load_plugin_module() if name == "plugin" else _load_tasks_module()
+    return importlib.import_module(f"{PKG_NAME}.{name}")
+
+
+def _table(module, attr):
+    return getattr(_module(module), attr)
+
+
 def _logos():
-    return importlib.import_module(f"{PKG_NAME}.logos")
+    return _module("logos")
 
 
 def _all_on_settings():
@@ -97,24 +160,33 @@ def _emitted(sources):
 
 
 def _stale_keys(emitted):
-    """{map name: [keys no source emits]}, empty when every key is live."""
-    logos = _logos()
+    """{"module.attr": [keys no source emits]}, empty when every key is live."""
     out = {}
-    for name in LOGO_MAPS:
-        dead = sorted(set(getattr(logos, name)) - emitted)
+    for module, attr in PREFIX_TABLES:
+        dead = sorted(set(_table(module, attr)) - emitted)
         if dead:
-            out[name] = dead
+            out[f"{module}.{attr}"] = dead
     return out
 
 
 def test_every_mapped_key_is_a_prefix_some_source_emits(built_sources):
     stale = _stale_keys(_emitted(built_sources))
     assert stale == {}, (
-        f"logos.py maps sport_prefix keys that no source emits: {stale}. "
+        f"tables keyed on sport_prefix carry keys no source emits: {stale}. "
         "A dead key is never looked up and reads exactly like a live one "
         "(#104 chased five of them). Remove it, or fix the prefix to the one "
         "the source's `sport_prefix` actually returns."
     )
+
+
+def test_the_soccer_window_holds_none_of_104s_dead_keys(plugin):
+    """#183's own class, one file over from logos.py: the soccer match-window
+    set carried "NCAAMS"/"NCAAWS" from #4, never matching the NCAA soccer
+    sources' real prefixes. Literal, so it does not lean on the derivation."""
+    for dead in ("NCAAMS", "NCAAWS"):
+        assert dead not in plugin._SOCCER_PREFIXES, dead
+        assert dead not in plugin._MATCH_WINDOW_OVERRIDE_PRE_MIN, dead
+        assert dead not in plugin._MATCH_WINDOW_OVERRIDE_POST_HOURS, dead
 
 
 def test_the_maps_are_populated():
@@ -123,6 +195,178 @@ def test_the_maps_are_populated():
     logos = _logos()
     assert len(logos._SPORT_HINT) >= 20
     assert len(logos.SPORTSDB_LEAGUE_IDS) >= 20
+    assert len(_table("plugin", "_SOCCER_PREFIXES")) >= 10
+    assert len(_table("gamethumbs", "GAMETHUMBS_LEAGUE_SLUGS")) >= 20
+    assert len(_table("rivalries", "_RIVALRIES_BY_SPORT")) >= 15
+
+
+def _prefix_like_tables(emitted):
+    """{id(obj): "module.attr"} for every module-level dict/set/tuple/list in
+    the package with ANY emitted prefix among its string members: the
+    contents test for "this table may be keyed on sport_prefix". One is
+    enough on purpose: a new table holding one live key and one dead one is
+    exactly the case to catch, and a threshold of two let it through. The few
+    tables where a prefix-shaped string means something else are classified
+    in NOT_PREFIX_KEYED. Keyed on identity so a table re-exported under a
+    second module (soccer.py imports scoring.LEAGUE_CONTEXTS) counts once."""
+    names = ["plugin", "tasks"] + sorted(
+        f[:-3] for f in os.listdir(REPO_ROOT)
+        if f.endswith(".py") and f not in ("__init__.py", "plugin.py", "tasks.py")
+    )
+    sources_pkg = importlib.import_module(f"{PKG_NAME}.sources")
+    names += [f"sources.{i.name}" for i in pkgutil.iter_modules(sources_pkg.__path__)]
+    found = {}
+    for name in names:
+        for attr, obj in vars(_module(name)).items():
+            if not isinstance(obj, (dict, set, frozenset, tuple, list)):
+                continue
+            members = {k for k in obj if isinstance(k, str)}
+            if members & emitted:
+                found.setdefault(id(obj), f"{name}.{attr}")
+    return found
+
+
+def test_every_prefix_keyed_table_is_registered(built_sources):
+    """Completeness for PREFIX_TABLES: a table found by its contents must be
+    either checked above or listed as a different key space. Without this the
+    guard covers only the tables someone remembered, which is how the soccer
+    window's dead keys outlived the logos.py ones."""
+    found = _prefix_like_tables(_emitted(built_sources))
+    registered = {id(_table(m, a)) for m, a in PREFIX_TABLES + tuple(NOT_PREFIX_KEYED)}
+    unregistered = sorted(found[i] for i in set(found) - registered)
+    assert not unregistered, (
+        f"tables that look keyed on sport_prefix but are not checked: "
+        f"{unregistered}. Add each to PREFIX_TABLES, or to NOT_PREFIX_KEYED "
+        "with the key space it really uses."
+    )
+    # Instrument check: discovery must see the known tables, or the
+    # assertion above is vacuous. An EMPTY table (SPORTSDB_TOURNAMENT_LEAGUE_IDS
+    # today) has no members to be found by, so it is the one exception.
+    checked = 0
+    for module, attr in PREFIX_TABLES + tuple(NOT_PREFIX_KEYED):
+        if not _table(module, attr):
+            continue
+        assert id(_table(module, attr)) in found, f"{module}.{attr}"
+        checked += 1
+    assert checked >= 10, "instrument check: too few known tables were found"
+
+
+def test_the_table_discovery_flags_a_new_prefix_table(built_sources, monkeypatch):
+    """Mutation for the completeness check: a new prefix-keyed table in some
+    module is reported until it is registered."""
+    monkeypatch.setattr(
+        _module("naming"), "_NEW_PREFIX_TABLE", {"EPL": 1, "NCAAB": 2}, raising=False)
+    found = _prefix_like_tables(_emitted(built_sources))
+    assert "naming._NEW_PREFIX_TABLE" in found.values()
+
+
+# Context codes a source writes into `extra["fd_competition_code"]` as a bare
+# literal rather than from an attribute, so _context_codes cannot read them off
+# the instance. Each is checked to still appear in its file.
+LITERAL_CONTEXT_CODES = {"BOXING": "boxing.py"}
+
+
+def _context_codes(sources):
+    """Every code a built source can put in `extra["fd_competition_code"]`,
+    which is what plugin.py looks LEAGUE_CONTEXTS up by, read from each way
+    the sources name one: an attribute (points_based's `league_context_code`,
+    mls.py's `_FD_CODE`, field_event.py's `FD_COMPETITION_CODE`), a method
+    (bracket's `_league_context_code`, soccer's `_group_stage_context_code`),
+    soccer's `config.fd_code`, or a literal listed in LITERAL_CONTEXT_CODES."""
+    used = set(LITERAL_CONTEXT_CODES)
+    for src in sources:
+        for attr in ("league_context_code", "_FD_CODE", "FD_COMPETITION_CODE"):
+            code = getattr(src, attr, None)
+            if isinstance(code, str) and code:
+                used.add(code)
+        for method in ("_league_context_code", "_group_stage_context_code"):
+            fn = getattr(src, method, None)
+            if callable(fn):
+                used.add(fn())
+        config = getattr(src, "config", None)
+        if getattr(config, "fd_code", None):
+            used.add(config.fd_code)
+    used.discard("")
+    return used
+
+
+def _dead_contexts(sources):
+    from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+    return sorted(set(LEAGUE_CONTEXTS) - _context_codes(sources))
+
+
+def test_every_league_context_is_one_a_source_uses(built_sources):
+    """LEAGUE_CONTEXTS is the other table #183's rot could hide in: it shares
+    keys with the prefix space ("CBB", "NHL") but is looked up by context
+    code, so the prefix check above cannot judge it. A context no built source
+    names is never consulted and reads exactly like a live one."""
+    used = _context_codes(built_sources)
+    assert {"PL", "ELC", "CBB", "NHL_PO", "MLS_EAST", "EC_GS", "NCAA_WSOC_CUP"} <= used, \
+        "instrument check: the context derivation missed a lookup shape"
+    dead = _dead_contexts(built_sources)
+    assert not dead, f"LEAGUE_CONTEXTS keys no source looks up: {dead}"
+
+
+def test_the_context_guard_fires_on_a_dead_context(built_sources, monkeypatch):
+    """Mutation (the round-2 review's input): a context under a prefix no
+    source uses is reported."""
+    from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+    monkeypatch.setitem(LEAGUE_CONTEXTS, "NCAAB", LEAGUE_CONTEXTS["CBB"])
+    assert _dead_contexts(built_sources) == ["NCAAB"]
+
+
+def test_the_context_guard_does_not_call_a_live_code_dead(built_sources, monkeypatch):
+    """The opposite mutation (round-3 review): a context for a code a source
+    DOES write, through each attribute shape the derivation reads, must not be
+    reported. NWSL comes from mls.py's `_FD_CODE`, F1 from field_event.py's
+    `FD_COMPETITION_CODE`, BOXING from a literal; none has a context today."""
+    from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+    for code in ("NWSL", "F1", "BOXING"):
+        assert code not in LEAGUE_CONTEXTS, f"instrument check: {code} already has one"
+        monkeypatch.setitem(LEAGUE_CONTEXTS, code, LEAGUE_CONTEXTS["CBB"])
+    assert _dead_contexts(built_sources) == []
+
+
+def test_the_literal_context_codes_are_still_written():
+    for code, fname in LITERAL_CONTEXT_CODES.items():
+        with open(os.path.join(REPO_ROOT, "sources", fname), encoding="utf-8") as f:
+            assert f'"{code}"' in f.read(), f"{fname} no longer writes {code!r}"
+
+
+def _json_prefix_keys(fname):
+    with open(os.path.join(REPO_ROOT, fname), encoding="utf-8") as f:
+        raw = json.load(f)
+    assert isinstance(raw, dict) and raw, f"instrument check: {fname} did not load"
+    return set(raw)
+
+
+def _bad_json_keys(fname, emitted):
+    keys = _json_prefix_keys(fname)
+    meta = PREFIX_KEYED_JSON[fname]
+    return sorted(k for k in keys if k not in meta and k not in emitted)
+
+
+@pytest.mark.parametrize("fname", sorted(PREFIX_KEYED_JSON))
+def test_every_raw_json_key_is_a_prefix_or_known_metadata(built_sources, fname):
+    """The loaded tables above cannot see a key their loader DROPPED: a league
+    renamed "_BL1" is skipped as metadata, and every alias for it goes dark
+    with only the remaining leagues to look at. Every raw key must be an
+    emitted prefix or one of the file's listed metadata keys."""
+    emitted = _emitted(built_sources)
+    assert _json_prefix_keys(fname) & emitted, f"instrument check: {fname} has no live key"
+    assert PREFIX_KEYED_JSON[fname] <= _json_prefix_keys(fname), \
+        f"{fname}: a listed metadata key is gone; drop it from PREFIX_KEYED_JSON"
+    bad = _bad_json_keys(fname, emitted)
+    assert not bad, f"{fname}: top-level keys that are neither a prefix nor metadata: {bad}"
+
+
+def test_the_raw_json_check_fires_on_a_hidden_league(built_sources, monkeypatch):
+    """Mutation: "_BL1" in place of "BL1" is reported."""
+    real = _json_prefix_keys
+    monkeypatch.setitem(
+        globals(), "_json_prefix_keys",
+        lambda fname: (real(fname) - {"BL1"}) | {"_BL1"})
+    assert _bad_json_keys("gamethumbs_aliases.json", _emitted(built_sources)) == ["_BL1"]
 
 
 def test_derivation_reaches_sources_that_return_no_literal(built_sources):
@@ -154,14 +398,16 @@ def test_derivation_is_not_over_inclusive(built_sources):
         assert dead not in emitted, dead
 
 
-@pytest.mark.parametrize("map_name", LOGO_MAPS)
-def test_the_guard_fires_on_an_injected_stale_key(built_sources, monkeypatch, map_name):
-    """Mutation: reintroduce one of #104's dead keys into each map in turn and
-    the check must name it."""
-    logos = _logos()
-    value = "NCAA" if map_name == "_SPORT_HINT" else 4607
-    monkeypatch.setitem(getattr(logos, map_name), "NCAAB", value)
-    assert _stale_keys(_emitted(built_sources)) == {map_name: ["NCAAB"]}
+@pytest.mark.parametrize("module,attr", PREFIX_TABLES)
+def test_the_guard_fires_on_an_injected_stale_key(built_sources, monkeypatch, module, attr):
+    """Mutation: reintroduce one of #104's dead keys into each table in turn
+    and the check must name it (and only it)."""
+    table = _table(module, attr)
+    if isinstance(table, dict):
+        monkeypatch.setitem(table, "NCAAB", next(iter(table.values()), 4607))
+    else:
+        monkeypatch.setattr(_module(module), attr, frozenset(table) | {"NCAAB"})
+    assert _stale_keys(_emitted(built_sources)) == {f"{module}.{attr}": ["NCAAB"]}
 
 
 def _concrete_source_classes():

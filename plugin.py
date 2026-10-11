@@ -370,21 +370,32 @@ EPG_PRE_MIN = 30      # 30 min before game starts (default; matches NCAAF / NFL 
 EPG_POST_HOURS = 4    # 4 hours after game starts (default; covers OT)
 
 # Per-sport match-window override (used by _build_epg_lookup to constrain
-# the regex pre-filter's time bucket). The ProgramData slot we emit for
-# our virtual channel still uses the defaults above: those control
-# user-facing display, not match recall. See #4.
+# the regex pre-filter's time bucket). See #4. It is NOT only match recall:
+# _game_end_utc dates a game's end with the post window, so it also sets when
+# the reaper may remove the channel and, through _live_window's min() with
+# EPG_POST_HOURS, where the Live EPG block and the auto-record window end.
 #
 # Soccer leagues / international tournaments. Soccer games run ~95-120 min
 # (90 reg + halftime + stoppage); add ~10 min for extra time + penalties
 # in knockouts. 5 min pre + 2.5h post covers the actual broadcast window
 # without sweeping in pre-game preview shows from earlier in the day.
+#
+# Every member must be a sport_prefix a source emits; tests/
+# test_mapped_prefixes.py fails on a dead one (#183). "NCAAMS"/"NCAAWS" sat
+# here from #4 until #183, never matching the NCAA soccer sources' real
+# "NCAAMSOC"/"NCAAWSOC", so NCAA soccer has always had the default window.
+# DO NOT just add NCAAMSOC/NCAAWSOC, EFLCUP/FACUP or the friendlies here:
+# those games currently get the 4h default, and a knockout that goes to extra
+# time and penalties runs past kickoff + 2.5h, so moving them would end their
+# Live block, auto-record and reap time before a shootout. That already
+# happens to the WC, EURO and UCL knockouts in this set. Decide the knockout
+# window first (#257).
 _SOCCER_PREFIXES = frozenset({
     "EPL", "EFL", "UCL",
     "BL1", "LaLiga", "SerieA", "Ligue1",
     "Eredivisie", "PrimeiraLiga", "BSA",
     "WC", "EURO",
     "MLS", "NWSL", "LigaMX",
-    "NCAAMS", "NCAAWS",
 })
 _MATCH_WINDOW_OVERRIDE_PRE_MIN: Dict[str, int] = {p: 5 for p in _SOCCER_PREFIXES}
 _MATCH_WINDOW_OVERRIDE_POST_HOURS: Dict[str, float] = {p: 2.5 for p in _SOCCER_PREFIXES}
