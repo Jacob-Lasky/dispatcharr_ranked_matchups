@@ -218,13 +218,26 @@ class TestCalendarUnavailable:
         _, _, fake = _bracket("w2025", calendar=False)
         assert [u for u in fake.urls if "scoreboard" in u] == []
 
-    def test_fetch_upcoming_degrades_to_tagged_events(self):
+    def test_fetch_upcoming_raises_rather_than_shrink_the_slate(self):
+        """The Nov 14 2025 women's board holds 25 games and ESPN tagged one.
+        Returning that one would read as a real one-game slate, and the
+        refresh only holds a source's published rows when it RAISES or
+        returns nothing (#240), so apply could reap the other channels."""
         src, fake = _cup("w2025", calendar=False, not_yet_played=True)
         pinned = datetime(2025, 11, 14, 12, 0, tzinfo=timezone.utc)
-        rows = _upcoming(src, cup_mod, fake, pinned, 0)
-        # The Nov 14 board holds the first first-round games; ESPN tagged one.
-        assert [r.extra["stage"] for r in rows] == ["R64"]
+        with pytest.raises(cup_mod.CalendarUnavailable):
+            _upcoming(src, cup_mod, fake, pinned, 0)
         assert len([u for u in fake.urls if "/seasons/" in u]) == 1
+
+    def test_no_calendar_before_november_is_not_an_outage(self):
+        src = cup_mod.NcaaSoccerCupSource(gender="m", season_year=2026)
+        ev = _event(["oct-1", "2026-10-11T23:00Z", 2026, 14219, "2026-ncaa-division-i-men",
+                     "Furman", "VMI", None, None, "pre", False])
+
+        def fake(url, *a, **k):
+            return {"events": [ev]} if "scoreboard" in url else None
+        rows = _upcoming(src, cup_mod, fake, datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc), 0)
+        assert rows == []
 
 
 # ---------------------------------------------------------------------------
@@ -311,11 +324,58 @@ class TestRegularSeasonCutoff:
         with patch.object(reg_mod, "_http_get", side_effect=FakeEspn(key)):
             assert src._regular_season_cutoff() == cutoff
 
-    def test_fallback_cutoff_is_the_end_of_the_eastern_day(self):
-        src = reg_mod.NcaaSoccerSource(gender="w", season_year=2026)
+    @pytest.mark.parametrize("gender,year,cutoff", [
+        # Nov 17 Eastern ends at Nov 18 05:00Z: the women's 2026 calendar.
+        ("w", 2026, datetime(2026, 11, 18, 5, 0, tzinfo=timezone.utc)),
+        ("w", 2027, datetime(2027, 11, 18, 5, 0, tzinfo=timezone.utc)),
+        # Before the NCAA moved the women's bracket: matches ESPN's own 2025
+        # boundary (fixture w2025: regular season ends 2025-11-11T04:59Z).
+        ("w", 2025, datetime(2025, 11, 12, 5, 0, tzinfo=timezone.utc)),
+        ("m", 2025, datetime(2025, 11, 19, 5, 0, tzinfo=timezone.utc)),
+        ("m", 2026, datetime(2026, 11, 19, 5, 0, tzinfo=timezone.utc)),
+    ])
+    def test_fallback_cutoff_is_the_end_of_the_eastern_day(self, gender, year, cutoff):
+        src = reg_mod.NcaaSoccerSource(gender=gender, season_year=year)
         with patch.object(reg_mod, "_http_get", return_value=None):
-            # Nov 17 Eastern ends at Nov 18 05:00Z.
-            assert src._regular_season_cutoff() == datetime(2026, 11, 18, 5, 0, tzinfo=timezone.utc)
+            assert src._regular_season_cutoff() == cutoff
+
+    def test_fallback_never_admits_that_seasons_first_round(self):
+        """Independent oracle: the fixture's real first-round kickoffs.
+        Every fallback cutoff must fall before the season's first College
+        Cup game and after its last conference game."""
+        for key in ("m2024", "w2024", "m2025", "w2025"):
+            g, y = key[0], int(key[1:])
+            src = reg_mod.NcaaSoccerSource(gender=g, season_year=y)
+            with patch.object(reg_mod, "_http_get", return_value=None):
+                cutoff = src._regular_season_cutoff()
+            games, _, _ = _bracket(key)
+            first_round = min(x["start_time"] for x in games)
+            regular_end = DATA[key]["season_types"][0]["endDate"]
+            last_regular = max(
+                r[1] for rows in DATA[key]["scoreboard"].values() for r in rows
+                if r[1] < regular_end)
+            assert datetime.fromisoformat(last_regular.replace("Z", "+00:00")) < cutoff <= first_round, key
+
+    def test_july_lookahead_keeps_next_seasons_openers(self):
+        """In late July the default source still points at LAST season; the
+        new season's openers are past last season's cutoff but are not its
+        College Cup games."""
+        reg = reg_mod.NcaaSoccerSource(gender="m", season_year=2024)
+        reg._fetch_rankings = lambda: {}
+        opener = _event(["aug-1", "2025-08-01T23:00Z", 2025, 13340, "2025-ncaa-division-i-men",
+                         "Furman", "VMI", None, None, "pre", False])
+        cup_game = _event(["dec-1", "2024-12-14T23:00Z", 2024, 12594, "2024-ncaa-division-i-men",
+                           "Marshall", "Vermont", None, None, "pre", False])
+        boards = {"20250801": [opener], "20241214": [cup_game]}
+
+        def fake(url, *a, **k):
+            if "/seasons/" in url:
+                return FakeEspn("m2024")(url)
+            return {"events": boards.get(url.rsplit("dates=", 1)[1], [])}
+        rows = _upcoming(reg, reg_mod, fake, datetime(2025, 7, 30, 12, 0, tzinfo=timezone.utc), 7)
+        assert [r.extra["espn_event_id"] for r in rows] == ["aug-1"]
+        rows = _upcoming(reg, reg_mod, fake, datetime(2024, 12, 14, 12, 0, tzinfo=timezone.utc), 0)
+        assert rows == []
 
     def test_season_walk_ends_before_the_first_round(self):
         src = reg_mod.NcaaSoccerSource(gender="w", season_year=2025)
@@ -341,20 +401,44 @@ class TestRegularSeasonCutoff:
 # ---------------------------------------------------------------------------
 
 class TestSeasonTypeWindows:
-    def test_parses_sorts_and_skips_unusable_items(self):
-        items = [
-            {"slug": "second-round", "type": 2, "startDate": "2025-11-22T05:00Z", "endDate": "2025-11-25T04:59Z"},
-            {"slug": "first-round", "type": "1", "startDate": "2025-11-18T05:00Z", "endDate": "2025-11-22T04:59Z"},
-            {"slug": "", "type": 3, "startDate": "2025-11-25T05:00Z", "endDate": "2025-11-26T04:59Z"},
-            {"slug": "backwards", "type": 4, "startDate": "2025-12-01T05:00Z", "endDate": "2025-11-30T04:59Z"},
-            {"slug": "no-type", "startDate": "2025-12-02T05:00Z", "endDate": "2025-12-03T04:59Z"},
-            "junk",
-        ]
-        ws = _espn.fetch_season_type_windows("usa.ncaa.m.1", 2025, lambda u: {"types": {"items": items}})
+    _GOOD = [
+        {"slug": "second-round", "type": 2, "startDate": "2025-11-22T05:00Z", "endDate": "2025-11-25T04:59Z"},
+        {"slug": "first-round", "type": "1", "startDate": "2025-11-18T05:00Z", "endDate": "2025-11-22T04:59Z"},
+        {"slug": "no-type", "startDate": "2025-12-02T05:00Z", "endDate": "2025-12-03T04:59Z"},
+    ]
+
+    def test_parses_and_sorts(self):
+        ws = _espn.fetch_season_type_windows(
+            "usa.ncaa.m.1", 2025, lambda u: {"types": {"count": 3, "items": self._GOOD}})
         assert [(w.slug, w.type_id) for w in ws] == [
             ("first-round", 1), ("second-round", 2), ("no-type", None)]
 
-    @pytest.mark.parametrize("payload", [None, {}, {"types": {"items": []}}, "oops"])
+    @pytest.mark.parametrize("bad", [
+        {"slug": "", "type": 3, "startDate": "2025-11-25T05:00Z", "endDate": "2025-11-26T04:59Z"},
+        {"slug": "backwards", "type": 4, "startDate": "2025-12-01T05:00Z", "endDate": "2025-11-30T04:59Z"},
+        {"slug": "no-dates", "type": 5},
+        "junk",
+    ])
+    def test_one_unusable_item_voids_the_calendar(self, bad):
+        assert _espn.fetch_season_type_windows(
+            "x", 2025, lambda u: {"types": {"items": self._GOOD + [bad]}}) is None
+
+    def test_short_page_voids_the_calendar(self):
+        """`count` 7 with only the first round delivered: accepting it would
+        make the first round `windows[0]`, the regular season."""
+        first_round_only = [t for t in DATA["m2025"]["season_types"] if t["slug"] == "first-round"]
+        assert _espn.fetch_season_type_windows(
+            "x", 2025, lambda u: {"types": {"count": 7, "items": first_round_only}}) is None
+
+    def test_partial_calendar_falls_back_in_the_regular_source(self):
+        first_round_only = [t for t in DATA["m2025"]["season_types"] if t["slug"] == "first-round"]
+        src = reg_mod.NcaaSoccerSource(gender="m", season_year=2025)
+        with patch.object(reg_mod, "_http_get",
+                          return_value={"types": {"count": 7, "items": first_round_only}}):
+            assert src._regular_season_cutoff() == datetime(2025, 11, 19, 5, 0, tzinfo=timezone.utc)
+
+    @pytest.mark.parametrize("payload", [
+        None, {}, {"types": {"items": []}}, {"types": []}, {"types": {"items": "x"}}, "oops"])
     def test_nothing_usable_is_none(self, payload):
         assert _espn.fetch_season_type_windows("x", 2025, lambda u: payload) is None
 

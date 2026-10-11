@@ -5749,6 +5749,14 @@ class TestNcaaSoccerCupSource:
         # Only the tournament event should be emitted.
         calls = {"n": 0}
         def fake_get(url, *_a, **_kw):
+            if "/seasons/" in url:
+                # ESPN's season calendar (#235): one regular-season phase
+                # covering the board, so the untagged event is placed in it
+                # and filtered as not-a-round.
+                return {"types": {"count": 1, "items": [{
+                    "slug": "regular", "type": 1,
+                    "startDate": "2030-08-01T04:00Z", "endDate": "2030-12-31T04:59Z",
+                }]}}
             calls["n"] += 1
             if calls["n"] != 1:
                 return {"events": []}

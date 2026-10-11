@@ -124,6 +124,11 @@ SLUG_TO_STAGE: Dict[str, str] = {
 }
 
 
+class CalendarUnavailable(RuntimeError):
+    """ESPN's season calendar could not be read while tournament games may
+    be on the board. See `NcaaSoccerCupSource.fetch_upcoming`."""
+
+
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
     """ESPN endpoints return dicts; the wrapper type is Optional[Any]
     rather than Optional[Dict] to keep the contract honest about the
@@ -292,9 +297,17 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
         ESPN's date-range syntax silently caps at 25 events, same trap
         as ncaa_baseball.py / ncaa_soccer.py. Only events
         `_stage_for_event` places in a tournament round surface here;
-        regular-season games are filtered out. If ESPN's season calendar
-        is unreachable this degrades to the events that carry their own
-        round tag (a missing EPG row, never a mislabelled one).
+        regular-season games are filtered out.
+
+        RAISES `CalendarUnavailable` when an event in the tournament months
+        cannot be placed because ESPN's season calendar is unreachable.
+        Returning only the few events ESPN tags (1 of 25 on the 2025
+        women's Nov 14 board) would read as a real, shorter slate: the
+        refresh would not hold the channels already published and apply
+        could reap them. A raise is what the refresh treats as this
+        source's outage (it holds the previous rows, #240). Before
+        November nothing can be a tournament game, so a missing calendar
+        then costs nothing and is not an error.
         """
         # The shared upcoming sweep owns the Eastern-bucket lookback, the
         # FINISHED drop, the stale-SCHEDULED floor and the id dedupe (see
@@ -305,13 +318,23 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
             days_ahead=days_ahead,
             team_namer=_team_canonical_name,
             http_get=_http_get,
-            extras_fn=lambda event: {"_routed": self._stage_for_event(event)},
+            extras_fn=lambda event: {
+                "_routed": self._stage_for_event(event),
+                "_season_year": self._event_season_year(event),
+            },
             base=ESPN_BASE,
         )
         out: List[GameRow] = []
         for rec in recs:
             routed = rec.get("_routed")
             if routed is None:
+                year = rec["_season_year"]
+                if (rec["start_time"].month >= TOURNAMENT_START_MONTH
+                        and self._season_windows(year) is None):
+                    raise CalendarUnavailable(
+                        f"ESPN {year} season calendar for {self._espn_slug} is "
+                        f"unavailable, so tournament rounds cannot be placed"
+                    )
                 continue
             eid = rec.get("id")
             out.append(GameRow(
@@ -411,6 +434,13 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
             self._season_windows_by_year[year] = windows
         return self._season_windows_by_year[year]
 
+    def _event_season_year(self, event: Dict[str, Any]) -> int:
+        """The event's own `season.year`, else this source's season."""
+        try:
+            return int((event.get("season") or {}).get("year") or self.season_year)
+        except (TypeError, ValueError):
+            return self.season_year
+
     def _stage_for_event(
         self, event: Dict[str, Any],
     ) -> Optional[tuple[str, str, str]]:
@@ -432,11 +462,7 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
         slug = (season.get("slug") or "").strip().lower()
         if slug in SLUG_TO_STAGE:
             return SLUG_TO_STAGE[slug], slug, "slug"
-        try:
-            year = int(season.get("year") or self.season_year)
-        except (TypeError, ValueError):
-            year = self.season_year
-        windows = self._season_windows(year)
+        windows = self._season_windows(self._event_season_year(event))
         if not windows:
             return None
         try:

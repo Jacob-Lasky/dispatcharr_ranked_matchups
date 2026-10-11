@@ -351,7 +351,7 @@ def fetch_season_type_windows(
     http_get: Callable[[str], Optional[Dict[str, Any]]],
 ) -> Optional[List[SeasonTypeWindow]]:
     """Every season type of `league_slug`'s `year` season, sorted by start,
-    or None when ESPN returned nothing usable.
+    or None when ESPN did not return a complete, well-formed calendar.
 
     ONE request: `seasons/{year}` inlines every type with its slug and dates,
     so the per-type `$ref`s never need following.
@@ -375,23 +375,35 @@ def fetch_season_type_windows(
     data = http_get(f"{ESPN_CORE_SOCCER_BASE}/{league_slug}/seasons/{year}")
     if not isinstance(data, dict):
         return None
-    items = (data.get("types") or {}).get("items") or []
+    types = data.get("types")
+    if not isinstance(types, dict):
+        return None
+    items = types.get("items")
+    if not isinstance(items, list) or not items:
+        return None
+    # ALL OR NOTHING. A calendar missing a phase is worse than none: drop the
+    # regular season and the first round becomes `windows[0]`, so
+    # ncaa_soccer.py would end the regular season after the first round and
+    # file its games as regular-season ones. So a short page (`count` says
+    # more types exist than arrived) or any unusable item voids the whole
+    # calendar, and callers take their no-calendar path.
+    count = types.get("count")
+    if isinstance(count, int) and count != len(items):
+        return None
     out: List[SeasonTypeWindow] = []
     for item in items:
         if not isinstance(item, dict):
-            continue
+            return None
         slug = (item.get("slug") or "").strip().lower()
         start = parse_iso_utc(item.get("startDate"))
         end = parse_iso_utc(item.get("endDate"))
         if not slug or start is None or end is None or end < start:
-            continue
+            return None
         try:
             type_id: Optional[int] = int(item.get("type"))
         except (TypeError, ValueError):
             type_id = None
         out.append(SeasonTypeWindow(slug, type_id, start, end))
-    if not out:
-        return None
     out.sort(key=lambda w: w.start)
     return out
 
