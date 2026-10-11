@@ -1254,7 +1254,11 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             # them into the guide at all. "MAJOR" is for golf's four
             # majors (Masters / PGA / US Open / British Open) and
             # marquee racing events the source flags as MAJOR.
+            # "TOUR_PLAYOFF" is golf's FedEx Cup playoffs (#188): it sits
+            # halfway between a regular week and a major, so a playoff event
+            # outranks the former and never the latter.
             "EVENT": 1.5,
+            "TOUR_PLAYOFF": 3.0,
             "MAJOR": 4.5,
             # Domestic-cup early rounds; the QF/SF/Final rounds of those cups
             # reuse the knockout labels above. See _CUP_ROUND_STAGE_SCORES.
@@ -1523,6 +1527,7 @@ _TOURNAMENT_STAGE_LABELS: Dict[str, str] = {
     "ROUND_OF_32": "Round of 32", "LAST_32": "Round of 32",
     "PLAYOFF_ROUND": "Playoff", "PLAYOFFS": "Playoff",
     "EVENT": "Event",
+    "TOUR_PLAYOFF": "Playoff",
     "MAJOR": "Major",
     # Domestic-cup early rounds (sources/english_cup.py). Rendered as the
     # round name a viewer would recognise from a broadcast caption.

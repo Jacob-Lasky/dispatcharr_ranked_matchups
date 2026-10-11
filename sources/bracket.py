@@ -65,6 +65,14 @@ from .base import GameRow, SportSource
 _SENTINEL_START = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
 
+def _game_index(extra: Dict[str, Any]) -> Any:
+    """The game's position in its tie: the bracket's own index when
+    place_upcoming stamped one (a fetched row's `matchday` is the source's,
+    not a leg number; see place_upcoming), else `matchday` as before."""
+    idx = extra.get("bracket_game_index")
+    return idx if isinstance(idx, int) else extra.get("matchday", 1)
+
+
 class BracketSportSource(SportSource):
     """Shared bracket state machine. Subclasses fill in the tie-shape hooks.
 
@@ -149,6 +157,20 @@ class BracketSportSource(SportSource):
         downstream ties when an upstream counterfactual changed the
         winner). Returns [] when the tie is complete."""
 
+    def _sim_extra(self, tie_meta: Dict[str, Any], game: Dict[str, Any]) -> Dict[str, Any]:
+        """The `extra` the simulator needs on a row for this bracket game. The
+        ONE builder for it: _emit_remaining_games_for_tie uses it for the rows
+        the bracket replays, and place_upcoming for the fetched row the
+        simulator starts from, so the two cannot disagree. Each tie shape
+        adds what its sample_result / apply_result read."""
+        extra: Dict[str, Any] = {
+            "game_id": game["game_id"],
+            "stage": tie_meta["stage"],
+            "matchday": game.get("matchday") or 1,
+        }
+        extra.update(game.get("extra", {}) or {})
+        return extra
+
     # ---------- public importance interface ----------
 
     @property
@@ -162,6 +184,103 @@ class BracketSportSource(SportSource):
     @abstractmethod
     def _league_context_code(self) -> str:
         """LEAGUE_CONTEXTS key for this bracket (e.g., 'CL', 'NHL_PO')."""
+
+    # True for sources whose every row is a playoff game (series, double
+    # elimination). False here because a soccer knockout source also lists its
+    # league phase. Read by place_upcoming.
+    ALL_ROWS_POSTSEASON: bool = False
+
+    def place_upcoming(self, games: List[GameRow], *, for_scoring: bool = False) -> int:
+        """Give each upcoming row its bracket identity, from this source's own
+        bracket records (#243). Mutates the rows; returns how many could not be
+        placed.
+
+        The importance simulator's TARGET is the row fetch_upcoming built, not
+        the one the bracket emits, and `apply_result` keys on three fields of
+        it. Each was missing or wrong on real rows, and each failed SILENTLY:
+
+        - `stage`: the tie is found only when it is a string. The NFL/NBA/NHL/
+          MLB/WNBA/NCAAW playoff rows had none, so the sampled result was
+          dropped; live MLB LCS games scored ~0.15 importance instead of ~3.
+          `plugin._is_postseason_game` reads it too.
+        - the game index: read from `matchday`, which on a soccer row is
+          Football-Data's, not a leg number. FD gives a UCL final 0 or None,
+          every 2026 World Cup knockout None, EURO 2024 knockouts 4-7, and
+          anything but 1 is filed as leg 2, so a single-leg tie never
+          completes: 0.0 importance. The bracket's index is stamped as
+          `bracket_game_index`, which apply_result prefers, rather than
+          overwriting `matchday`, which the EPG text renders.
+
+        - the rest of what `_sim_extra` gives the bracket's own rows, above
+          all `is_decisive_leg`: without it sample_result plays a final, a
+          second leg or a series game with no extra time or penalties, so it
+          can end level.
+
+        Everything comes from `_sim_extra` on the bracket's tie, the same
+        builder the replayed rows use, and overrides what the row had: once
+        matched, the bracket is authoritative for the simulator's keys. It is
+        matched on the row's own id (`game_id`, else `fd_id`), compared
+        exactly (simulation compares exactly too, so a "123" row is not 123),
+        and only when the team pair agrees and the id names one bracket game:
+        a wrong placement files the result into the wrong tie, which is worse
+        than none.
+
+        Rows of an ALL_ROWS_POSTSEASON source are flagged `postseason` first,
+        so a failed bracket fetch cannot make them look like regular season.
+        """
+        if self.ALL_ROWS_POSTSEASON:
+            for g in games:
+                g.extra["postseason"] = True
+        # Index every game the bracket knows, with its tie, by id. At scoring
+        # this is initial_state()'s bracket, the one importance will use, so
+        # the two cannot disagree about whether the bracket exists. Before
+        # scoring it is a throwaway build: initial_state() caches, and a
+        # season fetch failing that early would pin an empty bracket for the
+        # whole run and defeat the scoring-time retry
+        # (soccer.allow_scoring_retry).
+        bracket = (
+            self.initial_state().get("_bracket", {}) if for_scoring
+            else self._build_bracket(self._fetch_bracket_games())
+        )
+        by_id: Dict[Any, Optional[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
+        for ties in bracket.values():
+            for tie_meta in ties:
+                for game in tie_meta.get("games") or []:
+                    gid = game.get("game_id")
+                    if gid is None:
+                        continue
+                    # The same id twice is ambiguous: place neither.
+                    by_id[gid] = None if gid in by_id else (tie_meta, game)
+        unplaced = 0
+        for g in games:
+            extra = g.extra
+            gid = extra.get("game_id")
+            if gid is None:
+                gid = extra.get("fd_id")
+            hit = by_id.get(gid) if gid is not None else None
+            if hit is None or (
+                frozenset((hit[1].get("home"), hit[1].get("away")))
+                != frozenset((g.home, g.away))
+            ):
+                if not isinstance(extra.get("stage"), str):
+                    unplaced += 1
+                continue
+            tie_meta, game = hit
+            # The keys the tie shape itself sets (built without the record's
+            # pass-through extra) are what the simulator reads, and the
+            # bracket is authoritative for them on a game matched by id and
+            # teams: a fetched stage can be None or stale, and a fetched
+            # grouping_key can name the wrong sub-bracket (the upcoming sweep
+            # classifies against its own window, not opening day). The
+            # record's pass-through metadata only fills gaps.
+            own = self._sim_extra(tie_meta, {**game, "extra": {}})
+            extra["bracket_game_index"] = own.pop("matchday")
+            extra.update(own)
+            for key, value in (game.get("extra") or {}).items():
+                extra.setdefault(key, value)
+            # The fetched matchday is left alone: the EPG text renders it.
+            extra.setdefault("matchday", extra["bracket_game_index"])
+        return unplaced
 
     def initial_state(self) -> Dict[str, Any]:
         if self._initial_state_cache is not None:
@@ -233,7 +352,7 @@ class BracketSportSource(SportSource):
         extra = match.extra if isinstance(match.extra, dict) else {}
         stage = extra.get("stage")
         game_id = extra.get("game_id")
-        game_index = extra.get("matchday", 1)
+        game_index = _game_index(extra)
 
         # tie_key uses the simulator's actual participants (match.home / .away),
         # which may differ from the source-published draw when an upstream
@@ -544,14 +663,28 @@ class AggregateLegSource(BracketSportSource):
         del tie  # decisive-leg classification depends only on game index vs tie length
         return game_index == games_in_tie
 
+    def _sim_extra(self, tie_meta: Dict[str, Any], game: Dict[str, Any]) -> Dict[str, Any]:
+        legs_in_tie = len(tie_meta.get("games") or [])
+        matchday = game.get("matchday") or 1
+        extra: Dict[str, Any] = {
+            "game_id": game["game_id"],
+            "stage": tie_meta["stage"],
+            "matchday": matchday,
+            "leg_index": matchday,
+            "legs_in_tie": legs_in_tie,
+            # Drives extra time and penalties in sample_result; without it a
+            # final or a second leg is sampled as a game that can end level.
+            "is_decisive_leg": matchday == legs_in_tie,
+        }
+        extra.update(game.get("extra", {}) or {})
+        return extra
+
     def _emit_remaining_games_for_tie(
         self, tie, tie_meta, applied, team_a, team_b,
     ) -> List[GameRow]:
         del tie  # AggregateLegSource emits based on tie_meta.games; tie state not needed
         out: List[GameRow] = []
-        games = tie_meta.get("games") or []
-        legs_in_tie = len(games)
-        for g in games:
+        for g in tie_meta.get("games") or []:
             if g["game_id"] in applied:
                 continue
             matchday = g.get("matchday") or 1
@@ -561,15 +694,7 @@ class AggregateLegSource(BracketSportSource):
             else:
                 home, away = team_b, team_a
             start = g.get("start_time") or _SENTINEL_START
-            extra: Dict[str, Any] = {
-                "game_id": g["game_id"],
-                "stage": tie_meta["stage"],
-                "matchday": matchday,
-                "leg_index": matchday,
-                "legs_in_tie": legs_in_tie,
-                "is_decisive_leg": matchday == legs_in_tie,
-            }
-            extra.update(g.get("extra", {}) or {})
+            extra = self._sim_extra(tie_meta, g)
             out.append(GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
@@ -608,6 +733,8 @@ class BestOfNSeriesSource(BracketSportSource):
     listed in the tie_meta's games[] are emitted. Subclasses generate
     those records (with home/away pattern) in `_fetch_bracket_games`.
     """
+
+    ALL_ROWS_POSTSEASON = True
 
     SERIES_LENGTH: int = 7   # subclass overrides as needed (uniform-length sports)
 
@@ -684,6 +811,19 @@ class BestOfNSeriesSource(BracketSportSource):
         del tie, game_index, games_in_tie
         return True
 
+    def _sim_extra(self, tie_meta: Dict[str, Any], game: Dict[str, Any]) -> Dict[str, Any]:
+        matchday = game.get("matchday") or 1
+        extra: Dict[str, Any] = {
+            "game_id": game["game_id"],
+            "stage": tie_meta["stage"],
+            "matchday": matchday,
+            "game_index": matchday,
+            "games_in_series": self._series_length_for_stage(tie_meta.get("stage") or ""),
+            "is_decisive_leg": True,  # every series game can go to OT
+        }
+        extra.update(game.get("extra", {}) or {})
+        return extra
+
     def _emit_remaining_games_for_tie(
         self, tie, tie_meta, applied, team_a, team_b,
     ) -> List[GameRow]:
@@ -695,7 +835,6 @@ class BestOfNSeriesSource(BracketSportSource):
         wins_b = (tie.get("series_wins") or {}).get(team_b, 0)
         stage = tie_meta.get("stage") or ""
         target = self._clinching_wins_for_stage(stage)
-        series_length = self._series_length_for_stage(stage)
         # Walk source-published games in order; only emit ones not yet
         # applied AND that the series is still alive long enough to reach.
         # We model this by emitting games[i] only when wins_a < target AND
@@ -732,15 +871,7 @@ class BestOfNSeriesSource(BracketSportSource):
                 else:
                     home, away = team_b, team_a
             start = g.get("start_time") or _SENTINEL_START
-            extra: Dict[str, Any] = {
-                "game_id": g["game_id"],
-                "stage": tie_meta["stage"],
-                "matchday": matchday,
-                "game_index": matchday,
-                "games_in_series": series_length,
-                "is_decisive_leg": True,  # every series game can go to OT
-            }
-            extra.update(g.get("extra", {}) or {})
+            extra = self._sim_extra(tie_meta, g)
             out.append(GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
@@ -813,6 +944,8 @@ class DoubleEliminationSource(BracketSportSource):
     `_tie_grouping_key(game)` (new). Set `KO_STAGES` and
     `_league_context_code` as for any BracketSportSource.
     """
+
+    ALL_ROWS_POSTSEASON = True
 
     ELIMINATION_LOSS_COUNT: int = 2
 
@@ -1000,6 +1133,17 @@ class DoubleEliminationSource(BracketSportSource):
                 ))
         return out
 
+    def _sim_extra(self, tie_meta: Dict[str, Any], game: Dict[str, Any]) -> Dict[str, Any]:
+        extra: Dict[str, Any] = {
+            "game_id": game["game_id"],
+            "stage": tie_meta["stage"],
+            "matchday": game.get("matchday") or 1,
+            "grouping_key": tie_meta.get("grouping_key"),
+            "is_decisive_leg": True,  # any game can be a tie-ending game
+        }
+        extra.update(game.get("extra", {}) or {})
+        return extra
+
     def _emit_remaining_games_for_tie(
         self, tie, tie_meta, applied, team_a, team_b,
     ) -> List[GameRow]:
@@ -1015,14 +1159,7 @@ class DoubleEliminationSource(BracketSportSource):
             if not home or not away:
                 continue
             start = g.get("start_time") or _SENTINEL_START
-            extra: Dict[str, Any] = {
-                "game_id": g["game_id"],
-                "stage": tie_meta["stage"],
-                "matchday": g.get("matchday") or 1,
-                "grouping_key": tie_meta.get("grouping_key"),
-                "is_decisive_leg": True,  # any game can be a tie-ending game
-            }
-            extra.update(g.get("extra", {}) or {})
+            extra = self._sim_extra(tie_meta, g)
             out.append(GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
@@ -1042,7 +1179,7 @@ class DoubleEliminationSource(BracketSportSource):
         extra = match.extra if isinstance(match.extra, dict) else {}
         stage_raw = extra.get("stage")
         game_id = extra.get("game_id")
-        game_index = extra.get("matchday", 1)
+        game_index = _game_index(extra)
         grouping_key = extra.get("grouping_key")
         bracket = state.get("_bracket", {})
 

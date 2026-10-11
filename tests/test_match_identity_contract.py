@@ -72,12 +72,22 @@ def _extra_dicts_with_a_sport_specific_id(path):
     tree = ast.parse(src, filename=os.path.basename(path))
     for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
         for node in ast.walk(fn):
-            if not isinstance(node, ast.keyword) or node.arg != "extra":
+            # Both spellings: `GameRow(..., extra={...})`, and `extra = {...}`
+            # built first and passed as `extra=extra`. The keyword-only walk
+            # missed the second, which is how NhlPlayoffSource.fetch_upcoming
+            # shipped without game_id (#243).
+            if isinstance(node, ast.keyword) and node.arg == "extra":
+                value = node.value
+            elif isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "extra" for t in node.targets
+            ):
+                value = node.value
+            else:
                 continue
-            if not isinstance(node.value, ast.Dict):
+            if not isinstance(value, ast.Dict):
                 continue
             keys = [
-                k.value for k in node.value.keys
+                k.value for k in value.keys
                 if isinstance(k, ast.Constant) and isinstance(k.value, str)
             ]
             if any(

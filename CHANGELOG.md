@@ -5,6 +5,38 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.34.0] - 2026-10-11
+
+### Added
+
+- **Golf's FedEx Cup playoffs get their own tier.** The FedEx St. Jude
+  Championship, BMW Championship and TOUR Championship used to score as an
+  ordinary tour stop. They now rank between a regular week and a major, and
+  are labelled "Playoff". (#188)
+
+### Fixed
+
+- **NFL, NBA, NHL, MLB, WNBA and NCAA women's basketball playoff games rank
+  on their stakes again.** These sources never tagged their upcoming games
+  with the playoff round, and the bracket simulation needs the round to apply
+  a game's result. Without it the result was thrown away, so a League
+  Championship Series game scored almost no importance (about 0.15 instead of
+  about 3 on live MLB data). The plugin now looks each game up in the source's
+  own bracket. (#243)
+- **World Cup, EURO and Champions League final importance.** Football-Data
+  numbers these games by tournament day (or not at all), and the simulation
+  read that number as the leg of the tie, so a final or a World Cup knockout
+  game was filed as a second leg that never completed and scored no
+  importance. Knockout finals and second legs could also be simulated as
+  draws, with no extra time or penalties. Both now come from the bracket.
+  (#243)
+- **Favorites-only "show all postseason/playoff games" keeps those playoff
+  games**, which the missing round had made look like regular season, and no
+  longer keeps every Champions League league-phase game, which it had treated
+  as a knockout round. (#243)
+- **"BMW PGA Championship" and "Senior PGA Championship" are no longer
+  mistaken for the PGA Championship major.**
+
 ## [1.33.2] - 2026-10-11
 
 ### Fixed

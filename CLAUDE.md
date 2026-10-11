@@ -56,7 +56,7 @@ downstream is sport-agnostic.
 | `simulation.py` | Sport-agnostic Monte Carlo importance per Lahvička (2012). `monte_carlo_importance()` for single (team, outcome); `monte_carlo_importance_batch()` shares one set of N season simulations across K queries for ONE game; `monte_carlo_importance_shared()` shares one set across EVERY game of a source (#230), the production path for sources with `shared_season_importance = True` (state-free result models; knockouts opt out). `kendall_tau_c()` is the ordinal-association measure. |
 | `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` to Dispatcharr channels and streams. `_build_epg_lookup` (plugin.py) supplies three candidate paths: A, EPG `ProgramData` title, sub-title or description (whole-channel); B, channel name (whole-channel); C, stream name (stream-granular, so a stream need not be on a channel at all). Three tiers: `regex_strict` (channel or stream name names both teams, merging Tier-2 programme matches behind it), `regex_unique` (exactly one non-preview programme match), then Claude batched fallback or first candidate. `_partition_attach_targets` splits the result into `channel_ids` and `stream_ids`. |
 | `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Monte Carlo importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. A second, independent flag `shared_season_importance` (default False, #230) says the source's `sample_result` ignores `state`, so one set of simulated seasons can serve every one of its games — see the cost section below. |
-| `sources/bracket.py` | `BracketSportSource` shared state machine for all knockout/playoff sports (bracket inference, `_round_reached`, `terminal_outcomes` cascade). Three concrete tie shapes: `AggregateLegSource` (two-leg, used by `KnockoutSoccerSource`), `BestOfNSeriesSource` (best-of-N series, used by `NhlPlayoffSource`, `MlbPlayoffSource`, `NcaaBaseballPlayoffSource`, `NcaaSoftballPlayoffSource` for their Super Regional + Finals stages), and `DoubleEliminationSource` (4-team double-elim base class for NCAA Baseball / Softball Regional + 8-team MCWS/WCWS bracket; plumbing into the sport sources is tracked in #43). `BestOfNSeriesSource._series_length_for_stage(stage)` hook lets each sport map stages to series lengths — NHL uses uniform 7; MLB uses 3/5/7/7 (WC/LDS/LCS/WS). |
+| `sources/bracket.py` | `BracketSportSource` shared state machine for all knockout/playoff sports (bracket inference, `_round_reached`, `terminal_outcomes` cascade). Three concrete tie shapes: `AggregateLegSource` (two-leg, used by `KnockoutSoccerSource`), `BestOfNSeriesSource` (best-of-N series, used by `NhlPlayoffSource`, `MlbPlayoffSource`, `NcaaBaseballPlayoffSource`, `NcaaSoftballPlayoffSource` for their Super Regional + Finals stages), and `DoubleEliminationSource` (4-team double-elim base class for NCAA Baseball / Softball Regional + 8-team MCWS/WCWS bracket; plumbing into the sport sources is tracked in #43). `BestOfNSeriesSource._series_length_for_stage(stage)` hook lets each sport map stages to series lengths — NHL uses uniform 7; MLB uses 3/5/7/7 (WC/LDS/LCS/WS). `place_upcoming` stamps each fetched upcoming row with its bracket identity via `_sim_extra` (each tie shape's ONE builder of a simulated row's `extra`), and `ALL_ROWS_POSTSEASON` marks the playoff-only shapes — see the #243 gotcha below. |
 | `sources/points_based.py` | Shared Monte Carlo for round-robin point-scoring sports (NCAAF, NCAAM, NHL regular, MLB regular). Subclasses set `_count_field` to choose between `"wins"` (CFB/CBB/MLB) and `"standings_points"` (NHL) for terminal_outcomes bucketing. Sets `shared_season_importance = True` for the whole family: the result model is Poisson on fixed strengths and never reads `state`. |
 | `sources/ncaaf.py` | CFBD `/rankings`, `/games`, `/lines` calls. CFBD uses **camelCase** (homeTeam, awayTeam) — easy gotcha. |
 | `sources/nhl.py` | api-web.nhle.com (official, no key). `NhlRegularSource` uses standings points (regulation win = 2, OT/SO loss = 1, regulation loss = 0). `NhlPlayoffSource` is a best-of-7 BracketSportSource. The two cross-feed: NhlPlayoffSource borrows regular-season strengths via `set_regular_season_strengths()` so cup-final sampling uses the 82-game baseline. |
@@ -695,6 +695,44 @@ stay in agreement with that one.
   days" and is neither: it drops `tzinfo`, so comparing the result against an
   aware `start_time` raised `TypeError` and MLB Postseason reported an error on
   every refresh for the whole postseason. Use `now + timedelta(days=N)`.
+- **The simulator's TARGET is the row `fetch_upcoming` built, not the one the
+  bracket emits, and a bracket needs more on it than a source supplies**
+  (#243). Nothing fails when it is missing; the importance is just wrong:
+  - no `extra["stage"]` (the NFL/NBA/NHL/MLB/WNBA/NCAAW playoff rows): the
+    sampled result is dropped, live MLB LCS ~0.15 importance instead of ~3,
+    and `_is_postseason_game` reads the row as regular season;
+  - a `matchday` that is not the leg number: Football-Data gives a UCL final
+    0 or None, 2026 World Cup knockouts None, EURO 2024 knockouts 4-7, and
+    anything but 1 was filed as leg 2, so the tie never completed (0.0);
+  - no `is_decisive_leg`: a final or second leg sampled with no extra time
+    or penalties, so it can end level.
+
+  `BracketSportSource.place_upcoming` fixes the row. It matches each row to
+  its bracket game by `game_id` (else `fd_id`), exactly, and only when the
+  team pair agrees and the id is unique. It then applies `_sim_extra`, the ONE
+  builder of a simulated row's extra, shared with
+  `_emit_remaining_games_for_tie`: the bracket overrides the simulator's keys
+  (a fetched stage can be None or stale, a fetched double-elim `grouping_key`
+  can name the wrong sub-bracket), the source keeps its pass-through keys and
+  its `matchday` (the EPG text shows it), and the bracket's game number goes
+  in `bracket_game_index`, which `apply_result` prefers.
+
+  The refresh calls it twice through `_place_in_bracket`: at fetch, for the
+  favorites filter, on a throwaway bracket (reading `initial_state()` there
+  would cache an empty bracket if the season fetch failed that early and
+  defeat scoring's retry), and again after `_soccer_allow_scoring_retry()`
+  with `for_scoring=True`, on `initial_state()`'s bracket, the one importance
+  uses, so the two never disagree. Both passes warn, naming which. For the
+  same reason a `_fetch_bracket_games` must NOT cache a failed request as `[]`
+  (MLB and NHL did); the ESPN day-sweep sources still cache partial sweeps,
+  #245. Playoff-only shapes (`ALL_ROWS_POSTSEASON`) flag every row
+  `postseason` first, so a failed bracket fetch cannot demote them.
+
+  A new bracket source needs an id on its upcoming rows equal to its bracket
+  games' (`tests/test_match_identity_contract.py` checks `game_id`, including
+  `extra = {...}` built as a variable). Tests that take the target from
+  `remaining_matches` cannot see any of this: build it the way
+  `fetch_upcoming` does.
 - **The child log's LEADING LEVEL NAME is a contract.** `_pipeline_runner.py`
   sets `format="%(levelname)s %(name)s: %(message)s"`, and
   `tasks._child_line_level` parses that first token so a subprocess WARNING is
