@@ -563,11 +563,18 @@ slot that should have fired, allowing `_SCHEDULER_STALE_GRACE_SECONDS` (15 min),
 has no claim key, no process ran its scheduler then. Show current state ends
 with that WARNING (after the run verdict, because "Last run OK" is true and
 still the wrong answer), and `_warn_if_scheduler_stale` logs it once per missed
-slot per process from every reaper tick and from `Plugin.__init__` in the
-processes that start no threads (Celery children start throughout the day and
-their WARNING lines do reach the log, so they still report it when every uwsgi
-copy is gone). NOT from `__init__` in a uwsgi worker: discovery runs there on
-every plugins-list fetch, and that is no place for Redis round trips. A Redis watch key (`..:scheduler:watch`, `{sig, since}`)
+slot per process from every reaper tick and from `Plugin.__init__` in Celery
+and daphne, the long-lived processes that start no threads (Celery children
+start throughout the day and their WARNING lines do reach the log, so they
+still report it when every uwsgi copy is gone). NOT from `__init__` in a uwsgi
+worker: discovery runs there on every plugins-list fetch, and that is no place
+for Redis round trips. NOT from a `manage.py` command either: the AIO
+entrypoint runs `manage.py migrate` (whose post_migrate discovery builds the
+Plugin) before uwsgi starts Redis, so a check there only fails, on every boot.
+The check makes ONE Redis connect attempt (`get_client(max_retries=1)`):
+Dispatcharr's RedisClient otherwise sleeps 1+2+4+8 s between retries when Redis
+is down, on top of the same wait `_read_run_lock` already spent in Show current
+state. A Redis watch key (`..:scheduler:watch`, `{sig, since}`)
 records when the check started expecting claims for the current schedule
 (auto-refresh on/off, parsed times, resolved zone), so a fresh install, a Redis
 restart, or turning the schedule on or changing it never counts earlier slots.
@@ -578,7 +585,14 @@ expired claim would read as "nobody ran it". Redis unreachable means unknown,
 never stale, and so does a run lock held by a SCHEDULED run
 (`scheduled_auto_pipeline` in the holder record): the scheduler can be inside
 an earlier slot's pipeline when the next one comes due (one worker, close
-times), which is busy, not missing. Any other holder (a manual run, a reap, a
+times), which is busy, not missing. So, after that run ends, is a
+`last_run.json` record of a scheduled run that started before the slot and
+finished after it (within a minute; a finish in the future never counts): the
+busy scheduler picks its next slot from the run's end and never claims the one
+it ran through. `last_run.json` holds only the latest run, so a manual run that
+finishes before the check overwrites that evidence and the slot reads as
+missed until the next one is judged: a false warning in an already rare case
+(one worker, times closer together than a run), never a hidden dead scheduler. Any other holder (a manual run, a reap, a
 pre-#239 bare token) does not suppress it, or clicking Refresh would hide a
 dead scheduler. Known blind spots, by design: the first slot after
 the watch (re)starts is never judged (a Redis restart, which Dispatcharr's

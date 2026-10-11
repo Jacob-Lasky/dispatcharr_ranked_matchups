@@ -259,6 +259,33 @@ class TestPluginInit:
         assert calls == ["migrate", "stale"]
         assert spawned == []
 
+    @pytest.mark.parametrize("argv", [["manage.py", "migrate", "--noinput"],
+                                      ["/app/manage.py", "shell", "-c", "print(1)"]],
+                             ids=["manage-migrate", "manage-shell"])
+    def test_a_one_shot_command_skips_the_staleness_check(
+            self, plugin, monkeypatch, no_uwsgi, registries, spawned, argv):
+        # The AIO entrypoint runs `manage.py migrate` before uwsgi starts
+        # Redis, and its post_migrate discovery builds this Plugin: a check
+        # there could only sit through RedisClient's connect retries and log
+        # a Redis ERROR on every container boot. Threadless, migrated, no check.
+        calls = []
+        monkeypatch.setattr(plugin, "_migrate_stored_settings", lambda: calls.append("migrate"))
+        monkeypatch.setattr(plugin, "_warn_if_scheduler_stale", lambda s: calls.append("stale"))
+        monkeypatch.setattr(plugin.sys, "argv", argv)
+        plugin.Plugin()
+        assert calls == ["migrate"]
+        assert spawned == []
+
+    @pytest.mark.parametrize("argv", [CELERY_THREADS, DAPHNE], ids=["celery-threads", "daphne"])
+    def test_the_other_long_lived_threadless_processes_check(
+            self, plugin, monkeypatch, no_uwsgi, registries, spawned, argv):
+        calls = []
+        monkeypatch.setattr(plugin, "_migrate_stored_settings", lambda: calls.append("migrate"))
+        monkeypatch.setattr(plugin, "_warn_if_scheduler_stale", lambda s: calls.append("stale"))
+        monkeypatch.setattr(plugin.sys, "argv", argv)
+        plugin.Plugin()
+        assert calls == ["migrate", "stale"]
+
     def test_a_worker_discovery_does_not_touch_redis(self, plugin, monkeypatch,
                                                      registries, spawned):
         # Discovery runs on every plugins-list fetch in a uwsgi worker; its
@@ -365,6 +392,12 @@ SLOT_10 = datetime(2026, 10, 11, 14, 0, tzinfo=UTC)
 
 
 class TestSchedulerStaleness:
+    @pytest.fixture(autouse=True)
+    def _no_last_run(self, plugin, monkeypatch):
+        # Never read a last_run.json lying in the checkout; tests that need a
+        # record set one.
+        monkeypatch.setattr(plugin.tasks, "read_last_run", lambda: None)
+
     def _watch_from(self, plugin, since, settings=SCHED):
         """Start watching at `since` (the first check only records the watch)."""
         assert plugin._scheduler_staleness(settings, now=since) is None
@@ -441,6 +474,28 @@ class TestSchedulerStaleness:
         fake_core.RedisClient.get_client.return_value = None
         assert plugin._scheduler_staleness(SCHED, now=SLOT_10) is None
 
+    def test_redis_down_costs_no_connect_backoff(self, plugin, monkeypatch):
+        # Modelled on Dispatcharr's RedisClient.get_client: with Redis down
+        # it sleeps retry_interval * 2**n between its max_retries attempts
+        # (1+2+4+8 s by default) and then returns None. Show current state
+        # has already waited that out once in _read_run_lock, and Celery's
+        # worker_process_init runs this too: the status line must not wait.
+        waited, asked = [], []
+
+        class DownRedisClient:
+            @staticmethod
+            def get_client(max_retries=5, retry_interval=1, **_kw):
+                asked.append(max_retries)
+                waited.extend(retry_interval * 2 ** n for n in range(max_retries - 1))
+                return None
+
+        fake_core = MagicMock(RedisClient=DownRedisClient)
+        monkeypatch.setitem(sys.modules, "core", MagicMock())
+        monkeypatch.setitem(sys.modules, "core.utils", fake_core)
+        assert plugin._scheduler_staleness(SCHED, now=SLOT_10) is None
+        assert asked == [1]  # it did ask Redis, once, without retries
+        assert waited == []
+
     def test_a_claim_outlives_a_day_plus_the_grace(self, plugin, redis):
         # One daily time: the newest due slot can be 24h + grace old, and an
         # expired claim would read as "no scheduler ran it". The fake Redis
@@ -476,6 +531,34 @@ class TestSchedulerStaleness:
         assert '"kind": "scheduled_auto_pipeline"' in data[plugin._SCHEDULER_LOCK_KEY]
         assert plugin._scheduler_staleness(close, now=at) is None
         del data[plugin._SCHEDULER_LOCK_KEY]
+        assert plugin._scheduler_staleness(close, now=at) is not None
+
+    def test_busy_through_the_slot_is_not_dead_after_the_run_either(
+            self, plugin, monkeypatch, redis):
+        # Same single worker: the 10:00 pipeline ran 10:00:05-10:31, through
+        # 10:15, and the scheduler then picked 16:00, never claiming 10:15.
+        # Lock free again, so only the run record explains the missing claim.
+        data, _ = redis
+        close = dict(SCHED, scheduled_times="1000,1015")
+        self._watch_from(plugin, SLOT_10 - timedelta(hours=1), close)
+        data[plugin._SCHEDULER_SLOT_KEY_PREFIX + "2026-10-11T10:00:00-04:00"] = "401"
+        record = {"kind": "scheduled_auto_pipeline", "status": "ok",
+                  "started_at": "2026-10-11T14:00:05+00:00",
+                  "finished_at": "2026-10-11T14:31:00+00:00"}
+        monkeypatch.setattr(plugin.tasks, "read_last_run", lambda: dict(record))
+        at = SLOT_10 + timedelta(minutes=40)
+        assert plugin._scheduler_staleness(close, now=at) is None
+        # Its lock release and cleanup run just past the stamped finish.
+        record["finished_at"] = "2026-10-11T14:14:30+00:00"
+        assert plugin._scheduler_staleness(close, now=at) is None
+        # Controls: a run that ended well BEFORE 10:15, a finish in the future
+        # (a bad clock or file must not hide every later slot), or a manual
+        # run spanning it, does not explain an unclaimed 10:15.
+        record["finished_at"] = "2026-10-11T14:10:00+00:00"
+        assert plugin._scheduler_staleness(close, now=at) is not None
+        record["finished_at"] = "9999-12-31T23:59:59+00:00"
+        assert plugin._scheduler_staleness(close, now=at) is not None
+        record.update(kind="auto_pipeline", finished_at="2026-10-11T14:31:00+00:00")
         assert plugin._scheduler_staleness(close, now=at) is not None
 
     @pytest.mark.parametrize("holder", [

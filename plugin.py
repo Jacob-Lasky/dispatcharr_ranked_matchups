@@ -8018,14 +8018,19 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # Scheduler state (the running thread + its stop Event) lives in a registry
 # stashed in sys.modules under a synthetic key, NOT in module globals, so it
-# SURVIVES a plugin reload. #110: the loader's force_reload path (reload
-# endpoint / .reload_token / settings-save) unloads this module by file path and
-# re-imports it WITHOUT calling stop() — it only calls stop() on disable/delete.
+# SURVIVES a plugin reload. #110: the loader's force_reload paths (install,
+# repo update, and every OTHER worker reacting to .reload_token) unload this
+# module by file path and re-import it WITHOUT calling stop(). Only disable /
+# delete and the reload endpoint itself (stop_all_plugins(reason="reload"),
+# then discover_plugins(force_reload=True), read in the live loader 2026-10-11)
+# call stop() first.
 # Module globals reset on reload, so the new incarnation could never see the
 # thread the old one started, orphaning it (and its DB connection) every reload.
 # That re-leaks the exact thread #82's stop() was meant to reclaim. Keeping the
-# state in a reload-stable registry lets the new incarnation's __init__ find and
-# tear down the prior thread before starting its own. The synthetic module has
+# state in a reload-stable registry lets the new incarnation's __init__ find the
+# prior thread: it KEEPS a healthy one (no churn, #82/#136; it runs the old code
+# until the process exits) and replaces one that stop() signaled
+# (_thread_running, bounded by _MAX_RETIRING_THREADS). The synthetic module has
 # no __file__/__path__ under the plugin dir, so the loader's _unload_path_modules
 # leaves it in place across reloads.
 _SCHEDULER_REGISTRY_KEY = "_dispatcharr_ranked_matchups_scheduler_state"
@@ -8047,7 +8052,7 @@ def _stop_scheduler(thread, stop_event, reason: str) -> None:
     The loop polls its own stop_event between work units (and on every park via
     _scheduler_sleep), so setting it drops the loop out at its next wake-up
     (immediate: set() wakes a thread waiting on the Event); the loop's finally
-    then closes its DB connection. Only stop() (disable/delete) calls this now:
+    then closes its DB connection. Only stop() (disable/delete/reload) calls this:
     __init__ is idempotent and leaves a healthy thread running rather than
     restarting it (#82/#136), so there is no longer a reload path that needed the
     old non-blocking (join=False) variant.
@@ -8983,7 +8988,13 @@ def _scheduler_staleness(settings: Dict[str, Any],
             settings.get("scheduled_times", _DEFAULT_SCHEDULED_TIMES), quiet=True)
         now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         from core.utils import RedisClient
-        r = RedisClient.get_client()
+        # ONE connect attempt. DO NOT use get_client()'s default retries:
+        # Dispatcharr's RedisClient sleeps 1+2+4+8 s between them when Redis
+        # is down, and this status line runs inside Show current state (after
+        # _read_run_lock has already waited that out once) and inside Celery's
+        # worker_process_init. A failed attempt is not cached, so the next
+        # caller retries normally; a live client is cached whatever the args.
+        r = RedisClient.get_client(max_retries=1)
         if r is None:
             return None
         # Built from RESOLVED values: the reaper reads the raw stored dict and
@@ -9021,6 +9032,22 @@ def _scheduler_staleness(settings: Dict[str, Any],
             holder_kind = None
         if holder_kind == tasks.SCHEDULED_RUN_KIND:
             return None
+        # The same case once that run has ended: the busy scheduler picks its
+        # next slot from the run's END (_next_fire_time from now), so it never
+        # claims the slot it was busy through. A scheduled run that started
+        # before `expected` and finished after it (less a minute for the lock
+        # release and cleanup after finished_at is stamped) accounts for the
+        # missing claim; the next slot is judged on its own. A finish in the
+        # FUTURE is a bad clock or file, never a finished run: it must not
+        # hide every later slot.
+        last = tasks.read_last_run() or {}
+        if last.get("kind") == tasks.SCHEDULED_RUN_KIND:
+            began = parse_iso_utc(last.get("started_at"))
+            ended = parse_iso_utc(last.get("finished_at"))
+            due = expected.astimezone(timezone.utc)
+            if (began is not None and ended is not None and ended <= now_utc
+                    and began <= due <= ended + timedelta(seconds=60)):
+                return None
     except Exception:  # noqa: BLE001 - a status line must never break its caller
         return None
     when = _fmt_run_time(expected.astimezone(timezone.utc).isoformat(), tz)
@@ -9434,9 +9461,11 @@ class Plugin:
         #     leaked a DB connection per poll until max_connections was hit (the
         #     #82 lock-up). This early return is what prevents that churn.
         #   - The reload endpoint: the loader calls stop() FIRST (loader.py), which
-        #     clears reg.thread, so we fall through and start a fresh one; the old
-        #     thread was already signaled and releases its DB connection in
-        #     _scheduler_loop's finally, and the new one parks holding none.
+        #     signals the thread (and clears reg.thread once it has exited); a
+        #     signaled thread is not running (_thread_running), so we fall
+        #     through and start a fresh one. The old thread releases its DB
+        #     connection in _scheduler_loop's finally, and the new one parks
+        #     holding none; _MAX_RETIRING_THREADS bounds the stuck ones.
         # Either way no connection leaks. A kept thread DOES run stale code after
         # a deploy: only a container restart gives every process fresh threads.
         # The reload endpoint restarts them in the one worker serving it, and
@@ -9466,12 +9495,16 @@ class Plugin:
         start, certain = _thread_host()
         where = _process_label()
         if not start:
-            # A process that runs no scheduler checks that SOME process does:
-            # Celery children start throughout the day and their WARNING lines
-            # reach the log, so they report a scheduler missing everywhere.
-            # Not in the thread-running processes: there discovery runs on
-            # every plugins-list fetch, and their reaper tick checks instead.
-            _warn_if_scheduler_stale(self.get_current_settings())
+            # A long-lived process that runs no scheduler checks that SOME
+            # process does: Celery children start throughout the day and their
+            # WARNING lines reach the log, so they report a scheduler missing
+            # everywhere. Not in the thread-running processes: their reaper
+            # tick checks instead. And NOT in a one-shot `manage.py` command:
+            # the AIO entrypoint runs `manage.py migrate` (its post_migrate
+            # discovery builds this Plugin) BEFORE uwsgi starts Redis, so the
+            # check there could only fail, on every container boot.
+            if _program_name(sys.argv or []) in _THREADLESS_PROGRAMS:
+                _warn_if_scheduler_stale(self.get_current_settings())
             logger.info("[ranked_matchups] no scheduler or reaper in this process "
                         "(pid=%s, %s): only the web workers run them", os.getpid(), where)
             return
@@ -9526,9 +9559,10 @@ class Plugin:
 
     def stop(self, context: Optional[Dict[str, Any]] = None) -> None:
         """Tear down the scheduler thread when the loader disables / deletes the
-        plugin. The loader calls stop() on disable/delete (NOT on reload, see
-        #110), so the reload-orphan reclaim lives in __init__; this path handles
-        the explicit-teardown case. Without it the thread keeps polling Postgres
+        plugin, and the reload endpoint calls it before rediscovering. The
+        other force_reload paths (install, repo update, other workers reacting
+        to the reload token) do NOT call it (#110), so the reload-stable
+        registry is what lets __init__ find a prior incarnation's thread. Without it the thread keeps polling Postgres
         on a 5-min loop, leaking a DB connection per worker until max_connections
         is hit and every API request 500s with "too many clients" (#82).
 
