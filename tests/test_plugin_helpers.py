@@ -485,6 +485,44 @@ class TestRankPoolSizeWiring:
         assert undeclared == 3.8
 
 
+class TestRankFieldSizeWiring:
+    """#198: a poll's field size only changes a score if plugin.py carries it
+    from the source to the scorer, onto the cache row and back. Every
+    scoring-level test passes with that wiring missing, in which case every
+    poll rank silently scores against its 25-entry list again."""
+
+    def test_refresh_forwards_the_sources_field_for_a_poll_only(self, plugin):
+        import inspect
+        src = inspect.getsource(plugin._action_refresh)
+        assert '"rank_field_size", None' in src, (
+            "refresh no longer reads the source's rank_field_size"
+        )
+        assert "rank_field = None if rank_pool_exhaustive else" in src, (
+            "a league table must never be scored against a field"
+        )
+        assert "rank_field_size=rank_field" in src, (
+            "the field is not being passed into GameSignals"
+        )
+
+    def test_field_is_persisted_to_the_cache_row(self, plugin):
+        import inspect
+        src = inspect.getsource(plugin._action_refresh)
+        assert '"rank_field_size": signals.rank_field_size' in src
+
+    def test_cache_replay_reads_the_field_back(self, plugin):
+        """Behavioural: the row a refresh wrote comes back as the same
+        signals, and a pre-#198 row (no key) comes back as None, which scores
+        a poll rank against its published pool as that refresh did."""
+        row = {"home": "SMU", "away": "Virginia", "rank_home": 24,
+               "rank_away": None, "rank_pool_size": None,
+               "rank_pool_exhaustive": False, "rank_field_size": 138}
+        signals, _score = plugin._build_signals_score_from_payload(row)
+        assert signals.rank_field_size == 138
+        del row["rank_field_size"]
+        signals, _score = plugin._build_signals_score_from_payload(row)
+        assert signals.rank_field_size is None
+
+
 class TestManifestNcaafDivisionsMatchesCode:
     """plugin.json's ncaaf_divisions option values must equal the source's
     DIVISION_SETS keys, mirroring TestManifestFavoritesOnlyMatchesCode. A

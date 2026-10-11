@@ -63,6 +63,13 @@ DEFAULT_DIVISIONS = "fbs"
 class NcaafSource(PointsBasedSportSource):
     league_context_code = "CFB"
 
+    # The AP Top 25 is drawn from FBS (#198). 138 FBS programmes for 2026,
+    # measured 2026-10-11 from CFBD `/teams/fbs?year=2026` (136 for 2025).
+    # It stays the FBS count under the "fbs_fcs" divisions setting too: the
+    # poll ranks FBS teams only, so FBS is the field its ranks come from.
+    # See SportSource.rank_field_size.
+    rank_field_size = 138
+
     # CFB per-team average scoring is ~28 points/game. Cold-start fallback
     # for teams with no FINISHED games in the current season (weeks 1-2,
     # newly-promoted FCS-to-FBS programs).

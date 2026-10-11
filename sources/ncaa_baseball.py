@@ -161,6 +161,10 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
     """
 
     league_context_code = "BSB"
+    # The D1Baseball Top 25 is drawn from Division I (#198): 304 programmes
+    # in the 2026 season (Wikipedia, "List of NCAA Division I baseball
+    # programs", checked 2026-10-11). See SportSource.rank_field_size.
+    rank_field_size = 304
     _DEFAULT_POINTS_FOR = _DEFAULT_RUNS_FOR
     _DEFAULT_POINTS_AGAINST = _DEFAULT_RUNS_AGAINST
 

@@ -7,8 +7,9 @@ to be tuned.
 
 Signals:
   - rank_pair / one_ranked: mean of the two teams' percentile strength within
-    their own ranked pool (a 20-club league table, a 25-deep poll), scaled to
-    RANK_SCALE. One formula; the key just records whether both sides ranked.
+    the field they are ranked in (a 20-club league table; a 25-deep poll read
+    against its sport's eligible field, #198), scaled to RANK_SCALE. One
+    formula; the key just records whether both sides ranked.
   - favorite: at least one favorite team involved → flat boost
   - close_game: tight betting spread → score inversely proportional to spread
   - rivalry: known rivalry game → flat boost
@@ -99,6 +100,13 @@ class GameSignals:
     # whether last place bottoms out at 0.0 or stays above unranked.
     # Defaults False because an undeclared pool is the poll case.
     rank_pool_exhaustive: bool = False
+    # How many teams the POLL is drawn from (#198): 138 FBS programmes for the
+    # AP football poll, 365 Division I men's basketball programmes, and so on.
+    # Read only for a SELECTIVE pool, where it turns "#25 of a 25-deep poll"
+    # into "25th of 138". None means the published pool is treated as the
+    # whole field, which is exactly right for a league table and is the
+    # pre-#198 behaviour for an undeclared poll. See _rank_strength.
+    rank_field_size: Optional[int] = None
     team_a: str = ""
     team_b: str = ""
     favorite_match: List[str] = field(default_factory=list)  # which favorites match
@@ -1118,11 +1126,14 @@ def match_favorites(home: str, away: str, favorites: List[str]) -> List[str]:
     return matched
 
 
-def _rank_strength(rank: Optional[int], pool: int, exhaustive: bool) -> float:
-    """Team quality in [0, 1] as a share of its OWN ranked pool.
+def _rank_strength(
+    rank: Optional[int], pool: int, exhaustive: bool,
+    field: Optional[int] = None,
+) -> float:
+    """Team quality in [0, 1]: its percentile within the field it is ranked in.
 
-    A rank only means something relative to how many teams carry one. Before
-    this normalization the scorer read a poll rank and a league-table
+    A rank only means something relative to how many teams it was drawn
+    from. Before #194 the scorer read a poll rank and a league-table
     position as the same quantity, which they are not:
 
       * a LEAGUE table ranks every club, so every fixture had two ranks and
@@ -1133,37 +1144,42 @@ def _rank_strength(rank: Optional[int], pool: int, exhaustive: bool) -> float:
 
     The measured consequence (2026-08-29): any league fixture whose ranks
     summed to 30 or less outscored `#1 vs unranked` on this signal. Ranks
-    summing to 30 is a 14th-vs-16th place game. It was also backwards on the
-    merits, since being ranked #1 of 136 is a stronger claim than 1st of 20.
+    summing to 30 is a 14th-vs-16th place game.
 
-    Percentile fixes both at once, and does it surgically: for a 25-deep
-    pool the output is within ~0.4 raw points of the old formula, so poll
-    sports barely move. What changes is (a) league tables, which are no
-    longer scored as if they were 25 deep, and (b) the unranked side, which
-    now costs a team its own share rather than collapsing the whole game
-    into a lower-capped branch.
+    THREE CASES, and the distinction between them is load-bearing:
 
-    EXHAUSTIVE AND SELECTIVE POOLS ARE NORMALIZED DIFFERENTLY, and the
-    distinction is load-bearing rather than fussy:
+      * EXHAUSTIVE pool (a league table ranks every club): the pool IS the
+        field. Last place really is the worst team and bottoms out at 0.0:
+            (pool - rank) / (pool - 1)
+      * SELECTIVE pool with a declared FIELD (#198: the AP football poll's
+        25 drawn from 138 FBS programmes): the rank is a position in the
+        field, so #25 is about the 82nd percentile, not the bottom:
+            (field - rank) / (field - 1)
+      * SELECTIVE pool with NO declared field (a poll whose source has not
+        said how many teams it ranks among): the published pool stands in
+        for the field, and its last entry stays strictly above unranked:
+            (pool + 1 - rank) / pool
 
-      * an EXHAUSTIVE pool (a league table) ranks every eligible club, so
-        last place really is the worst team and must bottom out at 0.0;
-      * a SELECTIVE pool (a 25-deep poll drawn from ~136 FBS teams) ranks
-        only the elite, so its LAST entry is still a top-20% team and must
-        stay strictly above an unranked side.
+    Before #198 every poll took the third case, so AP #25 read as 0.04 when
+    it is really a top-18% FBS team, and "#12 vs #6" of 215 NCAA men's
+    soccer programmes scored 6.80, the same as 4th vs 10th of a 20-club
+    league table (6.84).
 
-    Collapsing both to 0.0 made `#25 vs unranked` score identically to
-    `unranked vs unranked`, which is plainly wrong and was a regression this
-    function introduced before the distinction existed.
+    UNRANKED STAYS 0.0, DELIBERATELY. DO NOT "FIX" IT TO THE MIDPOINT OF THE
+    UNRANKED TAIL WITHOUT FIRST GIVING THE UNRANKED SPORTS A RANK. The
+    tail's expected position is mid-field (an unranked FBS team is on
+    average about 81st of 138, strength ~0.41), and #198 floated that as
+    the honest default. Measured on the live slate of 2026-10-11 (the #198
+    PR): it hands every one of the 195 unranked-vs-unranked college games
+    4.1-4.4 raw points that no NFL, NHL, NBA or MLB game can earn, because
+    those sources carry no ranks at all. That put Jacksonville State v FIU
+    (no ranked team) above Cagliari v Juventus, and moved NCAA men's soccer
+    from 6 to 11 of the 25 slots on a slate without college football. 0.0
+    means "no evidence of quality", which is what a team in an unranked
+    sport also gets, so the signal stays comparable across sports.
 
-    Unranked scores 0.0 rather than the UNRANKED=26 sentinel: outside a
-    selective poll a team's true position is unknown, and 0 says "no
-    evidence of quality" without inventing a number.
-
-    KNOWN LIMITATION: this is a percentile within the PUBLISHED pool, not
-    within the sport's full eligible population, so a poll's #1 and a
-    league's #1 both read as 1.0. Modelling the unranked tail properly needs
-    a field size per sport; see the follow-up issue referenced in SCORING.md.
+    A field no larger than the pool carries no extra information and falls
+    back to the third case rather than inventing one.
     """
     if rank is None:
         return 0.0
@@ -1180,8 +1196,29 @@ def _rank_strength(rank: Optional[int], pool: int, exhaustive: bool) -> float:
     if exhaustive:
         # first -> 1.0, last -> 0.0
         return (pool - rank) / (pool - 1)
+    if field is not None and field > pool:
+        # first -> 1.0, last of the poll -> (field - pool) / (field - 1)
+        return (field - rank) / (field - 1)
     # first -> 1.0, last -> 1/pool (still ahead of unranked)
     return (pool + 1 - rank) / pool
+
+
+def _rank_note(rank: int, strength: float, pool: int, field: Optional[int],
+               exhaustive: bool) -> str:
+    """One team's rank, as the score note states it.
+
+    Says WHICH scale the strength came from, because a "#7" means different
+    things in a 20-club table and a 25-deep poll of 215 teams. The strength
+    is written as a plain number in [0, 1]; an earlier note printed it as
+    "top 96%", which reads as the opposite of what it meant (0.96 strength
+    is the top 4%, not the top 96%)."""
+    if exhaustive:
+        scale = f"of {pool}"
+    elif field is not None and field > pool:
+        scale = f"in a {pool}-deep poll of {field}"
+    else:
+        scale = f"of {pool}"
+    return f"#{rank} {scale} (strength {strength:.2f})"
 
 
 def score_game(signals: GameSignals, weights: Weights) -> GameScore:
@@ -1197,8 +1234,10 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
         # incomparable. See _rank_strength for the measured consequence.
         pool = signals.rank_pool_size or RANK_POOL_DEFAULT
         exhaustive = bool(signals.rank_pool_exhaustive)
-        sa = _rank_strength(ra, pool, exhaustive)
-        sb = _rank_strength(rb, pool, exhaustive)
+        # A league table is its own field; only a poll reads the field size.
+        field = None if exhaustive else signals.rank_field_size
+        sa = _rank_strength(ra, pool, exhaustive, field)
+        sb = _rank_strength(rb, pool, exhaustive, field)
         # Mean, not sum: preserves the old formulation's semantics (it scored
         # on ra+rb, so #1-vs-#25 and #13-vs-#13 already tied) while making the
         # result a share of the pool rather than of a fixed 25.
@@ -1210,13 +1249,14 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             breakdown["rank_pair" if both else "one_ranked"] = round(rank_pts, 2)
             if both:
                 notes.append(
-                    f"both ranked: #{ra} vs #{rb} (top {sa:.0%} / {sb:.0%} "
-                    f"of a {pool}-team pool)"
+                    f"both ranked: {_rank_note(ra, sa, pool, field, exhaustive)} "
+                    f"vs {_rank_note(rb, sb, pool, field, exhaustive)}"
                 )
             else:
-                rank = ra if ra is not None else rb
+                rank, strength = (ra, sa) if ra is not None else (rb, sb)
                 notes.append(
-                    f"one ranked: #{rank} of {pool} vs unranked"
+                    f"one ranked: {_rank_note(rank, strength, pool, field, exhaustive)} "
+                    f"vs unranked"
                 )
 
     if signals.favorite_match:

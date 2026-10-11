@@ -194,6 +194,10 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
     """
 
     league_context_code = "NCAAW_BBALL"
+    # The AP Top 25 is drawn from Division I (#198): 362 programmes,
+    # measured 2026-10-11 from ESPN's women's college basketball
+    # `/teams?groups=50` (D1). See SportSource.rank_field_size.
+    rank_field_size = 362
     _DEFAULT_POINTS_FOR = _DEFAULT_POINTS_FOR
     _DEFAULT_POINTS_AGAINST = _DEFAULT_POINTS_AGAINST
 

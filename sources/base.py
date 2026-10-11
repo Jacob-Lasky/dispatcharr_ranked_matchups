@@ -16,7 +16,7 @@ import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, FrozenSet, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 
 class SoccerTeamRow(TypedDict):
@@ -151,6 +151,24 @@ class SportSource(ABC):
     # single source of truth for it, and a second copy in this file would be
     # free to drift with nothing to report the divergence.
     rank_pool_size: Optional[int] = None
+
+    # How many teams a POLL source's ranks are drawn from (#198): the
+    # sport's whole eligible field, e.g. the 138 FBS programmes the AP
+    # football poll picks its 25 from. scoring._rank_strength reads a poll
+    # rank as a position in this field, so AP #25 is ~0.82 (25th of 138)
+    # instead of 0.04 (last of a 25-team list).
+    #
+    # Declare it on poll sources only. A LEAGUE source must leave it None:
+    # its standings table is exhaustive, so the table already IS the field,
+    # and plugin.py does not forward a field for an exhaustive pool at all.
+    #
+    # None means "not declared" and keeps the pre-#198 behaviour (the
+    # published pool stands in for the field). The value drifts by a
+    # programme or two a year as schools reclassify; that is deliberate
+    # tolerance, not a bug: a field of 136 vs 138 moves AP #25 from 0.822 to
+    # 0.825. Getting the ORDER of magnitude right (25 of ~140, not 25 of 25)
+    # is what matters, so DO NOT fetch it per refresh from an API.
+    rank_field_size: Optional[int] = None
 
     @property
     @abstractmethod

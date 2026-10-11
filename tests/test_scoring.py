@@ -283,6 +283,222 @@ class TestRankPercentileNormalization:
         assert b["rank_pair"] == 20.0
 
 
+class TestRankFieldSize:
+    """#198: a poll rank is a position in the sport's whole eligible field,
+    not in the 25-entry list the poll publishes.
+
+    Literals only, computed by hand, never against RANK_SCALE or a source's
+    declared field: asserting `x == CONSTANT` cannot fail when the constant
+    is the thing that is wrong.
+    """
+
+    @staticmethod
+    def _pts(ra, rb, pool=25, exhaustive=False, field=None):
+        b = score_game(
+            GameSignals(
+                rank_a=ra, rank_b=rb, rank_pool_size=pool,
+                rank_pool_exhaustive=exhaustive, rank_field_size=field,
+            ),
+            Weights(),
+        ).breakdown
+        return b.get("rank_pair", b.get("one_ranked", 0.0))
+
+    # ---- the property #198 is about ----
+
+    def test_bottom_of_the_ap_poll_is_a_top_fifth_team(self):
+        """AP #25 is 25th of 138 FBS programmes, not last of 25.
+        (138 - 25) / 137 = 0.8248 -> mean with unranked 0.0 -> 4.12.
+        Before #198 it read (25 + 1 - 25) / 25 = 0.04 -> 0.20."""
+        assert self._pts(25, None, field=138) == 4.12
+
+    def test_bottom_of_the_ap_poll_beats_a_bottom_half_league_club(self):
+        """15th of a 20-club table: (20 - 15) / 19 = 0.263 -> 1.32. A top-25
+        FBS team is the stronger claim; the published-pool percentile put
+        it at 0.20, below every club in the bottom half of a league."""
+        poll = self._pts(25, None, field=138)
+        league = self._pts(15, None, pool=20, exhaustive=True)
+        assert league == 1.32
+        assert poll > league, (poll, league)
+
+    def test_two_top_ten_poll_teams_rank_with_a_title_clash(self):
+        """#10 vs #10 of 138: (128 / 137) -> 9.34, above 1st vs 4th of a
+        20-club table, (19/19 + 16/19) / 2 -> 9.21. Before #198: 6.40."""
+        assert self._pts(10, 10, field=138) == 9.34
+        assert self._pts(1, 4, pool=20, exhaustive=True) == 9.21
+        assert self._pts(10, 10, field=138) > self._pts(1, 4, pool=20, exhaustive=True)
+
+    def test_literal_values_across_the_poll(self):
+        # (field - rank) / (field - 1), mean of the two sides, x 10:
+        #   #1 vs #2,  field 138 -> (137/137 + 136/137) / 2 * 10 = 9.96
+        #   #12 vs #6, field 215 -> (203/214 + 209/214) / 2 * 10 = 9.63
+        #   #4 vs unranked, field 215 -> (211/214) / 2 * 10      = 4.93
+        #   #1 vs unranked, any field -> 1.0 / 2 * 10            = 5.00
+        assert self._pts(1, 2, field=138) == 9.96
+        assert self._pts(12, 6, field=215) == 9.63
+        assert self._pts(4, None, field=215) == 4.93
+        assert self._pts(1, None, field=215) == 5.0
+
+    def test_a_bigger_field_makes_the_same_rank_worth_more(self):
+        """If these tie, the field has stopped being read."""
+        assert self._pts(20, None, field=365) > self._pts(20, None, field=138)
+
+    # ---- what must NOT move ----
+
+    def test_unranked_still_earns_nothing(self):
+        """The midpoint-of-the-tail model was measured and rejected (see
+        _rank_strength): an unranked team stays 0.0 and an all-unranked game
+        emits no rank key, exactly as before #198."""
+        b = score_game(
+            GameSignals(rank_a=None, rank_b=None, rank_pool_size=25,
+                        rank_field_size=138),
+            Weights(),
+        ).breakdown
+        assert "rank_pair" not in b and "one_ranked" not in b, b
+
+    def test_a_league_table_ignores_any_field(self):
+        """A table is exhaustive: it IS the field. 14th vs 16th of 20 stays
+        the #194 value 2.63 even if a field were (wrongly) supplied."""
+        assert self._pts(14, 16, pool=20, exhaustive=True, field=138) == 2.63
+        assert self._pts(20, None, pool=20, exhaustive=True, field=138) == 0.0
+
+    def test_undeclared_field_keeps_the_published_pool_percentile(self):
+        """A poll source that declares no field scores as it did under #194:
+        #7 vs unranked, (25 + 1 - 7) / 25 -> 3.80."""
+        assert self._pts(7, None, field=None) == 3.8
+
+    def test_a_field_no_bigger_than_the_pool_is_ignored(self):
+        """A field of 25 (or less) carries no information beyond the poll;
+        it must not flip the poll into the exhaustive formula and zero #25."""
+        assert self._pts(7, None, field=25) == 3.8
+        assert self._pts(7, None, field=10) == 3.8
+        assert self._pts(25, None, field=25) == 0.2
+
+    def test_out_of_poll_rank_is_clamped_to_the_poll(self):
+        """A rank past the poll depth (a 26th entry on a tie) is clamped to
+        the pool, never scored as 26th of the field and never negative."""
+        assert self._pts(26, None, field=215) == self._pts(25, None, field=215)
+
+    # ---- the note says which scale it used ----
+
+    def test_note_names_the_poll_and_the_field(self):
+        notes = score_game(
+            GameSignals(rank_a=25, rank_b=None, rank_pool_size=25,
+                        rank_field_size=138),
+            Weights(),
+        ).notes
+        assert notes == ["one ranked: #25 in a 25-deep poll of 138 (strength 0.82) vs unranked"], notes
+
+    def test_note_does_not_print_strength_as_top_percent(self):
+        """The #194 note printed a 0.96 strength as 'top 96%', the opposite
+        of its meaning. A league note names its table size."""
+        notes = score_game(
+            GameSignals(rank_a=1, rank_b=2, rank_pool_size=20,
+                        rank_pool_exhaustive=True),
+            Weights(),
+        ).notes
+        assert notes == ["both ranked: #1 of 20 (strength 1.00) vs #2 of 20 (strength 0.95)"], notes
+        assert not any("top " in n for n in notes), notes
+
+
+class TestPollSourcesDeclareTheirField:
+    """Every source that reads a POLL must say how many teams the poll is
+    drawn from, or its ranks silently fall back to the 25-team list (#198).
+    League sources must not, because their table already is the field."""
+
+    @staticmethod
+    def _poll_sources():
+        from dispatcharr_ranked_matchups.sources.ncaaf import NcaafSource
+        from dispatcharr_ranked_matchups.sources.ncaam import NcaamSource
+        from dispatcharr_ranked_matchups.sources.ncaaw_basketball import NcaawBasketballRegularSource
+        from dispatcharr_ranked_matchups.sources.ncaa_baseball import NcaaBaseballRegularSource
+        from dispatcharr_ranked_matchups.sources.ncaa_softball import NcaaSoftballRegularSource
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer import NcaaSoccerSource
+        return {
+            "NcaafSource": NcaafSource(api_key="x"),
+            "NcaamSource": NcaamSource(api_key="x"),
+            "NcaawBasketballRegularSource": NcaawBasketballRegularSource(),
+            "NcaaBaseballRegularSource": NcaaBaseballRegularSource(),
+            "NcaaSoftballRegularSource": NcaaSoftballRegularSource(),
+            "NcaaSoccerSource(m)": NcaaSoccerSource(gender="m"),
+            "NcaaSoccerSource(w)": NcaaSoccerSource(gender="w"),
+        }
+
+    def test_every_poll_source_declares_a_real_field(self):
+        # Division I / FBS fields are 130-370 programmes. Anything at or
+        # below 25 would be ignored by the scorer; anything past 400 is a
+        # typo (or ESPN's team list, which carries non-D1 opponents).
+        for name, src in self._poll_sources().items():
+            field = getattr(src, "rank_field_size", None)
+            assert isinstance(field, int) and 130 <= field <= 370, (name, field)
+
+    def test_gendered_soccer_fields_differ(self):
+        """Men's and women's D1 soccer are different-sized fields; one shared
+        class attribute would score one of them against the wrong field."""
+        srcs = self._poll_sources()
+        assert srcs["NcaaSoccerSource(m)"].rank_field_size == 215
+        assert srcs["NcaaSoccerSource(w)"].rank_field_size == 351
+
+    def test_the_poll_source_list_is_complete(self):
+        """Any source class with its own `_fetch_rankings`, and any source
+        module that calls a `/rankings` endpoint, reads a poll. If a new one
+        appears it must be added above (and declare its field)."""
+        import importlib
+        import inspect
+        import os
+        import pkgutil
+        from dispatcharr_ranked_matchups import sources as pkg
+        from dispatcharr_ranked_matchups.sources.base import SportSource
+        listed = {type(src).__name__ for src in self._poll_sources().values()}
+        listed_modules = {type(src).__module__ for src in self._poll_sources().values()}
+        readers, endpoint_modules = set(), set()
+        for info in pkgutil.iter_modules(pkg.__path__):
+            mod = importlib.import_module(f"{pkg.__name__}.{info.name}")
+            with open(os.path.join(pkg.__path__[0], f"{info.name}.py")) as fh:
+                if "/rankings" in fh.read():
+                    endpoint_modules.add(mod.__name__)
+            for _name, cls in inspect.getmembers(mod, inspect.isclass):
+                if (cls.__module__ == mod.__name__ and issubclass(cls, SportSource)
+                        and "_fetch_rankings" in cls.__dict__):
+                    readers.add(cls.__name__)
+        # Make the scan fail on purpose first: it must find the known six.
+        assert len(readers) >= 6 and len(endpoint_modules) >= 6, (readers, endpoint_modules)
+        assert readers <= listed, readers - listed
+        assert endpoint_modules <= listed_modules, endpoint_modules - listed_modules
+
+    def test_scoring_md_field_table_matches_the_sources(self):
+        """SCORING.md publishes each poll's field. That table is a second copy
+        of the declarations above, so it must agree with them or the doc
+        silently lies after the next reclassification bump."""
+        import os
+        import re
+        path = os.path.join(os.path.dirname(__file__), "..", "SCORING.md")
+        with open(path) as fh:
+            text = fh.read()
+        rows = re.findall(r"^\| NCAA ([^|]+?) \| [^|]+ \| ([0-9 /]+)", text, re.M)
+        documented = {label.strip(): [int(n) for n in nums.split("/")] for label, nums in rows}
+        # Fail on the instrument first: the table must have been found.
+        assert "Football" in documented, documented
+        srcs = self._poll_sources()
+        expected = {
+            "Football": [srcs["NcaafSource"].rank_field_size],
+            "Men's Basketball": [srcs["NcaamSource"].rank_field_size],
+            "Women's Basketball": [srcs["NcaawBasketballRegularSource"].rank_field_size],
+            "Baseball": [srcs["NcaaBaseballRegularSource"].rank_field_size],
+            "Softball": [srcs["NcaaSoftballRegularSource"].rank_field_size],
+            "Men's / Women's Soccer": [
+                srcs["NcaaSoccerSource(m)"].rank_field_size,
+                srcs["NcaaSoccerSource(w)"].rank_field_size,
+            ],
+        }
+        assert documented == expected
+
+    def test_league_sources_leave_the_field_undeclared(self):
+        from dispatcharr_ranked_matchups.sources.base import SportSource
+        from dispatcharr_ranked_matchups.sources.soccer import SoccerSource
+        assert SportSource.rank_field_size is None
+        assert SoccerSource.rank_field_size is None
+
+
 class TestScoreGame:
     def test_both_top_5(self):
         signals = GameSignals(rank_a=1, rank_b=5)

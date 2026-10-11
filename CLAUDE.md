@@ -191,6 +191,15 @@ a NEW sport needs.
    tvg_id. `tests/test_marker_identity.py` fails if a source stamps an `*_id`
    key that is neither listed there nor exempted in the test.
 
+5. If your ranks come from a POLL (a top-N list drawn from a larger
+   field), declare `rank_field_size` on the source: the number of teams
+   the poll picks from (138 FBS programmes for the AP football poll).
+   Without it every rank scores against the 25-entry list, so AP #25 reads
+   as 0.04 instead of 0.82 (#198). A league source leaves it None: its
+   standings table is exhaustive and already is the field.
+   `tests/test_scoring.py::TestPollSourcesDeclareTheirField` fails for any
+   source with a `_fetch_rankings` or a `/rankings` call that is not listed.
+
 Shared CFBD key already covers basketball (same Bearer token).
 
 For league-based sports (where standings position is the "rank"), populate
