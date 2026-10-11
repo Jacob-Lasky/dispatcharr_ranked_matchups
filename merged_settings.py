@@ -143,13 +143,15 @@ def _legacy_decides(settings: Dict[str, Any], new_key: str, default: Any,
                     legacy_keys: Tuple[str, ...]) -> bool:
     """The one precedence rule (see the module docstring): legacy keys decide
     when the install has not been migrated, at least one of them is stored,
-    and the new key is absent, cleared, or at its default."""
+    and the new key is absent, cleared (None, or text that is only
+    whitespace), or at its default. Shared by every merged setting, the
+    selects and Scoring weights alike, so they cannot drift apart."""
     if is_migrated(settings):
         return False
     if not any(k in settings for k in legacy_keys):
         return False
     raw = settings.get(new_key)
-    return raw is None or raw == "" or raw == default
+    return raw is None or (isinstance(raw, str) and not raw.strip()) or raw == default
 
 
 def league_pair_value(settings: Dict[str, Any], select_id: str) -> str:
@@ -255,9 +257,8 @@ def weight_overrides(settings: Dict[str, Any]) -> Tuple[Dict[str, float], List[s
     takes the Weights default (the caller's job). A legacy value that is not
     a finite number (a NumberInput cleared to "") is skipped and reported:
     before #208 it raised ValueError out of the refresh."""
-    text = settings.get(SCORING_WEIGHTS_SETTING)
-    overrides, problems = parse_weight_overrides(text)
-    if is_migrated(settings) or str(text or "").strip():
+    overrides, problems = parse_weight_overrides(settings.get(SCORING_WEIGHTS_SETTING))
+    if not _legacy_decides(settings, SCORING_WEIGHTS_SETTING, "", _LEGACY_WEIGHT_KEYS):
         return overrides, problems
     for name in WEIGHT_NAMES:
         legacy = LEGACY_WEIGHT_PREFIX + name

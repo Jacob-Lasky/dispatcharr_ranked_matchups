@@ -526,6 +526,22 @@ class TestRawSettingsReadMigrates:
         assert plugin.Plugin.get_current_settings(None) == {}
 
 
+class TestLostRaceRowGone:
+
+    def test_row_deleted_between_read_and_reread(self, plugin, fake_plugin_config):
+        """The plugin was deleted while we migrated: nothing to return."""
+        class _Vanishing(_FakePluginConfigStore):
+            def filter(self, **kw):
+                qs = super().filter(**kw)
+                if "pk" in kw and "settings" not in kw:
+                    qs.first = lambda: None
+                elif "settings" in kw:
+                    qs.update = lambda settings: 0
+                return qs
+        fake_plugin_config(_Vanishing({"enable_atp": True}))
+        assert plugin.Plugin.get_current_settings(None) == {}
+
+
 class TestInitRunsTheMigration:
     """Discovery rebuilds Plugin and then serves the plugins list, so __init__
     is where the modal's settings get migrated. It must sit ABOVE the
