@@ -4812,11 +4812,12 @@ class TestMlsFetchUpcomingShape:
         }]
 
         def stub_http_get(url, timeout=15.0, **params):
-            if "the-odds-api" in url or "odds" in url:
-                return odds_response
+            assert "odds" not in url, "odds must go through sources/_odds.py"
             return espn_response
 
         monkeypatch.setattr(mls_mod, "_http_get", stub_http_get)
+        monkeypatch.setattr(mls_mod, "fetch_odds_events",
+                            lambda *_a, **_kw: odds_response)
 
         src = mls_mod.MlsSource(odds_api_key="stubkey")
         games = src.fetch_upcoming(days_ahead=1)

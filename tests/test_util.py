@@ -568,8 +568,10 @@ class TestNoRawSecretLogging:
         # logs, because a requests exception carries the full URL.
         import re
         checked = 0
-        for parts in (("sources", "mls.py"), ("sources", "mls_standings.py"),
-                      ("sources", "soccer.py")):
+        # sources/_odds.py is the only Odds API caller since #200; the other
+        # three stay listed so a request added back to one is still screened.
+        for parts in (("sources", "_odds.py"), ("sources", "mls.py"),
+                      ("sources", "mls_standings.py"), ("sources", "soccer.py")):
             raw = self._src(*parts)
             code = self._code_only(raw)
             if "apiKey" not in code:

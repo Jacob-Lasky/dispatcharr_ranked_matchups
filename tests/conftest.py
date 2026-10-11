@@ -127,6 +127,16 @@ def _isolated_last_run(tmp_path, monkeypatch):
     monkeypatch.setattr(tasks, "LAST_RUN_PATH", str(tmp_path / "last_run.json"))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_odds_cache(tmp_path, monkeypatch):
+    """Point sources/_odds.CACHE_PATH at a per-test temp file (#200), for the
+    same reason as _isolated_last_run: left live, a test would write
+    odds_cache.json into the checkout and a later test would read it."""
+    import importlib
+    odds = importlib.import_module(f"{PKG_NAME}.sources._odds")
+    monkeypatch.setattr(odds, "CACHE_PATH", str(tmp_path / "odds_cache.json"))
+
+
 def pytest_configure(config):
     """Register custom markers so `-W error` / `--strict-markers` runs stay
     clean and a typo'd marker name fails loudly instead of silently doing

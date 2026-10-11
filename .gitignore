@@ -12,6 +12,7 @@ llm_descriptions_cache.json
 recordings_state.json
 recording_stops.json
 last_run.json
+odds_cache.json
 *.tmp
 
 # Python
