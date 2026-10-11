@@ -134,7 +134,7 @@ Unranked vs unranked: signal contributes 0 and no key is emitted.
 #### Why the unranked tail scores 0, not its midpoint (#198)
 
 An unranked FBS team's expected position is the middle of the 113-team
-tail (about 81st of 138, strength 0.41), and #198 floated that as the
+tail (about 82nd of 138, strength 0.41), and #198 floated that as the
 honest default. It was measured on the live slate of 2026-10-11 and
 rejected: it hands every unranked-vs-unranked college game 4.1 to 4.4 raw
 points that no NFL, NHL, NBA or MLB game can earn, because those sources

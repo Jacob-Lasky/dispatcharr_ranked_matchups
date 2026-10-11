@@ -1169,7 +1169,7 @@ def _rank_strength(
     UNRANKED STAYS 0.0, DELIBERATELY. DO NOT "FIX" IT TO THE MIDPOINT OF THE
     UNRANKED TAIL WITHOUT FIRST GIVING THE UNRANKED SPORTS A RANK. The
     tail's expected position is mid-field (an unranked FBS team is on
-    average about 81st of 138, strength ~0.41), and #198 floated that as
+    average about 82nd of 138, strength ~0.41), and #198 floated that as
     the honest default. Measured on the live slate of 2026-10-11 (the #198
     PR): it hands every one of the 195 unranked-vs-unranked college games
     4.1-4.4 raw points that no NFL, NHL, NBA or MLB game can earn, because
