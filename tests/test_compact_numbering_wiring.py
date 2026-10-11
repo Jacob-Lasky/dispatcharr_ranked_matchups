@@ -154,9 +154,11 @@ class TestApplyCallsTheAllocator:
             and isinstance(n.func, ast.Name)
             and n.func.id == "_assign_channel_numbers"
         ]
-        assert len(calls) == 1, "expected exactly one numbering call site in _action_apply"
-        kwargs = {kw.arg for kw in calls[0].keywords}
-        assert {"mode", "band_size", "existing_numbers"} <= kwargs, kwargs
+        # The placement, and the kickoff second pass after the pre-pass (#286).
+        assert len(calls) == 2, "expected the placement and its #286 second pass"
+        for call in calls:
+            kwargs = {kw.arg for kw in call.keywords}
+            assert {"mode", "band_size", "existing_numbers"} <= kwargs, kwargs
 
     def test_the_write_loop_tolerates_a_missing_marker(self):
         """A narrow band legitimately omits a game. Subscripting would raise

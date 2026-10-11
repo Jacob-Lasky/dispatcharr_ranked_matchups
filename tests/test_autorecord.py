@@ -290,7 +290,8 @@ class TestApplyWiring:
     def test_cancel_runs_inside_the_transaction_before_the_stale_reap(self, src):
         body = self._body(src, "_action_apply")
         atomic = body.index("with transaction.atomic():")
-        assert atomic < body.index("_autorecord_cancel(autorec, dry_run)") < body.index("stale = [ch for marker")
+        assert atomic < body.index("_autorecord_cancel(autorec, dry_run)") < body.index(
+            "stale = _unwritten_channels(existing_virtuals, seen_markers)")
 
     def test_game_write_precedes_the_dot_read(self, src):
         body = self._body(src, "_action_apply")
