@@ -237,6 +237,24 @@ class TestCalendarUnavailable:
         with pytest.raises(cup_mod.CalendarUnavailable):
             _upcoming(src, cup_mod, fake, datetime(2024, 11, 21, 12, 0, tzinfo=timezone.utc), 0)
 
+    def test_the_brackets_own_calendar_is_required(self):
+        """Routing reads the event's season, the importance bracket reads
+        the source's. An event stamped 2024 on a 2025 source must not be
+        published on the strength of the 2024 calendar alone."""
+        src = cup_mod.NcaaSoccerCupSource(gender="m", season_year=2025)
+        ev = _event(["x3", "2025-11-20T18:00Z", 2024, 12594, "first-round",
+                     "Duke", "Fairleigh Dickinson", None, None, "pre", False])
+        f24 = FakeEspn("m2024")
+
+        def fake(url, *a, **k):
+            if url.endswith("/seasons/2024"):
+                return f24(url)
+            if "/seasons/" in url:
+                return None
+            return {"events": [ev]}
+        with pytest.raises(cup_mod.CalendarUnavailable, match="2025"):
+            _upcoming(src, cup_mod, fake, datetime(2025, 11, 20, 12, 0, tzinfo=timezone.utc), 0)
+
     def test_no_calendar_before_november_is_not_an_outage(self):
         src = cup_mod.NcaaSoccerCupSource(gender="m", season_year=2026)
         ev = _event(["oct-1", "2026-10-11T23:00Z", 2026, 14219, "2026-ncaa-division-i-men",

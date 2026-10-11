@@ -329,15 +329,18 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
         for rec in recs:
             year = rec["_season_year"]
             # Checked for EVERY tournament-month event, tagged ones too: the
-            # importance bracket (`_fetch_bracket_games`) is empty without
-            # the calendar, so a tagged row published now would be scored
-            # against no bracket at all.
-            if (rec["start_time"].month >= TOURNAMENT_START_MONTH
-                    and self._season_windows(year) is None):
-                raise CalendarUnavailable(
-                    f"ESPN {year} season calendar for {self._espn_slug} is "
-                    f"unavailable, so tournament rounds cannot be placed"
-                )
+            # importance bracket (`_fetch_bracket_games`, which reads THIS
+            # source's season) is empty without the calendar, so a tagged
+            # row published now would be scored against no bracket at all.
+            # The event's own season is checked as well because routing
+            # reads that one.
+            if rec["start_time"].month >= TOURNAMENT_START_MONTH:
+                for needed in sorted({year, self.season_year}):
+                    if self._season_windows(needed) is None:
+                        raise CalendarUnavailable(
+                            f"ESPN {needed} season calendar for {self._espn_slug} "
+                            f"is unavailable, so tournament rounds cannot be placed"
+                        )
             routed = rec.get("_routed")
             if routed is None:
                 continue
