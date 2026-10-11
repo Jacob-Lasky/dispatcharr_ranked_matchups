@@ -5,18 +5,6 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
-### Fixed
-
-- **NCAA soccer College Cup games are recognised again.** Since 2025 ESPN
-  labels most tournament games like ordinary regular-season games, so the
-  College Cup source found almost none of them (5 of 47 men's games, 3 of 63
-  women's) and the regular-season source listed the rest without their round.
-  Rounds are now read from ESPN's season calendar, and the regular season ends
-  where that calendar says it does (the women's tournament moved a week later
-  in 2026). If the calendar cannot be read during the tournament, the source
-  reports an error and the refresh keeps the games already on air rather than
-  publishing a partial bracket. (#235)
-
 ## [1.33.2] - 2026-10-11
 
 ### Fixed

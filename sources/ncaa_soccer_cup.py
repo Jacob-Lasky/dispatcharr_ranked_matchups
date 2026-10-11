@@ -435,9 +435,12 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
             windows = fetch_season_type_windows(self._espn_slug, year, _http_get)
             if windows is None:
                 logger.warning(
-                    "[ncaa_soccer_cup] no %d season calendar for %s; only "
-                    "events ESPN tags with their round can be placed",
+                    "[ncaa_soccer_cup] no %d season calendar for %s; %s",
                     year, self._espn_slug,
+                    "the importance bracket is empty and a tournament-month "
+                    "board raises CalendarUnavailable"
+                    if year == self.season_year
+                    else "that season's untagged events cannot be placed in a round",
                 )
             self._season_windows_by_year[year] = windows
         return self._season_windows_by_year[year]

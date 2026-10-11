@@ -15,11 +15,13 @@ men's, 2025) has only 13 wins but 47 standings points: without the
 draws credit the win-count thresholds would misclassify them as
 bubble when they're a national seed contender.
 
-College Cup postseason bracket is NOT modeled: same shape as the
-WC / EURO knockout (single-leg elimination), so the existing
-KnockoutSoccerSource machinery can absorb it when wired up.
-fetch_upcoming still surfaces postseason games via rank + favorite
-signals.
+The College Cup (postseason bracket) is NOT this source's: it is
+`ncaa_soccer_cup.NcaaSoccerCupSource`, which shares this source's
+sport prefix and team names. This source ends at the regular season
+(`_regular_season_cutoff`), in the season walk AND in `fetch_upcoming`,
+and DO NOT let it list tournament games again: a regular-season row for
+a College Cup game wins `plugin._dedup_series_games` (same kickoff,
+earlier source) and drops the College Cup row and its stage (#235).
 """
 
 from __future__ import annotations
@@ -43,8 +45,9 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_soccer")
 
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 
-# NCAA soccer regular season: August through early December (College
-# Cup wraps mid-December). Walk Aug 1 through Dec 31 day-by-day to
+# NCAA soccer regular season: August through mid-November (the College
+# Cup follows, through mid-December, and belongs to ncaa_soccer_cup.py).
+# The season walk runs Aug 1 to `_regular_season_cutoff`, day by day, to
 # avoid ESPN's silent 25-event cap on date-range scoreboard queries
 # (see ncaa_baseball.py for the same trap).
 SEASON_START_MONTH = 8   # August
@@ -52,7 +55,8 @@ SEASON_START_MONTH = 8   # August
 # FALLBACK last day (US Eastern scoreboard date) of each gender's regular
 # season, conference tournaments included, as (month, day), keyed by the
 # first season it applies to. Used ONLY when ESPN's season calendar is
-# unreachable: the real boundary is the end of the regular-season type on
+# unusable (unreachable, short, malformed, or naming no single
+# regular-season phase): the real boundary is the end of the regular-season type on
 # that calendar (`_regular_season_cutoff`, #235), which ESPN publishes per
 # season and which tracks the NCAA's own moves. Each value sits in the gap
 # between the last conference final and the first round: men's Nov 16 /
@@ -270,8 +274,8 @@ class NcaaSoccerSource(PointsBasedSportSource):
     # ---------- _fetch_full_season_games ----------
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
-        """Per-day sweep across the season. Roughly Aug-Dec = ~150
-        days × ~100ms = ~15s. Acceptable for a 6-hour refresh budget.
+        """Per-day sweep across the regular season: Aug 1 to the cutoff in
+        mid-November, ~110 days, fetched concurrently by `_espn.fetch_days`.
         """
         seen: Dict[Any, Dict[str, Any]] = {}
         season_start = datetime(self.season_year, SEASON_START_MONTH, 1, tzinfo=timezone.utc).date()

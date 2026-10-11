@@ -394,9 +394,16 @@ def fetch_season_type_windows(
     for item in items:
         if not isinstance(item, dict):
             return None
-        slug = (item.get("slug") or "").strip().lower()
-        start = parse_iso_utc(item.get("startDate"))
-        end = parse_iso_utc(item.get("endDate"))
+        raw_slug, raw_start, raw_end = item.get("slug"), item.get("startDate"), item.get("endDate")
+        # Type-checked BEFORE parsing: `.strip()` on a numeric slug or
+        # `parse_iso_utc` on a numeric date raises AttributeError, which would
+        # turn a malformed calendar into a crashed refresh instead of the
+        # no-calendar path this function promises.
+        if not all(isinstance(v, str) for v in (raw_slug, raw_start, raw_end)):
+            return None
+        slug = raw_slug.strip().lower()
+        start = parse_iso_utc(raw_start)
+        end = parse_iso_utc(raw_end)
         if not slug or start is None or end is None or end < start:
             return None
         try:

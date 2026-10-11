@@ -449,6 +449,23 @@ class TestSeasonTypeWindows:
         assert _espn.fetch_season_type_windows(
             "x", 2025, lambda u: {"types": {"items": self._GOOD + [bad]}}) is None
 
+    @pytest.mark.parametrize("bad", [
+        {"slug": 7, "type": 6, "startDate": "2025-12-04T05:00Z", "endDate": "2025-12-05T04:59Z"},
+        {"slug": "numeric-start", "type": 7, "startDate": 20251206, "endDate": "2025-12-07T04:59Z"},
+        {"slug": "list-end", "type": 8, "startDate": "2025-12-08T05:00Z", "endDate": ["2025-12-09"]},
+    ])
+    def test_wrong_typed_field_voids_the_calendar_without_raising(self, bad):
+        """A numeric slug or date used to escape as AttributeError (`.strip()`
+        / `parse_iso_utc`'s `.replace()`), crashing the refresh's source
+        fetch and importance scoring instead of taking the no-calendar path
+        the function promises."""
+        try:
+            got = _espn.fetch_season_type_windows(
+                "x", 2025, lambda u: {"types": {"items": self._GOOD + [bad]}})
+        except Exception as exc:  # noqa: BLE001 - the old behaviour under test
+            got = f"raised {type(exc).__name__}"
+        assert got is None
+
     def test_short_page_voids_the_calendar(self):
         """`count` 7 with only the first round delivered: accepting it would
         make the first round `windows[0]`, the regular season."""
