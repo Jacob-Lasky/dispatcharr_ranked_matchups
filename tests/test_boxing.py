@@ -253,11 +253,14 @@ class TestBoxingSchedulePages:
         {"pagination": {"page": 1, "items": 3, "total_pages": 1, "total_items": 3}},
         {"pagination": {"page": 2, "items": 3, "total_pages": 1, "total_items": 3}},
         {"pagination": None},
-    ], ids=["short-page-labelled-1", "claims-fewer-pages", "no-pagination"])
+        {"pagination": {"page": 2, "items": 3, "total_pages": 2, "total_items": 53}},
+    ], ids=["short-page-labelled-1", "claims-fewer-pages", "no-pagination",
+            "page-count-shrank"])
     def test_a_short_later_page_that_cannot_vouch_is_reported(self, monkeypatch, page2):
-        """WITNESS (Codex round 1): page 1 said three pages; page 2 came back
-        short but labelled page 1, or claiming one page in all, or with no
-        paging. A short page vouches for itself only on page 1."""
+        """WITNESS (Codex rounds 1-2): page 1 said three pages; page 2 came
+        back short but labelled page 1, claiming one or two pages in all, or
+        with no paging. A short page vouches for itself only on page 1, and a
+        later page must belong to the schedule page 1 described."""
         body = {"error": None, "data": self._cards(25, 3), **page2}
         rows, lost, asked = self._run(monkeypatch, {
             1: self._page(self._cards(0, 25), 1, 3, 53), 2: body,

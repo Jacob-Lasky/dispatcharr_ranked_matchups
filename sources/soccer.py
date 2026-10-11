@@ -1057,6 +1057,8 @@ class SoccerSource(SportSource):
         out: Dict[str, int] = {}
         rich: List[Dict] = []
         for row in table:
+            if not isinstance(row, dict):
+                continue
             team = (row.get("team") or {}).get("name")
             pos = row.get("position")
             if team and pos:
@@ -1068,6 +1070,14 @@ class SoccerSource(SportSource):
                     "playedGames": row.get("playedGames"),
                     "goalDifference": row.get("goalDifference"),
                 })
+        if table and not out:
+            # Rows listed, none with a team and position: a changed row
+            # shape, not an empty table, and read as one it unranked the
+            # whole league (#283).
+            logger.error("[soccer:%s] standings rows carry no team position (season=%s)",
+                         self.config.fd_code, season)
+            raise RankingsUnavailable(
+                f"{self.config.fd_code} standings (season={season}) have no readable position")
         return out, rich
 
     def _fetch_standings_with_seed(self) -> "StandingsBundle":

@@ -129,30 +129,39 @@ def _match_name(title: str) -> str:
     return title
 
 
-def _next_page(data: dict, page: int, n_cards: int) -> Tuple[Optional[str], bool]:
-    """(why the schedule cannot be vouched for past `page`, or None; whether
-    to ask for the next page), read off the answer's `pagination`.
+def _next_page(
+    data: dict, page: int, n_cards: int, promised: Optional[int],
+) -> Tuple[Optional[str], Optional[int]]:
+    """(why the schedule cannot be vouched for past `page`, or None; the
+    number of pages to read, or None to stop), read off the answer's
+    `pagination`. `promised` is the page count page 1 gave (None on page 1).
 
-    No usable paging (no integer `total_pages`, or an answer for a different
-    page than the one asked for, as a server ignoring `page_num` would give):
-    on the FIRST page, a short page is the whole schedule and a full one
-    cannot vouch for what comes after it; on a later page, which was only
-    asked for because page 1 said more existed, it is always a failure, as is
-    a later page claiming fewer pages than its own number. More pages than
-    `_MAX_PAGES`: the rest is not read, and so not vouched for either.
+    Page 1 with no usable paging (no integer `total_pages`, or an answer for
+    a different page than the one asked for): a short page is the whole
+    schedule, a full one cannot vouch for what comes after it. A later page
+    was asked for only because page 1 promised it, so it must answer as that
+    page of the SAME schedule: unusable paging there, or a page count that
+    differs from page 1's (a server ignoring `page_num`, or a schedule that
+    changed between the requests, either of which can hide cards on pages
+    never read), is a failure. More pages than `_MAX_PAGES`: the rest is not
+    read, and so not vouched for either.
     """
     paging = data.get("pagination")
     paging = paging if isinstance(paging, dict) else {}
     total, answered = paging.get("total_pages"), paging.get("page")
-    if not isinstance(total, int) or answered != page or (page > 1 and total < page):
-        if page > 1 or n_cards >= _PAGE_SIZE:
-            return f"page {page} answered with pagination {paging!r}, which cannot say what follows", False
-        return None, False
+    usable = isinstance(total, int) and answered == page
+    if page > 1 and (not usable or total != promised):
+        return (f"page {page} answered with pagination {paging!r}, but page 1 "
+                f"promised {promised} pages"), None
+    if not usable:
+        if n_cards >= _PAGE_SIZE:
+            return f"page 1 is full and its pagination {paging!r} cannot say what follows", None
+        return None, None
     if page >= total:
-        return None, False
+        return None, None
     if page >= _MAX_PAGES:
-        return f"{total} pages; only the first {_MAX_PAGES} were read", False
-    return None, True
+        return f"{total} pages; only the first {_MAX_PAGES} were read", None
+    return None, total
 
 
 class BoxingSource(SportSource):
@@ -232,6 +241,7 @@ class BoxingSource(SportSource):
         events: List[Any] = []
         seen: set = set()
         page = 1
+        promised: Optional[int] = None
         while True:
             params = {"days": days, "date_sort": "ASC", "page_size": _PAGE_SIZE}
             if page > 1:
@@ -248,8 +258,8 @@ class BoxingSource(SportSource):
                             continue
                         seen.add(eid)
                     events.append(ev)
-                err, more = _next_page(data, page, len(page_events))
-                if more:
+                err, promised = _next_page(data, page, len(page_events), promised)
+                if promised is not None:
                     page += 1
                     continue
             if err:

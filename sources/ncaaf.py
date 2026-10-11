@@ -256,13 +256,20 @@ class NcaafSource(PointsBasedSportSource):
             )
             return None
         latest = data[-1]
+        if not all(isinstance(p, dict) for p in latest["polls"]):
+            raise RankingsUnavailable("/rankings: a listed poll is not an object")
         for p in latest["polls"]:
-            if isinstance(p, dict) and p.get("poll") == self.poll_name:
+            if p.get("poll") == self.poll_name:
                 ranks = p.get("ranks")
                 if not isinstance(ranks, list):
                     raise RankingsUnavailable(f"/rankings: {self.poll_name} has no ranks list")
-                out = {r["school"]: r["rank"] for r in ranks
-                       if isinstance(r, dict) and r.get("school") and r.get("rank") is not None}
+                out: Dict[str, int] = {}
+                for r in ranks:
+                    try:
+                        if isinstance(r, dict) and r.get("school"):
+                            out[r["school"]] = int(r["rank"])
+                    except (KeyError, TypeError, ValueError):
+                        continue   # a row without a usable rank ("NR", null)
                 if ranks and not out:
                     # Rows listed, none readable: a changed row shape, not an
                     # empty poll.
@@ -271,7 +278,7 @@ class NcaafSource(PointsBasedSportSource):
         logger.info(
             "[ncaaf] poll %r absent from the latest snapshot (polls present: "
             "%s); skipping", self.poll_name,
-            ", ".join(str(p.get("poll")) for p in latest["polls"] if isinstance(p, dict)) or "none",
+            ", ".join(str(p.get("poll")) for p in latest["polls"]) or "none",
         )
         return None
 

@@ -160,9 +160,13 @@ def _refused():
 @pytest.mark.parametrize("rankings", [_refused, {}, {"message": "quota"}, [{"week": 7}],
                                       [{"week": 7, "polls": [{"poll": "AP Top 25"}]}],
                                       [{"week": 7, "polls": [{"poll": "AP Top 25",
-                                                              "ranks": [{"school": "Georgia"}]}]}]],
+                                                              "ranks": [{"school": "Georgia"}]}]}],
+                                      [{"week": 7, "polls": [None]}],
+                                      [{"week": 7, "polls": [{"poll": "AP Top 25", "ranks": [
+                                          {"school": "Georgia", "rank": "NR"}]}]}]],
                          ids=["failed", "empty-object", "error-object", "snapshot-without-polls",
-                              "poll-without-ranks", "no-readable-rank"])
+                              "poll-without-ranks", "no-readable-rank", "poll-not-an-object",
+                              "rank-not-a-number"])
 def test_ncaaf_a_failed_poll_raises(monkeypatch, rankings):
     """WITNESS: CFBD /rankings failed, `_fetch_rankings` returned None and
     NCAAF returned [] like a preseason. The empty label was held (#240), but
@@ -218,8 +222,11 @@ def _table(played):
 
 
 @pytest.mark.parametrize("standings", [_refused, {}, {"errorCode": 403, "message": "restricted"},
-                                       {"standings": [{"type": "TOTAL"}]}],
-                         ids=["failed", "empty-object", "error-body", "standings-without-a-table"])
+                                       {"standings": [{"type": "TOTAL"}]},
+                                       {"standings": [{"type": "TOTAL", "table": [
+                                           {"team": {"name": "Arsenal FC"}, "points": 19}]}]}],
+                         ids=["failed", "empty-object", "error-body", "standings-without-a-table",
+                              "rows-without-a-position"])
 def test_fd_a_failed_table_raises(monkeypatch, standings):
     """WITNESS: /standings failed (or answered FD's error body, measured
     2026-10-11 as `{"errorCode": 403, "message": ...}`) and every Premier
