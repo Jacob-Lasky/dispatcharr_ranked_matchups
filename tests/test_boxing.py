@@ -1,7 +1,7 @@
 """Tests for the Boxing source (sources/boxing.py).
 
-Network is never called: we monkeypatch `boxing.requests.get` with a fake
-response. The schedule payload below is a real capture from the Boxing Data
+Network is never called: we stub the requests transport
+(`tests.conftest.stub_requests_get`) with a fake response. The schedule payload below is a real capture from the Boxing Data
 API (2026-07-10), trimmed to the fields the parser reads, so the test pins the
 actual wire shape (naive datetimes, the '(Cancelled)' marker, the broadcast
 country array) rather than an invented one.
@@ -12,6 +12,7 @@ from dispatcharr_ranked_matchups.sources import BoxingSource
 from dispatcharr_ranked_matchups.sources.base import SportSource
 from dispatcharr_ranked_matchups.sources import boxing as boxing_mod
 from dispatcharr_ranked_matchups._util import FIELD_AWAY_SENTINEL
+from tests.conftest import stub_requests_get
 
 
 class FakeResp:
@@ -83,9 +84,7 @@ class TestBoxingConstants:
 
 class TestBoxingParse:
     def test_parses_and_drops_cancelled(self, monkeypatch):
-        monkeypatch.setattr(
-            boxing_mod.requests, "get", lambda *a, **kw: FakeResp(_SCHEDULE_PAYLOAD)
-        )
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp(_SCHEDULE_PAYLOAD))
         rows = BoxingSource(api_key="x").fetch_upcoming()
         # 3 in the payload, the cancelled one dropped -> 2 rows.
         assert len(rows) == 2
@@ -99,9 +98,7 @@ class TestBoxingParse:
         assert all("Cancelled" not in t for t in full)
 
     def test_field_event_contract(self, monkeypatch):
-        monkeypatch.setattr(
-            boxing_mod.requests, "get", lambda *a, **kw: FakeResp(_SCHEDULE_PAYLOAD)
-        )
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp(_SCHEDULE_PAYLOAD))
         row = BoxingSource(api_key="x").fetch_upcoming()[0]
         assert row.away == FIELD_AWAY_SENTINEL
         assert row.rank_home is None and row.rank_away is None
@@ -111,9 +108,7 @@ class TestBoxingParse:
         assert row.extra["us_broadcasters"] == ["DAZN"]
 
     def test_major_vs_event_tier(self, monkeypatch):
-        monkeypatch.setattr(
-            boxing_mod.requests, "get", lambda *a, **kw: FakeResp(_SCHEDULE_PAYLOAD)
-        )
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp(_SCHEDULE_PAYLOAD))
         rows = BoxingSource(api_key="x").fetch_upcoming()
         by_full = {r.extra["full_title"]: r.extra["stage"] for r in rows}
         # Plain promo card -> EVENT; explicit title/undisputed card -> MAJOR
@@ -123,9 +118,7 @@ class TestBoxingParse:
 
     def test_error_envelope_returns_empty(self, monkeypatch):
         payload = {"data": [], "error": {"code": "DateOutOfRange", "message": "x"}}
-        monkeypatch.setattr(
-            boxing_mod.requests, "get", lambda *a, **kw: FakeResp(payload)
-        )
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp(payload))
         assert BoxingSource(api_key="x").fetch_upcoming() == []
 
     def test_lookahead_clamped_to_free_tier(self, monkeypatch):
@@ -136,7 +129,7 @@ class TestBoxingParse:
             captured["headers"] = headers
             return FakeResp({"data": [], "error": None})
 
-        monkeypatch.setattr(boxing_mod.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         BoxingSource(api_key="x").fetch_upcoming(days_ahead=30)
         # Free tier caps the queryable range; 30 must be clamped to 7.
         assert captured["params"]["days"] == boxing_mod._FREE_TIER_MAX_DAYS
@@ -165,7 +158,7 @@ class TestBoxingParse:
             def json(self):
                 raise AssertionError("json() must not be read on a >=400 status")
 
-        monkeypatch.setattr(boxing_mod.requests, "get", lambda *a, **kw: ErrResp())
+        stub_requests_get(monkeypatch, lambda *a, **kw: ErrResp())
         assert BoxingSource(api_key="x").fetch_upcoming() == []
 
 
@@ -201,7 +194,7 @@ class TestBoxingSchedulePages:
                 return type("R", (), {"status_code": 503, "json": lambda self: None})()
             return FakeResp(body)
 
-        monkeypatch.setattr(boxing_mod.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         with recording_lost_days() as lost:
             rows = BoxingSource(api_key="x").fetch_upcoming(days_ahead=7)
         return rows, lost, asked

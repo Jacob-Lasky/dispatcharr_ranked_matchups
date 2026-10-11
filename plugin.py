@@ -342,11 +342,14 @@ RECORDING_STATE_PATH = os.path.join(PLUGIN_DIR, "recordings_state.json")
 # under the scheduler lock, only ever READ by the live handoff timer, so the
 # timer never races apply's writes. A separate file from the state on purpose.
 RECORDING_STOPS_PATH = os.path.join(PLUGIN_DIR, "recording_stops.json")
-# The floor KICKOFF numbering last used (#219). Auto mode reads it back instead
-# of re-deriving the floor from the user's lineup on every apply, which moved
-# every published number whenever the top of that lineup changed. A file, not a
-# setting: writing it into PluginConfig.settings would replace the user's "0 =
-# auto" with a literal number in the settings form.
+# The floor KICKOFF numbering last used (#219), and the kickoff offset and
+# number each channel published from it was numbered for (#278). Auto mode reads
+# the floor back instead of re-deriving it from the user's lineup on every
+# apply, which moved every published number whenever the top of that lineup
+# changed. The record is what lets a channel nudged past its minute's block keep
+# its number when a game below it leaves (see _place_kickoff_numbers). A file,
+# not a setting: writing it into PluginConfig.settings would replace the user's
+# "0 = auto" with a literal number in the settings form.
 NUMBERING_STATE_PATH = os.path.join(PLUGIN_DIR, "numbering_state.json")
 # Sidecar cache for LLM-rewritten descriptions. Separate from cache.json so the
 # main cache file stays purely deterministic (score, breakdown, score_notes
@@ -1294,7 +1297,7 @@ def _first_free_number(used, start: int) -> int:
     """Smallest integer >= ``start`` that is not in ``used`` (any collection of
     numbers). Pure and ORM-free so it is unit-testable without a Django DB
     (mirrors the offline-policy pattern used elsewhere in this plugin). Shared by
-    _assign_channel_numbers (resolving same-minute game collisions) and
+    _place_kickoff_numbers (resolving same-minute game collisions) and
     _ensure_archive_channel (placing the archive channel collision-free)."""
     num = int(start)
     while num in used:
@@ -2834,15 +2837,37 @@ def _build_weights(settings: Dict[str, Any]):
 
 DEFAULT_MAX_GAMES = 25
 
-# Worst-case seconds apply's network pre-pass can spend on ONE game, as the sum
-# of the timeouts it can hit: the LLM description (llm_descriptions
-# ANTHROPIC_TIMEOUT_S = 30) plus the SportsDB thumb search (logos
-# _HTTP_TIMEOUT_S = 10) and its download (logos _DOWNLOAD_TIMEOUT_S = 15).
+# Seconds of network time apply's pre-pass may spend per game, ENFORCED as a
+# total: the pre-pass gets this times the number of games as one wall-clock
+# budget (_http.NetworkBudget, #271), and once it is spent every remaining
+# cosmetic fetch (LLM description, SportsDB thumb, game-thumbs composite,
+# league badge) is skipped and takes the fallback its own failure already
+# takes. The figure is the SportsDB path's sum of timeouts: the LLM description
+# (llm_descriptions ANTHROPIC_TIMEOUT_S = 30), the thumb search (logos
+# _HTTP_TIMEOUT_S = 10) and its download (logos _DOWNLOAD_TIMEOUT_S = 15). It
+# is NOT an estimate of one game's worst case any more: a game that also falls
+# through to game-thumbs and the badge can spend more, and the budget is what
+# stops a slate of those from outrunning the lock. The pre-pass can overrun the
+# total by at most the one call in flight when it runs out (30s).
+#
+# Inside the pipeline child the allowance is also capped at the child's
+# remaining life minus APPLY_WRITE_RESERVE_SECONDS: tasks.py kills the child at
+# _SUBPROCESS_TIMEOUT_SECONDS (25 min) whatever this says, and auto_pipeline
+# spends part of that on refresh first. Without the cap a large slate (28+
+# games x 55s > 1500s) would run the child out before the budget ever
+# skipped anything, and apply would die without publishing.
 #
 # A named constant because MAX_GAMES_CEILING is DERIVED from it and a test
 # asserts the derivation still holds; leaving it as a literal in a comment let
 # the two drift silently. Re-derive both if any of those three timeouts change.
 APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME = 30 + 10 + 15
+
+# What apply keeps for itself after the pre-pass, inside the pipeline child:
+# the one fetch in flight when the budget runs out (up to 30s) plus the DB
+# writes. Generous on purpose: the writes are a 0.55s transaction (#137) plus
+# the sweeps, and a whole live auto_pipeline (refresh AND apply) took 382s on
+# 2026-10-11.
+APPLY_WRITE_RESERVE_SECONDS = 120
 
 # Hard ceiling on max_games, derived from the scheduler-lock budget rather than
 # picked for roundness.
@@ -4759,7 +4784,10 @@ def _infer_kickoff_base(
 
     Only consulted when NUMBERING_STATE_PATH has no floor (the first apply after
     upgrading, or a lost file), so that apply keeps every published number
-    instead of re-deriving the floor from the lineup (#219).
+    instead of re-deriving the floor from the lineup (#219). The placement is
+    run with NO record of what each channel was numbered for (#278), and that is
+    exactly what apply then runs: the record is only valid under the floor it
+    was written with, and with no floor remembered there is none to trust.
     """
     slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
     rows: List[Tuple[str, int, int, int]] = []  # (marker, number, offset, block start)
@@ -4877,7 +4905,9 @@ def _resolve_kickoff_base(
       3. The floor the published channels were numbered from (_infer_kickoff_base,
          given the slate's `unpublished` games and the `reserved` numbers apply
          already holds back, so it can run the real placement), so upgrading, or
-         losing the state file, moves nothing.
+         losing the state file, keeps as many published numbers as any floor
+         can, normally all (with no record, a channel nudged past its block
+         over a gap can still move, see _place_kickoff_numbers).
       4. Highest other channel + 1 (_resolve_virtual_base's auto rule), for a
          fresh install with nothing published, where no number can move.
 
@@ -4898,30 +4928,102 @@ def _resolve_kickoff_base(
     return inferred if inferred is not None else lineup_floor
 
 
-def _load_kickoff_base(path: Optional[str] = None) -> Optional[int]:
-    """The floor the last kickoff apply used, or None when the file is missing,
-    unreadable or holds anything but a positive integer."""
+def _plain_int(value: Any, lowest: int) -> Optional[int]:
+    """`value` when it is a real int (not a bool, float or string) >= `lowest`,
+    else None: what a hand-edited or damaged numbering_state.json reads as."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < lowest:
+        return None
+    return value
+
+
+def _load_numbering_state(
+    path: Optional[str] = None,
+) -> Tuple[Optional[int], Dict[str, Tuple[int, int, int]]]:
+    """(the floor the last kickoff apply used, the record of what was numbered).
+
+    The record maps each published channel's marker to the (kickoff offset,
+    channel number, floor) it was numbered for, offset meaning
+    ``stable_channel_number(0, ...)`` as in _place_kickoff_numbers. Each entry
+    names its own floor because a channel kept for a recording keeps the number
+    an earlier floor gave it (see _numbered_for_floor). The floor is None when
+    the file is missing, unreadable or holds anything but a positive integer,
+    and the record is then empty too, so the floor inference and the apply after
+    it both run the record-free placement. A malformed entry is dropped on its
+    own, so one bad row costs only that channel the record (it falls back to the
+    chain rule). A file from before #278 has no record and reads as an empty
+    one."""
     path = path or NUMBERING_STATE_PATH
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, ValueError):
-        return None
-    base = data.get("kickoff_base") if isinstance(data, dict) else None
-    if isinstance(base, bool) or not isinstance(base, int) or base < 1:
-        return None
-    return base
+        return None, {}
+    if not isinstance(data, dict):
+        return None, {}
+    base = _plain_int(data.get("kickoff_base"), 1)
+    raw = data.get("numbered_for")
+    if base is None or not isinstance(raw, dict):
+        return base, {}
+    record: Dict[str, Tuple[int, int, int]] = {}
+    for marker, entry in raw.items():
+        if not isinstance(entry, list) or len(entry) != 3:
+            continue
+        values = (_plain_int(entry[0], 0), _plain_int(entry[1], 1), _plain_int(entry[2], 1))
+        if None not in values:
+            record[marker] = values
+    return base, record
 
 
-def _save_kickoff_base(base: int, path: Optional[str] = None) -> None:
-    """Remember the kickoff floor. Only apply writes it, under the scheduler
-    lock. A failed write is logged and swallowed: the next apply infers the same
-    floor from the published channels, so nothing moves."""
+def _save_numbering_state(
+    base: int,
+    numbered_for: Dict[str, Tuple[int, int, int]],
+    path: Optional[str] = None,
+) -> None:
+    """Remember the kickoff floor and the record of what was numbered (see
+    _load_numbering_state). Only apply writes it, under the scheduler lock,
+    after its transaction commits, never on a dry run.
+
+    A failed write is logged and swallowed. When the file on disk names a
+    DIFFERENT floor it is removed: left in place, that floor would be read back
+    as current, and after an apply under another floor (an explicit base the
+    user has since cleared) the next auto apply would renumber every game onto
+    the old one. With no file, the next apply infers the floor from the
+    published channels (#219), and with no record a channel nudged past its
+    block falls back to the chain rule. A file naming THIS floor is kept: its
+    record can only be older than this apply's, and an entry is only trusted
+    while its channel still carries the recorded number in the recorded minute
+    (_place_kickoff_numbers), so keeping it holds what deleting it would let
+    move. Its worst case is an entry still under the legacy marker of a
+    channel the failed apply re-keyed (#217): that channel gets the chain
+    rule, as every channel did before #278.
+
+    Two keys, and `kickoff_base` keeps its pre-#278 shape: older code reads that
+    key alone, so a downgrade keeps the floor. The older code rewrites the file
+    with that key only when the floor changes, so a record it leaves behind can
+    be stale; _place_kickoff_numbers only trusts an entry whose number the
+    channel still carries."""
     path = path or NUMBERING_STATE_PATH
     try:
-        write_json_atomic(path, {"kickoff_base": int(base)})
+        write_json_atomic(path, {
+            "kickoff_base": int(base),
+            "numbered_for": {
+                m: [int(off), int(n), int(fl)]
+                for m, (off, n, fl) in sorted(numbered_for.items())
+            },
+        })
     except OSError as e:
-        logger.warning("[ranked_matchups] could not save kickoff numbering floor to %s: %s", path, e)
+        logger.warning("[ranked_matchups] could not save kickoff numbering state to %s: %s", path, e)
+        if _load_numbering_state(path)[0] == int(base):
+            return
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e2:
+            logger.warning(
+                "[ranked_matchups] could not remove the stale kickoff numbering state %s: %s",
+                path, e2,
+            )
 
 
 def _resolve_park_base(max_target_number: int, highest_in_group: float = 0) -> int:
@@ -4987,6 +5089,7 @@ def _place_kickoff_numbers(
     virtual_base: int,
     held: Dict[str, int],
     reserved_numbers: Optional[set] = None,
+    numbered_for: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> Tuple[Dict[str, int], int, int]:
     """KICKOFF placement: the ONE implementation, shared by
     _assign_channel_numbers and _infer_kickoff_base (which runs it once per
@@ -4995,7 +5098,10 @@ def _place_kickoff_numbers(
 
     `entries` is (marker, offset) per game, offset being
     ``stable_channel_number(0, ...)``: the number is ``virtual_base + offset``.
-    `held` maps a marker to the number its live channel carries. Returns
+    `held` maps a marker to the number its live channel carries. `numbered_for`
+    is the record apply kept of the (offset, number) each channel was numbered
+    for FROM THIS SAME FLOOR (numbering_state.json, #278, filtered by
+    _numbered_for_floor). Returns
     (marker -> number, +1 nudges taken, games whose number was reserved).
     """
     # A game whose channel already holds a number inside its OWN kickoff
@@ -5028,31 +5134,49 @@ def _place_kickoff_numbers(
         else:
             pairs.append((marker, number, 1))
 
-    # A channel ABOVE its own block is held when its number is exactly where an
-    # upward nudge from its computed number lands today: every number from the
-    # computed one up to (not including) its own is taken by a channel kept this
-    # apply or by a reserved number (#267). A same-minute collision near the
-    # block's last slot nudges a game past the block's end, and without this a
-    # NEW game in that minute, placed first, took the nudged channel's number
-    # and moved a live channel (the guide binds by the bare number, #117).
+    # A channel ABOVE its own block is held in two cases. A same-minute
+    # collision near the block's last slot nudges a game past the block's end,
+    # and without a hold a NEW game in that minute, placed first, took the
+    # nudged channel's number, or a game below it leaving released it to its
+    # computed number: a live channel moved (the guide binds by the bare
+    # number, #117).
+    #  - RECORDED (#278): the record says this channel was numbered from this
+    #    floor for its game's CURRENT kickoff minute and still carries the
+    #    number it was given then, so it is a nudge, not a reschedule. It keeps
+    #    the number while it is free (not reserved, not taken by a channel
+    #    decided before it), gap in the chain or not. The minute, not the whole
+    #    offset: they agree for one marker, and a #217 re-key changes the
+    #    marker's hash slot but not the kickoff.
+    #  - CHAIN (#267, the fallback when the record does not name the channel:
+    #    the first apply after upgrading, a lost or damaged file, a floor other
+    #    than the one it was written under): its number is exactly where an
+    #    upward nudge from its computed number lands today, every number from
+    #    the computed one up to (not including) its own being taken by a channel
+    #    kept this apply or by a reserved number.
     # Ascending order, because a chain can run through another channel held
     # this way (the lower one is decided first).
     #
-    # DO NOT widen this to "any number within SLOTS above the computed one".
-    # Apply has no record of the kickoff a channel was numbered for, so that
-    # rule cannot tell a nudged channel from a game rescheduled one minute
-    # EARLIER that sat below its hash slot in its old minute (both sit a few
-    # numbers above the new computed number), and it would hold the
-    # rescheduled game in the next minute's block, which the release above
-    # exists to prevent. The chain is what tells them apart: a rescheduled game
-    # passes it only when a fresh nudge from its new number would land on that
-    # same number anyway, so the hold changes nothing but who wins it against a
-    # game with no channel yet. A gap in the chain (a game in it left the slate
-    # or was released) still releases the channel, as before #267.
+    # DO NOT hold a channel the record does not vouch for on anything looser
+    # than the chain, such as "any number within SLOTS above the computed
+    # one". Without the record that cannot tell a nudged channel from a game
+    # rescheduled one minute EARLIER that sat below its hash slot in its old
+    # minute (both sit a few numbers above the new computed number), and it
+    # would hold the rescheduled game in the next minute's block, which the
+    # release above exists to prevent. With the record a reschedule shows as a
+    # changed offset and gets no recorded hold; without it, the chain tells
+    # the two apart, because a rescheduled game passes it only when a fresh
+    # nudge from its new number would land on that same number anyway. A gap
+    # in the chain then still releases the channel, as before #278.
+    record = numbered_for or {}
     taken = set(reserved)
     taken.update(n for _m, n, kept in pairs if kept == 0)
     for prior, marker, number in sorted(beyond):
-        if _first_free_number(taken, number) == prior:
+        rec_offset, rec_number = record.get(marker, (None, None))
+        recorded = (
+            rec_number == prior
+            and rec_offset // slots == (number - virtual_base) // slots
+        )
+        if (recorded and prior not in taken) or _first_free_number(taken, number) == prior:
             pairs.append((marker, prior, 0))
             taken.add(prior)
         else:
@@ -5078,6 +5202,46 @@ def _place_kickoff_numbers(
     return assigned, collisions, blocked
 
 
+def _kickoff_offsets(games: List[Dict[str, Any]], tz) -> List[Tuple[str, int]]:
+    """(marker, offset) per game with a parseable kickoff, offset being
+    ``stable_channel_number(0, ...)``: what _place_kickoff_numbers places, and
+    what apply records each published channel was numbered for (#278). One
+    helper for both, so the record compares like with like."""
+    entries: List[Tuple[str, int]] = []
+    for g in games:
+        start_dt = parse_iso_utc(g.get("start_time_utc"))
+        if start_dt is None:
+            continue
+        marker = _build_marker_key(g)
+        entries.append((marker, stable_channel_number(0, start_dt, marker, tz)))
+    return entries
+
+
+def _numbered_for_floor(
+    record: Dict[str, Tuple[int, int, int]],
+    virtual_base: int,
+    renames: Sequence[Tuple[Any, str, str]] = (),
+) -> Dict[str, Tuple[int, int]]:
+    """The entries of apply's record (marker -> (offset, number, floor)) that
+    were numbered from `virtual_base`, as the (offset, number) map
+    _place_kickoff_numbers takes, with each entry of a channel re-keyed this
+    apply (`renames`, (channel, legacy marker, new marker) from
+    _rekey_legacy_virtuals, #217) moved to its new marker.
+
+    DO NOT trust an entry from another floor: there the same offset means a
+    different number, and holding the old one would keep a channel above its
+    block on a number only the old floor explains (under a new floor, the
+    in-block hold and the chain rule decide). Per entry, not per file, because
+    a channel kept for a recording keeps the number an earlier floor gave it
+    across floor changes, and its entry must survive them for when its game
+    returns."""
+    moved = {legacy: new for _ch, legacy, new in renames}
+    return {
+        moved.get(m, m): (offset, number)
+        for m, (offset, number, floor) in record.items() if floor == virtual_base
+    }
+
+
 def _assign_channel_numbers(
     games: List[Dict[str, Any]],
     virtual_base: int,
@@ -5086,6 +5250,7 @@ def _assign_channel_numbers(
     band_size: Optional[int] = None,
     existing_numbers: Optional[Dict[str, int]] = None,
     reserved_numbers: Optional[set] = None,
+    numbered_for: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> Dict[str, int]:
     """Map each game's marker to its channel number for this apply.
 
@@ -5097,20 +5262,24 @@ def _assign_channel_numbers(
     present. `existing_numbers` is honoured within the kickoff minute: a game
     whose channel already holds a slot in its own minute's block keeps that slot
     even if the marker hash now points elsewhere (#217), and a channel nudged
-    past its block keeps its number while that nudge is still what reaches it
-    (#267, see _place_kickoff_numbers).
+    past its block keeps its number while `numbered_for` (apply's record from
+    the same floor, #278) says it was numbered for the game's current kickoff,
+    or, with no record for it, while that nudge is still what reaches it (#267;
+    see _place_kickoff_numbers for both).
     That stability is what lets both the default M3U/XMLTV output and the Xtream
     Codes API bind the EPG correctly with no client setting (#121), while the
     numbers still increase with kickoff time so the list sorts soonest-first.
 
     Two DIFFERENT games can only land on the same number if they share a kickoff
-    minute AND a hash slot (uncommon; see CHANNEL_NUMBER_TIEBREAK_SLOTS). That
-    would violate the unique ``(channel_group, channel_number)`` constraint, so
-    we resolve it deterministically: walk the games in (number, marker) order and
-    bump any exact duplicate to the next free integer. This perturbs ONLY a
-    colliding same-minute game, never games at other minutes, and is reproducible
-    across applies. `reserved_numbers` (every number some other channel already
-    publishes under) is skipped the same way and never kept by the in-block hold,
+    minute AND a hash slot (uncommon; see CHANNEL_NUMBER_TIEBREAK_SLOTS). Nothing
+    in the database would refuse the duplicate (_PER_GROUP_NUMBER_NOTE), and the
+    guide would bind it arbitrarily, so we resolve it deterministically: kept
+    numbers first, then the fresh games in (number, marker) order, each bumped
+    to the next free integer. This moves ONLY a colliding game (a crowded
+    minute's last one can land in the next minute's block, which is why a nudge
+    past the block is held), and is reproducible across applies.
+    `reserved_numbers` (every number some other channel already publishes under)
+    is skipped the same way and never kept by either hold,
     since a shared number binds the guide arbitrarily for both channels (#219:
     the floor no longer tracks the lineup, so nothing else keeps them apart).
 
@@ -5158,16 +5327,9 @@ def _assign_channel_numbers(
         return assigned
 
     # The hold, the reservation and the nudge live in _place_kickoff_numbers.
-    entries: List[Tuple[str, int]] = []
-    for g in games:
-        start_dt = parse_iso_utc(g.get("start_time_utc"))
-        if start_dt is None:
-            continue
-        marker = _build_marker_key(g)
-        number = stable_channel_number(virtual_base, start_dt, marker, tz)
-        entries.append((marker, number - virtual_base))
     assigned, collisions, blocked = _place_kickoff_numbers(
-        entries, virtual_base, existing_numbers or {}, reserved_numbers,
+        _kickoff_offsets(games, tz), virtual_base, existing_numbers or {},
+        reserved_numbers, numbered_for,
     )
     if blocked:
         logger.warning(
@@ -6630,6 +6792,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     )
     numbering_mode = _resolve_numbering_mode(settings)
     remembered_base = None
+    remembered_record: Dict[str, Tuple[int, int, int]] = {}
+    numbered_for: Dict[str, Tuple[int, int]] = {}
     games_by_marker_all = {_build_marker_key(g): g for g in games}
     leaving = [ch for m, ch in existing_virtuals.items() if m not in games_by_marker_all]
     # A game that has left the slate but whose channel is still recording is
@@ -6686,11 +6850,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         reserved_numbers = (
             _reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings
         )
-        remembered_base = _load_kickoff_base()
+        remembered_base, remembered_record = _load_numbering_state()
         virtual_base = _resolve_kickoff_base(
             settings, highest_other, remembered_base, published, apply_tz,
             unpublished=unpublished, reserved=reserved_numbers,
         )
+        # What each channel was numbered for (#278), from this floor only.
+        numbered_for = _numbered_for_floor(remembered_record, virtual_base, marker_renames)
     else:
         virtual_base = _resolve_virtual_base(settings, highest_other)
         reserved_numbers = _reserved_channel_numbers(
@@ -6706,6 +6872,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             if ch.channel_number is not None
         },
         reserved_numbers=reserved_numbers,
+        numbered_for=numbered_for,
     )
     if numbering_mode == NUMBERING_MODE_COMPACT and games:
         # A game with no slot cannot be published: a null channel_number
@@ -6773,6 +6940,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     kept_stale_n = 0            # #146/#264: stale channels kept (recording, or guide)
     kept_by_guide_n = 0         # #264: of those, kept by their guide (_kept_by_guide)
     seen_markers = set()
+    # marker -> the number this run actually WROTE on its channel (not the plan
+    # in chnum_by_marker, which also names games the write loop skipped): what
+    # the kickoff record (#278) remembers each channel was numbered for.
+    written_numbers: Dict[str, int] = {}
+    kept_numbered: Dict[str, Tuple[int, int, int]] = {}  # record entries of kept channels
 
     placeholder_threshold = _float_setting(settings, "placeholder_min_score", 5.0)
     placeholder_channels_created = 0
@@ -6887,6 +7059,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             matchup_logos.LOGO_DIR, matchup_logos.badge_filename(league_id),
         )
         if not os.path.exists(badge_path):
+            if not prepass_budget.allow():
+                return None
             badge_url = matchup_logos.resolve_league_badge_url(league_id, sportsdb_api_key)
             if not badge_url:
                 return None
@@ -6895,7 +7069,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             except OSError as e:
                 logger.warning("[ranked_matchups] cannot mkdir %s: %s", matchup_logos.LOGO_DIR, e)
                 return None
-            if not matchup_logos.download_thumb(badge_url, badge_path):
+            if not prepass_budget.allow() or not matchup_logos.download_thumb(badge_url, badge_path):
                 return None
         return _logo_id_for_file(
             badge_path, f"League badge: {game.get('sport_prefix', '?')}",
@@ -6933,6 +7107,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 away=game.get("away", ""),
                 home=game.get("home", ""),
                 dest_path=local_path,
+                allow=prepass_budget.allow,
             )
             if url is None:
                 # Only a DEFINITIVE miss is cached. A transient failure (429,
@@ -6983,6 +7158,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 # game-thumbs resolves purely from the team pair, so an
                 # unparseable start time still gets a real matchup image.
                 return _gamethumbs_or_badge()
+            if not prepass_budget.allow():
+                # Out of budget: NOT a miss, so nothing is cached and the next
+                # apply asks SportsDB again.
+                return _gamethumbs_or_badge()
             thumb_url = matchup_logos.resolve_thumb_url(
                 home=game.get("home", ""),
                 away=game.get("away", ""),
@@ -7004,7 +7183,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             matchup_logos.LOGO_DIR, matchup_logos.marker_to_filename(marker),
         )
         if not os.path.exists(local_path):
-            if not matchup_logos.download_thumb(thumb_url, local_path):
+            if not prepass_budget.allow() or not matchup_logos.download_thumb(thumb_url, local_path):
                 return _gamethumbs_or_badge()
         return _logo_id_for_file(local_path, _matchup_logo_name(game)), "matchup"
 
@@ -7021,9 +7200,22 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # placeholder / bad-start-time semantics of the write loop exactly (same
     # marker key, same seen_markers set, same counters) so the two stay in lockstep.
     from types import SimpleNamespace
+    from ._http import NetworkBudget
     from .matcher import _strong_team_keywords, select_streams_for_game
     from .scoring import pick_tagline
     prep_by_marker: Dict[str, Any] = {}
+    # ONE wall-clock allowance for every cosmetic fetch below (#271), see
+    # APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME. DO NOT gate anything on it that
+    # decides WHICH channels publish or what streams they carry: the stream
+    # pool and the placeholder decision make no network call, and must never
+    # start to depend on one that can be skipped.
+    prepass_allowance = APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME * len(games)
+    child_seconds_left = tasks.pipeline_child_seconds_left()
+    if child_seconds_left is not None:
+        prepass_allowance = max(
+            0.0, min(prepass_allowance, child_seconds_left - APPLY_WRITE_RESERVE_SECONDS),
+        )
+    prepass_budget = NetworkBudget(prepass_allowance)
     prepass_now = datetime.now(timezone.utc)
     recording_channel_ids = {
         r.channel_id for r in Recording.objects.filter(
@@ -7196,6 +7388,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 cache=llm_cache,
                 boundary_summary=_boundary,
                 marker=marker,
+                allow_network=prepass_budget.allow,
                 # Supplies the outcome-band cutoffs the prompt needs to state
                 # each team's exact distance from relegation / Europe rather
                 # than leaving the model to infer it from a table slice (#209).
@@ -7224,6 +7417,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             logo_id=resolved_logo_id,
             source_streams=source_streams,
             start_dt=start_dt,
+        )
+    if prepass_budget.skipped:
+        logger.warning(
+            "[ranked_matchups] apply's network budget (%gs for %d games) ran out; "
+            "skipped %d cosmetic fetch(es) (descriptions, logos), which keep their "
+            "fallback until the next apply",
+            prepass_budget.seconds, len(games), prepass_budget.skipped,
         )
 
     # Set by step 8 inside the transaction; stays None on a dry run so the
@@ -7360,6 +7560,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                             channel=vc, stream_id=sid, order=order,
                         )
                     created += 1
+            if vc is not None and not dry_run:
+                written_numbers[marker] = target_chnum
 
             # Auto-record this game (#216). Outside the EPG block on purpose: a
             # recording is scheduled whether or not an EPG source exists.
@@ -7589,6 +7791,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         taken_now.add(orig)  # two kept channels, one old number
                 if restore:
                     Channel.objects.bulk_update(restore, ["channel_number"])
+                # A kept channel back on the number it was numbered for is
+                # still published under it, so its entry in the kickoff record
+                # (#278) is carried over, whatever floor it names: if its game
+                # returns to the slate under that floor, it keeps the number.
+                # One left parked has no entry to carry.
+                kept_id_set = {ch.id for ch in kept_stale}
+                renamed = {new: legacy for _ch, legacy, new in marker_renames}
+                for kept_marker, kept_ch in existing_virtuals.items():
+                    entry = remembered_record.get(renamed.get(kept_marker, kept_marker))
+                    if kept_ch.id in kept_id_set and entry and entry[1] == kept_ch.channel_number:
+                        kept_numbered[kept_marker] = entry
             deleted_stale = len(reap_ids)
             kept_stale_n = len(kept_stale)
             kept_by_guide_n = sum(1 for c in kept_stale if c.id in guide_kept_ids)
@@ -7666,16 +7879,23 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     if not dry_run:
         _invalidate_epg_output_cache()
 
-    # Remember the kickoff floor (#219) only now that the channels carrying it
-    # have COMMITTED. Saving it before the transaction would let a failed apply
-    # leave a floor on disk that no published channel uses, and the next auto
-    # apply would renumber every game onto it.
+    # Remember the kickoff floor (#219), and what each channel was numbered for
+    # (#278), only now that the channels carrying them have COMMITTED. Saving
+    # before the transaction would let a failed apply leave a floor on disk that
+    # no published channel uses, and the next auto apply would renumber every
+    # game onto it. The record is rebuilt from what this run WROTE (plus kept
+    # channels still on their number), so a game no longer published drops out.
+    offsets = dict(_kickoff_offsets(games, apply_tz))
+    kickoff_record = {
+        m: (offsets[m], n, virtual_base) for m, n in written_numbers.items() if m in offsets
+    }
+    kickoff_record.update(kept_numbered)
     if (
         not dry_run
         and numbering_mode == NUMBERING_MODE_KICKOFF
-        and virtual_base != remembered_base
+        and (virtual_base, kickoff_record) != (remembered_base, remembered_record)
     ):
-        _save_kickoff_base(virtual_base)
+        _save_numbering_state(virtual_base, kickoff_record)
 
     # Persist the LLM-description cache (prune entries whose marker is no
     # longer in this refresh; keep file bounded to live games). Save outside

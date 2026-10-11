@@ -23,12 +23,12 @@ Three layers:
 from __future__ import annotations
 
 import importlib
-import socket
 from datetime import datetime, timezone
 
 import pytest
 
 from dispatcharr_ranked_matchups.sources.base import RankingsUnavailable
+from tests.conftest import stub_requests_get
 from tests.test_hold_failed_days import NOON, _Resp, _pin_window, _standings
 from tests.test_upcoming_window import _event
 
@@ -145,7 +145,7 @@ def _ncaaf(monkeypatch, rankings):
         games_asked.append(url)
         return _Resp([])
 
-    monkeypatch.setattr(ncaaf.requests, "get", get)
+    stub_requests_get(monkeypatch, get)
     return ncaaf.NcaafSource(api_key="k"), games_asked
 
 
@@ -201,7 +201,7 @@ def _fd(monkeypatch, standings, fixtures=True):
             }]})
         return _Resp({"matches": []})
 
-    monkeypatch.setattr(soccer.requests, "get", get)
+    stub_requests_get(monkeypatch, get)
     return soccer.SoccerSource("epl", fd_api_key="k", odds_api_key=""), asked
 
 
@@ -275,10 +275,6 @@ def test_every_built_source_that_reads_a_rank_feed_raises_when_it_fails(plugin, 
     from dispatcharr_ranked_matchups.sources.ncaa_soccer import NcaaSoccerSource
     from tests.test_mapped_prefixes import _all_on_settings
 
-    def _offline(*_a, **_kw):
-        raise socket.gaierror("network disabled in tests/test_rankings_failures.py")
-
-    monkeypatch.setattr(socket, "getaddrinfo", _offline)
     monkeypatch.setattr(soccer, "_fd_sleep", lambda s: None)
     monkeypatch.setattr(NcaaSoccerSource, "_regular_season_cutoff",
                         lambda self: datetime(2100, 1, 1, tzinfo=UTC))
@@ -309,7 +305,7 @@ def test_every_built_source_that_reads_a_rank_feed_raises_when_it_fails(plugin, 
         return _Resp([] if ("collegebasketballdata" in url or "collegefootballdata" in url)
                      else {"matches": [], "events": [], "dates": [], "gameWeek": [], "data": []})
 
-    monkeypatch.setattr(requests, "get", get)
+    stub_requests_get(monkeypatch, get)
     sources = plugin._build_sources(_all_on_settings())
     quiet = {}
     for src in sources:

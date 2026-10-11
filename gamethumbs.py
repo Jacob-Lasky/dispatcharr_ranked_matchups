@@ -40,7 +40,7 @@ import os
 import time
 import urllib.error
 import urllib.parse
-from typing import Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from ._util import is_field_event
 from .logos import download_to_file
@@ -267,8 +267,12 @@ def fetch_matchup_composite(
     away: str,
     home: str,
     dest_path: str,
+    allow: Optional[Callable[[], bool]] = None,
 ) -> Tuple[Optional[str], bool]:
     """Download a game's matchup composite to dest_path.
+
+    `allow`, when given, is asked before every request (apply's network
+    budget, #271); a refusal is a TRANSIENT failure, so nothing is cached.
 
     Returns (url_or_None, is_definitive_miss). The second element is what the
     caller MUST branch on before writing a cache entry:
@@ -302,7 +306,7 @@ def fetch_matchup_composite(
         return None, True
 
     url = build_url(base_url, league_slug, away, home)
-    status = _attempt(url, dest_path)
+    status = _attempt(url, dest_path, allow)
     if status == 200:
         return url, False
     if status not in _DEFINITIVE_MISS_CODES:
@@ -320,7 +324,7 @@ def fetch_matchup_composite(
     aliased_away = alias_away or away
     aliased_home = alias_home or home
     url = build_url(base_url, league_slug, aliased_away, aliased_home)
-    status = _attempt(url, dest_path)
+    status = _attempt(url, dest_path, allow)
     if status == 200:
         logger.debug(
             "game-thumbs resolved %s %s @ %s via aliases %s @ %s",
@@ -336,7 +340,7 @@ def fetch_matchup_composite(
     return None, False
 
 
-def _attempt(url: str, dest_path: str) -> Optional[int]:
+def _attempt(url: str, dest_path: str, allow: Optional[Callable[[], bool]] = None) -> Optional[int]:
     """Issue one paced request, retrying ONCE on a 429 that carries a usable
     Retry-After. Returns the HTTP status of the last response, or None for a
     network-level failure.
@@ -347,6 +351,8 @@ def _attempt(url: str, dest_path: str) -> Optional[int]:
     """
     status: Optional[int] = None
     for attempt in (1, 2):
+        if allow is not None and not allow():
+            return None
         _pace()
         status, err = download_to_file(
             url, dest_path, timeout=_DOWNLOAD_TIMEOUT_S, user_agent=_USER_AGENT,

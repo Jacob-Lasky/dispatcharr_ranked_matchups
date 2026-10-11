@@ -26,6 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
+from tests.conftest import stub_requests_get
 from tests.test_hold_failed_days import EVENING, NOON, _Resp, _pin_window
 
 UTC = timezone.utc
@@ -64,7 +65,7 @@ def _tier(monkeypatch, now, matches, days_ahead):
     soccer._clear_fd_caches()
     _pin_window(monkeypatch, now)
     fake = _FakeFootballData(matches)
-    monkeypatch.setattr(soccer.requests, "get", fake)
+    stub_requests_get(monkeypatch, fake)
     by_code = soccer._fetch_tier_fixtures("k", days_ahead)
     return sorted(m["id"] for ms in by_code.values() for m in ms), fake.asked
 
@@ -162,7 +163,7 @@ def test_a_season_answer_without_a_matches_list_is_a_failure(monkeypatch, body):
     failed attempt: not cached, counted, and reported once given up."""
     soccer = importlib.import_module(f"{PKG}.soccer")
     soccer._clear_fd_caches()
-    monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: _Resp(body))
+    stub_requests_get(monkeypatch, lambda *a, **k: _Resp(body))
     assert soccer._fetch_season_matches_for_code("k", "PL") == []
     assert "PL" not in soccer._SEASON_MATCHES_CACHE
     assert soccer._fetch_season_matches_for_code("k", "PL") == []
@@ -174,6 +175,6 @@ def test_a_previous_season_answer_without_a_matches_list_is_not_cached(monkeypat
     cached an error body as a season with no meetings for the whole refresh."""
     soccer = importlib.import_module(f"{PKG}.soccer")
     soccer._clear_fd_caches()
-    monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: _Resp({"message": "quota"}))
+    stub_requests_get(monkeypatch, lambda *a, **k: _Resp({"message": "quota"}))
     assert soccer._fetch_prev_season_matches_for_code("k", "PL") == []
     assert "PL" not in soccer._PREV_SEASON_MATCHES_CACHE

@@ -429,7 +429,7 @@ def run() -> None:
     target = find_match(s1_matches, "Mexico", "South Africa", "GROUP_STAGE")
     r = probe_match(groups, s1_matches, target)
     body = (
-        f"All 104 matches in natural FD.org TIMED state. Target: MD1 opener.\n\n"
+        "All 104 matches in natural FD.org TIMED state. Target: MD1 opener.\n\n"
         f"- match: **{r['match']}** ({r['group']} MD{r['matchday']})\n"
         f"- raw importance: **{r['raw']:.3f}**\n"
         f"- labels hit: `{r['labels_hit']}`\n"
@@ -447,8 +447,8 @@ def run() -> None:
     target = ga_md2[0] if ga_md2 else find_match(s2_matches, "Mexico", "Czechia")
     r = probe_match(groups, s2_matches, target)
     body = (
-        f"Group A MD1 played: Mexico 2-0 South Africa, Czechia 1-1 South Korea. "
-        f"All other groups still TIMED.\n\n"
+        "Group A MD1 played: Mexico 2-0 South Africa, Czechia 1-1 South Korea. "
+        "All other groups still TIMED.\n\n"
         f"- match: **{r['match']}** ({r['group']} MD{r['matchday']})\n"
         f"- raw importance: **{r['raw']:.3f}**\n"
         f"- labels hit: `{r['labels_hit']}`\n"
@@ -467,10 +467,10 @@ def run() -> None:
         target = ga_md3[0]
         r = probe_match(groups, s3_matches, target)
         body = (
-            f"Group A enters MD3 with all 4 teams alive (each on 3 pts). "
-            f"Groups B-L are fully decided with deterministic standings, "
-            f"so the Annex C lookup should hit a canonical key for any "
-            f"advancing-thirds set Group A's outcome can produce.\n\n"
+            "Group A enters MD3 with all 4 teams alive (each on 3 pts). "
+            "Groups B-L are fully decided with deterministic standings, "
+            "so the Annex C lookup should hit a canonical key for any "
+            "advancing-thirds set Group A's outcome can produce.\n\n"
             f"- match: **{r['match']}** ({r['group']} MD{r['matchday']})\n"
             f"- raw importance: **{r['raw']:.3f}**\n"
             f"- labels hit: `{r['labels_hit']}`\n"
@@ -557,16 +557,16 @@ def run() -> None:
                 f"(`{third_by_group.get(exp_grp, '?')}`); actual `{actual}` {mark}"
             )
     body = (
-        f"All 12 groups fully decided, with groups A-H's 3rd-placers "
-        f"given better goal differential than I-L's so the advancing "
+        "All 12 groups fully decided, with groups A-H's 3rd-placers "
+        "given better goal differential than I-L's so the advancing "
         f"set is exactly {{A,B,C,D,E,F,G,H}}. This is Annex C row 495 "
-        f"in `_WC2026_THIRD_PLACER_SLOT_TABLE`. The canonical assignment "
-        f"diverges from the greedy fallback at M77: canonical puts "
-        f"group F (Sweden) there; greedy with alphabetical-by-team "
-        f"`qualifying_thirds` puts group G (Iran) there.\n\n"
+        "in `_WC2026_THIRD_PLACER_SLOT_TABLE`. The canonical assignment "
+        "diverges from the greedy fallback at M77: canonical puts "
+        "group F (Sweden) there; greedy with alphabetical-by-team "
+        "`qualifying_thirds` puts group G (Iran) there.\n\n"
         f"### Advancing set: `{advancing_set}` "
         f"({'expected ABCDEFGH' if advancing_set == 'ABCDEFGH' else 'NOT the target set!'})\n\n"
-        f"### 3rd-placers by group:\n"
+        "### 3rd-placers by group:\n"
         + "\n".join(f"  - group {g}: {t}" for t, g in sorted(advancing_thirds, key=lambda x: x[1])) + "\n\n"
         "### Canonical vs actual (per slot):\n"
         + ("\n".join(canonical_lines) if canonical_lines else "  _(advancing set not ABCDEFGH; can't run the distinguishing check)_") + "\n\n"

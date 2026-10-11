@@ -36,6 +36,7 @@ from .base import (
 from ._espn import upcoming_window
 from .bracket import AggregateLegSource
 from ._odds import fetch_odds_events
+from .._http import get_within_deadline
 from .._util import (
     SEED_PLAYED_THRESHOLD,
     is_bottom_outcome,
@@ -177,8 +178,8 @@ def _fd_get(
     for attempt in range(_FD_MAX_ATTEMPTS):
         _fd_sleep_until_slot()
         try:
-            r = requests.get(
-                url,
+            r = get_within_deadline(
+                requests, url,
                 headers={"X-Auth-Token": fd_api_key},
                 params=params,
                 timeout=timeout,
