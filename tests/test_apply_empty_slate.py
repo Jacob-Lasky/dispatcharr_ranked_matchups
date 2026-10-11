@@ -910,6 +910,46 @@ def scenario_a_stamp_that_names_another_game_is_not_read(env):
     assert rows == [] and unaccounted == 1
 
 
+def scenario_a_live_game_whose_feed_vanished_keeps_its_channel(env):
+    """WITNESS (codex review): the hold carries a live game with its previous
+    match, but its stream is gone mid-game. Its score is under the placeholder
+    threshold, so apply used to skip the row and reap the live channel as
+    stale, the removal #240 exists to prevent. It stays, as a placeholder."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    settings = _settings(placeholder_min_score=9.0)
+    row = _row(401, _now() - timedelta(minutes=30), user_ch.id)
+    _write_cache(env, [{**row, "score": 9.5}])
+    assert env.plugin._action_apply(settings)["status"] == "ok"
+    assert "ranked_matchups:CFB:401" in _owned(env)
+    m.Stream.objects.filter(pk=stream.pk).delete()
+    _write_cache(env, [{**row, "score": 7.4, "held_on_air": True}])
+
+    result = env.plugin._action_apply(settings)
+
+    assert result["status"] == "ok", result
+    assert "ranked_matchups:CFB:401" in _owned(env), result
+    assert "unmatched_skipped=0" in result["message"], result
+
+
+def scenario_an_unmatched_game_not_yet_on_air_is_still_skipped(env):
+    """Guard: only a game that has kicked off keeps a stream-less channel
+    below the threshold. One that has not started goes as before."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    settings = _settings(placeholder_min_score=9.0)
+    row = _row(401, _now() + timedelta(hours=3), user_ch.id)
+    _write_cache(env, [{**row, "score": 9.5}])
+    assert env.plugin._action_apply(settings)["status"] == "ok"
+    m.Stream.objects.filter(pk=stream.pk).delete()
+    _write_cache(env, [{**row, "score": 7.4}])
+
+    result = env.plugin._action_apply(settings)
+
+    assert "unmatched_skipped=1" in result["message"], result
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
 def scenario_a_lost_cache_reads_nothing_from_the_archive_channel(env):
     """The recordings archive is ours but is never a published game: it must
     neither be held nor count as a channel the hold could not see, or it

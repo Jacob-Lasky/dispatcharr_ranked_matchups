@@ -6717,6 +6717,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from .matcher import _strong_team_keywords, select_streams_for_game
     from .scoring import pick_tagline
     prep_by_marker: Dict[str, Any] = {}
+    prepass_now = datetime.now(timezone.utc)
     for g in games:
         source_ids = list(g.get("channel_ids") or [])
         # Path C stream-granular matches: specific streams to attach without
@@ -6761,9 +6762,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         #
         # A game with nothing attachable therefore falls into the EXISTING
         # "no source, no streams" path, which already does the right thing:
-        # placeholder if the score earns one, otherwise skip, and either way its
-        # old channel goes down the normal stale route, which preserves DVR
-        # recordings (#146).
+        # placeholder if the score earns one (or the game is already on air),
+        # otherwise skip, and then its old channel goes down the normal stale
+        # route, which preserves DVR recordings (#146).
         field_event = is_field_event(g.get("away"), g.get("extra"))
         home_kws = [] if field_event else _strong_team_keywords(g.get("home") or "")
         away_kws = [] if field_event else _strong_team_keywords(g.get("away") or "")
@@ -6793,7 +6794,19 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # publish an event feed only hours before kickoff, and the recording
             # has to exist on the channel before then. The next apply that
             # matches a stream attaches it to this same row (same marker).
-            if score_val >= placeholder_threshold or g.get("recorded_matched"):
+            # A game already ON AIR keeps its channel the same way (#240: a
+            # refresh never takes a game off air, only the reaper does). Its
+            # feed can vanish mid-game (a provider renames the slot, an M3U
+            # refresh drops the stream), and skipping it here would send the
+            # live channel down the stale reap below whatever the hold did.
+            # It stays as a placeholder until a later match re-attaches a
+            # stream or the reaper removes it.
+            kickoff = parse_iso_utc(g.get("start_time_utc"))
+            on_air = (
+                kickoff is not None and kickoff <= prepass_now
+                and _build_marker_key(g) in existing_virtuals
+            )
+            if score_val >= placeholder_threshold or g.get("recorded_matched") or on_air:
                 placeholder = True
                 placeholder_channels_created += 1
             else:
