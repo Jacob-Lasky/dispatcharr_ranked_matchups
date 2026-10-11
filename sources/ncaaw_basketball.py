@@ -17,7 +17,8 @@ API patterns:
     season it returned 742 of the 1033 games the per-day walk found,
     without reaching its limit (see `_espn.SCOREBOARD_EVENT_LIMIT`).
   - /rankings exposes AP Top 25 + Coaches Poll. Prefer AP.
-  - Tournament stage in competition.notes[0].headline, e.g.
+  - Tournament stage in competition.notes[0].headline, e.g. (2025 wording;
+    from 2026 ESPN writes "NCAA Women's Basketball Championship - ...", #268)
       "NCAA Women's Championship - Regional 2 in Birmingham - 1st Round"
       "NCAA Women's Championship - Regional 2 in Birmingham - Sweet 16"
       "NCAA Women's Championship - Final Four"
@@ -80,13 +81,30 @@ def _default_season_end_year() -> int:
     return now.year + 1 if now.month >= SEASON_START_MONTH else now.year
 
 
-# Tournament-stage regex. Matches the round suffix on ESPN's headline.
-# The "Regional N in {City}" prefix only appears for R64..E8; F4 and NCG
-# have no regional prefix. Both formats handled here.
+# Tournament-stage regex over ESPN's whole headline. The "Regional N in
+# {City}" part only appears for R64..E8 (and the First Four, which is not a
+# bracket round and does not match); F4 and NCG have none.
+# The prefix has changed once already: "NCAA Women's Championship - ..."
+# through 2025, "NCAA Women's Basketball Championship - ..." from the 2026
+# tournament (#268). A headline that does not match drops the game from the
+# BRACKET (fetch_upcoming selects on season type 3 and never reads the
+# headline, so the game still airs, but with no stakes), and the bracket is
+# then cached short as if it were real; tests/test_ncaaw_headlines.py pins
+# every form ESPN has served.
+#
+# Anchored at BOTH ends on purpose: an unanchored search accepted a title
+# embedded in another one ("WNIT: NCAA Women's ... - Final Four") and a
+# longer round word ("Final Fourteen"), and a First Four play-in game must
+# not be filed as a first-round tie. The regional city is matched lazily up
+# to the next separator, not as `[^-]+`, so a hyphenated host city
+# ("Winston-Salem") still parses. ESPN's separator has always been " - ";
+# an en dash, a curly apostrophe and a trailing period are accepted too,
+# since each is one typography pass away and costs nothing to allow.
 _HEADLINE_RE = re.compile(
-    r"NCAA\s+Women'?s?\s+Championship\s*-\s*"
-    r"(?:Regional\s+\d+\s+in\s+[^-]+\s*-\s*)?"
-    r"(?P<round>1st\s+Round|2nd\s+Round|Sweet\s*16|Elite\s*8|Final\s+Four|National\s+Championship)",
+    r"^\s*NCAA\s+Women['\u2019]?s?\s+(?:Basketball\s+)?Championship\s*[-\u2013]\s*"
+    r"(?:Regional\s+\d+\s+in\s+.+?\s+[-\u2013]\s*)?"
+    r"(?P<round>1st\s+Round|2nd\s+Round|Sweet\s*16|Elite\s*8|Final\s+Four|National\s+Championship)"
+    r"\.?\s*$",
     re.IGNORECASE,
 )
 

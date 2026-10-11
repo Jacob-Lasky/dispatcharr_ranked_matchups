@@ -50,6 +50,13 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   final matchday** because football-data.org had already filled some knockout
   fixtures. It runs while any group game is unplayed, and stays off for a
   season whose groups do not match the published bracket. (#78)
+- **NCAA Women's Basketball tournament games get their stakes again.** From
+  the 2026 tournament ESPN titles the games "NCAA Women's Basketball
+  Championship - ..." instead of "NCAA Women's Championship - ...", and the
+  plugin no longer recognised the round, so every tournament game aired with
+  no bracket importance. Both wordings are now read; First Four play-in games
+  and other women's events (WNIT, conference tournaments) are still left out
+  of the bracket. (#268)
 
 ## [1.33.2] - 2026-10-11
 
