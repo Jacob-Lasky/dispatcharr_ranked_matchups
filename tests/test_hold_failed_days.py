@@ -134,44 +134,64 @@ def test_nhl_schedule_walk_reports_a_failed_day(monkeypatch, cls_name):
     assert lost == {lost_day}
 
 
+_HTTP_CALLS = ("_http_get", "http_get", "get_json", "http_get_json")
+
+
+def _call_name(call):
+    f = call.func
+    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+
+
+def _upcoming_day_loops(tree):
+    """[(function name, loop)] for every loop that makes an HTTP request in a
+    `fetch_upcoming`, or in any function of the same module that one reaches
+    by name (`helper(...)` or `self.helper(...)`), transitively. The helpers
+    matter: #256 moved NHL's per-day walk out of both `fetch_upcoming` bodies
+    into `_upcoming_schedule_games`, and a guard reading only `fetch_upcoming`
+    then judged nothing there."""
+    defs = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, ast.FunctionDef):
+            defs.setdefault(fn.name, []).append(fn)
+    todo = list(defs.get("fetch_upcoming", []))
+    reached = []
+    while todo:
+        fn = todo.pop()
+        if fn in reached:
+            continue
+        reached.append(fn)
+        for c in ast.walk(fn):
+            if isinstance(c, ast.Call) and _call_name(c) in defs:
+                todo.extend(defs[_call_name(c)])
+    return [
+        (fn.name, loop) for fn in reached for loop in ast.walk(fn)
+        if isinstance(loop, (ast.For, ast.While))
+        and any(isinstance(c, ast.Call) and _call_name(c) in _HTTP_CALLS for c in ast.walk(loop))
+    ]
+
+
 def test_every_upcoming_day_loop_reports_its_lost_days():
     """Guard for the next source: a `fetch_upcoming` that walks days with its
     OWN loop of HTTP requests (rather than through `_espn.fetch_scoreboard_days`,
-    which reports for it) must call `report_lost_days`, or a failed day reads
-    as a quiet one again. AST over every module in sources/."""
+    which reports for it), directly or in a helper it calls, must call
+    `report_lost_days`, or a failed day reads as a quiet one again. AST over
+    every module in sources/."""
     offenders = []
     for path in sorted(SOURCES.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for fn in ast.walk(tree):
-            if not (isinstance(fn, ast.FunctionDef) and fn.name == "fetch_upcoming"):
-                continue
-            for loop in ast.walk(fn):
-                if not isinstance(loop, (ast.For, ast.While)):
-                    continue
-                called = set()
-                for c in ast.walk(loop):
-                    if isinstance(c, ast.Call):
-                        f = c.func
-                        called.add(f.id if isinstance(f, ast.Name)
-                                   else f.attr if isinstance(f, ast.Attribute) else "")
-                http = {n for n in called if n in ("_http_get", "http_get", "get_json", "http_get_json")}
-                if http and "report_lost_days" not in called:
-                    offenders.append(f"{path.name}:{loop.lineno}")
+        for name, loop in _upcoming_day_loops(tree):
+            called = {_call_name(c) for c in ast.walk(loop) if isinstance(c, ast.Call)}
+            if "report_lost_days" not in called:
+                offenders.append(f"{path.name}:{name}:{loop.lineno}")
     assert offenders == []
 
 
 def test_the_guard_sees_the_nhl_loop():
     """The AST guard above must actually find a loop to judge, or it passes
-    by finding nothing (a zero from a search is a claim about the search)."""
+    by finding nothing (a zero from a search is a claim about the search).
+    NHL's one per-day walk, shared by both of its sources since #256."""
     tree = ast.parse((SOURCES / "nhl.py").read_text(encoding="utf-8"))
-    loops = [
-        loop for fn in ast.walk(tree)
-        if isinstance(fn, ast.FunctionDef) and fn.name == "fetch_upcoming"
-        for loop in ast.walk(fn) if isinstance(loop, ast.For)
-        and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-                and c.func.id == "_http_get" for c in ast.walk(loop))
-    ]
-    assert len(loops) == 2
+    assert [name for name, _loop in _upcoming_day_loops(tree)] == ["_upcoming_schedule_games"]
 
 
 # ---------------------------------------------------------------------------

@@ -1290,3 +1290,22 @@ class TestKeptByGuide:
 
     def test_nothing_left_keeps_nothing(self, plugin):
         assert plugin._kept_by_guide(None, [], self.NOW) is False
+
+
+def test_the_stamp_never_carries_a_non_finite_float(plugin):
+    """Postgres jsonb refuses the bare NaN / Infinity tokens Python's json
+    writes, and the stamp is written inside apply's transaction, so one NaN in
+    a cache row would fail the whole apply. cache.json itself accepts them."""
+    row = {
+        "home": "Alabama", "away": "Georgia",
+        "importance": float("nan"),
+        "extra": {"probs": [0.5, float("inf"), -float("inf")], "series": {"p": float("nan")}},
+        "start_time_utc": datetime(2026, 10, 11, 20, 0, tzinfo=timezone.utc),
+        "score": 7.25,
+    }
+    stamp = plugin._published_row_stamp(row)["ranked_matchups_row"]
+    json.dumps(stamp, allow_nan=False)  # what jsonb would accept
+    assert stamp["importance"] is None
+    assert stamp["extra"] == {"probs": [0.5, None, None], "series": {"p": None}}
+    assert stamp["score"] == 7.25
+    assert stamp["start_time_utc"] == "2026-10-11 20:00:00+00:00"

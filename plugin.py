@@ -711,10 +711,21 @@ ARCHIVE_TVG_ID = TVG_ID_PREFIX + "recordings_archive"
 # (every televizo/XC client sees "no playlist"/"update failed"), not just this one
 # channel. DO NOT set the archive channel's number back to None.
 #
+# _PER_GROUP_NUMBER_NOTE. Dispatcharr has NO database constraint on
+# (channel_group, channel_number). Measured against Postgres on 2026-10-11
+# (Dispatcharr 0.32.0): the channel table's only unique constraints are id and
+# uuid, and no migration adds one. Per-group uniqueness is enforced only by
+# Channel.clean(), which queryset .update() and a plain save() never call, so a
+# duplicate number is written silently rather than failing the apply. DO NOT
+# relax the plugin's own distinctness rules on the strength of that: a
+# duplicate still binds the guide arbitrarily (every output keys on the bare
+# number) and the UI's clean() then refuses to save either channel.
 # The exact value is arbitrary: _ensure_archive_channel takes the first free
 # number at/above this within the recordings group (via _first_free_number), so it
-# never trips the unique (channel_group, channel_number) constraint even if the
-# user points recordings_group_name at an already-populated group. Staying out of
+# never duplicates a number in that group even if the user points
+# recordings_group_name at an already-populated group (Dispatcharr checks
+# per-group uniqueness only in Channel.clean(), which a plain save() skips, so
+# nothing would refuse the duplicate; see _PER_GROUP_NUMBER_NOTE). Staying out of
 # the highest-real-channel scan is handled by the ranked_matchups: tvg_id prefix
 # via _owned_tvg_id_q (see _resolve_virtual_base), NOT by the number.
 _ARCHIVE_CHANNEL_NUMBER = 9999
@@ -1309,8 +1320,8 @@ def _ensure_archive_channel(recordings_group_name):
     # Either a fresh create, or a self-heal of an install whose archive channel
     # was created before _ARCHIVE_CHANNEL_NUMBER existed (null number, silently
     # breaking the XC feed). Take the first free number at/above the constant
-    # within the group so the unique (channel_group, channel_number) constraint
-    # can't fire even if recordings_group_name points at a populated group, AND
+    # within the group so no number is duplicated there even if
+    # recordings_group_name points at a populated group (_PER_GROUP_NUMBER_NOTE), AND
     # that no channel ANYWHERE publishes under: the guide keys on the bare
     # number, so a compact game or a user channel already at 9999 in another
     # group would bind the guide arbitrarily for both (review finding, #219).
@@ -2569,12 +2580,27 @@ def _slate_known(prior_cache: Dict[str, Any], outage_labels: set, unaccounted: i
 _PUBLISHED_ROW_KEY = "ranked_matchups_row"
 
 
+def _finite_json(value: Any) -> Any:
+    """`value` with every NaN or infinite float replaced by None. Python's json
+    writes those as the bare tokens NaN / Infinity, which Postgres jsonb
+    refuses ("invalid input syntax for type json")."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _finite_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_finite_json(v) for v in value]
+    return value
+
+
 def _published_row_stamp(row: Dict[str, Any]) -> Dict[str, Any]:
     """The custom_properties apply writes on a live guide entry. The row goes
     through JSON first: JSONField's encoder rejects a datetime that the cache
     writer (default=str) would have accepted, and a failed stamp would fail
-    the whole apply transaction."""
-    return {_PUBLISHED_ROW_KEY: json.loads(json.dumps(row, default=str))}
+    the whole apply transaction. For the same reason a non-finite float (a
+    score or probability that came out NaN) is stamped as null: cache.json
+    accepts NaN, jsonb does not."""
+    return {_PUBLISHED_ROW_KEY: _finite_json(json.loads(json.dumps(row, default=str)))}
 
 
 def _published_rows() -> Tuple[List[Dict[str, Any]], int]:
@@ -4580,9 +4606,9 @@ def _unique_by_marker(games) -> Tuple[List[Any], int]:
     """Keep the first game per marker, in order; return (games, n_dropped).
 
     DO NOT let apply see two games with one marker. The write loop would create
-    two channels with the same tvg_id and the same channel number, and the
-    unique (channel_group, channel_number) constraint then fails the whole
-    apply transaction. Since #217 a marker is a source event id, so the same
+    two channels with the same tvg_id and the same channel number. Nothing in
+    the database refuses that (_PER_GROUP_NUMBER_NOTE), so both are published
+    and the guide binds arbitrarily between them. Since #217 a marker is a source event id, so the same
     event listed by two sources (or twice by one) collapses here even when the
     team names differ. The cache is in rank order, so the first is the best.
     """
@@ -4902,7 +4928,8 @@ def _resolve_park_base(max_target_number: int, highest_in_group: float = 0) -> i
     """Pick a parking range that's guaranteed past every target number we'll
     write AND every number a channel in the group already holds. Parking +
     writing happens in one transaction within our own group, so only the group
-    matters to the unique (channel_group, channel_number) constraint; +1000 slack
+    matters to keeping in-group numbers distinct at every step
+    (_PER_GROUP_NUMBER_NOTE); +1000 slack
     keeps the parking range comfortably clear of both.
 
     `max_target_number` is the largest channel number this apply will write
@@ -6171,11 +6198,13 @@ def _reserved_channel_numbers(
     single integer is predictable. Reserving the floor covers the common case
     without over-reserving the whole band.
 
-    RAW NUMBERS OF A STRANGER IN OUR GROUP (third review round, #219). The
-    unique constraint is on the RAW ``(channel_group, channel_number)``. A
-    channel someone added to our group by hand at raw 400, overridden to publish
-    as 500, reserves only 500 above; a game handed 400 would then fail the write
-    and roll back every apply. So those are reserved at their raw number too,
+    RAW NUMBERS OF A STRANGER IN OUR GROUP (third review round, #219).
+    Dispatcharr's per-group uniqueness (Channel.clean(), see
+    _PER_GROUP_NUMBER_NOTE) compares the RAW ``channel_number``. A channel
+    someone added to our group by hand at raw 400, overridden to publish as 500,
+    reserves only 500 above; a game handed 400 would then sit on the same raw
+    number in the same group, which the UI refuses to save for either channel
+    from then on. So those are reserved at their raw number too,
     integral ones only: a raw 400.5 does not conflict with our 400.
 
     NOT COVERED, on purpose: a ChannelOverride on one of OUR game channels. The
@@ -6205,9 +6234,9 @@ def _published_numbers(
     [band_start, band_end] (no upper bound when band_end is None). EFFECTIVE
     numbers (a ChannelOverride wins, as in every output path) and floored, the
     reasoning for both is in _reserved_channel_numbers. `effective=False` reads
-    the raw column instead, which is what the per-group unique constraint sees,
-    and keeps only INTEGRAL values: that constraint compares exact numbers, so a
-    raw 400.5 does not stop us writing 400.
+    the raw column instead, which is what the per-group uniqueness check
+    (Channel.clean()) sees, and keeps only INTEGRAL values: that check compares
+    exact numbers, so a raw 400.5 does not stop us writing 400.
 
     The upper bound is ``< band_end + 1``, not ``<= band_end``: a channel at
     400.5 publishes as 400 over Xtream Codes, so it must reserve 400 even when
@@ -6622,7 +6651,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # top of the band. Existing numbers are passed so COMPACT can hold a
     # published game on the slot it already has (see allocate_compact_numbers).
     # Every number in use by a channel we do NOT own is reserved, in BOTH modes.
-    # The DB constraint is per-group, so nothing stops a collision, but the M3U,
+    # Uniqueness is per-group at most (and only in Channel.clean(), see
+    # _PER_GROUP_NUMBER_NOTE), so nothing stops a collision, but the M3U,
     # XMLTV and Xtream Codes outputs all key the guide on the bare channel number,
     # so a shared number silently binds the wrong programme. Measured live on
     # 2026-08-29 against a Peacock lineup occupying 400-499. Kickoff mode used to
@@ -7229,8 +7259,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         len(marker_renames))
 
         # Phase 0: park existing virtual channels in a high temporary number
-        # range so we can renumber based on cache order without colliding with
-        # the unique (channel_group, channel_number) constraint. park_base is
+        # range so we can renumber based on cache order without two channels
+        # ever sharing a number in the group (_PER_GROUP_NUMBER_NOTE). park_base is
         # guaranteed to be past every target number we're about to write.
         # Capture pre-park numbers so a channel we end up KEEPING (active
         # recording, #146) can be restored to its real number instead of being
@@ -7534,8 +7564,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
             # Restore kept channels (recording, or guide) to their pre-park number
             # so they don't linger at a ~park_base value. Only restore numbers
-            # not claimed by a current game this run (assigned set), so the
-            # unique (channel_group, channel_number) constraint can't be hit;
+            # not claimed by a current game this run (assigned set), so no
+            # number is duplicated in the group (_PER_GROUP_NUMBER_NOTE);
             # any (rare) collision leaves that channel parked, still safe.
             if kept_stale:
                 # Numbers actually WRITTEN this run, not the whole plan.
