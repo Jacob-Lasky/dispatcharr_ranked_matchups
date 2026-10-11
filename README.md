@@ -117,11 +117,13 @@ the **Test naming convention** action to preview a template before applying it.
 ### NCAA Football divisions
 
 CFBD's feed carries every NCAA division, not just Division I. The
-**NCAA Football divisions** setting selects what actually reaches the guide:
+**NCAA Football (CFBD)** dropdown turns the sport on and selects what
+actually reaches the guide:
 
 | Setting | What is pulled |
 |---|---|
-| `D1 FBS only` (default) | Games where either side is FBS, including FBS-vs-FCS |
+| `Off` (default) | Nothing; NCAA Football is disabled |
+| `D1 FBS only (recommended)` | Games where either side is FBS, including FBS-vs-FCS |
 | `D1 FBS + FCS` | The above, plus FCS-vs-FCS |
 
 Division II and III are never pulled under either setting. They are not
@@ -138,7 +140,7 @@ an FCS game can still score on stakes alone. Under `D1 FBS + FCS` those
 stakes are measured with FBS win-count bands (6 wins = bowl eligible,
 10+ = playoff contender), which FCS's own postseason does not work that
 way — treat FCS importance as an approximation rather than a like-for-like
-comparison with FBS. This is why FBS-only is the default.
+comparison with FBS. This is why FBS-only is the recommended setting.
 
 
 Adding a sport is a new file in `sources/` implementing the `SportSource`

@@ -49,8 +49,7 @@ downstream is sport-agnostic.
 
 | File | What it does |
 |---|---|
-| `plugin.json` | Manifest: settings (sports toggles, weights, favorites, schedule), actions. Read by Dispatcharr loader. The ONLY home of the field list: the `Plugin` class declares no `fields`. Dispatcharr renders it as one flat list with no grouping primitive, so the modal only gets shorter by having fewer fields (#208). |
-| `merged_settings.py` | The settings #208 merged to shorten the modal, and the legacy fallback that keeps pre-#208 saved settings behaving identically: `LEAGUE_PAIRS` (six four-way Off/A/B/Both selects replacing pairs of `enable_*` toggles), the `ncaaf` select (replacing `enable_ncaaf` + `ncaaf_divisions`), the `scoring_weights` text (replacing seven `weight_<name>` numbers). `league_enabled(settings, "enable_<x>")` is how `_build_sources` asks about EVERY league, merged or not, so the legacy toggle ids remain the logical league ids. One precedence rule: a new key wins unless it is absent or at its default and legacy keys are stored, because `context["settings"]` fills manifest defaults in and so cannot tell "picked the default" from "never saved". `migrate_stored_settings` (written once by `plugin._migrate_stored_settings` from `Plugin.__init__`, compare-and-swap on the settings JSON) makes the modal SHOW what the runtime does, stamps `settings_schema: 2` after which legacy keys are ignored, and KEEPS the legacy keys so a downgrade restores the pre-upgrade setup (edits made after the upgrade are not carried back). A new key already present in the RAW stored dict was saved by the user, so migration keeps it even at its default. `get_current_settings` migrates on the way through too, so the scheduler and reaper always read the migrated dict. Pure, no Django. |
+| `plugin.json` | Manifest: settings (sports toggles, weights, favorites, schedule), actions. Read by Dispatcharr loader. |
 | `plugin.py` | Plugin class and action handlers. Daemon scheduler, EPG lookup closure, virtual-channel and stream linking, and inactive XMLTV EPG source management. |
 | `scoring.py` | `GameSignals`, `Weights`, `GameScore`. `score_game()` sums per-signal contributions, `_compress_to_10()` does the tanh squash. Helpers: `match_favorites`, `compute_match_importance` (Lahvička Monte Carlo, one game at a time) and `compute_league_importance` (every game of one source from one shared set of seasons, #230) — both built from the same `importance_queries` + `importance_points` pair so the two paths ask the same questions and weight the answers identically, `format_channel_name` (delegates to `naming`), `render_importance_tagline` + `STAGE_BANDS` (bracket-band prettify), `tournament_stage_label`. League thresholds in `LEAGUE_CONTEXTS` dict (position, label, consequence_weight). |
 | `naming.py` | Channel-name templating (Sonarr/Radarr `{group}`-collapse convention). `render_name`, `validate_template`, `build_context`, `preview_lines`, `DEFAULT_NAME_TEMPLATE`, `TOKENS`. Pure: no Django, no `scoring` import — which is why `_RECORDING_DOT` is a literal here rather than an import of `recording.DOT`; the two must stay the same glyph (`tests/test_autorecord.py` pins it). `{recording_dot}` is deliberately absent from `DEFAULT_NAME_TEMPLATE`. |
@@ -181,14 +180,8 @@ a NEW sport needs.
 2. Register in `sources/__init__.py`.
 
 3. Add an `enable_<sport>` toggle to `plugin.json` and wire it in
-   `_build_sources(settings)` in `plugin.py` through
-   `league_enabled(settings, "enable_<sport>")` (never a bare
-   `settings.get`: merged leagues only resolve through it). Every toggle must
-   be wired in both places or the setting renders but does nothing. A league
-   that genuinely pairs with an existing one (the other gender of the same
-   competition) can join a four-way select in `merged_settings.LEAGUE_PAIRS`
-   instead of adding a field; unrelated leagues must not be paired just to
-   save a row.
+   `_build_sources(settings)` in `plugin.py`. Every toggle must be wired
+   in both places or the setting renders but does nothing.
 
 4. If your feed publishes a per-game id, stamp it into `extra` and add that
    key + a tag to `_MARKER_ID_KEYS` in `plugin.py` (#217) — that id is the
