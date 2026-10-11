@@ -449,10 +449,10 @@ stay in agreement with that one.
 last game, or a refresh that finds nothing to air, leaves `games == []` with
 `refreshed_at` stamped, and apply must run on it: the stale reap, orphan-EPG
 sweep, recording stops file and auto-record state all depend on it. Apply
-returns "Cache empty; run refresh first." ONLY when `refreshed_at` is missing,
-which `_read_cache` reports for a missing, unparseable or wrong-shaped file
-(not an object, or `games` not a list), so a file it cannot read never reaps
-the group.
+returns "Cache empty; run refresh first." only when `_cache_has_slate` says
+there is no slate: `_read_cache`'s shape for a missing, unparseable or
+non-object file, `games` not a list, or an empty list without a parseable
+`refreshed_at`. A file nobody could have written never reaps the group.
 
 ## Known gotchas / lessons learned
 

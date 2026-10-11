@@ -2121,12 +2121,10 @@ def _resolve_key(settings: Dict[str, Any], setting_id: str, *fallback_paths: str
 def _read_cache() -> Dict[str, Any]:
     """The last refresh's cache, or the empty shape when there is none to read.
 
-    Missing, unreadable (bad JSON, bad UTF-8) and wrong-shaped (not an object,
-    or no `games` list) all return `{"games": [], "refreshed_at": None}`. The
-    `None` is load-bearing: `_action_apply` tells "no cache at all" apart from
-    "a refresh really did leave no games" by `refreshed_at`, and applying a
-    file it could not make sense of as an empty slate would reap every channel
-    the plugin owns (#241). Every writer stores `games` as a list.
+    Missing, unreadable (bad JSON, bad UTF-8) and non-object files all return
+    `{"games": [], "refreshed_at": None}`, so every caller can `.get()` without
+    guarding. The `None` is load-bearing: see `_cache_has_slate`, which is how
+    apply tells this shape apart from a refresh that really left no games.
     """
     try:
         with open(CACHE_PATH, "r", encoding="utf-8") as f:
@@ -2134,9 +2132,30 @@ def _read_cache() -> Dict[str, Any]:
     except (FileNotFoundError, ValueError):
         # ValueError covers json.JSONDecodeError and UnicodeDecodeError.
         data = None
-    if isinstance(data, dict) and isinstance(data.get("games"), list):
+    if isinstance(data, dict):
         return data
     return {"games": [], "refreshed_at": None}
+
+
+def _cache_has_slate(cache: Dict[str, Any]) -> bool:
+    """True when `cache` is a slate apply may publish, EVEN AN EMPTY ONE (#241).
+
+    A slate is a `games` list that a writer stamped with a parseable
+    `refreshed_at`; every writer (refresh, `_empty_refresh_result`, the
+    reaper) has done both since v0.1.0. `_read_cache`'s missing / unreadable
+    shape has no stamp, and a damaged file (`games` not a list, a stamp that is
+    not a timestamp) proves nothing either. DO NOT relax this to "games is a
+    list": apply on an empty slate deletes every channel the plugin owns, so
+    the empty case must be one a writer actually produced. A non-empty list is
+    a slate whatever its stamp says, as it always was.
+    """
+    games = cache.get("games")
+    if not isinstance(games, list):
+        return False
+    if games:
+        return True
+    stamp = cache.get("refreshed_at")
+    return isinstance(stamp, str) and parse_iso_utc(stamp) is not None
 
 
 def _write_cache(data: Dict[str, Any]) -> None:
@@ -5280,19 +5299,16 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from .scoring import format_channel_name
 
     cache = _read_cache()
-    games, dup_dropped = _unique_by_marker(cache.get("games", []))
-    # An empty slate is only "nothing to do" when there is NO cache to speak
-    # of: _read_cache returns the same empty shape, with refreshed_at None, for
-    # a missing or unreadable file, and applying that would reap every channel
-    # we own on the strength of a file we could not read. DO NOT widen this
-    # back to `if not games`. A real cache with no games (the reaper took the
-    # last one off, #241; or a refresh that found nothing to air) is a slate
-    # like any other, and the stale reap, the orphan-EPG sweep and the
-    # auto-record bookkeeping below all have to run for it. Returning here
-    # left the last finished game's channel on air until the next refresh
-    # that produced games.
-    if not games and not cache.get("refreshed_at"):
+    # Return early ONLY when there is no slate at all (see _cache_has_slate).
+    # DO NOT narrow this back to `if not games`. A real cache with no games
+    # (the reaper took the last one off, #241; or a refresh found nothing to
+    # air) is a slate like any other, and the stale reap, the orphan-EPG sweep
+    # and the auto-record bookkeeping below all have to run for it. Returning
+    # on it left the last finished game's channel on air until the next
+    # refresh that produced games.
+    if not _cache_has_slate(cache):
         return {"status": "ok", "message": "Cache empty; run refresh first."}
+    games, dup_dropped = _unique_by_marker(cache.get("games", []))
     if dup_dropped:
         logger.warning(
             "[ranked_matchups] apply: dropped %d cached game(s) sharing a marker "

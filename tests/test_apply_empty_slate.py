@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -183,20 +184,62 @@ def scenario_a_second_reap_after_the_last_game_is_a_no_op(env):
     assert _owned(env) == {}
 
 
+class _StubSource:
+    """Just enough of a SportSource for `_action_refresh`'s fetch loop."""
+
+    sport_prefix = "CFB"
+    sport_label = "NCAA Football"
+
+    def __init__(self, games=(), error=None):
+        self._games, self._error = list(games), error
+
+    def fetch_upcoming(self, days_ahead=7):
+        if self._error is not None:
+            raise self._error
+        return list(self._games)
+
+
+@contextmanager
+def _sources(env, *sources):
+    """Make the real `_action_refresh` fetch from `sources` instead of APIs."""
+    real = env.plugin._build_sources
+    env.plugin._build_sources = lambda settings: list(sources)
+    try:
+        yield
+    finally:
+        env.plugin._build_sources = real
+
+
+def _game_row(home, away, start):
+    from dispatcharr_ranked_matchups.sources.base import GameRow
+    return GameRow(
+        sport_prefix="CFB", sport_label="NCAA Football", home=home, away=away,
+        rank_home=None, rank_away=None, start_time=start, extra={"cfbd_id": 777},
+    )
+
+
 def scenario_refresh_that_finds_no_games_clears_the_guide(env):
-    """The other producer of a genuine empty cache: a refresh with nothing to
-    air writes one through _empty_refresh_result, and auto_pipeline then
-    applies it. The previous slate's channels and EPG rows must go."""
+    """The other producer of a genuine empty cache, driven through the real
+    refresh: Favorites-only is on, the source lists only a non-favorite game,
+    so refresh writes `games == []` via _empty_refresh_result, and the apply
+    that auto_pipeline runs next must take the old slate's channels down (as it
+    always did when one favorite game survived the filter)."""
     m = env.m
     user_ch, _ = _seed_source_channel(env)
     later = _now() + timedelta(days=2)
-    _publish(env, [_row(401, later, user_ch.id), _row(402, later, user_ch.id, home="Ohio State", away="Michigan")])
+    settings = _settings(favorites="Georgia", favorites_only="strict")
+    _publish(env, [_row(401, later, user_ch.id), _row(402, later, user_ch.id, home="Georgia", away="Auburn")])
     # An orphan guide entry on our source with no channel at all.
     src = m.EPGSource.objects.get(name="Top Matchups")
     m.EPGData.objects.create(epg_source=src, tvg_id="ranked_matchups:CFB:999", name="orphan")
 
-    env.plugin._empty_refresh_result("No games found in lookahead window.", [])
-    result = env.plugin._action_apply(_settings())
+    with _sources(env, _StubSource([_game_row("Texas", "Oklahoma", later)])):
+        refreshed = env.plugin._action_refresh(settings)
+    assert refreshed["status"] == "ok", refreshed
+    cache = _read_cache(env)
+    assert cache["games"] == [] and cache["refreshed_at"], cache
+
+    result = env.plugin._action_apply(settings)
 
     assert result["status"] == "ok", result
     assert "stale_deleted=2" in result["message"], result
@@ -207,6 +250,25 @@ def scenario_refresh_that_finds_no_games_clears_the_guide(env):
     # The group and the source stay: the next refresh with games reuses them.
     assert m.ChannelGroup.objects.filter(name="Top Matchups").exists()
     assert m.EPGSource.objects.filter(name="Top Matchups").exists()
+
+
+def scenario_source_outage_does_not_empty_the_slate(env):
+    """What makes letting an empty slate through safe: a refresh whose source
+    FAILS holds the previous games (#240), so the cache it writes is not empty
+    and apply keeps their channels. Without the hold, this outage would now
+    clear the guide."""
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() + timedelta(days=1), user_ch.id)])
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525"))):
+        refreshed = env.plugin._action_refresh(_settings())
+    assert refreshed["status"] == "ok", refreshed
+    assert [g["extra"]["cfbd_id"] for g in _read_cache(env)["games"]] == [401]
+
+    result = env.plugin._action_apply(_settings())
+
+    assert result["status"] == "ok", result
+    assert set(_owned(env)) == set(owned)
 
 
 def scenario_empty_slate_keeps_a_channel_that_is_recording(env):
@@ -370,6 +432,16 @@ def scenario_cache_without_games_is_not_a_slate(env):
     )
 
 
+def scenario_cache_with_unparseable_refreshed_at_is_not_a_slate(env):
+    _assert_no_cache_touches_nothing(
+        env, _writes(b'{"games": [], "refreshed_at": "not-a-date"}'),
+    )
+
+
+def scenario_cache_with_numeric_refreshed_at_is_not_a_slate(env):
+    _assert_no_cache_touches_nothing(env, _writes(b'{"games": [], "refreshed_at": 5}'))
+
+
 # --------------------------------------------------------- pytest driver ---
 
 SCENARIOS = sorted(
@@ -396,3 +468,19 @@ def harness_results(tmp_path_factory):
 def test_apply_empty_slate(harness_results, name):
     error = harness_results.get(name, "scenario did not run")
     assert error is None, error
+
+
+def test_read_cache_keeps_a_damaged_stamped_file_for_show_state(plugin, tmp_path, monkeypatch):
+    """`games` not being a list makes apply refuse the file (above), but
+    _read_cache must still return it: Show current state reads `summary` and
+    `refreshed_at` from it to report the failed sources."""
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({
+        "games": None,
+        "refreshed_at": "2026-10-11T12:00:00+00:00",
+        "summary": ["NCAA Football: error (HTTP 525)"],
+    }), encoding="utf-8")
+    monkeypatch.setattr(plugin, "CACHE_PATH", str(path))
+    cache = plugin._read_cache()
+    assert cache["summary"] == ["NCAA Football: error (HTTP 525)"]
+    assert cache["refreshed_at"] == "2026-10-11T12:00:00+00:00"
