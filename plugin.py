@@ -2123,8 +2123,10 @@ def _read_cache() -> Dict[str, Any]:
 
     Missing, unreadable (bad JSON, bad UTF-8) and non-object files all return
     `{"games": [], "refreshed_at": None}`, so every caller can `.get()` without
-    guarding. The `None` is load-bearing: see `_cache_has_slate`, which is how
-    apply tells this shape apart from a refresh that really left no games.
+    guarding. DO NOT add `_EMPTY_SLATE_KNOWN_KEY` to this shape: its absence
+    is what stops apply publishing it as an empty slate and deleting every
+    channel the plugin owns (_cache_has_slate), and the `None` stamp is what
+    apply's toast reads to say "run refresh first".
     """
     try:
         with open(CACHE_PATH, "r", encoding="utf-8") as f:
