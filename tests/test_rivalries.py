@@ -169,6 +169,28 @@ class TestLoadRivalries:
                 assert rivalries._normalize(a) != rivalries._normalize(b), \
                     f"Self-rivalry in {key}: {a} / {b}"
 
+    def test_every_written_entry_is_what_the_loaded_index_answers(self):
+        """An oracle that does NOT go through `_resolve_entries`: walk the raw
+        JSON, follow a pool reference by plain lookup, and ask the loaded
+        index (what `rivalry_name` reads in production) about every entry.
+        A resolver that dropped or reordered an entry would pass every check
+        built on the resolver itself."""
+        raw = _raw_json()
+        checked = 0
+        for prefix, value in raw.items():
+            if prefix.startswith("_"):
+                continue
+            entries = raw["_pools"][value] if isinstance(value, str) else value
+            assert len(rivalries._RIVALRIES_BY_SPORT[prefix]) == len(entries), prefix
+            for entry in entries:
+                trophy = entry[2] if len(entry) == 3 else ""
+                for home, away in ((entry[0], entry[1]), (entry[1], entry[0])):
+                    assert rivalries.rivalry_name(home, away, prefix) == trophy, (
+                        f"{prefix}: {home} v {away}"
+                    )
+                checked += 1
+        assert checked > 250, "instrument check: walked too few entries"
+
     def test_no_pair_is_listed_twice_in_one_list(self):
         """The clone guard. Before the English pool (#192), the East Anglian
         and Second City derbies were each written out in BOTH the EPL and the
@@ -339,17 +361,20 @@ class TestEveryEntryResolvesToARealTeam:
     # entry resolving only against FD.org's would fire in the league and
     # never in the cup (#192).
     #
-    # The league prefixes DO also accept the cup rosters, for the same reason
-    # SOCCER pools: a club outside the two FD.org divisions is still spelled
-    # right if ESPN confirms it, and can be promoted into view.
+    # The ENGLISH league prefixes also accept the cup rosters, for the same
+    # reason SOCCER pools: a club outside the two FD.org divisions is still
+    # spelled right if ESPN confirms it, and can be promoted into view. Only
+    # the English ones: an English non-league club cannot appear in LaLiga,
+    # so the cup rosters must not validate a LaLiga entry.
     COMPLETE = ("EFLCUP", "FACUP")
+    ENGLISH_LEAGUES = ("EPL", "EFL")
 
     def _candidates(self, prefix, rosters):
         if prefix in self.COMPLETE:
             return [n for p in self.COMPLETE for n in rosters.get(p, [])]
         if prefix in self.SOCCER:
-            return [n for p in self.SOCCER + self.COMPLETE
-                    for n in rosters.get(p, [])]
+            extra = self.COMPLETE if prefix in self.ENGLISH_LEAGUES else ()
+            return [n for p in self.SOCCER + extra for n in rosters.get(p, [])]
         return rosters.get(prefix, [])
 
     def _resolves(self, name, candidates):
@@ -367,6 +392,8 @@ class TestEveryEntryResolvesToARealTeam:
             "instrument check: needs a club only the FA Cup draws"
         for prefix in ("EFLCUP", "FACUP", "EPL", "EFL"):
             assert self._resolves("Chester FC", self._candidates(prefix, rosters)), prefix
+        # ...but an English non-league club must not validate a LaLiga entry.
+        assert not self._resolves("Chester FC", self._candidates("LaLiga", rosters))
 
     def test_a_cup_prefix_still_rejects_a_misspelling(self):
         """Pooling the two cup rosters must not loosen the spelling check."""

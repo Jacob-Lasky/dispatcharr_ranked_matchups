@@ -212,7 +212,9 @@ def _odd_row_prefixes(paths):
     Three shapes are reported:
       - `GameRow(sport_prefix=...)` whose value is not the source's own
         prefix (`self.sport_prefix` / `self.config.sport_prefix`);
-      - `replace(row, sport_prefix=...)`, the dataclasses re-stamp;
+      - a positional or `**mapping` GameRow, which cannot be checked;
+      - `replace(row, sport_prefix=...)` or `replace(row, **mapping)`, the
+        dataclasses re-stamp;
       - any assignment to an attribute named `sport_prefix`, including
         `setattr(row, "sport_prefix", ...)`, which re-stamps a row AFTER it
         was built correctly and so slips past the constructor check.
@@ -227,7 +229,15 @@ def _odd_row_prefixes(paths):
                 func = node.func
                 name = func.id if isinstance(func, ast.Name) else (
                     func.attr if isinstance(func, ast.Attribute) else "")
+                # A positional GameRow puts sport_prefix FIRST (its first
+                # field), and a `**mapping` can carry it under any value, so
+                # neither can be checked: both are reported, which makes the
+                # keyword form the only one a source can use.
+                if name == "GameRow" and node.args:
+                    odd.append((fname, node.lineno, ast.unparse(node)))
                 for kw in node.keywords:
+                    if kw.arg is None and name in ("GameRow", "replace"):
+                        odd.append((fname, node.lineno, ast.unparse(node)))
                     if kw.arg != "sport_prefix":
                         continue
                     if name == "GameRow":
@@ -290,7 +300,10 @@ def test_the_row_prefix_scan_flags_every_restamp_shape(tmp_path):
         'row.sport_prefix = "NCAAB"\n'
         'setattr(row, "sport_prefix", "NCAAB")\n'
         'dataclasses.replace(row, sport_prefix="NCAAB")\n'
+        'GameRow("NCAAB", "NCAA", "A", "B", None, None, start)\n'
+        'dataclasses.replace(row, **{"sport_prefix": "NCAAB"})\n'
+        'GameRow(**fields)\n'
     )
     odd, seen = _odd_row_prefixes([str(fake)])
     assert seen == 3
-    assert sorted(line for _f, line, _t in odd) == [3, 4, 5, 6]
+    assert sorted(line for _f, line, _t in odd) == [3, 4, 5, 6, 7, 8, 9]
