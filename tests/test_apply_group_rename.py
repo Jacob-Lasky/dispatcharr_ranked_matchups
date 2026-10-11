@@ -118,6 +118,35 @@ def scenario_rename_keeps_the_guide_of_a_channel_kept_for_a_recording(env):
     assert m.ProgramData.objects.filter(epg=other.epg_data).exists()
 
 
+def scenario_a_kept_channel_is_not_restored_onto_a_strangers_number(env):
+    """Codex review, 1.34.0 batch: a channel kept for its recording is parked
+    and then restored to its old number, which was checked only against the
+    numbers this apply wrote. After a rename the target group can already hold
+    someone else's channel on that RAW number (here one the user filed in the
+    new group by hand). Nothing in the database refuses the duplicate, so both
+    sat on one number, the guide bound arbitrarily and the UI refused to save
+    either. The kept channel must stay parked instead."""
+    m = env.m
+    user_ch, rec_ch, programmes = _recording_on_air(env)
+    number = rec_ch.channel_number
+    new_group = m.ChannelGroup.objects.create(name=NEW)
+    stranger = m.Channel.objects.create(
+        name="Hand-filed", channel_number=number, channel_group=new_group,
+    )
+
+    _rename_with_401_off_the_slate(env, user_ch)
+
+    rec_ch.refresh_from_db()
+    stranger.refresh_from_db()
+    assert stranger.channel_number == number
+    assert rec_ch.channel_group.name == NEW
+    assert rec_ch.channel_number != number, "restored onto the stranger's number"
+    raw = list(m.Channel.objects.filter(channel_group__name=NEW)
+               .values_list("channel_number", flat=True))
+    assert len(raw) == len(set(raw)), raw
+    _assert_guide_kept(env, rec_ch, programmes)
+
+
 def scenario_the_moved_entry_goes_with_its_channel_when_the_recording_ends(env):
     """No orphan guide once the recording ends: the next apply reaps the
     channel and its moved entry together, and nothing of 401 is left."""

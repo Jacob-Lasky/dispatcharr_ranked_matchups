@@ -326,19 +326,22 @@ class TestReviewFindings:
             f"{statements} vs guard at {guard}"
         )
 
-    def test_the_restore_uses_written_numbers_not_the_plan(self):
+    def test_the_restore_reads_the_numbers_channels_carry_not_the_plan(self):
         """chnum_by_marker keeps entries for games that were filtered out or
         skipped. Treating those as occupied refuses a kept-for-recording
-        channel its own original number and leaves it at park_base."""
+        channel its own original number and leaves it at park_base. The
+        restore reads back what the group's other channels carry instead,
+        which also covers a channel that is not ours (the rename scenario
+        a_kept_channel_is_not_restored_onto_a_strangers_number)."""
         src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
-        assert "assigned_now = written_numbers" in src
-        assert "assigned_now = set(chnum_by_marker.values())" not in src
-
-    def test_written_numbers_is_populated_where_a_channel_is_actually_numbered(self):
-        src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
-        i = src.index("target_chnum = chnum_by_marker.get(marker)")
-        j = src.index("prog_start, prog_end = _live_window(g, start_dt)", i)
-        assert "written_numbers.add(target_chnum)" in src[i:j]
+        i = src.index("# Restore kept channels (recording, or guide) to their pre-park number")
+        j = src.index("Channel.objects.bulk_update(restore", i)
+        block = "\n".join(
+            line for line in src[i:j].splitlines() if not line.lstrip().startswith("#")
+        )
+        assert "Channel.objects.filter(channel_group=target_group)" in block
+        assert ".exclude(id__in=kept_ids)" in block
+        assert "chnum_by_marker" not in block
 
     def test_the_full_band_error_does_not_claim_nothing_changed(self):
         """By that point apply may already have created the target group,

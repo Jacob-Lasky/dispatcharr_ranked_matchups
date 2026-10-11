@@ -360,3 +360,63 @@ def test_lost_days_reach_the_refresh_from_threads_of_the_walk(plugin):
                                     date(2026, 10, 10), date(2026, 10, 17))
     assert threading.get_ident() not in callers  # the requests really were pooled
     assert lost == {date(2026, 10, 12)}
+
+
+# ---------------------------------------------------------------------------
+# Behavioural class guard: every built source, every dated request failing
+# ---------------------------------------------------------------------------
+
+def test_every_built_source_reports_the_days_it_could_not_fetch(plugin, monkeypatch):
+    """The AST guard above reads code shapes, and a shape it does not know (a
+    per-day helper with no loop of its own, a direct `requests.get`) slips
+    past it (1.34.0 batch review). This half does not care how a source walks:
+    every source `_build_sources` builds with everything on runs
+    `fetch_upcoming` with EVERY request failing, and each dated day it asked
+    for must come back as lost, or the source must raise (a whole-source
+    outage, which the refresh already counts). Returning quietly with a day
+    unreported is the #261 defect."""
+    import re
+    import socket
+
+    import requests
+    from dispatcharr_ranked_matchups.sources.base import recording_lost_days
+    from tests.test_mapped_prefixes import _all_on_settings
+
+    dated = (
+        re.compile(r"[?&]dates=(\d{4})(\d{2})(\d{2})"),            # ESPN scoreboard
+        re.compile(r"/schedule/(\d{4})-(\d{2})-(\d{2})(?:$|\?)"),  # NHL api-web
+    )
+
+    def _offline(*_a, **_kw):
+        raise socket.gaierror("network disabled in tests/test_hold_failed_days.py")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _offline)
+    sources = plugin._build_sources(_all_on_settings())
+    asked: dict = {}
+    current = {}
+
+    def failing_get(url, *a, **k):
+        for rx in dated:
+            m = rx.search(url)
+            if m:
+                asked.setdefault(current["name"], set()).add(
+                    date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        raise requests.ConnectionError("every request fails in this test")
+
+    monkeypatch.setattr(requests, "get", failing_get)
+    unreported = {}
+    for src in sources:
+        name = type(src).__name__
+        current["name"] = name
+        try:
+            with recording_lost_days() as lost:
+                src.fetch_upcoming(days_ahead=2)
+        except Exception:
+            continue  # an outage the refresh sees for itself
+        missing = asked.get(name, set()) - lost
+        if missing:
+            unreported[name] = sorted(d.isoformat() for d in missing)
+    # The instrument reached the per-day walks, NHL's included.
+    assert {"NbaRegularSource", "NhlRegularSource", "NhlPlayoffSource",
+            "UfcSource", "EflCupSource"} <= set(asked)
+    assert unreported == {}

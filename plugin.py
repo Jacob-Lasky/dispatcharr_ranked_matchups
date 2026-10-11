@@ -7268,10 +7268,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # the loop below, so without this a kept stale channel would sit at the
         # parking number until the next cycle reaps it.
         prepark_numbers = {ch.id: ch.channel_number for ch in existing_virtuals.values()}
-        # Every channel number this run actually assigns to a channel. Used by
-        # the kept-for-recording restore below, which must not treat a merely
-        # PLANNED number as occupied.
-        written_numbers: set = set()
         if not dry_run and existing_virtuals:
             parked = list(existing_virtuals.values())
             for i, ch in enumerate(parked):
@@ -7310,7 +7306,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             target_chnum = chnum_by_marker.get(marker)
             if target_chnum is None:
                 continue
-            written_numbers.add(target_chnum)
             prog_start, prog_end = _live_window(g, start_dt)
             existing = existing_virtuals.get(marker)
 
@@ -7563,24 +7558,35 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     )
 
             # Restore kept channels (recording, or guide) to their pre-park number
-            # so they don't linger at a ~park_base value. Only restore numbers
-            # not claimed by a current game this run (assigned set), so no
-            # number is duplicated in the group (_PER_GROUP_NUMBER_NOTE);
-            # any (rare) collision leaves that channel parked, still safe.
+            # so they don't linger at a ~park_base value. Only restore a number
+            # no other channel in the group carries now, so no number is
+            # duplicated in the group (_PER_GROUP_NUMBER_NOTE); any (rare)
+            # collision leaves that channel parked, still safe.
             if kept_stale:
-                # Numbers actually WRITTEN this run, not the whole plan.
-                # chnum_by_marker still holds entries for games the compact
-                # placeable-filter dropped and for games the pre-pass skipped,
-                # and treating those as taken refuses a kept channel its own
-                # original number and leaves it parked. Only a number some
-                # channel really carries can block a restore.
-                assigned_now = written_numbers
+                # Raw numbers channels in the group REALLY carry now, read back
+                # rather than planned. DO NOT use only the numbers this run
+                # wrote: after a rename the group can already
+                # hold a channel that is not ours (one the user filed there by
+                # hand) on a kept channel's old number, and the rename's
+                # queryset .update() moved the kept channel in beside it with
+                # nothing refusing the clash (1.34.0 batch review). And DO NOT
+                # use chnum_by_marker: it still holds entries for games the
+                # compact placeable-filter dropped and for games the pre-pass
+                # skipped, and treating those as taken refuses a kept channel
+                # its own original number and leaves it parked.
+                kept_ids = [ch.id for ch in kept_stale]
+                taken_now = set(
+                    Channel.objects.filter(channel_group=target_group)
+                    .exclude(id__in=kept_ids)
+                    .values_list("channel_number", flat=True)
+                )
                 restore = []
                 for ch in kept_stale:
                     orig = prepark_numbers.get(ch.id)
-                    if orig is not None and orig not in assigned_now:
+                    if orig is not None and orig not in taken_now:
                         ch.channel_number = orig
                         restore.append(ch)
+                        taken_now.add(orig)  # two kept channels, one old number
                 if restore:
                     Channel.objects.bulk_update(restore, ["channel_number"])
             deleted_stale = len(reap_ids)
