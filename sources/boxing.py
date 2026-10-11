@@ -130,29 +130,31 @@ def _match_name(title: str) -> str:
 
 
 def _next_page(
-    data: dict, page: int, n_cards: int, promised: Optional[int],
-) -> Tuple[Optional[str], Optional[int]]:
+    data: dict, page: int, n_cards: int, promised: Optional[Tuple[Any, Any]],
+) -> Tuple[Optional[str], Optional[Tuple[Any, Any]]]:
     """(why the schedule cannot be vouched for past `page`, or None; the
-    number of pages to read, or None to stop), read off the answer's
-    `pagination`. `promised` is the page count page 1 gave (None on page 1).
+    (total_pages, total_items) still to read up to, or None to stop), read
+    off the answer's `pagination`. `promised` is what page 1 gave (None on
+    page 1).
 
     Page 1 with no usable paging (no integer `total_pages`, or an answer for
     a different page than the one asked for): a short page is the whole
     schedule, a full one cannot vouch for what comes after it. A later page
     was asked for only because page 1 promised it, so it must answer as that
-    page of the SAME schedule: unusable paging there, or a page count that
-    differs from page 1's (a server ignoring `page_num`, or a schedule that
-    changed between the requests, either of which can hide cards on pages
-    never read), is a failure. More pages than `_MAX_PAGES`: the rest is not
+    page of the SAME schedule: unusable paging there, or a page or card count
+    that differs from page 1's (a server ignoring `page_num`, or a schedule
+    that changed between the requests, which shifts cards across a page
+    boundary unseen), is a failure. More pages than `_MAX_PAGES`: the rest is not
     read, and so not vouched for either.
     """
     paging = data.get("pagination")
     paging = paging if isinstance(paging, dict) else {}
     total, answered = paging.get("total_pages"), paging.get("page")
+    shape = (total, paging.get("total_items"))
     usable = isinstance(total, int) and answered == page
-    if page > 1 and (not usable or total != promised):
+    if page > 1 and (not usable or shape != promised):
         return (f"page {page} answered with pagination {paging!r}, but page 1 "
-                f"promised {promised} pages"), None
+                f"promised (pages, cards) {promised}"), None
     if not usable:
         if n_cards >= _PAGE_SIZE:
             return f"page 1 is full and its pagination {paging!r} cannot say what follows", None
@@ -161,7 +163,7 @@ def _next_page(
         return None, None
     if page >= _MAX_PAGES:
         return f"{total} pages; only the first {_MAX_PAGES} were read", None
-    return None, total
+    return None, shape
 
 
 class BoxingSource(SportSource):
@@ -234,14 +236,16 @@ class BoxingSource(SportSource):
         reported lost all the same, since the missing pages could hold a card
         on any of them, so the refresh keeps what it had published (#261).
 
-        Cards are deduped by `id` across pages, in case the schedule shifts
-        between two page requests. The first request carries no `page_num`,
-        which keeps it the request measured live (page 1 is the default).
+        A card already seen on an earlier page is kept once and fails the
+        read, because it means the schedule shifted between two page
+        requests and another card may have moved past a page boundary. The
+        first request carries no `page_num`, which keeps it the request
+        measured live (page 1 is the default).
         """
         events: List[Any] = []
         seen: set = set()
         page = 1
-        promised: Optional[int] = None
+        promised: Optional[Tuple[Any, Any]] = None
         while True:
             params = {"days": days, "date_sort": "ASC", "page_size": _PAGE_SIZE}
             if page > 1:
@@ -255,9 +259,13 @@ class BoxingSource(SportSource):
                     eid = ev.get("id") if isinstance(ev, dict) else None
                     if eid is not None:
                         if eid in seen:
+                            # On two pages: the schedule moved between the
+                            # requests, so a card may have moved past one.
+                            err = f"card {eid!r} is on two pages"
                             continue
                         seen.add(eid)
                     events.append(ev)
+            if not err:
                 err, promised = _next_page(data, page, len(page_events), promised)
                 if promised is not None:
                     page += 1

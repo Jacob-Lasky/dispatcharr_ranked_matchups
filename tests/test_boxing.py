@@ -254,8 +254,9 @@ class TestBoxingSchedulePages:
         {"pagination": {"page": 2, "items": 3, "total_pages": 1, "total_items": 3}},
         {"pagination": None},
         {"pagination": {"page": 2, "items": 3, "total_pages": 2, "total_items": 53}},
+        {"pagination": {"page": 2, "items": 3, "total_pages": 3, "total_items": 54}},
     ], ids=["short-page-labelled-1", "claims-fewer-pages", "no-pagination",
-            "page-count-shrank"])
+            "page-count-shrank", "card-count-grew"])
     def test_a_short_later_page_that_cannot_vouch_is_reported(self, monkeypatch, page2):
         """WITNESS (Codex rounds 1-2): page 1 said three pages; page 2 came
         back short but labelled page 1, claiming one or two pages in all, or
@@ -266,6 +267,20 @@ class TestBoxingSchedulePages:
             1: self._page(self._cards(0, 25), 1, 3, 53), 2: body,
         })
         assert len(asked) == 2 and len(rows) == 28
+        assert len(lost) == 8
+
+    def test_a_card_on_two_pages_means_the_schedule_moved(self, monkeypatch):
+        """WITNESS (Codex round 3): a card added ahead of page 1 between the
+        two requests pushes page 1's last card onto page 2 under the same
+        page and card counts. Its repeat was deduped silently, and the card
+        that moved past the boundary was never seen. The repeat now fails the
+        read, so the schedule's days are reported."""
+        page1 = self._cards(0, 25)
+        page2 = [page1[-1]] + self._cards(25, 2)
+        rows, lost, _asked = self._run(monkeypatch, {
+            1: self._page(page1, 1, 2, 28), 2: self._page(page2, 2, 2, 28),
+        })
+        assert len(rows) == 27
         assert len(lost) == 8
 
     def test_one_short_page_is_the_whole_schedule(self, monkeypatch):
