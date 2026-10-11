@@ -211,23 +211,23 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
     so a lock that frees up a minute later does not leave a stale "did not
     run" note behind (and the per-attempt line drops to INFO)."""
     # Lazy import: keeps tasks.py importable without Django configured.
-    from .plugin import _try_acquire_scheduler_lock, _release_scheduler_lock
+    from .plugin import (
+        _release_scheduler_lock,
+        _run_lock_unavailable_reason,
+        _try_acquire_scheduler_lock,
+    )
 
-    # Whether this run WRITES. auto_pipeline chains refresh + apply, so it
-    # deletes Channels / ProgramData and renumbers the guide; a bare refresh
-    # only reads upstream APIs and rewrites cache.json. The flag decides what
-    # happens when Redis is unreachable: destructive work refuses to run
-    # unserialized, non-destructive work proceeds. See _try_acquire_scheduler_lock.
-    destructive = kind != "refresh"
-
-    lock_token = _try_acquire_scheduler_lock(destructive=destructive)
+    # EVERY kind takes the lock and fails closed, a bare refresh included
+    # (#199): refresh publishes cache.json, which apply and reap delete by. See
+    # _try_acquire_scheduler_lock for why "refresh is non-destructive" was the
+    # wrong reason to let it run unlocked.
+    lock_token = _try_acquire_scheduler_lock(kind, task_id)
     if not lock_token:
+        reason = _run_lock_unavailable_reason()
         logger.log(
             logging.WARNING if record_skip else logging.INFO,
-            "[ranked_matchups.tasks] %s task %s: scheduler lock unavailable; "
-            "%s (another refresh / auto_pipeline is in flight, or Redis is "
-            "unreachable and this action writes)",
-            kind, task_id, "skipping" if record_skip else "will retry",
+            "[ranked_matchups.tasks] %s task %s did not get the run lock; %s (%s)",
+            kind, task_id, "skipping" if record_skip else "will retry", reason,
         )
         if not record_skip:
             return False
@@ -236,7 +236,7 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
         # previous run's verdict as if it answered this click. Recorded beside
         # that verdict, never over it: the previous outcome is still the truth
         # about the last run that actually ran.
-        record_skipped_run(kind)
+        record_skipped_run(kind, reason)
         return False
     started = datetime.now(timezone.utc)
     result: Dict[str, Any] = {"status": "error", "message": "crashed before returning a result"}
@@ -287,10 +287,10 @@ def _as_int(value: Any) -> int:
 
 
 def _write_last_run(record: Dict[str, Any]) -> None:
-    """Atomic replace through a writer-unique temp file. Refresh runs WITHOUT
-    the lock when Redis is unreachable (it fails open), so two workers can
-    write at once; a shared temp name would let one replace the other's
-    half-written file."""
+    """Atomic replace through a writer-unique temp file. A skip note is
+    written by a caller that did NOT get the lock (record_skipped_run), so it
+    can race the holder's verdict or another worker's skip; a shared temp
+    name would let one replace the other's half-written file."""
     tmp = f"{LAST_RUN_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(record, f)
@@ -324,25 +324,42 @@ def _record_last_run(kind: str, task_id: str, started: datetime, result: Dict[st
         logger.warning("[ranked_matchups.tasks] could not record run outcome to %s: %s", LAST_RUN_PATH, e)
 
 
-def record_skipped_run(kind: str) -> None:
+def record_skipped_run(kind: str, reason: Optional[str] = None) -> None:
     """Note that a requested run was skipped (lock held or Redis down) on the
-    existing record, without touching that record's verdict. Never raises."""
+    existing record, without touching that record's verdict. `reason` is the
+    sentence-ending text from plugin._run_lock_unavailable_reason, naming the
+    holder (#239); Show current state prints it. Never raises."""
     try:
         record = read_last_run() or {}
         record["skipped_kind"] = kind
         record["skipped_at"] = datetime.now(timezone.utc).isoformat()
+        # The reason carries the skip it belongs to. Code from before #239
+        # updates skipped_kind/skipped_at and leaves any older reason in place,
+        # so a reason whose stamp does not match skipped_at is not this skip's
+        # (plugin._run_health_lines checks the stamp).
+        if reason:
+            record["skipped_reason"] = reason
+            record["skipped_reason_at"] = record["skipped_at"]
+        else:
+            record.pop("skipped_reason", None)
+            record.pop("skipped_reason_at", None)
         _write_last_run(record)
     except Exception as e:  # noqa: BLE001 - caller is a daemon thread
         logger.warning("[ranked_matchups.tasks] could not record skipped run: %s", e)
 
 
 # User-facing names for the run kinds _run_under_lock records. Show current
-# state prints these, so a toast never shows an internal id.
+# state prints these, so a toast never shows an internal id. "apply" and
+# "reap" never reach last_run.json (they do not run through _run_under_lock);
+# they are here because they also take the run lock, and the lock's holder
+# record (#239) is described with these names.
 RUN_KIND_LABELS = {
     "auto_pipeline": "Refresh + apply",
     "scheduled_auto_pipeline": "Scheduled refresh + apply",
     "m3u_rematch": "Refresh + apply after an M3U update",
     "refresh": "Refresh",
+    "apply": "Apply",
+    "reap": "Reap finished games",
 }
 
 

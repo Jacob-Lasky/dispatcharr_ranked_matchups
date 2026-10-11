@@ -76,7 +76,7 @@ State (gitignored, lives in `<plugin_dir>/`):
 - `recording_stops.json` — planned stops of RUNNING recordings (#216 phase C): written whole by apply under the scheduler lock, only READ by the live handoff timer in `_reaper_loop` (`_run_due_stops`), so the timer never races apply
 - `recordings_state.json` — auto-record bookkeeping (#216): what the plugin last wrote for each recording it created (so a user edit is recognised and left alone), and tombstones for ones the user deleted so they are not re-created
 - `odds_cache.json` — The Odds API responses (#200), one entry per `sport_key|region` with its `fetched_at`, plus `exhausted_until` / `exhausted_key` for the out-of-credits backoff and the last `credits_remaining` header. Written by `sources/_odds.py` with the same per-writer temp + atomic replace as the cache. Holds no API key, and a hand-edited or wrong-shaped file is started over rather than failing every league's fetch
-- `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict AND by `_slot_already_covered` to decide a waiting scheduled slot has already been done for it (see the scheduler section) — so `kind`, `status` and `started_at` steer behaviour, not just display. `kind` is one of `RUN_KIND_LABELS` (`auto_pipeline`, `scheduled_auto_pipeline`, `m3u_rematch`, `refresh`) — the label is what names WHY a run happened, so a new background trigger needs an entry there or Show current state cannot explain itself, plus a decision about whether it belongs in `_PIPELINE_RUN_KINDS`. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
+- `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock, with `skipped_reason` (naming the holder, #239) stamped by `skipped_reason_at`. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict AND by `_slot_already_covered` to decide a waiting scheduled slot has already been done for it (see the scheduler section) — so `kind`, `status` and `started_at` steer behaviour, not just display. `kind` is one of the `_run_under_lock` kinds in `RUN_KIND_LABELS` (`auto_pipeline`, `scheduled_auto_pipeline`, `m3u_rematch`, `refresh`; its `apply` and `reap` entries only describe lock holders) — the label is what names WHY a run happened, so a new background trigger needs an entry there or Show current state cannot explain itself, plus a decision about whether it belongs in `_PIPELINE_RUN_KINDS`. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
 - `cfbd_api_key`, `football_data_api_key`, `odds_api_key`, `anthropic_api_key` — file fallback when settings field is blank.
 
 ## How channels are produced
@@ -403,6 +403,70 @@ hazard — including `_run_scheduled_slot`'s own retry wait, which re-reads
 settings and bails after each `_scheduler_sleep` so turning auto-refresh off
 while a slot is waiting for the lock cancels it.
 
+### The run lock: every run takes it, and it says who holds it
+
+`_try_acquire_scheduler_lock(kind, task_id)` is the ONE cross-worker mutex for
+refresh, apply, reap and every refresh + apply (manual, scheduled, M3U
+rematch). Two properties are load-bearing:
+
+- **It fails CLOSED for every caller when Redis is unreachable, refresh
+  included** (#199). Refresh used to fail open on the theory that it is
+  non-destructive, but it PUBLISHES `cache.json`, and `cache.json` is what apply
+  and reap delete by: a reap reads the cache, rewrites it, runs apply (which
+  reads it again) and writes its own copy back, so a refresh landing in between
+  makes apply delete against a generation the reap never saw and is then erased
+  by the reap's write. Redis dropping mid-run is exactly when a destructive
+  holder is still running, so "no lock" is not "nobody is writing". DO NOT
+  reintroduce a fail-open path (`tests/test_run_lock.py` and the
+  `_LOCK_NOT_HELD` check in `tests/test_async_dispatch.py` pin this). Show
+  current state says "Redis is unreachable" (`_read_run_lock`, which must not
+  go through `tasks._redis()`: that folds a `None` client into "no client" and
+  hides the outage) so the refusal is never silent. The guarantee holds only
+  once EVERY process runs this code: a process whose plugin module was never
+  reloaded keeps the fail-open refresh, so shipping this needs a container
+  restart, not just a plugin reload (see the process paragraph below). A
+  process that DID reload but kept a running thread is covered: that thread's
+  old `_run_under_lock` imports the lock function lazily, gets the new one, and
+  calls it as `_try_acquire_scheduler_lock(destructive=...)`. DO NOT drop that
+  legacy keyword while an in-place upgrade from a pre-#199 release is
+  possible: the TypeError lands after the old thread has claimed the scheduled
+  slot, so the slot runs nowhere (`TestOlderCallers` pins it).
+- **The lock VALUE is a JSON holder record** (#239): `kind`, `task_id`, `pid`,
+  `process` (`uwsgi worker N`, or an allowlisted summary of a Celery/daphne
+  process's argv), `thread`, plugin `version`, `acquired_at`, plus a unique
+  `token`. `_process_label` copies out of argv only the program name, plain
+  script file names (`_SCRIPT_NAME_RE`), the words in `_PROCESS_LABEL_WORDS`
+  and a `-Q` queue list (`_QUEUE_LIST_RE`), because the label is copied into
+  Redis, logs, toasts and `last_run.json`; do not loosen it to a length or
+  looks-like-a-flag filter, `-p hunter2` and `--token=abc` are both short.
+  Release compares the WHOLE string, so ownership works as before. A contended
+  acquire logs the holder at INFO, take and release are logged at INFO, the
+  busy apply toast and the skipped-run note (`skipped_reason` in
+  `last_run.json`) name the holder (`_run_lock_unavailable_reason`), and Show
+  current state prints a `Run lock: held by ...` line. A skip reason is stamped
+  with its skip (`skipped_reason_at`), because older code records a skip
+  without touching the reason, and a scheduled run given up without an attempt
+  (it was already past its deadline) says so instead of describing a lock
+  nobody tried. A value that is not JSON is a holder running code from before
+  #239. `apply` and `reap` have `RUN_KIND_LABELS` entries for this description
+  only; they never reach `last_run.json`'s `kind`.
+
+**The plugin runs in more processes than the uwsgi workers.** Measured on
+Tower 2026-10-10/11 (Dispatcharr's `celery.py` runs plugin discovery in
+`worker_process_init`, i.e. in every Celery prefork child and thread worker):
+daphne (pid 415) and Celery pool children (pids 422501, 533697) each run their
+own scheduler and reaper, and they take part in every scheduled slot. Two
+consequences. The plugin reload restarts threads only in the uwsgi worker that
+serves it, so the other processes keep the code they loaded until they exit or
+the container restarts. And **the plugin's INFO lines from a Celery process do
+not reach the container log** while its WARNING lines do (measured, mechanism
+not pinned down): pid 533697 claimed and ran the whole 10:00 slot on
+2026-10-11 and left no log line at all, only its `last_run.json` record. A
+Celery-side copy that wins a slot therefore leaves every visible copy logging
+"lock unavailable" with no visible winner, which is the most likely explanation
+of the 16:00 wait #239 was filed for (see the issue). The holder record above
+is what names such a holder now.
+
 ### cache.json has TWO lists: `games` and `bench`
 
 `games` is what apply puts on air; `bench` is scored-but-not-applied stock the
@@ -650,8 +714,9 @@ stay in agreement with that one.
   `record_skipped_run` itself only once it gives up, since `_run_under_lock`'s
   bool return ("did the work run?") is what a retry loop steers on and a lock
   that frees a minute later must not leave a stale "did not run" note; the
-  per-writer temp name in `_write_last_run` exists because refresh fails open
-  when Redis is down, so two workers can write at once; and `_run_health_lines`
+  per-writer temp name in `_write_last_run` exists because a skip note is
+  written by a caller that did NOT get the lock, so it can race the holder's
+  verdict or another worker's skip; and `_run_health_lines`
   orders the lines data warnings → config notices → verdict LAST, with a
   running pipeline stated IN the verdict so the last line never presents the
   previous run's outcome as the answer to the click just made.
@@ -884,6 +949,9 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   apply that started after the slot finishes OK while it waits. Scheduler clock
   maths is DST-safe, and the
   pipeline subprocess starts no scheduler or reaper of its own
+- Every run takes the cross-worker run lock and refuses to start without it,
+  a plain refresh included (#199), and the lock names its holder (#239) in the
+  log, the busy toast, the skipped-run note and Show current state
 - Group-rename auto-cleanup
 - Multi-time scheduler (`scheduled_times = "0400,1000,1600,2200"`)
 - Both file-based and settings-based API keys (settings preferred, masked UI)

@@ -215,7 +215,7 @@ class TestApplyRunsOutOfProcess:
         src = self._source("plugin.py")
         start = src.index("def _action_apply_locked(")
         body = src[start:src.index("\ndef ", start + 10)]
-        assert "_try_acquire_scheduler_lock(destructive=True)" in body
+        assert '_try_acquire_scheduler_lock("apply"' in body
         assert "_release_scheduler_lock(token)" in body
 
     def test_apply_stays_synchronous(self):

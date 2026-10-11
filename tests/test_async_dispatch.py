@@ -407,7 +407,7 @@ class TestSchedulerLockOwnership:
 
     def test_acquire_returns_a_unique_token_not_a_constant(self, plugin_mod, monkeypatch):
         store = self._fake_redis(plugin_mod, monkeypatch)
-        token = plugin_mod._try_acquire_scheduler_lock()
+        token = plugin_mod._try_acquire_scheduler_lock("auto_pipeline")
         assert token
         assert store[plugin_mod._SCHEDULER_LOCK_KEY] == token
         assert token not in ("1", 1), "lock value must be a per-run token"
@@ -415,19 +415,19 @@ class TestSchedulerLockOwnership:
 
     def test_two_acquires_get_different_tokens(self, plugin_mod, monkeypatch):
         self._fake_redis(plugin_mod, monkeypatch)
-        a = plugin_mod._try_acquire_scheduler_lock()
+        a = plugin_mod._try_acquire_scheduler_lock("auto_pipeline")
         plugin_mod._release_scheduler_lock(a)
-        b = plugin_mod._try_acquire_scheduler_lock()
+        b = plugin_mod._try_acquire_scheduler_lock("auto_pipeline")
         assert a and b and a != b
 
     def test_second_acquire_is_refused_while_held(self, plugin_mod, monkeypatch):
         self._fake_redis(plugin_mod, monkeypatch)
-        assert plugin_mod._try_acquire_scheduler_lock()
-        assert plugin_mod._try_acquire_scheduler_lock() is None
+        assert plugin_mod._try_acquire_scheduler_lock("auto_pipeline")
+        assert plugin_mod._try_acquire_scheduler_lock("auto_pipeline") is None
 
     def test_release_frees_the_lock_for_the_owner(self, plugin_mod, monkeypatch):
         store = self._fake_redis(plugin_mod, monkeypatch)
-        token = plugin_mod._try_acquire_scheduler_lock()
+        token = plugin_mod._try_acquire_scheduler_lock("auto_pipeline")
         plugin_mod._release_scheduler_lock(token)
         assert plugin_mod._SCHEDULER_LOCK_KEY not in store
 
@@ -435,7 +435,7 @@ class TestSchedulerLockOwnership:
         """THE bug. Run A overruns the TTL, run B acquires, run A releases.
         B's lock must survive, or a third run starts while B is still writing."""
         store = self._fake_redis(plugin_mod, monkeypatch)
-        a_token = plugin_mod._try_acquire_scheduler_lock()   # run A acquires
+        a_token = plugin_mod._try_acquire_scheduler_lock("auto_pipeline")   # run A acquires
 
         store[plugin_mod._SCHEDULER_LOCK_KEY] = "run-B-token"  # TTL expiry + B
 
@@ -449,43 +449,32 @@ class TestSchedulerLockOwnership:
     def test_concurrent_holders_in_one_process_keep_separate_tokens(self, plugin_mod, monkeypatch):
         """The scheduler daemon thread and an HTTP greenlet can both be in the
         lock functions inside the SAME worker. Tokens must not be shared state:
-        a module global let the second caller's fail-open path wipe the first
+        a module global let a second caller's acquire overwrite the first
         caller's token, turning its release into a no-op and leaking the lock
         until the TTL."""
         store = self._fake_redis(plugin_mod, monkeypatch)
-        held = plugin_mod._try_acquire_scheduler_lock()      # daemon thread
+        held = plugin_mod._try_acquire_scheduler_lock("auto_pipeline")      # daemon thread
         assert held
 
         # A second caller in the same process is refused (lock held)...
-        assert plugin_mod._try_acquire_scheduler_lock() is None
+        assert plugin_mod._try_acquire_scheduler_lock("auto_pipeline") is None
         # ...and that refusal must not have disturbed the first caller's token.
         plugin_mod._release_scheduler_lock(held)
         assert plugin_mod._SCHEDULER_LOCK_KEY not in store, (
             "the first holder could no longer release; token was clobbered"
         )
 
-    def test_destructive_action_fails_closed_when_redis_is_down(self, plugin_mod, monkeypatch):
-        # apply / auto_pipeline delete Channels and ProgramData. Unserialized is
-        # worse than skipped, so these must refuse to run.
+    @pytest.mark.parametrize("kind", ["refresh", "auto_pipeline", "scheduled_auto_pipeline",
+                                      "m3u_rematch", "apply", "reap"])
+    def test_every_kind_fails_closed_when_redis_is_down(self, plugin_mod, monkeypatch, kind):
+        # #199: refresh included. It publishes cache.json, which apply and reap
+        # delete by, so an unlocked refresh can swap the cache under a running
+        # reap. There is no fail-open path for any caller.
         self._fake_redis(plugin_mod, monkeypatch, raise_on="set")
-        assert plugin_mod._try_acquire_scheduler_lock(destructive=True) is None
-
-    def test_refresh_fails_open_when_redis_is_down(self, plugin_mod, monkeypatch):
-        # refresh only reads upstream APIs and rewrites cache.json, so a
-        # duplicate run wastes quota but cannot corrupt anything. Freezing all
-        # refreshes on a Redis blip is the worse outcome.
-        self._fake_redis(plugin_mod, monkeypatch, raise_on="set")
-        token = plugin_mod._try_acquire_scheduler_lock(destructive=False)
-        assert token == plugin_mod._LOCK_NOT_HELD
-
-    def test_release_after_fail_open_is_a_noop(self, plugin_mod, monkeypatch):
-        # Nothing was acquired, so there is nothing to delete, and crucially we
-        # must not delete a lock someone else legitimately holds.
-        store = self._fake_redis(plugin_mod, monkeypatch, raise_on="set")
-        store[plugin_mod._SCHEDULER_LOCK_KEY] = "someone-elses"
-        token = plugin_mod._try_acquire_scheduler_lock(destructive=False)
-        plugin_mod._release_scheduler_lock(token)
-        assert store[plugin_mod._SCHEDULER_LOCK_KEY] == "someone-elses"
+        assert plugin_mod._try_acquire_scheduler_lock(kind) is None
+        assert not hasattr(plugin_mod, "_LOCK_NOT_HELD"), (
+            "the fail-open sentinel is back; see #199"
+        )
 
     def test_release_tolerates_none(self, plugin_mod, monkeypatch):
         store = self._fake_redis(plugin_mod, monkeypatch)
@@ -530,7 +519,7 @@ class TestApplyActionTakesTheLock:
         return calls
 
     def test_returns_busy_without_applying_when_lock_is_held(self, plugin_mod, monkeypatch):
-        monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda **k: None)
+        monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda *a, **k: None)
         calls = self._stub_subprocess(plugin_mod, monkeypatch, {"status": "ok"})
         out = plugin_mod._action_apply_locked({})
         assert out["status"] == "busy"
@@ -538,7 +527,7 @@ class TestApplyActionTakesTheLock:
 
     def test_releases_the_lock_on_the_success_path(self, plugin_mod, monkeypatch):
         released = []
-        monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda **k: "tok-1")
+        monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda *a, **k: "tok-1")
         monkeypatch.setattr(plugin_mod, "_release_scheduler_lock", released.append)
         calls = self._stub_subprocess(plugin_mod, monkeypatch, {"status": "ok"})
         out = plugin_mod._action_apply_locked({"max_games": 4})
@@ -553,7 +542,7 @@ class TestApplyActionTakesTheLock:
         # worker) and reports failure as an error dict. The lock must still come
         # back, or every later run is refused with "busy" until the TTL expires.
         released = []
-        monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda **k: "tok-1")
+        monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda *a, **k: "tok-1")
         monkeypatch.setattr(plugin_mod, "_release_scheduler_lock", released.append)
         self._stub_subprocess(plugin_mod, monkeypatch,
                               {"status": "error", "message": "pipeline subprocess failed (rc=1)"})
@@ -565,7 +554,7 @@ class TestApplyActionTakesTheLock:
         # Defence in depth: run_pipeline_subprocess promises not to raise, but
         # the finally must hold regardless of whether that promise is kept.
         released = []
-        monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda **k: "tok-1")
+        monkeypatch.setattr(plugin_mod, "_try_acquire_scheduler_lock", lambda *a, **k: "tok-1")
         monkeypatch.setattr(plugin_mod, "_release_scheduler_lock", released.append)
 
         def boom(_settings):

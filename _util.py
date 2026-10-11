@@ -21,7 +21,9 @@ def parse_iso_utc(s: Optional[str]) -> Optional[datetime]:
         return None
     try:
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+    except (AttributeError, TypeError, ValueError):
+        # AttributeError: a non-string (a number read back from a JSON file or
+        # a Redis value) has no .replace; the docstring promises None for it.
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)

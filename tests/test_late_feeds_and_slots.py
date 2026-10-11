@@ -115,7 +115,8 @@ def _pipeline(monkeypatch, plugin, outcomes):
 
 def _skips(monkeypatch, plugin):
     calls = []
-    monkeypatch.setattr(plugin.tasks, "record_skipped_run", lambda kind: calls.append(kind))
+    monkeypatch.setattr(plugin.tasks, "record_skipped_run",
+                        lambda kind, reason=None: calls.append(kind))
     return calls
 
 
@@ -257,6 +258,60 @@ class TestScheduledSlot:
         plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
         assert attempts == []
         assert skips == ["scheduled_auto_pipeline"]
+
+    @pytest.mark.parametrize("redis_state", ["store", "redis_down"])
+    def test_a_late_wake_says_so_instead_of_blaming_the_lock(self, plugin, redis_state,
+                                                             request, monkeypatch):
+        """Waking past the deadline means NO attempt was made, so the recorded
+        reason must not describe the lock: with the lock free it used to read
+        "the run lock could not be taken, and is free now"."""
+        request.getfixturevalue(redis_state)
+        attempts = _pipeline(monkeypatch, plugin, [True])
+        reasons = []
+        monkeypatch.setattr(plugin.tasks, "record_skipped_run",
+                            lambda kind, reason=None: reasons.append(reason))
+        slot = datetime.now(UTC) - timedelta(minutes=31)
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert attempts == []
+        assert len(reasons) == 1
+        assert "run lock" not in reasons[0]
+        assert "woke" in reasons[0] and "too late to start" in reasons[0]
+
+    def test_a_slow_claim_is_not_reported_as_a_late_wake(self, plugin, monkeypatch):
+        """The scheduler woke in time, but the slot claim (Redis connect
+        retries, then failure) took until past the deadline. Blaming the wake
+        would send a reader after the wrong thing."""
+        import time
+        mark = {}
+
+        def slow_claim(slot):
+            mark["deadline"] = datetime.now(UTC)
+            time.sleep(0.02)
+            return plugin._SLOT_UNKNOWN
+
+        monkeypatch.setattr(plugin, "_claim_scheduled_slot", slow_claim)
+        monkeypatch.setattr(plugin, "_scheduled_retry_deadline",
+                            lambda slot, times, tz: mark["deadline"])
+        attempts = _pipeline(monkeypatch, plugin, [True])
+        reasons = []
+        monkeypatch.setattr(plugin.tasks, "record_skipped_run",
+                            lambda kind, reason=None: reasons.append(reason))
+        slot = _now_slot()
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert attempts == []
+        assert len(reasons) == 1
+        assert "woke after" not in reasons[0]
+        assert "already past" in reasons[0]
+
+    def test_giving_up_after_attempts_still_names_the_lock(self, plugin, store, monkeypatch):
+        _pipeline(monkeypatch, plugin, [False])
+        _sleeps(monkeypatch, plugin)
+        reasons = []
+        monkeypatch.setattr(plugin.tasks, "record_skipped_run",
+                            lambda kind, reason=None: reasons.append(reason))
+        slot = datetime.now(UTC) - timedelta(minutes=29, seconds=30)
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert len(reasons) == 1 and "run lock" in reasons[0]
 
     def test_a_late_wake_does_not_start_past_the_deadline(self, plugin, store, monkeypatch):
         attempts = _pipeline(monkeypatch, plugin, [True])
@@ -464,17 +519,19 @@ class TestRematchAfterM3U:
 class TestRunUnderLockRetryContract:
     def test_lost_lock_with_retry_returns_false_and_records_nothing(self, tasks_mod, monkeypatch):
         plugin_stub = type(sys)("stub")
-        plugin_stub._try_acquire_scheduler_lock = lambda destructive=True: None
+        plugin_stub._try_acquire_scheduler_lock = lambda kind, task_id="": None
         plugin_stub._release_scheduler_lock = lambda token: None
+        plugin_stub._run_lock_unavailable_reason = lambda: "the run lock is held by X"
         monkeypatch.setitem(sys.modules, f"{tasks_mod.__name__.rsplit('.', 1)[0]}.plugin", plugin_stub)
         skips = []
-        monkeypatch.setattr(tasks_mod, "record_skipped_run", lambda kind: skips.append(kind))
+        monkeypatch.setattr(tasks_mod, "record_skipped_run",
+                            lambda kind, reason=None: skips.append((kind, reason)))
         target = MagicMock()
         assert tasks_mod._run_under_lock("scheduled_auto_pipeline", "t", target, {},
                                          record_skip=False) is False
         assert skips == []
         assert tasks_mod._run_under_lock("auto_pipeline", "t", target, {}) is False
-        assert skips == ["auto_pipeline"]
+        assert skips == [("auto_pipeline", "the run lock is held by X")]
         target.assert_not_called()
 
 
