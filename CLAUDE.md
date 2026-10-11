@@ -737,8 +737,9 @@ says which.
   is `related_name="+"` and `_meta.related_objects` silently omits hidden
   relations. The programmes kept are the ones one of OUR channels shows, so a
   second stale old source processed after the live one cannot overwrite the
-  recording's guide. A source with a `url` or `file_path` is never ours,
-  whatever markers its rows carry (`_never_fetches_q`): it is never swept as
+  recording's guide. A source with a `url`, a `file_path` or the Schedules
+  Direct type (which fetches with credentials and leaves both blank) is never
+  ours, whatever markers its rows carry (`_never_fetches_q`): it is never swept as
   an old source, and apply refuses, before any write, a group name that is
   also the name of such a source, since step 2 would otherwise adopt it.
   `tests/test_apply_group_rename.py` drives all of it through the real apply.

@@ -5961,7 +5961,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         )
     dry_run = _dry_run_enabled(settings)
     # Our EPGSource is the one named after the live group, and ours never
-    # fetches (blank url and file_path). If the group is named after a source
+    # fetches (blank url and file_path, not Schedules Direct: _never_fetches_q).
+    # If the group is named after a source
     # that DOES fetch, step 2 would adopt the user's source (switch it inactive)
     # and the rename cleanup would write our guide rows into it, replacing
     # programmes on any row that shares a marker. Refuse before any write.
@@ -6042,8 +6043,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         .filter(_owned_tvg_id_q("channels__"))
         .distinct()
     )
-    # Our sources never fetch anything (blank url and file_path, see step 2).
-    # A source that does is fed from somewhere else, even when its rows carry
+    # Our sources never fetch anything (blank url and file_path, not Schedules
+    # Direct, see _never_fetches_q). A source that does is fed from somewhere else, even when its rows carry
     # our marker (a user who added this server's own XMLTV output as a
     # source), so it is never ours to empty or delete.
     foreign_epg_sources = list(
