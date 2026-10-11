@@ -30,6 +30,7 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNNER = os.path.join(HERE, "orm_harness", "run_scenarios.py")
 NO_CACHE_MESSAGE = "Cache empty; run refresh first."
+OUTAGE_MESSAGE_PART = "could not rule out a source outage, so no channels were removed"
 
 
 # --------------------------------------------------------------- helpers ---
@@ -104,12 +105,15 @@ def _row(cfbd_id, start, channel_id, home="Georgia", away="Alabama"):
 
 
 def _write_cache(env, games, refreshed_at=None, **extra):
+    """A cache as a current writer leaves it, one that knew the slate it
+    replaced (the reaper, or a refresh that read the previous cache)."""
     cache = {
         "refreshed_at": (refreshed_at or _now()).isoformat(),
         "matched_at": (refreshed_at or _now()).isoformat(),
         "summary": [],
         "games": games,
         "bench": [],
+        "empty_slate_known": True,
     }
     cache.update(extra)
     with open(env.plugin.CACHE_PATH, "w", encoding="utf-8") as f:
@@ -170,6 +174,24 @@ def scenario_reaping_the_last_game_removes_its_channel(env):
     # Source side untouched: the user's channel and its stream link.
     assert m.Channel.objects.filter(pk=user_ch.pk).exists()
     assert list(m.ChannelStream.objects.filter(channel=user_ch).values_list("stream_id", flat=True)) == [stream.id]
+
+
+def scenario_reaper_vouches_for_the_slate_it_empties(env):
+    """A refresh that could not vouch for an empty result still writes a
+    NON-empty slate as usual (it is published either way), marked
+    `empty_slate_known: false`. The reaper emptying that slate knows exactly
+    what it removed, finished games, so its empty result must be published."""
+    user_ch, _ = _seed_source_channel(env)
+    _write_cache(env, [_row(401, _now() - timedelta(hours=10), user_ch.id)],
+                 empty_slate_known=False)
+    assert env.plugin._action_apply(_settings())["status"] == "ok"
+    assert set(_owned(env)) == {"ranked_matchups:CFB:401"}
+
+    result = env.plugin._action_reap(_settings())
+
+    assert result["status"] == "ok" and result["reaped"] == 1, result
+    assert _owned(env) == {}
+    assert _read_cache(env)["empty_slate_known"] is True
 
 
 def scenario_a_second_reap_after_the_last_game_is_a_no_op(env):
@@ -283,12 +305,12 @@ def scenario_outage_after_the_cache_was_lost_removes_nothing(env):
 
     with _sources(env, _StubSource(error=RuntimeError("CFBD 525"))):
         assert env.plugin._action_refresh(_settings())["status"] == "ok"
-    assert _read_cache(env)["prior_slate_unknown"] is True
+    assert _read_cache(env)["empty_slate_known"] is False
 
     result = env.plugin._action_apply(_settings())
 
     assert result["status"] == "ok", result
-    assert "no channels were removed" in result["message"], result
+    assert OUTAGE_MESSAGE_PART in result["message"], result
     assert set(_owned(env)) == set(owned)
 
     # The source recovers: a normal cache again, and apply publishes it, which
@@ -296,9 +318,27 @@ def scenario_outage_after_the_cache_was_lost_removes_nothing(env):
     other = _game_row("Texas", "Oklahoma", _now() + timedelta(days=1))
     with _sources(env, _StubSource([other])):
         assert env.plugin._action_refresh(_settings())["status"] == "ok"
-    assert "prior_slate_unknown" not in _read_cache(env)
+    assert _read_cache(env)["empty_slate_known"] is True
     assert env.plugin._action_apply(_settings())["status"] == "ok"
     assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
+def scenario_lost_cache_then_a_healthy_empty_refresh_clears_the_guide(env):
+    """The lost-cache guard must not stick on a HEALTHY empty result: every
+    source answered, Favorites-only dropped what they listed, so nothing an
+    outage could have dropped exists and the old channels go."""
+    user_ch, _ = _seed_source_channel(env)
+    settings = _settings(favorites="Georgia", favorites_only="strict")
+    _publish(env, [_row(402, _now() + timedelta(days=1), user_ch.id, home="Georgia", away="Auburn")], settings)
+    os.remove(env.plugin.CACHE_PATH)
+
+    with _sources(env, _StubSource([_game_row("Texas", "Oklahoma", _now() + timedelta(days=1))])):
+        assert env.plugin._action_refresh(settings)["status"] == "ok"
+    cache = _read_cache(env)
+    assert cache["games"] == [] and cache["empty_slate_known"] is True, cache
+
+    assert env.plugin._action_apply(settings)["status"] == "ok"
+    assert _owned(env) == {}
 
 
 def scenario_empty_slate_keeps_a_channel_that_is_recording(env):
@@ -401,7 +441,7 @@ def scenario_empty_slate_dry_run_deletes_nothing(env):
     assert m.EPGData.objects.filter(tvg_id="ranked_matchups:CFB:401").exists()
 
 
-def _assert_no_cache_touches_nothing(env, write_bad_cache):
+def _assert_no_cache_touches_nothing(env, write_bad_cache, message=NO_CACHE_MESSAGE):
     m = env.m
     user_ch, _ = _seed_source_channel(env)
     owned = _publish(env, [_row(401, _now() + timedelta(days=1), user_ch.id)])
@@ -410,7 +450,7 @@ def _assert_no_cache_touches_nothing(env, write_bad_cache):
         result = env.plugin._action_apply(_settings())
     except Exception as e:  # the pre-fix behaviour for a wrong-shaped file
         raise AssertionError(f"apply crashed on an unusable cache: {e!r}") from e
-    assert result == {"status": "ok", "message": NO_CACHE_MESSAGE}, result
+    assert result["status"] == "ok" and message in result["message"], result
     assert set(_owned(env)) == set(owned)
     assert m.ProgramData.objects.filter(tvg_id="ranked_matchups:CFB:401").exists()
 
@@ -442,9 +482,6 @@ def scenario_non_object_cache_touches_nothing(env):
 
 
 def scenario_cache_without_refreshed_at_is_not_a_slate(env):
-    """refreshed_at is the only thing separating "a refresh left no games" from
-    "no cache": every writer has stamped it since v0.1.0. An empty games list
-    without it is treated as no cache."""
     _assert_no_cache_touches_nothing(env, _writes(b'{"games": []}'))
 
 
@@ -462,14 +499,25 @@ def scenario_cache_without_games_is_not_a_slate(env):
     )
 
 
-def scenario_cache_with_unparseable_refreshed_at_is_not_a_slate(env):
+def scenario_empty_cache_from_before_the_marker_is_not_a_slate(env):
+    """A pre-#241 empty cache carries a stamp but no `empty_slate_known`, and
+    nothing says whether its refresh could see what was on air (an outage after
+    the cache was lost writes exactly this). The old apply left the guide alone
+    for it, and so must the first apply after the upgrade."""
     _assert_no_cache_touches_nothing(
-        env, _writes(b'{"games": [], "refreshed_at": "not-a-date"}'),
+        env,
+        _writes(b'{"games": [], "refreshed_at": "2026-10-11T12:00:00+00:00", "summary": []}'),
+        message=OUTAGE_MESSAGE_PART,
     )
 
 
-def scenario_cache_with_numeric_refreshed_at_is_not_a_slate(env):
-    _assert_no_cache_touches_nothing(env, _writes(b'{"games": [], "refreshed_at": 5}'))
+def scenario_marker_must_be_true_not_truthy(env):
+    _assert_no_cache_touches_nothing(
+        env,
+        _writes(b'{"games": [], "refreshed_at": "2026-10-11T12:00:00+00:00", '
+                b'"empty_slate_known": "false"}'),
+        message=OUTAGE_MESSAGE_PART,
+    )
 
 
 # --------------------------------------------------------- pytest driver ---

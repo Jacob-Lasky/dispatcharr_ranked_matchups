@@ -445,14 +445,19 @@ the archive re-home, ChannelStream/EPGData cleanup, and signal-safe queryset
 deletes. Do NOT add a second deletion path; it would be a copy that has to
 stay in agreement with that one.
 
-**An empty `games` list is a slate, not a missing cache (#241).** Reaping the
-last game, or a refresh that finds nothing to air, leaves `games == []` with
-`refreshed_at` stamped, and apply must run on it: the stale reap, orphan-EPG
-sweep, recording stops file and auto-record state all depend on it. Apply
-returns "Cache empty; run refresh first." only when `_cache_has_slate` says
-there is no slate: `_read_cache`'s shape for a missing, unparseable or
-non-object file, `games` not a list, or an empty list without a parseable
-`refreshed_at`. A file nobody could have written never reaps the group.
+**An empty `games` list can be a slate, and apply must publish it (#241).**
+Reaping the last game, or a refresh that finds nothing to air, leaves
+`games == []`, and the stale reap, orphan-EPG sweep, recording stops file and
+auto-record state all depend on apply running on it. But publishing an empty
+slate deletes every channel the plugin owns, and the only defence against
+doing that during a source outage is `_rows_to_hold` carrying the previous
+games forward, which needs the previous cache. So an empty list counts only
+when its writer set `empty_slate_known: true` (`_cache_has_slate`): the reaper
+always does, a refresh does when it read the previous slate or every source
+answered with games (`_slate_known`). Refused: a missing, unreadable or
+non-object file, `games` not a list, a pre-#241 empty cache, and an empty
+refresh after cache.json was lost (the plugin folder is replaced on upgrade)
+with a source failing. Apply's toast says which.
 
 ## Known gotchas / lessons learned
 
