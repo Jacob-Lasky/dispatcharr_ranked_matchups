@@ -19,6 +19,7 @@ temp directory, and signals failure by raising. Writes `out.json` as
 Django or the plugin prints can be mistaken for the result.
 """
 
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -32,17 +33,19 @@ HARNESS_DIR = os.path.dirname(os.path.abspath(__file__))
 TESTS_DIR = os.path.dirname(HARNESS_DIR)
 REPO_ROOT = os.path.dirname(TESTS_DIR)
 
-# Every file plugin.py would write next to itself. Each is redirected into the
-# scenario's temp dir; anything missed here would land in the repo checkout,
-# which the before/after listing in main() turns into a failure instead of a
-# stray file.
-_PLUGIN_PATH_ATTRS = (
-    "CACHE_PATH",
-    "RECORDING_STATE_PATH",
-    "RECORDING_STOPS_PATH",
-    "LLM_DESCRIPTIONS_CACHE_PATH",
-    "SPORTSDB_THUMB_CACHE_PATH",
-    "GAMETHUMBS_CACHE_PATH",
+# Every file the plugin writes next to its own code, as (module, attribute).
+# Each is redirected into the scenario's temp dir. Anything missed here lands
+# in the repo checkout, which the before/after snapshot in main() turns into a
+# failure rather than a stray or silently overwritten file.
+_REDIRECTED_PATHS = (
+    ("plugin", "CACHE_PATH"),
+    ("plugin", "RECORDING_STATE_PATH"),
+    ("plugin", "RECORDING_STOPS_PATH"),
+    ("plugin", "LLM_DESCRIPTIONS_CACHE_PATH"),
+    ("plugin", "SPORTSDB_THUMB_CACHE_PATH"),
+    ("plugin", "GAMETHUMBS_CACHE_PATH"),
+    ("sources._odds", "CACHE_PATH"),
+    ("tasks", "LAST_RUN_PATH"),
 )
 
 
@@ -70,8 +73,12 @@ def _load_plugin():
     conftest = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(conftest)
     plugin = conftest._load_plugin_module()
-    logos = importlib.import_module(f"{conftest.PKG_NAME}.logos")
-    return plugin, logos
+    pkg = conftest.PKG_NAME
+    redirects = [
+        (plugin if mod == "plugin" else importlib.import_module(f"{pkg}.{mod}"), attr)
+        for mod, attr in _REDIRECTED_PATHS
+    ]
+    return plugin, importlib.import_module(f"{pkg}.logos"), redirects
 
 
 def _models():
@@ -88,28 +95,39 @@ def _fresh_schema(create: bool):
             (editor.create_model if create else editor.delete_model)(model)
 
 
-def _repo_listing():
-    return sorted(os.listdir(REPO_ROOT))
+def _repo_snapshot():
+    """Top-level entries of the checkout with each file's content hash: the
+    plugin only ever writes beside its own code, and a NAME listing alone would
+    miss it overwriting a gitignored file that was already there."""
+    snap = {}
+    for name in os.listdir(REPO_ROOT):
+        path = os.path.join(REPO_ROOT, name)
+        if os.path.isfile(path):
+            with open(path, "rb") as f:
+                snap[name] = hashlib.sha256(f.read()).hexdigest()
+        else:
+            snap[name] = "dir"
+    return snap
 
 
 def main(argv):
     out_path, test_file, names = argv[0], argv[1], argv[2:]
     _setup_django()
-    plugin, logos = _load_plugin()
+    plugin, logos, redirects = _load_plugin()
 
     spec = importlib.util.spec_from_file_location("_orm_harness_scenarios", test_file)
     scenarios = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(scenarios)
 
-    before = _repo_listing()
+    before = _repo_snapshot()
     results = {}
     for name in names:
         tmp = tempfile.mkdtemp(prefix="orm_harness_")
         logo_dir = os.path.join(tmp, "logos")
-        saved = {a: getattr(plugin, a) for a in _PLUGIN_PATH_ATTRS}
+        saved = [(mod, attr, getattr(mod, attr)) for mod, attr in redirects]
         saved_logo = (logos.LOGO_DIR, logos.sweep_stale_logo_files.__defaults__)
-        for attr in _PLUGIN_PATH_ATTRS:
-            setattr(plugin, attr, os.path.join(tmp, os.path.basename(saved[attr])))
+        for mod, attr, original in saved:
+            setattr(mod, attr, os.path.join(tmp, os.path.basename(original)))
         # sweep_stale_logo_files binds LOGO_DIR as a DEFAULT at def time, so
         # patching the module constant alone would still sweep /data/logos.
         logos.LOGO_DIR = logo_dir
@@ -124,15 +142,15 @@ def main(argv):
             results[name] = traceback.format_exc()
         finally:
             _fresh_schema(create=False)
-            for attr, val in saved.items():
-                setattr(plugin, attr, val)
+            for mod, attr, original in saved:
+                setattr(mod, attr, original)
             logos.LOGO_DIR, logos.sweep_stale_logo_files.__defaults__ = saved_logo
 
-    after = _repo_listing()
+    after = _repo_snapshot()
     if after != before:
-        stray = sorted(set(after) - set(before))
+        changed = sorted(n for n in set(before) | set(after) if before.get(n) != after.get(n))
         for name in results:
-            results[name] = results[name] or f"harness wrote into the repo: {stray}"
+            results[name] = results[name] or f"harness wrote into the repo: {changed}"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(results, f)
 

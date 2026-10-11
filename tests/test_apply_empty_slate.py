@@ -271,6 +271,36 @@ def scenario_source_outage_does_not_empty_the_slate(env):
     assert set(_owned(env)) == set(owned)
 
 
+def scenario_outage_after_the_cache_was_lost_removes_nothing(env):
+    """The case the #240 hold cannot cover: cache.json is gone (the plugin
+    folder was replaced on upgrade) and the first refresh hits an outage. With
+    no previous games to carry it writes `games == []`, and publishing that
+    would delete a live channel. It is marked instead, and apply leaves the
+    guide alone until a refresh with games writes a normal cache."""
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    os.remove(env.plugin.CACHE_PATH)
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525"))):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    assert _read_cache(env)["prior_slate_unknown"] is True
+
+    result = env.plugin._action_apply(_settings())
+
+    assert result["status"] == "ok", result
+    assert "no channels were removed" in result["message"], result
+    assert set(_owned(env)) == set(owned)
+
+    # The source recovers: a normal cache again, and apply publishes it, which
+    # takes the game it no longer lists off air as usual.
+    other = _game_row("Texas", "Oklahoma", _now() + timedelta(days=1))
+    with _sources(env, _StubSource([other])):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    assert "prior_slate_unknown" not in _read_cache(env)
+    assert env.plugin._action_apply(_settings())["status"] == "ok"
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
 def scenario_empty_slate_keeps_a_channel_that_is_recording(env):
     """Zero games must not change the recording rules (#146): a channel with a
     recording in progress is kept at its own number, and a channel whose

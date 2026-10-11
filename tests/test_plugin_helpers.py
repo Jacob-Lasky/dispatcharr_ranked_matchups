@@ -524,11 +524,20 @@ class TestEmptyRefreshResult:
     def test_returns_ok_and_persists_empty_cache(self, plugin, monkeypatch):
         captured = {}
         monkeypatch.setattr(plugin, "_write_cache", lambda c: captured.update(c))
-        out = plugin._empty_refresh_result("nothing here", ["NFL: 0 games"])
+        out = plugin._empty_refresh_result("nothing here", ["NFL: 0 games"], True)
         assert out == {"status": "ok", "message": "nothing here"}
         assert captured["games"] == []
         assert captured["summary"] == ["NFL: 0 games"]
         assert "refreshed_at" in captured
+        assert "prior_slate_unknown" not in captured
+
+    def test_marks_a_cache_written_without_the_previous_slate(self, plugin, monkeypatch):
+        """#241: apply must not publish this one; see _cache_has_slate."""
+        captured = {}
+        monkeypatch.setattr(plugin, "_write_cache", lambda c: captured.update(c))
+        plugin._empty_refresh_result("nothing here", [], False)
+        assert captured["prior_slate_unknown"] is True
+        assert plugin._cache_has_slate(captured) is False
 
 
 class TestBuildMarkerKey:

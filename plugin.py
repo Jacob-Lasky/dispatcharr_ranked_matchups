@@ -2137,6 +2137,11 @@ def _read_cache() -> Dict[str, Any]:
     return {"games": [], "refreshed_at": None}
 
 
+# Set on an empty cache written by a refresh that could not read the previous
+# slate (see _empty_refresh_result). Read by _cache_has_slate.
+_PRIOR_SLATE_UNKNOWN_KEY = "prior_slate_unknown"
+
+
 def _cache_has_slate(cache: Dict[str, Any]) -> bool:
     """True when `cache` is a slate apply may publish, EVEN AN EMPTY ONE (#241).
 
@@ -2144,16 +2149,20 @@ def _cache_has_slate(cache: Dict[str, Any]) -> bool:
     `refreshed_at`; every writer (refresh, `_empty_refresh_result`, the
     reaper) has done both since v0.1.0. `_read_cache`'s missing / unreadable
     shape has no stamp, and a damaged file (`games` not a list, a stamp that is
-    not a timestamp) proves nothing either. DO NOT relax this to "games is a
-    list": apply on an empty slate deletes every channel the plugin owns, so
-    the empty case must be one a writer actually produced. A non-empty list is
-    a slate whatever its stamp says, as it always was.
+    not a timestamp) proves nothing either. Nor does an empty refresh that
+    could not see the previous slate (_PRIOR_SLATE_UNKNOWN_KEY): it cannot
+    tell an outage from an empty week. DO NOT relax this to "games is a list":
+    apply on an empty slate deletes every channel the plugin owns, so the
+    empty case must be one a writer produced knowing what it replaced. A
+    non-empty list is a slate whatever its stamp says, as it always was.
     """
     games = cache.get("games")
     if not isinstance(games, list):
         return False
     if games:
         return True
+    if cache.get(_PRIOR_SLATE_UNKNOWN_KEY):
+        return False
     stamp = cache.get("refreshed_at")
     return isinstance(stamp, str) and parse_iso_utc(stamp) is not None
 
@@ -2454,19 +2463,33 @@ _NON_POSTSEASON_STAGES = frozenset({
 })
 
 
-def _empty_refresh_result(msg: str, src_summary: List[str]) -> Dict[str, Any]:
+def _empty_refresh_result(msg: str, src_summary: List[str], prior_known: bool) -> Dict[str, Any]:
     """Log `msg`, persist an empty cache (so a stale prior cache doesn't keep
     serving games that no longer pass the curator), and return the action's
     ok-with-message payload. Shared by the no-games-fetched and
-    everything-filtered-out exits so the two can't drift."""
+    everything-filtered-out exits so the two can't drift.
+
+    `prior_known` is whether this refresh could read the previous slate. Since
+    #241 apply publishes an empty slate, deleting every channel it no longer
+    lists, and the only thing standing between a source OUTAGE and that
+    deletion is _rows_to_hold carrying the previous games forward. With no
+    previous slate to read (cache.json missing, e.g. after the plugin folder
+    was replaced on upgrade, or damaged) there is nothing to carry, so an
+    outage would come back as `games == []`. Mark that cache so apply does not
+    treat it as a slate (_cache_has_slate); the next refresh with games clears
+    the mark by writing a normal cache.
+    """
     # WARNING, not info: an empty slate is either a real off-day or upstream
     # breakage, and in the background-run log the two must not look routine.
     logger.warning("[ranked_matchups] %s", msg)
-    _write_cache({
+    cache = {
         "games": [],
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
         "summary": src_summary,
-    })
+    }
+    if not prior_known:
+        cache[_PRIOR_SLATE_UNKNOWN_KEY] = True
+    _write_cache(cache)
     return {"status": "ok", "message": msg}
 
 
@@ -3132,8 +3155,10 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # air (#240). See _rows_to_hold. `held` is keyed by marker; the ones this
     # fetch still lists are protected from the cap below, the rest are carried
     # over from the previous cache and re-matched after the main match.
+    prior_cache = _read_cache()
+    prior_known = _cache_has_slate(prior_cache)
     held = _rows_to_hold(
-        _read_cache().get("games") or [],
+        prior_cache.get("games") or [],
         datetime.now(timezone.utc),
         _reap_settings(settings),
         settings,
@@ -3164,6 +3189,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         return _empty_refresh_result(
             "No games found in lookahead window. " + " | ".join(src_summary),
             src_summary,
+            prior_known,
         )
 
     # 1a. Series dedup. Best-of-N playoff sources (NHL, NBA, MLB, NCAA
@@ -3220,6 +3246,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 "Favorites-only filter dropped every game in the lookahead "
                 "window. " + " | ".join(src_summary),
                 src_summary,
+                prior_known,
             )
 
     # 2. Score. The Lahvička Monte Carlo importance signal covers three
@@ -5307,6 +5334,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # on it left the last finished game's channel on air until the next
     # refresh that produced games.
     if not _cache_has_slate(cache):
+        if cache.get(_PRIOR_SLATE_UNKNOWN_KEY):
+            return {"status": "ok", "message": (
+                "The last refresh found no games and could not read the list "
+                "before it, so no channels were removed. They are rechecked on "
+                "the next refresh that finds games."
+            )}
         return {"status": "ok", "message": "Cache empty; run refresh first."}
     games, dup_dropped = _unique_by_marker(cache.get("games", []))
     if dup_dropped:
