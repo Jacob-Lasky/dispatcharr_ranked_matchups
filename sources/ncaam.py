@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import GameRow, report_lost_day_range
+from .base import GameRow, RankingsUnavailable, report_lost_day_range
 from .points_based import PointsBasedSportSource
 from ._espn import upcoming_window
 from .._util import parse_iso_utc
@@ -75,6 +75,9 @@ class NcaamSource(PointsBasedSportSource):
         self.api_key = api_key
         self.poll_name = poll_name
         self._headers = {"Authorization": f"Bearer {api_key}"}
+        # (season, poll or None) once read, or (season, RankingsUnavailable).
+        # See _poll.
+        self._poll_memo: Optional[tuple] = None
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         if not self.api_key:
@@ -82,11 +85,12 @@ class NcaamSource(PointsBasedSportSource):
             return []
 
         season_year = self._current_season_year()
-        # Raises when the request FAILS: that is an outage the refresh holds
-        # the previous games for (#240), where None, no poll published yet,
-        # is a real preseason and stays quiet. DO NOT catch it back into
-        # None: it was logged as "offseason" and the slate zeroed silently.
-        rank_by_team = self._fetch_rankings(season_year, raise_on_failure=True)
+        # Raises RankingsUnavailable when the request FAILS: that is an outage
+        # the refresh holds the previous games for (#240), where None, no poll
+        # published yet, is a real preseason and stays quiet. DO NOT catch it
+        # back into None: it was logged as "offseason" and the slate zeroed
+        # silently.
+        rank_by_team = self._poll(season_year)
         if rank_by_team is None:
             logger.info("[ncaam] no %s poll published for %d yet (preseason / "
                         "offseason); skipping", self.poll_name, season_year)
@@ -152,14 +156,34 @@ class NcaamSource(PointsBasedSportSource):
         now = datetime.now(timezone.utc)
         return now.year + 1 if now.month >= 11 else now.year
 
-    def _fetch_rankings(
-        self, season: int, raise_on_failure: bool = False,
-    ) -> Optional[Dict[str, int]]:
+    def _poll(self, season: int) -> Optional[Dict[str, int]]:
+        """`_fetch_rankings(season)`, read ONCE per source (#283).
+
+        `fetch_upcoming` ranks its rows with it and `_fetch_full_season_games`
+        picks the simulated population from it, so the two must agree: a poll
+        that answered for one read and failed for the other ranked the slate
+        against one poll and simulated a population of NONE (zero importance
+        for every game). One read, kept on the instance, and a failure kept
+        too: the season walk re-raises it rather than asking again. In a
+        refresh the walk never reaches a failed poll anyway, because the
+        source raised from `fetch_upcoming` and none of its games is scored.
+        """
+        if self._poll_memo is None or self._poll_memo[0] != season:
+            try:
+                self._poll_memo = (season, self._fetch_rankings(season))
+            except RankingsUnavailable as e:
+                self._poll_memo = (season, e)
+        result = self._poll_memo[1]
+        if isinstance(result, RankingsUnavailable):
+            raise result
+        return result
+
+    def _fetch_rankings(self, season: int) -> Optional[Dict[str, int]]:
         """Return {team_name → rank} for the latest week of the configured
         poll. None if no poll has been published yet (preseason, before
-        mid-October's preseason AP poll), and None too for a FAILED request
-        unless `raise_on_failure`, which `fetch_upcoming` sets so a failure is
-        not read as a preseason (see there)."""
+        mid-October's preseason AP poll). RAISES `RankingsUnavailable` for a
+        failed request or an answer that is not a list of poll rows, which is
+        not a preseason (#283). Read through `_poll`."""
         try:
             r = requests.get(
                 f"{CBB_BASE}/rankings",
@@ -177,9 +201,7 @@ class NcaamSource(PointsBasedSportSource):
                 raise ValueError(f"/rankings answered {str(data)[:80]!r}, not a list of poll rows")
         except Exception as e:
             logger.error("[ncaam] /rankings failed: %s", e)
-            if raise_on_failure:
-                raise
-            return None
+            raise RankingsUnavailable(f"/rankings failed: {e}") from e
         if not data:
             return None
         # Flat list: filter by pollType, then take the latest week.
@@ -284,7 +306,10 @@ class NcaamSource(PointsBasedSportSource):
         if not self.api_key:
             return []
         season = self._current_season_year()
-        ranked = self._fetch_rankings(season)
+        # The poll `fetch_upcoming` ranked the slate with (`_poll`); a failed
+        # one raises here too, so the importance call fails (and is logged)
+        # instead of simulating an empty population as zero importance (#283).
+        ranked = self._poll(season)
         if not ranked:
             # No AP poll yet (preseason). Importance signal returns 0
             # via terminal_outcomes' empty dict: graceful no-op.

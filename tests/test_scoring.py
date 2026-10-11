@@ -487,10 +487,12 @@ class TestPollSourcesDeclareTheirField:
         from dispatcharr_ranked_matchups.sources.base import SportSource
         listed = {type(src).__name__ for src in self._poll_sources().values()}
         readers, emitters = set(), set()
-        # `rank_home=<anything but None>` in the fetch: the class EMITS a rank,
-        # however it got one (a module-level helper included). A league
-        # source emits one too, but stamps its exhaustive standings table.
-        emits = re.compile(r"\brank_(?:home|away)\s*=\s*(?!None\b)")
+        # `rank_home=<anything but None>` in the fetch, or the rows passed
+        # through `base.attach_poll_ranks` (which stamps the poll's ranks onto
+        # rows built unranked, #283): the class EMITS a rank, however it got
+        # one (a module-level helper included). A league source emits one
+        # too, but stamps its exhaustive standings table.
+        emits = re.compile(r"\brank_(?:home|away)\s*=\s*(?!None\b)|\battach_poll_ranks\(")
         for info in pkgutil.iter_modules(pkg.__path__):
             mod = importlib.import_module(f"{pkg.__name__}.{info.name}")
             for name, cls in inspect.getmembers(mod, inspect.isclass):

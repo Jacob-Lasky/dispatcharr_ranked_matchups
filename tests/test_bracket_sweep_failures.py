@@ -244,12 +244,29 @@ def test_a_sweep_that_recovers_is_not_reported(monkeypatch):
 
 
 def test_an_empty_day_is_an_answer_not_a_failure(monkeypatch):
-    """`{}` (a day with nothing on it) was skipped before and still is."""
-    monkeypatch.setattr(nba, "_http_get", lambda *a, **kw: {})
+    """Guard: `{"events": []}` is what ESPN answers for a day with nothing on
+    it (measured 2026-10-11 on NBA, NFL, NHL and the FA Cup, among others),
+    and the sweep reads it as played-and-empty."""
+    monkeypatch.setattr(nba, "_http_get", lambda *a, **kw: {"events": []})
     src = nba.NbaPlayoffSource(season_end_year=2026)
     assert src._fetch_bracket_games() == []
     assert src._bracket_games_cache == []
     assert src.bracket_fetch_failure() is None
+
+
+@pytest.mark.parametrize("body", [{}, {"code": 404}, {"events": None}])
+def test_a_page_without_an_events_list_is_a_failed_day(monkeypatch, body):
+    """WITNESS (#282): a 200 body with no `events` list is an error page or a
+    cut-off answer, never an empty day; ESPN's error bodies carry `code` and
+    no list. It was cached as a bracket with no games. Now the sweep fails on
+    its first day, is not cached, and gives up after its bounded retry."""
+    monkeypatch.setattr(nba, "_http_get", lambda *a, **kw: body)
+    src = nba.NbaPlayoffSource(season_end_year=2026)
+    assert src._fetch_bracket_games() == []
+    assert src._bracket_games_cache is None
+    src._fetch_bracket_games()
+    failure = src.bracket_fetch_failure()
+    assert isinstance(failure, str) and "did not answer" in failure
 
 
 # ---------------------------------------------------------------------------

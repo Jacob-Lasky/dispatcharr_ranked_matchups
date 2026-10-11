@@ -32,11 +32,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow
+from .base import GameRow, attach_poll_ranks
 from .points_based import PointsBasedSportSource
 from .._util import http_get_json
 from ._espn import (
     extract_espn_scoreboard_event,
+    fetch_espn_poll,
     fetch_scoreboard_days,
     fetch_season_type_windows,
     sweep_upcoming_scoreboard,
@@ -234,8 +235,9 @@ class NcaaSoccerSource(PointsBasedSportSource):
         """Upcoming regular-season games, through the shared ESPN upcoming
         sweep (Eastern-bucket lookback, FINISHED drop, stale floor, id
         dedupe: see `_espn.sweep_upcoming_scoreboard`), cut at the end of
-        the regular season (`_regular_season_cutoff`)."""
-        rankings = self._fetch_rankings()
+        the regular season (`_regular_season_cutoff`). The poll is read
+        after the sweep, only when it kept a game (`base.attach_poll_ranks`);
+        a failed one raises (#283)."""
         cutoff = self._regular_season_cutoff()
         recs = sweep_upcoming_scoreboard(
             slug=self._espn_slug,
@@ -263,8 +265,8 @@ class NcaaSoccerSource(PointsBasedSportSource):
                 sport_label=self.sport_label,
                 home=home,
                 away=away,
-                rank_home=rankings.get(home),
-                rank_away=rankings.get(away),
+                rank_home=None,
+                rank_away=None,
                 start_time=start,
                 extra={
                     "espn_event_id": eid,
@@ -273,7 +275,7 @@ class NcaaSoccerSource(PointsBasedSportSource):
                     "fd_competition_code": self.league_context_code,
                 },
             ))
-        return out
+        return attach_poll_ranks(out, self._fetch_rankings)
 
     # ---------- _fetch_full_season_games ----------
 
@@ -319,24 +321,12 @@ class NcaaSoccerSource(PointsBasedSportSource):
     # ---------- Rankings ----------
 
     def _fetch_rankings(self) -> Dict[str, int]:
-        data = _http_get(f"{ESPN_BASE}/{self._espn_slug}/rankings")
-        if not data:
-            return {}
-        ranks: Dict[str, int] = {}
-        polls = data.get("rankings") or []
-        if not polls:
-            return ranks
-        poll = polls[0]  # United Soccer Coaches Top 25 (only poll exposed)
-        for r in poll.get("ranks") or []:
-            team_obj = r.get("team") or {}
-            name = _team_canonical_name(team_obj)
-            try:
-                rank = int(r.get("current") or 0)
-            except (TypeError, ValueError):
-                continue
-            if name and rank > 0:
-                ranks[name] = rank
-        return ranks
+        """{school: rank} from the United Soccer Coaches Top 25, the one poll
+        ESPN exposes per gender. Raises `RankingsUnavailable` when it did not
+        answer (#283; see `_espn.fetch_espn_poll`)."""
+        return fetch_espn_poll(
+            _http_get, f"{ESPN_BASE}/{self._espn_slug}/rankings", _team_canonical_name,
+        )
 
     # ---------- sample_result (allows ties: draws are legitimate) ----------
 

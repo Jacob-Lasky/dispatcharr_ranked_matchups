@@ -167,3 +167,95 @@ class TestBoxingParse:
 
         monkeypatch.setattr(boxing_mod.requests, "get", lambda *a, **kw: ErrResp())
         assert BoxingSource(api_key="x").fetch_upcoming() == []
+
+
+class TestBoxingSchedulePages:
+    """The schedule is paged (#284): boxing-data.com documents `page_size`
+    (default 25) and `page_num`, and answers with `pagination: {page, items,
+    total_pages, total_items}` (the capture above). One page of 25 used to be
+    all that was read. Paging is NOT live-measured (no key was available), so
+    an answer that does not follow the documented contract is read as
+    truncated: its cards are kept and the schedule's days reported lost."""
+
+    @staticmethod
+    def _cards(first, n):
+        return [{"id": f"c{i}", "title": f"Fighter{i} vs. Rival{i}: Card",
+                 "date": "2026-07-11T20:00:00"} for i in range(first, first + n)]
+
+    @staticmethod
+    def _page(cards, page, total_pages, total_items):
+        return {"pagination": {"page": page, "items": len(cards), "total_pages": total_pages,
+                               "total_items": total_items},
+                "error": None, "data": cards}
+
+    def _run(self, monkeypatch, pages):
+        """Serve `pages` by `page_num` (absent = 1): a body, or None for a
+        failed request. Returns (rows, lost days, page params asked)."""
+        from dispatcharr_ranked_matchups.sources.base import recording_lost_days
+        asked = []
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            asked.append(dict(params))
+            body = pages.get(params.get("page_num", 1))
+            if body is None:
+                return type("R", (), {"status_code": 503, "json": lambda self: None})()
+            return FakeResp(body)
+
+        monkeypatch.setattr(boxing_mod.requests, "get", fake_get)
+        with recording_lost_days() as lost:
+            rows = BoxingSource(api_key="x").fetch_upcoming(days_ahead=7)
+        return rows, lost, asked
+
+    def test_every_page_is_read(self, monkeypatch):
+        """WITNESS: 28 cards over two pages. Only the first 25 came back, with
+        nothing logged; the 26th to 28th were dropped from the slate."""
+        rows, lost, asked = self._run(monkeypatch, {
+            1: self._page(self._cards(0, 25), 1, 2, 28),
+            2: self._page(self._cards(25, 3), 2, 2, 28),
+        })
+        assert len(rows) == 28
+        assert [a.get("page_num") for a in asked] == [None, 2]
+        assert all(a["page_size"] == 25 for a in asked)
+        assert lost == set()
+
+    def test_a_failed_later_page_keeps_the_cards_and_reports_the_days(self, monkeypatch):
+        """WITNESS: page 2 failed. The page-1 cards are published, and the
+        schedule's days are reported lost so the refresh holds what it had."""
+        rows, lost, _asked = self._run(monkeypatch, {
+            1: self._page(self._cards(0, 25), 1, 2, 28),
+            2: None,
+        })
+        assert len(rows) == 25
+        assert len(lost) == 8   # today-UTC through today+7
+
+    def test_a_full_page_without_usable_paging_is_truncated(self, monkeypatch):
+        """WITNESS: a full page that cannot say whether more follow (no
+        `pagination`) read as the whole schedule."""
+        body = self._page(self._cards(0, 25), 1, 1, 25)
+        del body["pagination"]
+        rows, lost, asked = self._run(monkeypatch, {1: body})
+        assert len(rows) == 25 and len(asked) == 1
+        assert len(lost) == 8
+
+    def test_a_server_ignoring_page_num_is_truncated_not_duplicated(self, monkeypatch):
+        """WITNESS: asked for page 2, the API answers page 1 again (as one
+        that ignored `page_num` would). Its cards are not added twice, and
+        the schedule is reported, since page 2 was never really read."""
+        page1 = self._page(self._cards(0, 25), 1, 2, 28)
+        rows, lost, _asked = self._run(monkeypatch, {1: page1, 2: page1})
+        assert len(rows) == 25
+        assert len(lost) == 8
+
+    def test_more_pages_than_the_cap_are_reported(self, monkeypatch):
+        cap = boxing_mod._MAX_PAGES
+        pages = {p: self._page(self._cards(25 * (p - 1), 25), p, cap + 1, 25 * (cap + 1))
+                 for p in range(1, cap + 2)}
+        rows, lost, asked = self._run(monkeypatch, pages)
+        assert len(asked) == cap and len(rows) == 25 * cap
+        assert len(lost) == 8
+
+    def test_one_short_page_is_the_whole_schedule(self, monkeypatch):
+        """Guard: the measured case. One request, as before, no `page_num`."""
+        rows, lost, asked = self._run(monkeypatch, {1: _SCHEDULE_PAYLOAD})
+        assert len(rows) == 2 and lost == set()
+        assert asked == [{"days": 7, "date_sort": "ASC", "page_size": 25}]

@@ -29,7 +29,11 @@ from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, T
 
 import requests
 
-from .base import GameRow, MatchResult, SoccerTeamRow, SportSource, report_lost_day_range
+from .base import (
+    GameRow, MatchResult, RankingsUnavailable, SoccerTeamRow, SportSource,
+    report_lost_day_range,
+)
+from ._espn import upcoming_window
 from .bracket import AggregateLegSource
 from ._odds import fetch_odds_events
 from .._util import (
@@ -270,16 +274,35 @@ _SEASON_FETCH_MAX_ATTEMPTS = 2
 
 # FD.org's /v4/matches endpoint caps each call's window at 10 days
 # (HTTP 400 "Specified period must not exceed 10 days"), counted as the
-# DIFFERENCE between the inclusive dates, so a chunk spans 11 calendar days:
-# measured 2026-10-11, dateFrom=2026-10-11&dateTo=2026-10-21 answered 200 and
-# ...&dateTo=2026-10-22 answered that 400. DO NOT "fix" a chunk down to 10
-# dates on the assumption that the cap counts days inclusively. The
-# per-competition /v4/competitions/<code>/matches endpoint, which the
-# tier-wide fetch replaced, did NOT have this cap. To preserve the
-# pre-refactor contract for plugin configs with lookahead_days > 10,
-# windows longer than this split into back-to-back chunks inside
-# _fetch_tier_fixtures.
+# DIFFERENCE between the dates: measured 2026-10-11,
+# dateFrom=2026-10-11&dateTo=2026-10-21 answered 200 and ...&dateTo=2026-10-22
+# answered that 400. The per-competition /v4/competitions/<code>/matches
+# endpoint, which the tier-wide fetch replaced, did NOT have this cap. To
+# preserve the pre-refactor contract for plugin configs with
+# lookahead_days > 10, windows longer than this split into back-to-back
+# chunks inside _fetch_tier_fixtures.
+#
+# AND `dateTo` IS AN EXCLUSIVE DAY BOUND (#285). FD files a match by its UTC
+# kickoff INSTANT, and a request covers dateFrom 00:00Z through dateTo 00:00Z:
+# measured 2026-10-11, dateFrom=2026-09-19&dateTo=2026-09-20 returned the 45
+# matches kicking off on the 19th (UTC) plus the one at exactly
+# 2026-09-20T00:00Z, and none of the 37 later that day, which
+# dateFrom=2026-09-20&dateTo=2026-09-21 returned; dateFrom=dateTo=2026-09-19
+# returned nothing at all, and `resultSet.last` read 2026-09-20 / 2026-10-11
+# for dateTo 2026-09-21 / 2026-10-12. So a chunk spans 10 UTC days, the next
+# starts ON the previous dateTo, and the window's request runs to the day
+# AFTER its last one. DO NOT go back to dateTo = last day and the next chunk
+# at dateTo + 1: that never asked for the window's last day, nor for the day
+# between two chunks (a whole matchday lost at every chunk boundary).
 _FD_TIER_MAX_WINDOW_DAYS = 10
+
+# Statuses of a match that is not going to be played at its listed time, so
+# not an upcoming game: FINISHED, POSTPONED and CANCELLED measured 2026-10-11
+# (a POSTPONED Brasileirão match still sat at its July slot in October, and a
+# CANCELLED La Liga match at its kickoff that day); AWARDED and SUSPENDED are
+# FD's other documented end states. TIMED, SCHEDULED and IN_PLAY (and FD's
+# PAUSED, EXTRA_TIME, PENALTY_SHOOTOUT) are upcoming or live and kept.
+_FD_OVER_STATUSES = frozenset({"FINISHED", "AWARDED", "CANCELLED", "POSTPONED", "SUSPENDED"})
 
 
 def _clear_fd_caches() -> None:
@@ -317,19 +340,32 @@ def season_fetch_failures() -> Dict[str, str]:
 
 
 def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dict]]:
-    """One or more /v4/matches calls covering [today, today+days_ahead].
-    Returns a dict keyed by competition code (PL, ELC, WC, etc.) with
-    the raw FD.org match dicts as values.
+    """The UPCOMING (or live) matches of every competition on the key's tier
+    over `_espn.upcoming_window(days_ahead)`, keyed by competition code (PL,
+    ELC, WC, etc.), as raw FD.org match dicts, from one or more /v4/matches
+    calls.
 
-    Windows longer than `_FD_TIER_MAX_WINDOW_DAYS` (10) are split into
-    back-to-back chunks because the endpoint rejects requests over 10
-    days with HTTP 400 ("Specified period must not exceed 10 days").
-    Each chunk's matches merge into the same `by_code` dict; the cache
-    stores the merged result keyed by the full requested window. The
-    per-competition /v4/competitions/<code>/matches endpoint does NOT
-    have this cap, so chunking preserves the contract callers had
-    before the tier-wide refactor (lookahead_days values > 10 were
-    valid).
+    The window is the one every upcoming sweep shares (#256, #285): from the
+    lookback day before today-UTC through `days_ahead` after it, keeping only
+    what `UpcomingWindow.admits` keeps (not over by `_FD_OVER_STATUSES`,
+    kicked off no more than `_espn.MAX_AGE_AFTER_KICKOFF` ago). FD buckets by
+    UTC instant, not US date, so the lookback day is not needed to find
+    tonight's late kickoffs before they start; it is what finds an
+    evening-Eastern match still being played after 00:00Z (one that kicked
+    off at 23:00Z yesterday), which starting at today-UTC could not see.
+    Admission also drops what the old today-UTC window returned anyway: a
+    match FINISHED or CANCELLED earlier today was published as upcoming.
+
+    The request runs from the window's first day to the day AFTER its last
+    (dateTo is exclusive; see `_FD_TIER_MAX_WINDOW_DAYS`), in chunks of at
+    most 10 days that each start on the previous chunk's dateTo. A match
+    kicking off exactly at a chunk boundary's 00:00Z is in both chunks, so
+    matches are deduped by id. Each chunk's matches merge into the same
+    `by_code` dict; the cache stores the merged result keyed by the full
+    requested window. The per-competition /v4/competitions/<code>/matches
+    endpoint does NOT have the 10-day cap, so chunking preserves the
+    contract callers had before the tier-wide refactor (lookahead_days
+    values > 10 were valid).
 
     Cache key includes the date window so a same-day refresh with a
     different lookahead_days setting refetches correctly.
@@ -345,11 +381,12 @@ def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dic
     inside its own lost-day record, and every one of them is missing those
     days. Without the report a competition that kept another chunk's games
     read the lost days as quiet ones, and the refresh dropped the games it
-    had published for them. Only the failed chunk's own days: a chunk that
-    answered vouches for its days. DO NOT go back to stopping at the first
-    failed chunk: the chunks after it would then be lost without any
-    request covering them, and reporting days no request covered holds
-    games the source never asked about.
+    had published for them. Only the failed chunk's own days, dateFrom
+    through the day before its dateTo: a chunk that answered vouches for its
+    days. DO NOT go back to stopping at the first failed chunk: the chunks
+    after it would then be lost without any request covering them, and
+    reporting days no request covered holds games the source never asked
+    about.
 
     A body without a `matches` list is a failure too: a successful answer
     always carries one, empty included (`{"filters": ..., "resultSet":
@@ -358,10 +395,9 @@ def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dic
     global _TIER_FIXTURES_CACHE
     if not fd_api_key:
         return {}
-    now = datetime.now(timezone.utc)
-    date_from = now.strftime("%Y-%m-%d")
-    date_to = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-    cache_key = (fd_api_key, date_from, date_to)
+    window = upcoming_window(days_ahead)
+    request_end = window.last_day + timedelta(days=1)   # exclusive
+    cache_key = (fd_api_key, window.first_day.isoformat(), request_end.isoformat())
     cached = _TIER_FIXTURES_CACHE
     if cached is not None and cached[0] == cache_key:
         for first, last in cached[2]:
@@ -369,16 +405,13 @@ def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dic
         return cached[1]
 
     by_code: Dict[str, List[Dict]] = {}
+    seen_ids: set = set()
     failed: List[Tuple[date, date]] = []
-    chunk_start = now
-    window_end = now + timedelta(days=days_ahead)
-    while chunk_start.date() <= window_end.date():
-        chunk_end = min(
-            chunk_start + timedelta(days=_FD_TIER_MAX_WINDOW_DAYS),
-            window_end,
-        )
-        chunk_from = chunk_start.strftime("%Y-%m-%d")
-        chunk_to = chunk_end.strftime("%Y-%m-%d")
+    chunk_start = window.first_day
+    while chunk_start < request_end:
+        chunk_end = min(chunk_start + timedelta(days=_FD_TIER_MAX_WINDOW_DAYS), request_end)
+        chunk_from = chunk_start.isoformat()
+        chunk_to = chunk_end.isoformat()
         try:
             r = _fd_get(
                 f"{FD_BASE}/matches",
@@ -390,13 +423,14 @@ def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dic
             if not isinstance(matches, list):
                 raise ValueError(f"no matches list in the response: {redact_secrets(str(data)[:200])}")
         except Exception as e:
+            lost = (chunk_start, chunk_end - timedelta(days=1))
             logger.error(
                 "[soccer:tier] /v4/matches fetch failed [%s..%s]: %s; no "
                 "fixtures for those days this refresh",
-                chunk_from, chunk_to, e,
+                lost[0].isoformat(), lost[1].isoformat(), e,
             )
-            failed.append((chunk_start.date(), chunk_end.date()))
-            report_lost_day_range(chunk_start.date(), chunk_end.date())
+            failed.append(lost)
+            report_lost_day_range(*lost)
             matches = []
         for m in matches:
             comp = m.get("competition") if isinstance(m, dict) else None
@@ -406,13 +440,16 @@ def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dic
                 # code on a match would be a FD.org schema regression.
                 # Skip rather than misroute it.
                 continue
+            if not window.admits(parse_iso_utc(m.get("utcDate")),
+                                 m.get("status") in _FD_OVER_STATUSES):
+                continue
+            mid = m.get("id")
+            if mid is not None:
+                if mid in seen_ids:
+                    continue
+                seen_ids.add(mid)
             by_code.setdefault(code, []).append(m)
-        if chunk_end >= window_end:
-            break
-        # +1 day so the next chunk starts AFTER chunk_end and we don't
-        # re-fetch the boundary day (FD's dateFrom/dateTo are inclusive
-        # on both ends).
-        chunk_start = chunk_end + timedelta(days=1)
+        chunk_start = chunk_end
     _TIER_FIXTURES_CACHE = (cache_key, by_code, tuple(failed))
     return by_code
 
@@ -441,6 +478,12 @@ def _fetch_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[Dict]:
     try:
         r = _fd_get(f"{FD_BASE}/competitions/{fd_code}/matches", fd_api_key)
         data = r.json()
+        matches = data.get("matches") if isinstance(data, dict) else None
+        if not isinstance(matches, list):
+            # A 200 without the list (an error object) is a failure, not an
+            # empty season (#282's class): cached as [] it would score every
+            # game in the competition zero importance, silently.
+            raise ValueError(f"no matches list in the response: {redact_secrets(str(data)[:200])}")
     except Exception as e:
         attempts += 1
         _SEASON_FETCH_FAILURES[fd_code] = (attempts, str(e))
@@ -466,7 +509,6 @@ def _fetch_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[Dict]:
         # (season_fetch_failures), so the zero is loud, which is what the
         # rule above exists to guarantee.
         return []
-    matches: List[Dict] = data.get("matches", []) or []
     _SEASON_MATCHES_CACHE[fd_code] = matches
     return matches
 
@@ -541,6 +583,11 @@ def _fetch_prev_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[D
             params={"season": season},
         )
         data = r.json()
+        matches = data.get("matches") if isinstance(data, dict) else None
+        if not isinstance(matches, list):
+            # An error object is a failure, not a season with no meetings:
+            # cached as [] it would drop head-to-head for the whole refresh.
+            raise ValueError(f"no matches list in the response: {redact_secrets(str(data)[:200])}")
     except Exception as e:
         logger.warning("[soccer:%s] prev-season matches fetch failed (season=%s): %s",
                        fd_code, season, e)
@@ -549,7 +596,6 @@ def _fetch_prev_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[D
         # fixture in this competition for the whole refresh. This list feeds
         # prose only, so a retry is cheap and a wrong answer is not.
         return []
-    matches: List[Dict] = data.get("matches", []) or []
     _PREV_SEASON_MATCHES_CACHE[fd_code] = matches
     return matches
 
@@ -850,17 +896,23 @@ class SoccerSource(SportSource):
             logger.warning("[soccer:%s] no Football-Data.org key", self.config.fd_code)
             return []
 
+        fixtures = self._fetch_fixtures(days_ahead)
+        if not fixtures:
+            logger.info("[soccer:%s] no upcoming fixtures in next %d days",
+                        self.config.fd_code, days_ahead)
+            return []
+
+        # The table that ranks the fixtures, read only once there is one to
+        # rank (an international break costs no request against the 10/min
+        # quota). A failed read RAISES RankingsUnavailable (#283): the
+        # refresh holds this league's previous games instead of publishing
+        # every one of them unranked.
         bundle = (
             self._fetch_standings_with_seed() if self.config.use_position_as_rank
             else StandingsBundle({}, [], [], [], False)
         )
         position_by_team = bundle.position_by_team
         table_full = bundle.scoring_table
-        fixtures = self._fetch_fixtures(days_ahead)
-        if not fixtures:
-            logger.info("[soccer:%s] no upcoming fixtures in next %d days",
-                        self.config.fd_code, days_ahead)
-            return []
 
         # Build team-name → closeness lookup (best-effort). B.3
         # replaced the old Asian-handicap "spreads" market with the
@@ -968,6 +1020,12 @@ class SoccerSource(SportSource):
         `season` is the start-year (e.g. 2024 = 2024-25 season). None →
         FD.org's default (current season). Pass an explicit year to fetch
         a historical final table (B.2 cold-start seed).
+
+        RAISES `RankingsUnavailable` when the request failed or the answer
+        has no `standings` list (#283): an answered table always has one
+        (PL and BSA, this season and last, measured 2026-10-11), and an error
+        body (`{"errorCode": 403, "message": ...}`) does not. Read as "no
+        table", a failure published every game in the league unranked.
         """
         try:
             r = _fd_get(
@@ -976,14 +1034,18 @@ class SoccerSource(SportSource):
                 params={"season": season} if season is not None else None,
             )
             data = r.json()
+            standings = data.get("standings") if isinstance(data, dict) else None
+            if not isinstance(standings, list) or (
+                    standings and not isinstance(standings[0], dict)):
+                raise ValueError(f"no standings list in the response: {redact_secrets(str(data)[:200])}")
         except Exception as e:
             logger.error("[soccer:%s] standings fetch failed (season=%s): %s",
                          self.config.fd_code, season, e)
-            return {}, []
-        standings = data.get("standings") or []
+            raise RankingsUnavailable(
+                f"{self.config.fd_code} standings (season={season}) failed: {e}") from e
         if not standings:
             return {}, []
-        table = standings[0].get("table", [])
+        table = standings[0].get("table") or []
         out: Dict[str, int] = {}
         rich: List[Dict] = []
         for row in table:

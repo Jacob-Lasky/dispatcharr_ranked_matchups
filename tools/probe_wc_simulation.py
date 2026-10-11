@@ -45,7 +45,7 @@ import random
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 # Bootstrap Django so model imports inside the plugin work.
 sys.path.insert(0, "/app")
@@ -63,7 +63,6 @@ PluginManager.get().discover_plugins(sync_db=False)
 from dispatcharr_ranked_matchups.sources.soccer import (  # noqa: E402
     GroupStageSoccerSource,
     KnockoutSoccerSource,
-    SoccerSource,
 )
 from dispatcharr_ranked_matchups.scoring import (  # noqa: E402
     LEAGUE_CONTEXTS,
@@ -497,14 +496,14 @@ def run() -> None:
         for team, _ in standings.best_third_order[:standings.n_best_third_advance]
     ]
     body = (
-        f"All 12 groups fully decided with deterministic alphabetical "
-        f"standings (each group's alphabetically-first team wins all 3 "
-        f"games, second wins 2, third wins 1, fourth loses all). The "
-        f"`_build_bracket_seed` output below shows the LAST_32 entry "
-        f"pairings the cross-source chain produces.\n\n"
-        f"### Advancing 3rd-placers (top 8 across all groups):\n"
+        "All 12 groups fully decided with deterministic alphabetical "
+        "standings (each group's alphabetically-first team wins all 3 "
+        "games, second wins 2, third wins 1, fourth loses all). The "
+        "`_build_bracket_seed` output below shows the LAST_32 entry "
+        "pairings the cross-source chain produces.\n\n"
+        "### Advancing 3rd-placers (top 8 across all groups):\n"
         + "\n".join(f"  - {t} (group {g})" for t, g in advancing_thirds) + "\n\n"
-        f"### LAST_32 pairings:\n" + "\n".join(pairings_lines) + "\n"
+        "### LAST_32 pairings:\n" + "\n".join(pairings_lines) + "\n"
     )
     sections.append(("Scenario 4: All groups decided — LAST_32 bracket seed", body))
 
@@ -569,9 +568,9 @@ def run() -> None:
         f"({'expected ABCDEFGH' if advancing_set == 'ABCDEFGH' else 'NOT the target set!'})\n\n"
         f"### 3rd-placers by group:\n"
         + "\n".join(f"  - group {g}: {t}" for t, g in sorted(advancing_thirds, key=lambda x: x[1])) + "\n\n"
-        f"### Canonical vs actual (per slot):\n"
+        "### Canonical vs actual (per slot):\n"
         + ("\n".join(canonical_lines) if canonical_lines else "  _(advancing set not ABCDEFGH; can't run the distinguishing check)_") + "\n\n"
-        f"### LAST_32 pairings:\n" + "\n".join(pairings_lines) + "\n"
+        "### LAST_32 pairings:\n" + "\n".join(pairings_lines) + "\n"
     )
     sections.append(("Scenario 5: Annex C canonical-vs-greedy discriminator", body))
 
