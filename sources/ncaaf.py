@@ -261,8 +261,13 @@ class NcaafSource(PointsBasedSportSource):
                 ranks = p.get("ranks")
                 if not isinstance(ranks, list):
                     raise RankingsUnavailable(f"/rankings: {self.poll_name} has no ranks list")
-                return {r["school"]: r["rank"] for r in ranks
-                        if isinstance(r, dict) and r.get("school") and r.get("rank") is not None}
+                out = {r["school"]: r["rank"] for r in ranks
+                       if isinstance(r, dict) and r.get("school") and r.get("rank") is not None}
+                if ranks and not out:
+                    # Rows listed, none readable: a changed row shape, not an
+                    # empty poll.
+                    raise RankingsUnavailable(f"/rankings: {self.poll_name} has no readable rank")
+                return out
         logger.info(
             "[ncaaf] poll %r absent from the latest snapshot (polls present: "
             "%s); skipping", self.poll_name,

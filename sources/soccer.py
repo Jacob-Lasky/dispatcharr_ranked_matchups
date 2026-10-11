@@ -1046,7 +1046,14 @@ class SoccerSource(SportSource):
                 f"{self.config.fd_code} standings (season={season}) failed: {e}") from e
         if not standings:
             return {}, []
-        table = standings[0].get("table") or []
+        table = standings[0].get("table")
+        if not isinstance(table, list):
+            # The envelope answered but its table is missing: as unusable as
+            # an error body, and read as empty it unranked the whole league.
+            logger.error("[soccer:%s] standings answered without a table (season=%s)",
+                         self.config.fd_code, season)
+            raise RankingsUnavailable(
+                f"{self.config.fd_code} standings (season={season}) have no table list")
         out: Dict[str, int] = {}
         rich: List[Dict] = []
         for row in table:

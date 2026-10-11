@@ -215,9 +215,16 @@ class NcaamSource(PointsBasedSportSource):
         for entry in latest:
             team = entry.get("team")
             rank = entry.get("ranking")
-            if team and rank is not None:
-                out[team] = int(rank)
-        return out or None
+            try:
+                if team and rank is not None:
+                    out[team] = int(rank)
+            except (TypeError, ValueError):
+                continue
+        if not out:
+            # The poll's rows are listed but none reads as a team and rank: a
+            # changed row shape, not a preseason (#283).
+            raise RankingsUnavailable(f"/rankings: {self.poll_name} week {latest_week} has no readable rank")
+        return out
 
     def _fetch_games(self, start: date, end: date) -> Optional[List[Dict]]:
         """Use startDateRange/endDateRange: /games is hard-capped at 3000

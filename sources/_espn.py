@@ -172,16 +172,19 @@ def fetch_espn_poll(
     and both NCAA soccer polls, measured 2026-10-11); a failed one is None,
     which is what `_http_get` makes of every 4xx/5xx, including the offseason
     404 college baseball and softball answer (see `base.attach_poll_ranks`,
-    which never asks then). The ONE parser for the four ESPN college polls;
+    which never asks then). A listed poll that is not an object, or a chosen
+    poll whose rows none of which reads as a team and rank, is a failure too.
+    The ONE parser for the four ESPN college polls;
     `http_get` is injected for the reason given in `sweep_upcoming_scoreboard`.
     """
     data = http_get(rankings_url)
     polls = data.get("rankings") if isinstance(data, dict) else None
     if not isinstance(polls, list):
         raise RankingsUnavailable(f"{rankings_url} did not answer with a rankings list")
-    polls = [p for p in polls if isinstance(p, dict)]
     if not polls:
         return {}
+    if not all(isinstance(p, dict) for p in polls):
+        raise RankingsUnavailable(f"{rankings_url}: a listed poll is not an object")
     poll = next((p for p in polls if prefer is not None and prefer(p)), polls[0])
     ranks = poll.get("ranks")
     if not isinstance(ranks, list):
@@ -197,6 +200,10 @@ def fetch_espn_poll(
             continue
         if name and rank > 0:
             out[name] = rank
+    if ranks and not out:
+        # Rows listed, none readable: the row shape changed, not a poll with
+        # nobody in it. Unranked games from it would be the #283 defect again.
+        raise RankingsUnavailable(f"{rankings_url}: poll {poll.get('name')!r} has no readable rank")
     return out
 
 

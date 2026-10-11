@@ -954,11 +954,14 @@ says which.
   `homeClassification` / `awayClassification` are `fbs` / `fcs` / `ii` /
   `iii`, and are occasionally absent entirely. A time-window filter alone
   returns mostly Division II and III. See the refresh-budget section above.
-- **A "0 games" summary from a poll-driven source usually means the POLL
-  call failed, not that it is the offseason.** `_fetch_rankings` returning
-  `None` makes `fetch_upcoming` return `[]`, and NCAAF logged that as
-  "offseason (?)" regardless of cause, which cost a day of wrong diagnosis
-  on 2026-08-28. Distinguish request failure from unpublished poll.
+- **A failed poll is an ERROR in the summary, not "0 games" (#283).** It used
+  to be: `_fetch_rankings` returned `None` for a failed request too, NCAAF
+  returned `[]` and logged "offseason (?)" regardless of cause, which cost a
+  day of wrong diagnosis on 2026-08-28. A failed or malformed poll now raises
+  `RankingsUnavailable` (`<label>: error` in the summary, previous games
+  held), and `None` / `{}` means only an answered poll with nothing in it. A
+  "0 games" from a poll-driven source today is a real empty slate or a
+  preseason with no poll.
 - **CFBD API is camelCase**: `homeTeam`, `awayTeam`, `startDate`,
   `neutralSite`, `excitementIndex`. We hit this once already — got 0 games
   because we used `home_team`. Their `/games` response also exposes

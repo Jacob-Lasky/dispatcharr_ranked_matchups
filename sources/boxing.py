@@ -135,16 +135,18 @@ def _next_page(data: dict, page: int, n_cards: int) -> Tuple[Optional[str], bool
 
     No usable paging (no integer `total_pages`, or an answer for a different
     page than the one asked for, as a server ignoring `page_num` would give):
-    a short page is the whole schedule, a full one cannot vouch for what
-    comes after it. More pages than `_MAX_PAGES`: the rest is not read, and
-    so not vouched for either.
+    on the FIRST page, a short page is the whole schedule and a full one
+    cannot vouch for what comes after it; on a later page, which was only
+    asked for because page 1 said more existed, it is always a failure, as is
+    a later page claiming fewer pages than its own number. More pages than
+    `_MAX_PAGES`: the rest is not read, and so not vouched for either.
     """
     paging = data.get("pagination")
     paging = paging if isinstance(paging, dict) else {}
     total, answered = paging.get("total_pages"), paging.get("page")
-    if not isinstance(total, int) or answered != page:
-        if n_cards >= _PAGE_SIZE:
-            return f"page {page} is full and its pagination {paging!r} cannot say what follows", False
+    if not isinstance(total, int) or answered != page or (page > 1 and total < page):
+        if page > 1 or n_cards >= _PAGE_SIZE:
+            return f"page {page} answered with pagination {paging!r}, which cannot say what follows", False
         return None, False
     if page >= total:
         return None, False

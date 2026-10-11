@@ -761,6 +761,38 @@ class TestCbbRangeReportsLostDays:
             src._fetch_full_season_games()
         assert len(asked) == 1
 
+    def test_the_season_walk_reuses_an_answered_poll(self, monkeypatch):
+        """WITNESS (#283), the success half: the poll that ranked the slate
+        is the one the season walk simulates, not a second request that could
+        fail (or answer differently) in between. The second answer here is a
+        newer poll, so the old code read it without raising and only the
+        request count tells."""
+        _pin_window(monkeypatch, NOON)
+        newer = [{"pollType": "AP Top 25", "week": 2, "team": "Kansas", "ranking": 1}]
+        polls = [lambda: _Resp(self.POLL), lambda: _Resp(newer)]
+        asked = []
+
+        def rankings():
+            asked.append(1)
+            return polls.pop(0)()
+
+        ncaam, _ranged = self._stub(monkeypatch, rankings=rankings, games=[])
+        src = ncaam.NcaamSource(api_key="k")
+        assert src.fetch_upcoming(days_ahead=2) == []
+        src._fetch_full_season_games()
+        assert len(asked) == 1
+
+    def test_a_poll_whose_rows_carry_no_ranking_is_an_outage(self, monkeypatch):
+        """WITNESS (Codex round 1): AP rows listed, none with a ranking, read
+        as "no poll yet" and the slate skipped as a preseason."""
+        from dispatcharr_ranked_matchups.sources.base import RankingsUnavailable
+        _pin_window(monkeypatch, NOON)
+        rows = [{"pollType": "AP Top 25", "week": 1, "team": "Duke"}]
+        ncaam, ranged = self._stub(monkeypatch, rankings=rows, games=[])
+        with pytest.raises(RankingsUnavailable, match="no readable rank"):
+            ncaam.NcaamSource(api_key="k").fetch_upcoming(days_ahead=2)
+        assert ranged == []
+
     def test_the_season_walk_still_reads_no_poll_yet_as_no_population(self, monkeypatch):
         """Guard: an ANSWERED empty poll (preseason) is still the quiet no-op."""
         ncaam, _ranged = self._stub(monkeypatch, rankings=[], games=[])
