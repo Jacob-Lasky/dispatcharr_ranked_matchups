@@ -24,18 +24,30 @@ March Madness). Calls in May-October return [] cleanly.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import GameRow
+from .base import GameRow, report_lost_day_range
 from .points_based import PointsBasedSportSource
+from ._espn import upcoming_window
+from .._http import get_within_deadline
 from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaam")
 
 CBB_BASE = "https://api.collegebasketballdata.com"
+
+
+def _completed(game: Dict[str, Any]) -> bool:
+    """Whether a CBBD /games row is a finished game. CBBD encodes completion
+    via the homeWinner/awayWinner booleans being non-null AND the *Points
+    fields being numeric; `status` doesn't always reflect completion, so the
+    joint check. A game in progress has points and no winner yet."""
+    return (game.get("homePoints") is not None and game.get("awayPoints") is not None
+            and (game.get("homeWinner") is not None
+                 or game.get("awayWinner") is not None))
 
 
 class NcaamSource(PointsBasedSportSource):
@@ -71,19 +83,34 @@ class NcaamSource(PointsBasedSportSource):
             return []
 
         season_year = self._current_season_year()
-        rank_by_team = self._fetch_rankings(season_year)
+        # Raises when the request FAILS: that is an outage the refresh holds
+        # the previous games for (#240), where None, no poll published yet,
+        # is a real preseason and stays quiet. DO NOT catch it back into
+        # None: it was logged as "offseason" and the slate zeroed silently.
+        rank_by_team = self._fetch_rankings(season_year, raise_on_failure=True)
         if rank_by_team is None:
-            logger.info("[ncaam] no current rankings (preseason / offseason?); skipping")
+            logger.info("[ncaam] no %s poll published for %d yet (preseason / "
+                        "offseason); skipping", self.poll_name, season_year)
             return []
 
-        now = datetime.now(timezone.utc)
-        end = now + timedelta(days=days_ahead)
-        games = self._fetch_games(now, end)
+        # The window starts at the US-Eastern lookback day, not today-UTC
+        # (#256): from 00:00Z an evening-Eastern tip-off sits on yesterday's
+        # UTC date, and `startDateRange=<today-UTC>` cannot return it while it
+        # is being played. `admits` then drops the finished and the stale.
+        window = upcoming_window(days_ahead)
+        games = self._fetch_games(window.first_day, window.last_day)
+        if games is None:
+            # The one request for every day of the window failed: those days
+            # are lost, not quiet (#261, see base.report_lost_day_range).
+            report_lost_day_range(window.first_day, window.last_day)
+            return []
+        games = [g for g in games
+                 if window.admits(parse_iso_utc(g.get("startDate")), _completed(g))]
         if not games:
             logger.info("[ncaam] no upcoming games in next %d days", days_ahead)
             return []
 
-        spread_by_id = self._fetch_spreads(now, end)
+        spread_by_id = self._fetch_spreads(window.first_day, window.last_day)
 
         rows: List[GameRow] = []
         for g in games:
@@ -92,8 +119,6 @@ class NcaamSource(PointsBasedSportSource):
             if not home or not away:
                 continue
             start = parse_iso_utc(g.get("startDate"))
-            if start is None:
-                continue
             cbb_id = g.get("id")
             spread = spread_by_id.get(cbb_id) if cbb_id is not None else None
             rows.append(GameRow(
@@ -128,21 +153,33 @@ class NcaamSource(PointsBasedSportSource):
         now = datetime.now(timezone.utc)
         return now.year + 1 if now.month >= 11 else now.year
 
-    def _fetch_rankings(self, season: int) -> Optional[Dict[str, int]]:
+    def _fetch_rankings(
+        self, season: int, raise_on_failure: bool = False,
+    ) -> Optional[Dict[str, int]]:
         """Return {team_name → rank} for the latest week of the configured
         poll. None if no poll has been published yet (preseason, before
-        mid-October's preseason AP poll)."""
+        mid-October's preseason AP poll), and None too for a FAILED request
+        unless `raise_on_failure`, which `fetch_upcoming` sets so a failure is
+        not read as a preseason (see there)."""
         try:
-            r = requests.get(
-                f"{CBB_BASE}/rankings",
+            r = get_within_deadline(
+                requests, f"{CBB_BASE}/rankings",
                 headers=self._headers,
                 params={"season": season},
                 timeout=15,
             )
             r.raise_for_status()
             data = r.json()
+            if not isinstance(data, list) or not all(
+                    isinstance(e, dict) and "pollType" in e for e in data):
+                # /rankings is a flat JSON list of poll rows, [] before the
+                # first poll; anything else (an error object, null, rows
+                # without a pollType) is a failure, not a preseason.
+                raise ValueError(f"/rankings answered {str(data)[:80]!r}, not a list of poll rows")
         except Exception as e:
             logger.error("[ncaam] /rankings failed: %s", e)
+            if raise_on_failure:
+                raise
             return None
         if not data:
             return None
@@ -160,14 +197,17 @@ class NcaamSource(PointsBasedSportSource):
                 out[team] = int(rank)
         return out or None
 
-    def _fetch_games(self, start: datetime, end: datetime) -> List[Dict]:
+    def _fetch_games(self, start: date, end: date) -> Optional[List[Dict]]:
         """Use startDateRange/endDateRange: /games is hard-capped at 3000
         without offset support, so a season-wide call would silently miss
         late-season games.
+
+        None when the request FAILED, distinct from [] (it answered with no
+        games): the caller reports the window's days as lost on None.
         """
         try:
-            r = requests.get(
-                f"{CBB_BASE}/games",
+            r = get_within_deadline(
+                requests, f"{CBB_BASE}/games",
                 headers=self._headers,
                 params={
                     "startDateRange": start.strftime("%Y-%m-%d"),
@@ -177,17 +217,22 @@ class NcaamSource(PointsBasedSportSource):
                 timeout=30,
             )
             r.raise_for_status()
-            return r.json() or []
+            data = r.json()
+            if not isinstance(data, list):
+                # /games answers with a JSON list, empty included; anything
+                # else (an error object, null) is not an answer.
+                raise ValueError(f"/games answered {type(data).__name__}, not a list")
+            return data
         except Exception as e:
             logger.error("[ncaam] /games failed: %s", e)
-            return []
+            return None
 
-    def _fetch_spreads(self, start: datetime, end: datetime) -> Dict[int, float]:
+    def _fetch_spreads(self, start: date, end: date) -> Dict[int, float]:
         """Same date-range as /games. Returns {gameId: abs(spread)}."""
         out: Dict[int, float] = {}
         try:
-            r = requests.get(
-                f"{CBB_BASE}/lines",
+            r = get_within_deadline(
+                requests, f"{CBB_BASE}/lines",
                 headers=self._headers,
                 params={
                     "startDateRange": start.strftime("%Y-%m-%d"),
@@ -260,8 +305,8 @@ class NcaamSource(PointsBasedSportSource):
         all_games: List[Dict[str, Any]] = []
         for start, end in chunks:
             try:
-                r = requests.get(
-                    f"{CBB_BASE}/games",
+                r = get_within_deadline(
+                    requests, f"{CBB_BASE}/games",
                     headers=self._headers,
                     params={
                         "startDateRange": start.strftime("%Y-%m-%d"),
@@ -287,12 +332,7 @@ class NcaamSource(PointsBasedSportSource):
                 continue
             hp = g.get("homePoints")
             ap_pts = g.get("awayPoints")
-            # CBBD encodes completion via the homeWinner/awayWinner booleans
-            # being non-null AND the *Points fields being numeric. Use the
-            # joint check: `status` field doesn't always reflect completion.
-            completed = (hp is not None and ap_pts is not None
-                         and (g.get("homeWinner") is not None
-                              or g.get("awayWinner") is not None))
+            completed = _completed(g)
             out.append({
                 "id": g.get("id"),
                 "home": home,

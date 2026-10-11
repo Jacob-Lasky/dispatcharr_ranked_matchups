@@ -13,6 +13,8 @@ import threading
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ._http import get_within_deadline
+
 
 def write_json_atomic(path: str, data: Any, **dump_kwargs: Any) -> None:
     """Write `data` as JSON to `path` so a reader never sees a half-written file.
@@ -613,37 +615,39 @@ def http_get_json(
     """GET `url` and return its parsed JSON, or None after logging a WARNING.
 
     The ONE body behind every source module's `_http_get` (#193). A status of
-    400 or above, any `requests` exception and an unparseable body all come
-    back as None, which every caller already reads as "no data from this
-    feed". Both log lines go through `redact_secrets`, on the URL AND on the
-    exception text, because `requests` renders the full URL (query string
-    included) into its exception messages and no caller can sanitise those.
+    400 or above, any `requests` exception, a response still incomplete after
+    `timeout` seconds in total (#271, see `_http.get_within_deadline`) and an
+    unparseable body all come back as None, which every caller already reads
+    as "no data from this feed". Both log lines go through `redact_secrets`, on
+    the URL AND on the exception text, because `requests` renders the full URL
+    (query string included) into its exception messages and no caller can
+    sanitise those.
 
     DO NOT import `requests` in this module, and DO NOT "simplify" the
     per-module `_http_get` wrappers away. Each source keeps a thin
     `_http_get` that passes ITS OWN module-level `requests` symbol and logger:
 
       - The `requests` symbol is the patch point. Source tests replace
-        `<module>._http_get`, or `get` on `<module>.requests`, and a source
-        that stopped resolving its own symbol at call time would turn a
-        test stub into a live call against ESPN / NHL / MLB that the suite
-        cannot see. `requests_mod.get` is looked up per call, so a stub
-        installed after import is honoured.
+        `<module>._http_get`, `<module>.requests` itself, or the transport
+        (`tests/conftest.py::stub_requests_get`), and a source that stopped
+        resolving its own symbol at call time would turn a test stub into a
+        live call against ESPN / NHL / MLB that the suite cannot see.
+        `requests_mod.Session` is looked up per call (`_http.get_within_deadline`),
+        so a stub installed after import is honoured.
         `tests/test_sources_http.py` pins this for every wrapper.
       - The logger and `tag` keep each failing feed attributed to its own
         `plugins.dispatcharr_ranked_matchups.<source>` channel.
 
     `params` and `headers` are forwarded only when given, so a wrapper that
-    never took them makes the same `requests.get(url, timeout=...)` call it
-    always did.
+    never took them makes the same `GET url, timeout=...` call it always did.
     """
-    kwargs: Dict[str, Any] = {"timeout": timeout}
+    kwargs: Dict[str, Any] = {}
     if params is not None:
         kwargs["params"] = params
     if headers is not None:
         kwargs["headers"] = headers
     try:
-        r = requests_mod.get(url, **kwargs)
+        r = get_within_deadline(requests_mod, url, timeout=timeout, **kwargs)
         if r.status_code >= 400:
             log.warning("[%s] %s -> %d", tag, redact_secrets(url), r.status_code)
             return None

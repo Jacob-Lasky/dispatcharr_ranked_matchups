@@ -204,6 +204,138 @@ def _isolated_numbering_state(tmp_path, monkeypatch):
     )
 
 
+# ---------------------------------------------------------------------------
+# The HTTP transport seam (#271).
+#
+# Every outbound call goes through _http.get_within_deadline (requests, as
+# `requests_mod.Session().get`) or _http.urlopen_read (urllib, as
+# `OpenerDirector.open`). A stub on `requests.get` or `urllib.request.urlopen`
+# is no longer reached, so tests stub the transport here. Both helpers keep the
+# old stubs' signatures: `fake(url, **kwargs)` and `fake(request, timeout=...)`.
+# ---------------------------------------------------------------------------
+
+def stub_requests_get(monkeypatch, fake):
+    """Answer every requests GET in the plugin with `fake(url, **kwargs)`."""
+    import requests
+    monkeypatch.setattr(requests.Session, "get", lambda self, url, **kw: fake(url, **kw))
+
+
+def stub_urlopen(monkeypatch, fake):
+    """Answer every urllib open in the plugin with `fake(request, timeout=...)`."""
+    import urllib.request
+    monkeypatch.setattr(
+        urllib.request.OpenerDirector, "open",
+        lambda self, fullurl, data=None, timeout=None: fake(fullurl, timeout=timeout),
+    )
+
+
+
+def refuse_requests(monkeypatch, why):
+    """Every plugin HTTP call fails as an unreachable feed would, at the seam.
+
+    DO NOT refuse by replacing `socket.getaddrinfo` instead: that replaces
+    `_no_live_network`'s own hook, so a call that slipped past the stubs is
+    no longer recorded and the guard passes vacuously (1.34.0 batch review).
+    `test_no_test_replaces_the_socket_layer` enforces it."""
+    import urllib.error
+
+    import requests
+
+    def refuse_get(url, **_kw):
+        raise requests.ConnectionError(why)
+
+    def refuse_open(request, timeout=None):
+        raise urllib.error.URLError(why)
+
+    stub_requests_get(monkeypatch, refuse_get)
+    stub_urlopen(monkeypatch, refuse_open)
+
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                  "http_proxy", "https_proxy", "all_proxy", "no_proxy")
+
+
+def clear_proxy_env(monkeypatch):
+    """A proxy in the environment would make a live call look local (the
+    socket goes to 127.0.0.1:3128 and the proxy fetches the internet), so every
+    call in a test goes direct and the guard checks the real target."""
+    for name in PROXY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def guard_live_network(monkeypatch):
+    """Install the live-network hooks on `monkeypatch`. Returns (attempts,
+    check): `attempts` records every non-loopback lookup or connect (each is
+    also refused), and `check()` fails if any happened OR if something
+    replaced the hooks since, which would have switched the recording off.
+
+    Shared by the autouse `_no_live_network` and by module-scoped fixtures
+    (`tests/test_mapped_prefixes.py::built_sources`), which run before any
+    function-scoped fixture and so would otherwise build with no guard."""
+    import socket
+
+    clear_proxy_env(monkeypatch)
+    attempts = []
+    real_getaddrinfo = socket.getaddrinfo
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def _host(address):
+        return address[0] if isinstance(address, tuple) else address
+
+    def getaddrinfo(host, *args, **kwargs):
+        if host is not None and str(host) not in _LOOPBACK_HOSTS:
+            attempts.append(f"getaddrinfo({host!r})")
+            raise socket.gaierror(socket.EAI_NONAME, "live network refused in tests")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def _guard(real):
+        def connect(self, address):
+            if self.family in (socket.AF_INET, socket.AF_INET6) and _host(address) not in _LOOPBACK_HOSTS:
+                attempts.append(f"connect({address!r})")
+                raise OSError("live network refused in tests")
+            return real(self, address)
+        return connect
+
+    hooks = {
+        (socket, "getaddrinfo"): getaddrinfo,
+        (socket.socket, "connect"): _guard(real_connect),
+        (socket.socket, "connect_ex"): _guard(real_connect_ex),
+    }
+    for (owner, name), hook in hooks.items():
+        monkeypatch.setattr(owner, name, hook)
+
+    def check():
+        replaced = [name for (owner, name), hook in hooks.items()
+                    if getattr(owner, name) is not hook]
+        # Behavioural half of tests/test_http_deadline.py's AST scan: catches a
+        # replacement however it was spelled, while it is still in place.
+        assert not replaced, (
+            f"the live-network hooks were replaced ({replaced}), which stops "
+            "them recording; refuse at the HTTP seam with refuse_requests instead"
+        )
+        assert not attempts, f"test reached the live network: {attempts}"
+
+    return attempts, check
+
+
+@pytest.fixture(autouse=True)
+def _no_live_network(monkeypatch):
+    """Fail any test that reaches past this machine.
+
+    Moving the HTTP seam (#271) turned every stub on the OLD one into a live
+    call, and a live call that fails comes back as "no data from this feed",
+    which plenty of assertions accept. Refusing here would be just as quiet,
+    for the same reason, so the attempt is RECORDED and the test fails at
+    teardown instead. Loopback stays open for the real-server tests.
+    Teardown runs before `monkeypatch` undoes the test's own patches, so a
+    test that replaced a hook through the shared `monkeypatch` is caught."""
+    _, check = guard_live_network(monkeypatch)
+    yield
+    check()
+
+
 def pytest_configure(config):
     """Register custom markers so `-W error` / `--strict-markers` runs stay
     clean and a typo'd marker name fails loudly instead of silently doing

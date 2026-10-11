@@ -32,13 +32,13 @@ import ast
 import glob
 import os
 import re
-import socket
 import textwrap
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from dispatcharr_ranked_matchups.sources import _espn
+from tests.conftest import refuse_requests, stub_requests_get
 
 SOURCES_DIR = os.path.join(os.path.dirname(__file__), "..", "sources")
 
@@ -697,13 +697,11 @@ def every_source_under_a_pinned_clock(plugin, monkeypatch):
     Returns {class name: EARLIEST date requested}. Earliest, not first:
     the days are fetched concurrently, and the sweep's dedupe runs in date
     order whatever order the requests went out in."""
-    import requests
     from tests.test_mapped_prefixes import _all_on_settings
 
-    def _offline(*_a, **_kw):
-        raise socket.gaierror("network disabled in tests/test_upcoming_window.py")
-
-    monkeypatch.setattr(socket, "getaddrinfo", _offline)
+    # Build-time seeding requests fail like an unreachable feed; each source
+    # tolerates that and keeps its prior.
+    refuse_requests(monkeypatch, "network disabled in tests/test_upcoming_window.py")
     sources = plugin._build_sources(_all_on_settings())
     _pin_clock(monkeypatch)
 
@@ -729,11 +727,19 @@ def every_source_under_a_pinned_clock(plugin, monkeypatch):
                 current["earliest"][name] = min(day, current["earliest"].get(name, day))
         return _Resp()
 
-    monkeypatch.setattr(requests, "get", fake_get)
+    stub_requests_get(monkeypatch, fake_get)
     current["earliest"] = {}
     for src in sources:
         current["name"] = type(src).__name__
-        src.fetch_upcoming(days_ahead=2)
+        try:
+            src.fetch_upcoming(days_ahead=2)
+        except Exception:
+            # A source whose GATING request got this stub's `{}` raises, as it
+            # does for a real failure (#261: NCAAM /rankings, MLS /standings
+            # need a list / conference tables). It is judged by the dated
+            # requests it made before raising, if any; the reach assertion
+            # below names the ones that must get that far.
+            pass
     return current["earliest"]
 
 
@@ -745,8 +751,9 @@ class TestEverySourceStartsAtTheLookbackDay:
     that drifted back would admit the day before as well)."""
 
     def test_the_instrument_reaches_the_dated_sweeps(self, every_source_under_a_pinned_clock):
-        # mls_standings is absent on purpose: with no standings it returns
-        # before sweeping (its sweep is pinned by the witness above).
+        # mls_standings is absent on purpose: with no standings it raises
+        # before sweeping (its sweep is pinned by the witness above), and
+        # so is NCAAM, whose /rankings gate gets no poll from this stub.
         expected = {
             "NbaRegularSource", "NbaPlayoffSource", "NflRegularSource", "NflPlayoffSource",
             "WnbaRegularSource", "WnbaPlayoffSource", "NhlRegularSource", "NhlPlayoffSource",

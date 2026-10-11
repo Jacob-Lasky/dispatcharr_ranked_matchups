@@ -129,6 +129,20 @@ class TestMissClassification:
         url, definitive = self._fetch(monkeypatch, 200)
         assert url is not None and definitive is False
 
+    def test_a_refused_budget_is_transient_and_makes_no_request(self, monkeypatch):
+        """#271: apply's spent network budget must not negative-cache a game
+        (that would blank its logo for the whole TTL), and must not call out."""
+        _no_pacing(monkeypatch)
+        calls = []
+        monkeypatch.setattr(gamethumbs, "download_to_file",
+                            lambda *a, **k: calls.append(a) or (200, None))
+        out = gamethumbs.fetch_matchup_composite(
+            base_url="https://x.test", sport_prefix="MLS",
+            away="Columbus Crew", home="Charlotte FC", dest_path="/tmp/x.png",
+            allow=lambda: False,
+        )
+        assert out == (None, False) and calls == []
+
     def test_400_is_definitive(self, monkeypatch):
         # Server enumerates the league's real teams: a stable fact.
         assert self._fetch(monkeypatch, 400) == (None, True)

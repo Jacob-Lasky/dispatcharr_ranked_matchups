@@ -33,11 +33,12 @@ import json
 import os
 import pkgutil
 import re
-import socket
 import sys
 import types
 
 import pytest
+
+from tests.conftest import guard_live_network, refuse_requests
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PKG_NAME = "dispatcharr_ranked_matchups"
@@ -160,20 +161,22 @@ def built_sources(plugin):
     once per module (it is the slow part, and nothing here mutates it).
 
     Several sources seed playoff strengths from a live fetch at build time;
-    each wraps that in try/except, so a refused DNS lookup just leaves the
+    each wraps that in try/except, so a refused request just leaves the
     prior in place. Refusing it here keeps the test offline and fast, and a
     source that does NOT tolerate it fails loudly rather than reaching out.
     """
-    def _offline(*_a, **_kw):
-        raise socket.gaierror("network disabled in tests/test_mapped_prefixes.py")
-
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(socket, "getaddrinfo", _offline)
+        # Module scope runs before the autouse `_no_live_network`, so this
+        # build installs the same guard itself.
+        _, check_network = guard_live_network(mp)
+        refuse_requests(mp, "network disabled in tests/test_mapped_prefixes.py")
         # Module scope runs before the function-scoped autouse fixture that
         # removes Football-Data.org pacing, so remove it here too.
         soccer = importlib.import_module(f"{PKG_NAME}.sources.soccer")
         mp.setattr(soccer, "_fd_sleep", lambda _seconds: None)
-        return plugin._build_sources(_all_on_settings())
+        sources = plugin._build_sources(_all_on_settings())
+        check_network()
+        return sources
 
 
 def _emitted(sources):
@@ -567,7 +570,15 @@ def test_the_guard_fires_on_an_injected_stale_key(built_sources, monkeypatch, mo
 
 def _concrete_source_classes():
     """Every non-abstract SportSource subclass defined in the sources package.
-    Imports each module first so `__subclasses__` sees all of them."""
+    Imports each module first so `__subclasses__` sees all of them.
+
+    A class counts only if its module really holds it, under ANY name (an
+    exported alias still counts, so a real source cannot slip out). The
+    probe classes other tests here build (NotSoccer, NewSoccerSource) set
+    `__module__` to a fake `sources.` module and stay in `__subclasses__`
+    until the garbage collector frees them, which on Python 3.13 (the live
+    container's) is after this test runs: it failed on the base branch, 2 of 2
+    runs, naming NotSoccer."""
     sources_pkg = importlib.import_module(f"{PKG_NAME}.sources")
     for info in pkgutil.iter_modules(sources_pkg.__path__):
         importlib.import_module(f"{PKG_NAME}.sources.{info.name}")
@@ -583,8 +594,63 @@ def _concrete_source_classes():
     return {
         c for c in seen
         if c.__module__.startswith(f"{PKG_NAME}.sources.") and not inspect.isabstract(c)
+        and _held_by_its_module(c)
     }
 
+
+def _held_by_its_module(cls):
+    """True if `cls`'s module reaches it: as a module global under any name,
+    or nested at any depth in a class the module reaches (`Alias.Nested`
+    counts). A class built inside a function, or claiming a module that was
+    never imported, is a test probe and is not reached."""
+    module = sys.modules.get(cls.__module__)
+    if module is None:
+        return False
+    seen, stack = set(), list(vars(module).values())
+    while stack:
+        obj = stack.pop()
+        if obj is cls:
+            return True
+        if isinstance(obj, type) and id(obj) not in seen:
+            seen.add(id(obj))
+            stack.extend(vars(obj).values())
+    return False
+
+
+
+def test_discovery_counts_nested_and_aliased_classes_and_drops_probes(monkeypatch):
+    """Codex (1.34.0 batch review): reading only module globals dropped a
+    source nested in another class, so the completeness test would have
+    missed it unbuilt."""
+    mod = types.ModuleType(f"{PKG_NAME}.sources._probe_discovery")
+
+    class Outer:
+        class Nested:
+            pass
+
+    class Aliased:
+        pass
+
+    class Unheld:
+        pass
+
+    for cls, qualname in ((Outer, "Outer"), (Outer.Nested, "Outer.Nested"),
+                          (Aliased, "Aliased"), (Unheld, "Unheld")):
+        cls.__module__, cls.__qualname__ = mod.__name__, qualname
+    class Hidden:
+        class Nested:
+            pass
+
+    Hidden.Nested.__module__ = mod.__name__
+    Hidden.Nested.__qualname__ = "Hidden.Nested"
+    mod.Outer, mod.Exported, mod.Alias = Outer, Aliased, Hidden
+    monkeypatch.setitem(sys.modules, mod.__name__, mod)
+    assert _held_by_its_module(Outer.Nested)
+    assert _held_by_its_module(Hidden.Nested)  # reached only as Alias.Nested
+    assert _held_by_its_module(Aliased)
+    assert not _held_by_its_module(Unheld)
+    monkeypatch.delitem(sys.modules, mod.__name__)
+    assert not _held_by_its_module(Outer)
 
 def test_every_source_class_is_in_the_build(built_sources):
     """Completeness: the emitted set is only authoritative if the build

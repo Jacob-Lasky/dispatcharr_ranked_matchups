@@ -164,11 +164,13 @@ REGULAR_SEASON_SLUG = "regular-season"
 CONFERENCE_ABBREVIATIONS = ("East", "West")
 
 
-def _fetch_conference_map() -> Dict[str, str]:
+def _fetch_conference_map() -> Optional[Dict[str, str]]:
     """Pull the current MLS conference assignments from ESPN's /standings
-    endpoint. Returns {team_displayName: "East" | "West"}. Empty dict
-    on any failure: the source falls back to emitting zero games for
-    that conference (no spurious importance signal).
+    endpoint. Returns {team_displayName: "East" | "West"}, never a partial
+    map: None when the request FAILED or listed clubs for only one
+    conference (or none). The importance path then simulates nothing for
+    that conference (no spurious signal), and `fetch_upcoming` raises (see
+    there), because a quiet [] would read the conference's days as empty.
 
     The conference roster changes year over year (expansion teams). The
     map is rebuilt on every refresh rather than cached, so an expansion
@@ -176,10 +178,13 @@ def _fetch_conference_map() -> Dict[str, str]:
     routing without redeploy.
     """
     data = _http_get(ESPN_STANDINGS_URL)
-    if not isinstance(data, dict):
-        return {}
+    if not isinstance(data, dict) or not isinstance(data.get("children"), list):
+        # Every answer carries the conference tables as `children` (East and
+        # West, 15 clubs each, measured 2026-10-11); a body without them (an
+        # error object) is a failure.
+        return None
     out: Dict[str, str] = {}
-    for child in data.get("children") or []:
+    for child in data["children"]:
         conf_abbrev = (child.get("abbreviation") or "").strip()
         if conf_abbrev not in CONFERENCE_ABBREVIATIONS:
             continue
@@ -189,6 +194,17 @@ def _fetch_conference_map() -> Dict[str, str]:
             name = _team_canonical_name(team)
             if name:
                 out[name] = conf_abbrev
+    if set(out.values()) != set(CONFERENCE_ABBREVIATIONS):
+        # A conference with no clubs is not an MLS season; it is a partial or
+        # reshaped answer (a renamed abbreviation drops a whole conference).
+        # DO NOT return the half map: the missing conference's source would
+        # read its days as quiet while the other kept the shared "MLS" label
+        # non-empty, and the refresh would drop its published games (#261).
+        logger.warning(
+            "[mls_standings] /standings listed clubs for %s only; treating "
+            "it as a failed request", sorted(set(out.values())) or "no conference",
+        )
+        return None
     return out
 
 
@@ -242,6 +258,7 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
             else (now.year if now.month >= SEASON_START_MONTH else now.year - 1)
         )
         self._conference_map_cache: Optional[Dict[str, str]] = None
+        self._conference_map_fetched = False
         self._closeness_cache: Optional[Dict[Tuple[str, str], float]] = None
 
     @property
@@ -255,16 +272,26 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         # the league_context_code, not the display label.
         return "MLS"
 
-    # ---------- conference map (shared across instances per-refresh) ----------
+    # ---------- conference map (cached per instance, so once per refresh) ----------
 
-    def _conference_map(self) -> Dict[str, str]:
-        if self._conference_map_cache is not None:
-            return self._conference_map_cache
-        self._conference_map_cache = _fetch_conference_map()
+    def _conference_map(self) -> Optional[Dict[str, str]]:
+        """The conference map, or None when its request failed. Fetched ONCE
+        per source, a failure included. DO NOT retry a failure here: the
+        strength estimate reads the season through this map when the source
+        is BUILT, before `fetch_upcoming`, and caches what it got
+        (`points_based`), so a retry that recovered would publish games
+        scored against the empty season the failure left behind. Failing
+        both, `fetch_upcoming` raises and the refresh holds the games it had."""
+        if not self._conference_map_fetched:
+            self._conference_map_cache = _fetch_conference_map()
+            self._conference_map_fetched = True
         return self._conference_map_cache
 
-    def _own_conf_teams(self) -> Set[str]:
+    def _own_conf_teams(self) -> Optional[Set[str]]:
+        """This conference's clubs, or None when the standings request failed."""
         cmap = self._conference_map()
+        if cmap is None:
+            return None
         return {name for name, conf in cmap.items() if conf == self._conference}
 
     # ---------- closeness (carried over from V1 MlsSource) ----------
@@ -344,6 +371,17 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         dedupe.
         """
         own_conf = self._own_conf_teams()
+        if own_conf is None:
+            # Raise, DO NOT return []: both conference sources share the label
+            # "MLS", so when only one conference's standings request failed
+            # the label still had games, a quiet [] read that conference's
+            # days as having none, and the refresh dropped the games it had
+            # published for them. A raise is the outage the refresh holds the
+            # previous games for (#240, #261).
+            raise RuntimeError(
+                "ESPN MLS standings unavailable, so games cannot be routed "
+                f"to the {self._conference} conference"
+            )
         if not own_conf:
             return []
         closeness_map = self._fetch_closeness()

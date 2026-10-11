@@ -17,7 +17,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, TypedDict
 
 
@@ -31,6 +31,12 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, TypedDict
 # their channels deleted. A sweep reports every day it asked for and did not
 # get (failed after its retry, or never requested because the walk was
 # abandoned), and the refresh holds previously published games dated on one.
+# A RANGED request (one call for several days: statsapi startDate/endDate,
+# Football-Data dateFrom/dateTo chunks, CollegeBasketballData
+# startDateRange/endDateRange, the boxing `days=` schedule) loses every day it
+# covered at once, and reports them with `report_lost_day_range`. Exactly the
+# days that request covered, never the whole window: a chunk that answered
+# vouches for its days. An answer with no games is a quiet day, not a lost one.
 #
 # A ContextVar, not a return value: fifteen fetch_upcoming implementations
 # walk days through the two shared walks, and threading a second result
@@ -47,6 +53,12 @@ def report_lost_days(days: Iterable[date]) -> None:
     sink = _LOST_DAYS.get()
     if sink is not None:
         sink.update(days)
+
+
+def report_lost_day_range(first: date, last: date) -> None:
+    """Record every day from `first` through `last` (inclusive) as lost: the
+    days one ranged request covered when it got no answer."""
+    report_lost_days(first + timedelta(days=i) for i in range((last - first).days + 1))
 
 
 @contextmanager
