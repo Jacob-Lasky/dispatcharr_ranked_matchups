@@ -2440,27 +2440,31 @@ def _empty_refresh_result(msg: str, src_summary: List[str]) -> Dict[str, Any]:
     return {"status": "ok", "message": msg}
 
 
-def _place_in_bracket(src: Any, games: List[Any], *, warn: bool = True) -> None:
+def _place_in_bracket(src: Any, games: List[Any], *, for_scoring: bool) -> None:
     """Stamp a bracket source's upcoming rows with their round (#243); see
     BracketSportSource.place_upcoming for why both importance and
-    favorites_only need it. Runs at fetch (for the favorites filter, quietly)
-    and again at scoring (after the season-fetch retry; that pass warns).
-    Never fails the refresh: an unplaced row keeps its game, it just scores
-    no bracket importance, which is what the warning is for."""
+    favorites_only need it. Runs at fetch (for the favorites filter) and again
+    at scoring, after the season-fetch retry, against the bracket importance
+    will use. Never fails the refresh: an unplaced row keeps its game, it
+    just scores no bracket importance, which is what the warning is for. Both
+    passes warn: the favorites filter can drop an unplaced game before
+    scoring ever runs."""
     place = getattr(src, "place_upcoming", None)
     if not games or not callable(place):
         return
+    when = "scoring" if for_scoring else "fetch"
     try:
-        unplaced = place(games)
+        unplaced = place(games, for_scoring=for_scoring)
     except Exception:
-        logger.exception("[ranked_matchups] %s: could not place games in the bracket",
-                         src.sport_label)
+        logger.exception("[ranked_matchups] %s: could not place games in the bracket (%s)",
+                         src.sport_label, when)
         return
-    if unplaced and warn:
+    if unplaced:
         logger.warning(
             "[ranked_matchups] %s: %d of %d upcoming game(s) not found in the "
-            "bracket; they score no bracket importance and count as regular "
-            "season", src.sport_label, unplaced, len(games),
+            "bracket (%s); they score no bracket importance and, unless the "
+            "source is playoffs-only, count as regular season",
+            src.sport_label, unplaced, len(games), when,
         )
 
 
@@ -3122,7 +3126,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             src_summary.append(_source_error_entry(src.sport_label, e))
             raised_labels.add(src.sport_label)
             continue
-        _place_in_bracket(src, games, warn=False)
+        _place_in_bracket(src, games, for_scoring=False)
         pulled_by_label[src.sport_label] += len(games)
         all_games.extend(games)
         game_sources.extend([src] * len(games))
@@ -3252,7 +3256,8 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # retry here, and a row placed against an empty bracket would otherwise
     # never reach its tie (#243). Idempotent on rows already placed.
     for src in {id(s): s for s in game_sources}.values():
-        _place_in_bracket(src, [g for g, s in zip(all_games, game_sources) if s is src])
+        _place_in_bracket(src, [g for g, s in zip(all_games, game_sources) if s is src],
+                          for_scoring=True)
     # Importance for every game whose source can share simulated seasons,
     # computed per league up front (#230); the loop below falls back to the
     # per-game simulator only for the rest (knockouts, active group->knockout

@@ -335,3 +335,23 @@ def test_nhl_does_not_cache_a_failed_bracket_fetch(monkeypatch):
     monkeypatch.setattr(nhl_mod, "_http_get", lambda *a, **kw: None)
     assert src._fetch_bracket_games() == []
     assert src._bracket_games_cache is None
+
+
+def test_scoring_placement_and_importance_share_one_bracket(mlb, monkeypatch):
+    """At scoring, placement reads the bracket importance will use, so they
+    cannot disagree about whether it exists (a recovery between the two used
+    to leave rows unplaced against a bracket importance then had)."""
+    from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, compute_match_importance
+    real = mlb._fetch_bracket_games
+    calls = []
+
+    def counted():
+        calls.append(1)
+        return real()
+    monkeypatch.setattr(mlb, "_fetch_bracket_games", counted)
+    rows = mlb.fetch_upcoming(days_ahead=7)
+    mlb.place_upcoming(rows)                       # fetch pass: throwaway build
+    mlb.place_upcoming(rows, for_scoring=True)     # scoring pass: initial_state
+    compute_match_importance(mlb, _by_pk(rows)[3], LEAGUE_CONTEXTS["MLB_PO"],
+                             n_sims=50, rng=random.Random(1))
+    assert len(calls) == 2

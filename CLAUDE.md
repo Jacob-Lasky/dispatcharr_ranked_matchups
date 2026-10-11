@@ -718,9 +718,10 @@ stay in agreement with that one.
   `bracket_game_index`, which `apply_result` prefers. It builds its own
   bracket rather than reading `initial_state()`, which would cache an empty
   one if the season fetch failed at fetch time and defeat scoring's retry,
-  and the refresh calls it twice: at fetch (quietly, for the favorites
-  filter) and again after `_soccer_allow_scoring_retry()` (that pass warns),
-  so a bracket that recovers still places its rows. For the same reason a
+  and the refresh calls it twice: at fetch (for the favorites filter, on a
+  throwaway bracket) and again after `_soccer_allow_scoring_retry()`
+  (`for_scoring=True`, on `initial_state()`'s bracket, the one importance
+  uses, so the two can never disagree). Both passes warn, naming which. For the same reason a
   `_fetch_bracket_games` must NOT cache a failed request as `[]` (MLB and NHL
   did); the ESPN day-sweep sources still cache partial sweeps, #245. Playoff-only shapes
   (`ALL_ROWS_POSTSEASON`) flag every row `postseason` first, so a failed

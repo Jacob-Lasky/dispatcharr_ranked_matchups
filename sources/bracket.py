@@ -190,7 +190,7 @@ class BracketSportSource(SportSource):
     # league phase. Read by place_upcoming.
     ALL_ROWS_POSTSEASON: bool = False
 
-    def place_upcoming(self, games: List[GameRow]) -> int:
+    def place_upcoming(self, games: List[GameRow], *, for_scoring: bool = False) -> int:
         """Give each upcoming row its bracket identity, from this source's own
         bracket records (#243). Mutates the rows; returns how many could not be
         placed.
@@ -231,12 +231,19 @@ class BracketSportSource(SportSource):
         if self.ALL_ROWS_POSTSEASON:
             for g in games:
                 g.extra["postseason"] = True
-        # Index every game the bracket knows, with its tie, by id. Built here
-        # rather than read from initial_state(): that caches, and a season
-        # fetch that fails NOW would pin an empty bracket for the whole run,
-        # defeating the retry scoring gets (soccer.allow_scoring_retry).
+        # Index every game the bracket knows, with its tie, by id. At scoring
+        # this is initial_state()'s bracket, the one importance will use, so
+        # the two cannot disagree about whether the bracket exists. Before
+        # scoring it is a throwaway build: initial_state() caches, and a
+        # season fetch failing that early would pin an empty bracket for the
+        # whole run and defeat the scoring-time retry
+        # (soccer.allow_scoring_retry).
+        bracket = (
+            self.initial_state().get("_bracket", {}) if for_scoring
+            else self._build_bracket(self._fetch_bracket_games())
+        )
         by_id: Dict[Any, Optional[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
-        for ties in self._build_bracket(self._fetch_bracket_games()).values():
+        for ties in bracket.values():
             for tie_meta in ties:
                 for game in tie_meta.get("games") or []:
                     gid = game.get("game_id")
