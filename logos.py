@@ -148,8 +148,14 @@ _SPORT_HINT: dict[str, str] = {
 #
 # Cup prefixes (UCL/WC/EURO) map to the competition itself, so their badge IS
 # the tournament badge. Prefixes deliberately left unmapped (the NCAA
-# sub-sports and the friendlies, whose SportsDB league could not be confirmed)
-# fall through to the source-channel logo rather than risk a wrong-sport badge.
+# sub-sports, the friendlies and the English domestic cups EFLCUP/FACUP, whose
+# SportsDB league has not been confirmed by the procedure above) fall through
+# to the source-channel logo rather than risk a wrong-sport badge.
+#
+# Every key here, in _SPORT_HINT and in SPORTSDB_TOURNAMENT_LEAGUE_IDS must be
+# a sport_prefix some source actually emits: tests/test_mapped_prefixes.py
+# builds every source through plugin._build_sources and fails on a dead key
+# (#183; five of them once sent #104 after work that could not be done).
 SPORTSDB_LEAGUE_IDS: dict[str, int] = {
     "CFB": 4479,            # NCAA Division 1 (American Football)
     "CBB": 4607,            # NCAA Division I Basketball Mens
@@ -178,10 +184,11 @@ SPORTSDB_LEAGUE_IDS: dict[str, int] = {
 # Optional tournament-specific override, consulted FIRST when a game carries a
 # `tournament_stage`, so a league source's postseason can show the competition
 # badge rather than the regular-season league badge (the "tournament -> sport
-# -> channel" order chosen for #102). Empty by default: cup SOURCES already map
-# their tournament badge directly via SPORTSDB_LEAGUE_IDS, so this only matters
-# for a league source that also runs a distinct postseason with its own
-# SportsDB league id. Add entries as those ids are confirmed.
+# -> channel" order chosen for #102). Empty by default: a cup SOURCE has its own
+# prefix and so maps its tournament badge directly via SPORTSDB_LEAGUE_IDS, so
+# this only matters for a league source that also runs a distinct postseason
+# with its own SportsDB league id. Add entries as those ids are confirmed, under
+# the same verification rule as SPORTSDB_LEAGUE_IDS.
 SPORTSDB_TOURNAMENT_LEAGUE_IDS: dict[str, int] = {}
 
 _LEAGUE_URL = "https://www.thesportsdb.com/api/v1/json/{key}/lookupleague.php?id={id}"

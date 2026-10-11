@@ -110,24 +110,50 @@ class TestIsRivalry:
         assert not rivalries.is_rivalry("Texas Longhorns", "Oklahoma Sooners", "CFB")
 
 
+def _raw_json():
+    with open(os.path.join(REPO_ROOT, "rivalries.json"), "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _resolved():
+    """{prefix: [entries as written]} with pool references expanded: what the
+    loader actually indexes. Iterating the raw JSON instead would walk a pool
+    reference ("EPL": "ENGLISH_CLUBS") character by character and check
+    nothing, so every data test below goes through the resolver."""
+    return rivalries._resolve_entries(_raw_json())
+
+
 class TestLoadRivalries:
     def test_json_is_valid(self):
-        path = os.path.join(REPO_ROOT, "rivalries.json")
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+        resolved = _resolved()
         # At least the sports listed in the issue are present.
         for sport in ("CFB", "EPL", "NBA", "NHL", "MLB", "NFL"):
-            assert sport in raw, f"Missing sport {sport} in rivalries.json"
-            assert isinstance(raw[sport], list)
-            assert len(raw[sport]) > 0
+            assert sport in resolved, f"Missing sport {sport} in rivalries.json"
+            assert isinstance(resolved[sport], list)
+            assert len(resolved[sport]) > 0
 
-    def test_every_pair_has_two_strings(self):
-        path = os.path.join(REPO_ROOT, "rivalries.json")
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        for key, pairs in raw.items():
+    def test_every_value_is_a_list_or_names_a_real_pool(self):
+        """A dangling pool name loads as "no rivalries" with only a log line,
+        which is the silently-dead-entry failure again, so the shipped file
+        must not contain one."""
+        raw = _raw_json()
+        pools = raw["_pools"]
+        refs = 0
+        for key, value in raw.items():
             if key.startswith("_"):
                 continue
+            if isinstance(value, str):
+                refs += 1
+                assert isinstance(pools.get(value), list), \
+                    f"{key} names pool {value!r}, which does not exist"
+            else:
+                assert isinstance(value, list), f"{key}: {type(value).__name__}"
+        assert refs >= 4, "instrument check: EPL, EFL, EFLCUP, FACUP are pool references"
+
+    def test_every_pair_has_two_strings(self):
+        resolved = _resolved()
+        assert len(resolved) >= 15, "instrument check: the resolver returned too little"
+        for key, pairs in resolved.items():
             for pair in pairs:
                 # 2 = a pair; 3 = a pair plus its trophy / game name.
                 assert isinstance(pair, list) and len(pair) in (2, 3), \
@@ -137,16 +163,50 @@ class TestLoadRivalries:
 
     def test_no_self_rivalries(self):
         # A team can't be its own rival.
-        path = os.path.join(REPO_ROOT, "rivalries.json")
-        with open(path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        for key, pairs in raw.items():
-            if key.startswith("_"):
-                continue
+        for key, pairs in _resolved().items():
             for entry in pairs:
                 a, b = entry[0], entry[1]
                 assert rivalries._normalize(a) != rivalries._normalize(b), \
                     f"Self-rivalry in {key}: {a} / {b}"
+
+    def test_every_written_entry_is_what_the_loaded_index_answers(self):
+        """An oracle that does NOT go through `_resolve_entries`: walk the raw
+        JSON, follow a pool reference by plain lookup, and ask the loaded
+        index (what `rivalry_name` reads in production) about every entry.
+        A resolver that dropped or reordered an entry would pass every check
+        built on the resolver itself."""
+        raw = _raw_json()
+        checked = 0
+        for prefix, value in raw.items():
+            if prefix.startswith("_"):
+                continue
+            entries = raw["_pools"][value] if isinstance(value, str) else value
+            assert len(rivalries._RIVALRIES_BY_SPORT[prefix]) == len(entries), prefix
+            for entry in entries:
+                trophy = entry[2] if len(entry) == 3 else ""
+                for home, away in ((entry[0], entry[1]), (entry[1], entry[0])):
+                    assert rivalries.rivalry_name(home, away, prefix) == trophy, (
+                        f"{prefix}: {home} v {away}"
+                    )
+                checked += 1
+        assert checked > 250, "instrument check: walked too few entries"
+
+    def test_no_pair_is_listed_twice_in_one_list(self):
+        """The clone guard. Before the English pool (#192), the East Anglian
+        and Second City derbies were each written out in BOTH the EPL and the
+        EFL list; a pair held twice is a pair whose two copies can disagree
+        (different trophy names, one fixed and one not)."""
+        for key, pairs in _resolved().items():
+            seen = {}
+            for entry in pairs:
+                pair = frozenset(
+                    rivalries._strip_suffix(rivalries._normalize(n))
+                    for n in entry[:2]
+                )
+                assert pair not in seen, (
+                    f"{key}: {entry} repeats {seen[pair]}"
+                )
+                seen[pair] = entry
 
 
 class TestDisambiguatingTokens:
@@ -256,7 +316,6 @@ class TestEveryEntryResolvesToARealTeam:
     # Names the fixture cannot confirm, each for a stated reason. A name here
     # is a deliberate exemption; anything else that fails is a typo.
     KNOWN_ABSENT = {
-        "Sheffield Wednesday",  # below the Championship, so in no tracked roster
         "Saint-Etienne",        # Ligue 2
         # SportsDB's spelling of Paris Saint-Germain, kept as a second entry
         # because that source and Football-Data.org disagree. The fixture
@@ -281,30 +340,89 @@ class TestEveryEntryResolvesToARealTeam:
         assert sum(len(v) for v in rosters.values()) > 250
         assert "Ole Miss" in rosters["CFB"], "the school the Egg Bowl entry got wrong"
 
-    # Rosters a given sport's entries may resolve against. Soccer pools,
-    # because promotion and relegation move a club between competitions and an
-    # EPL derby entry legitimately names a club currently in the Championship.
-    # Everything else stands alone: pooling let an NFL name validate a CFB
-    # entry, which is how a global rename turned the Apple Cup's "Washington"
-    # into "Washington Commanders" and the check said nothing.
-    SOCCER = ("EPL", "EFL", "BL1", "LaLiga", "SerieA", "Ligue1",
-              "BSA", "Eredivisie", "PrimeiraLiga", "MLS", "LigaMX")
+    # Rosters a given sport's entries may resolve against: its own, plus the
+    # other rosters of the SAME football pyramid, because promotion and
+    # relegation move a club between them and an EPL derby entry legitimately
+    # names a club currently in the Championship. Never across sports: pooling
+    # let an NFL name validate a CFB entry, which is how a global rename turned
+    # the Apple Cup's "Washington" into "Washington Commanders" and the check
+    # said nothing. And never across pyramids either: pooling EVERY soccer
+    # league let an English club validate a LaLiga entry (["Arsenal", "Real
+    # Madrid"] passed), the same failure one level down. Only England has more
+    # than one roster here; every other league stands alone.
+    ENGLISH_LEAGUES = ("EPL", "EFL")
+
+    # The ESPN English cup rosters: between them, EVERY club either cup can
+    # draw, so a name in neither is a misspelling, never a club that dropped
+    # out of view, and KNOWN_ABSENT does not apply to a cup prefix.
+    #
+    # A cup prefix is checked against BOTH cup rosters, not only its own,
+    # because the cups share the ENGLISH_CLUBS pool: a non-league derby
+    # (Chester FC is in the FA Cup and never in the EFL Cup) is a valid pool
+    # entry that simply never meets in the EFL Cup. It is NOT checked against
+    # Football-Data.org's rosters: a cup row carries ESPN's spelling, so an
+    # entry resolving only against FD.org's would fire in the league and
+    # never in the cup (#192). The English league prefixes accept the cup
+    # rosters too: a club outside FD.org's two divisions is still spelled
+    # right if ESPN confirms it, and can be promoted into view.
+    COMPLETE = ("EFLCUP", "FACUP")
 
     def _candidates(self, prefix, rosters):
-        if prefix in self.SOCCER:
-            return [n for p in self.SOCCER for n in rosters.get(p, [])]
-        return rosters.get(prefix, [])
+        if prefix in self.COMPLETE:
+            group = self.COMPLETE
+        elif prefix in self.ENGLISH_LEAGUES:
+            group = self.ENGLISH_LEAGUES + self.COMPLETE
+        else:
+            group = (prefix,)
+        return [n for p in group for n in rosters.get(p, [])]
+
+    def test_another_pyramids_club_does_not_validate(self):
+        """The cross-pyramid mutation: an English club must not validate a
+        LaLiga entry, nor a Spanish club an EPL one."""
+        rosters = self._fixture()
+        assert self._resolves("Arsenal", self._candidates("EPL", rosters))
+        assert not self._resolves("Arsenal", self._candidates("LaLiga", rosters))
+        assert self._resolves("Real Madrid CF", self._candidates("LaLiga", rosters))
+        assert not self._resolves("Real Madrid CF", self._candidates("EPL", rosters))
+
+    def _resolves(self, name, candidates):
+        return any(
+            rivalries._name_matches(rivalries._normalize(t), rivalries._normalize(name))
+            for t in candidates
+        )
+
+    def test_a_non_league_cup_club_can_join_the_shared_pool(self):
+        """The codex finding on this change: checking each cup only against
+        its own roster rejected a valid FA-Cup-only derby for EFLCUP."""
+        rosters = self._fixture()
+        assert "Chester FC" in rosters["FACUP"]
+        assert "Chester FC" not in rosters["EFLCUP"], \
+            "instrument check: needs a club only the FA Cup draws"
+        for prefix in ("EFLCUP", "FACUP", "EPL", "EFL"):
+            assert self._resolves("Chester FC", self._candidates(prefix, rosters)), prefix
+        # ...but an English non-league club must not validate a LaLiga entry.
+        assert not self._resolves("Chester FC", self._candidates("LaLiga", rosters))
+
+    def test_a_cup_prefix_still_rejects_a_misspelling(self):
+        """Pooling the two cup rosters must not loosen the spelling check."""
+        cup = self._candidates("EFLCUP", self._fixture())
+        assert not self._resolves("Sheffield Weds", cup)
+        assert self._resolves("Sheffield Wednesday", cup)
 
     def test_every_entry_resolves_somewhere(self):
         rosters = self._fixture()
-        raw = self._raw()
+        resolved = rivalries._resolve_entries(self._raw())
+        assert set(self.COMPLETE) <= set(resolved), \
+            "instrument check: the cup prefixes must be in the resolved map"
         unresolved = []
-        for prefix in rosters:
+        # Walk the RESOLVED map, not the roster keys: a prefix with rivalries
+        # and no roster must fail below rather than be skipped.
+        for prefix, entries in resolved.items():
             candidates = self._candidates(prefix, rosters)
             assert candidates, f"no roster to check {prefix} against"
-            for entry in raw.get(prefix, []):
+            for entry in entries:
                 for name in entry[:2]:
-                    if name in self.KNOWN_ABSENT:
+                    if name in self.KNOWN_ABSENT and prefix not in self.COMPLETE:
                         continue
                     if not any(
                         rivalries._name_matches(
@@ -391,3 +509,112 @@ class TestEveryEntryResolvesToARealTeam:
             assert rivalries.rivalry_name(home, away, sport) == expected, (
                 f"{home} vs {away} ({sport})"
             )
+
+
+class TestEnglishClubPool:
+    """#192. rivalries.json had no EFLCUP or FACUP key, so no cup tie could
+    ever earn the rivalry bonus: an Arsenal v Tottenham Carabao Cup
+    quarterfinal scored as an ordinary fixture. The fix is one shared English
+    pool that the leagues AND the cups resolve against, not cup copies of the
+    league lists."""
+
+    def test_a_league_derby_fires_in_both_cups(self):
+        # ESPN spellings: sources/english_cup.py names a team by its location.
+        for cup in ("EFLCUP", "FACUP"):
+            assert rivalries.rivalry_name(
+                "Arsenal", "Tottenham Hotspur", cup) == "the North London derby", cup
+            assert rivalries.rivalry_name(
+                "Everton", "Liverpool", cup) == "the Merseyside derby", cup
+
+    def test_a_cross_tier_derby_fires_in_a_cup(self):
+        """The case no single league key can hold: the clubs sit in
+        different divisions, so the cup is the only place they meet."""
+        assert rivalries.rivalry_name(
+            "Sheffield Wednesday", "Sheffield United", "FACUP") == "the Steel City derby"
+        assert rivalries.rivalry_name(
+            "Southampton", "Portsmouth", "EFLCUP") == "the South Coast derby"
+
+    def test_a_club_friendly_still_never_fires(self):
+        """friendlies.py: the absence of CLUBFRIENDLY is DELIBERATE and
+        load-bearing. Pooling the English pairs must not reach it."""
+        assert rivalries.rivalry_name(
+            "Arsenal", "Tottenham Hotspur", "CLUBFRIENDLY") is None
+        assert rivalries.rivalry_name(
+            "Sheffield Wednesday", "Sheffield United", "CLUBFRIENDLY") is None
+        assert "CLUBFRIENDLY" not in _raw_json()
+        assert "CLUBFRIENDLY" not in rivalries._RIVALRIES_BY_SPORT
+
+    def test_one_list_four_prefixes(self):
+        """The shape that makes drift impossible: all four prefixes name the
+        same pool, so there is no second copy to fall out of step."""
+        raw = _raw_json()
+        for prefix in ("EPL", "EFL", "EFLCUP", "FACUP"):
+            assert raw[prefix] == "ENGLISH_CLUBS", prefix
+        loaded = rivalries._RIVALRIES_BY_SPORT
+        assert loaded["EFLCUP"] == loaded["FACUP"] == loaded["EPL"] == loaded["EFL"]
+        assert len(loaded["EPL"]) >= 20, "instrument check: the pool is populated"
+
+    def test_the_leagues_see_the_whole_pool(self):
+        """EPL and EFL share it too, so a derby recorded once fires in
+        whichever division the two clubs meet: the Steel City derby used to
+        be EFL-only and would have gone dark the season both Sheffield clubs
+        were promoted."""
+        assert rivalries.rivalry_name(
+            "Sheffield United FC", "Sheffield Wednesday FC", "EPL") == "the Steel City derby"
+        assert rivalries.rivalry_name(
+            "Arsenal FC", "Tottenham Hotspur FC", "EFL") == "the North London derby"
+
+    def test_derbies_added_with_the_pool(self):
+        # (Football-Data.org spelling, ESPN spelling) for each club, because
+        # the league rows and the cup rows reach the matcher spelled
+        # differently and the derby has to fire on both.
+        for fd, espn, name in (
+            (("Wolverhampton Wanderers FC", "West Bromwich Albion FC"),
+             ("Wolverhampton Wanderers", "West Bromwich Albion"),
+             "the Black Country derby"),
+            (("Swansea City AFC", "Cardiff City FC"),
+             ("Swansea City", "Cardiff City"),
+             "the South Wales derby"),
+            (("West Ham United FC", "Millwall FC"),
+             ("West Ham United", "Millwall"),
+             "the Dockers derby"),
+        ):
+            assert rivalries.rivalry_name(*fd, "EFL") == name
+            assert rivalries.rivalry_name(*espn, "FACUP") == name
+
+    def test_a_non_derby_cup_tie_is_not_a_rivalry(self):
+        # #190's motivating fixture: a cup tie, but not a derby.
+        assert rivalries.rivalry_name(
+            "Tottenham Hotspur", "Charlton Athletic", "EFLCUP") is None
+
+
+class TestResolveEntries:
+    def test_pool_reference_expands_to_the_pool(self):
+        raw = {
+            "_comment": "x",
+            "_pools": {"_comment": "y", "P": [["A", "B", "the A-B derby"]]},
+            "X": "P",
+            "Y": "P",
+            "Z": [["C", "D"]],
+        }
+        out = rivalries._resolve_entries(raw)
+        assert out == {
+            "X": [["A", "B", "the A-B derby"]],
+            "Y": [["A", "B", "the A-B derby"]],
+            "Z": [["C", "D"]],
+        }
+        # The SAME list, not a copy: nothing to drift.
+        assert out["X"] is out["Y"] is raw["_pools"]["P"]
+
+    def test_a_dangling_reference_loads_nothing_and_says_so(self, caplog):
+        raw = {"_pools": {"P": [["A", "B"]]}, "X": "MISSING", "Z": [["C", "D"]]}
+        with caplog.at_level("WARNING"):
+            out = rivalries._resolve_entries(raw)
+        assert out == {"Z": [["C", "D"]]}
+        assert "MISSING" in caplog.text
+
+    def test_a_pool_is_never_a_sport_prefix(self):
+        out = rivalries._resolve_entries({"_pools": {"P": [["A", "B"]]}})
+        assert out == {}
+        assert "_pools" not in rivalries._RIVALRIES_BY_SPORT
+        assert "ENGLISH_CLUBS" not in rivalries._RIVALRIES_BY_SPORT

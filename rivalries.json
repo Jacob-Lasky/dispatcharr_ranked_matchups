@@ -1,5 +1,123 @@
 {
-  "_comment": "Per-sport-prefix list of known rivalry pairs. Each entry is [team_a, team_b] or [team_a, team_b, trophy_or_derby_name]. Names are matched WHOLE (case/whitespace normalized, club-type suffix stripped, extra words allowed unless they name a DIFFERENT institution), so spell each one the way its SOURCE spells it: CFBD says 'Ole Miss', not 'Mississippi'. tests/test_rivalries.py asserts every entry resolves against a real roster. Order within a pair does not matter. The optional third element is the trophy or derby name and is surfaced to the description writer as a fact it may state. See #8.",
+  "_comment": "Per-sport-prefix list of known rivalry pairs. Each entry is [team_a, team_b] or [team_a, team_b, trophy_or_derby_name]. Names are matched WHOLE (case, whitespace and diacritics normalized, a club-type suffix such as FC stripped, nothing looser; see rivalries._name_matches), so spell each one the way its SOURCE spells it: CFBD says 'Ole Miss', not 'Mississippi'. tests/test_rivalries.py asserts every entry resolves against a real roster. Order within a pair does not matter. The optional third element is the trophy or derby name and is surfaced to the description writer as a fact it may state. A prefix whose value is a STRING instead of a list names a shared set under \"_pools\" and resolves to exactly that set, so several prefixes can share one list without copying it (#192). See #8.",
+  "_pools": {
+    "_comment": "Rivalry sets shared by several sport prefixes. ENGLISH_CLUBS is every English-pyramid club rivalry, held ONCE and referenced by the two league prefixes (EPL, EFL) and the two domestic cups (EFLCUP, FACUP): a derby is a derby whichever competition it is played in, and a cup draws across divisions, so cross-tier derbies (Sheffield, South Coast) must live where the cup can see them. DO NOT give a cup prefix its own copy of these pairs: four copies of one fact that must agree is the clone class #192 was filed to avoid. DO NOT point CLUBFRIENDLY here: a pre-season kickabout is not a derby, and its absence is load-bearing (sources/friendlies.py).",
+    "ENGLISH_CLUBS": [
+      [
+        "Arsenal",
+        "Tottenham Hotspur",
+        "the North London derby"
+      ],
+      [
+        "Liverpool",
+        "Everton",
+        "the Merseyside derby"
+      ],
+      [
+        "Manchester City",
+        "Manchester United",
+        "the Manchester derby"
+      ],
+      [
+        "Liverpool",
+        "Manchester United",
+        "the North West derby"
+      ],
+      [
+        "Newcastle United",
+        "Sunderland",
+        "the Tyne-Wear derby"
+      ],
+      [
+        "Aston Villa",
+        "Birmingham City",
+        "the Second City derby"
+      ],
+      [
+        "Brighton & Hove Albion",
+        "Crystal Palace",
+        "the M23 derby"
+      ],
+      [
+        "Ipswich Town",
+        "Norwich City",
+        "the East Anglian derby"
+      ],
+      [
+        "Chelsea",
+        "Fulham",
+        "the West London derby"
+      ],
+      [
+        "Chelsea",
+        "Tottenham Hotspur"
+      ],
+      [
+        "Arsenal",
+        "Chelsea"
+      ],
+      [
+        "West Ham United",
+        "Tottenham Hotspur"
+      ],
+      [
+        "Arsenal",
+        "Manchester United"
+      ],
+      [
+        "Liverpool",
+        "Chelsea"
+      ],
+      [
+        "Sheffield United",
+        "Sheffield Wednesday",
+        "the Steel City derby"
+      ],
+      [
+        "Portsmouth",
+        "Southampton",
+        "the South Coast derby"
+      ],
+      [
+        "Bristol City",
+        "Cardiff City",
+        "the Severnside derby"
+      ],
+      [
+        "Derby County",
+        "Nottingham Forest",
+        "the East Midlands derby"
+      ],
+      [
+        "Blackburn Rovers",
+        "Burnley",
+        "the East Lancashire derby"
+      ],
+      [
+        "Leeds United",
+        "Millwall"
+      ],
+      [
+        "Stoke City",
+        "West Bromwich Albion"
+      ],
+      [
+        "Wolverhampton Wanderers",
+        "West Bromwich Albion",
+        "the Black Country derby"
+      ],
+      [
+        "Cardiff City",
+        "Swansea City",
+        "the South Wales derby"
+      ],
+      [
+        "Millwall",
+        "West Ham United",
+        "the Dockers derby"
+      ]
+    ]
+  },
   "CFB": [
     [
       "Alabama",
@@ -462,118 +580,10 @@
       "Georgetown"
     ]
   ],
-  "EPL": [
-    [
-      "Arsenal",
-      "Tottenham Hotspur",
-      "the North London derby"
-    ],
-    [
-      "Liverpool",
-      "Everton",
-      "the Merseyside derby"
-    ],
-    [
-      "Manchester City",
-      "Manchester United",
-      "the Manchester derby"
-    ],
-    [
-      "Liverpool",
-      "Manchester United",
-      "the North West derby"
-    ],
-    [
-      "Newcastle United",
-      "Sunderland",
-      "the Tyne-Wear derby"
-    ],
-    [
-      "Aston Villa",
-      "Birmingham City",
-      "the Second City derby"
-    ],
-    [
-      "Brighton & Hove Albion",
-      "Crystal Palace",
-      "the M23 derby"
-    ],
-    [
-      "Ipswich Town",
-      "Norwich City",
-      "the East Anglian derby"
-    ],
-    [
-      "Chelsea",
-      "Fulham",
-      "the West London derby"
-    ],
-    [
-      "Chelsea",
-      "Tottenham Hotspur"
-    ],
-    [
-      "Arsenal",
-      "Chelsea"
-    ],
-    [
-      "West Ham United",
-      "Tottenham Hotspur"
-    ],
-    [
-      "Arsenal",
-      "Manchester United"
-    ],
-    [
-      "Liverpool",
-      "Chelsea"
-    ]
-  ],
-  "EFL": [
-    [
-      "Sheffield United",
-      "Sheffield Wednesday",
-      "the Steel City derby"
-    ],
-    [
-      "Portsmouth",
-      "Southampton",
-      "the South Coast derby"
-    ],
-    [
-      "Bristol City",
-      "Cardiff City",
-      "the Severnside derby"
-    ],
-    [
-      "Ipswich Town",
-      "Norwich City",
-      "the East Anglian derby"
-    ],
-    [
-      "Birmingham City",
-      "Aston Villa",
-      "the Second City derby"
-    ],
-    [
-      "Derby County",
-      "Nottingham Forest",
-      "the East Midlands derby"
-    ],
-    [
-      "Blackburn Rovers",
-      "Burnley",
-      "the East Lancashire derby"
-    ],
-    [
-      "Leeds United",
-      "Millwall"
-    ],
-    [
-      "Stoke City",
-      "West Bromwich Albion"
-    ]
-  ],
+  "EPL": "ENGLISH_CLUBS",
+  "EFL": "ENGLISH_CLUBS",
+  "EFLCUP": "ENGLISH_CLUBS",
+  "FACUP": "ENGLISH_CLUBS",
   "BL1": [
     [
       "FC Bayern München",
