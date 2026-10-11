@@ -632,6 +632,27 @@ def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled
     return reapable, kept, rehome_rec_ids
 
 
+def _numbers_held_for_recordings(stale, archive_enabled) -> set:
+    """Channel numbers of stale channels this apply will KEEP for a recording.
+
+    Same policy as the reap step (_partition_stale_for_recordings), evaluated
+    before numbering so a new game is never handed a number a kept channel is
+    about to be restored to. Fractional numbers are floored like every other
+    reservation (Xtream Codes floors them)."""
+    candidates = [ch for ch in stale if ch.channel_number is not None]
+    if not candidates:
+        return set()
+    from apps.channels.models import Recording
+
+    recs_by_channel: Dict[int, list] = {}
+    for r in Recording.objects.filter(channel_id__in=[c.id for c in candidates]):
+        recs_by_channel.setdefault(r.channel_id, []).append(r)
+    _reapable, kept, _rehome = _partition_stale_for_recordings(
+        candidates, recs_by_channel, datetime.now(timezone.utc), archive_enabled,
+    )
+    return {int(ch.channel_number) for ch in kept}
+
+
 # ---------- Auto-record (#216) ----------
 #
 # The policy lives in recording.py (pure, unit-tested). These functions are the
@@ -1023,12 +1044,19 @@ def _ensure_archive_channel(recordings_group_name):
     # was created before _ARCHIVE_CHANNEL_NUMBER existed (null number, silently
     # breaking the XC feed). Take the first free number at/above the constant
     # within the group so the unique (channel_group, channel_number) constraint
-    # can't fire even if recordings_group_name points at a populated group.
+    # can't fire even if recordings_group_name points at a populated group, AND
+    # that no channel ANYWHERE publishes under: the guide keys on the bare
+    # number, so a compact game or a user channel already at 9999 in another
+    # group would bind the guide arbitrarily for both (review finding, #219).
+    # This runs inside apply's transaction after the game writes, so this
+    # apply's own new numbers are already visible here.
     used = set(
         Channel.objects.filter(channel_group=grp)
         .exclude(tvg_id=ARCHIVE_TVG_ID)
         .exclude(channel_number__isnull=True)
         .values_list("channel_number", flat=True)
+    ) | _published_numbers(
+        Channel.objects.exclude(tvg_id=ARCHIVE_TVG_ID), _ARCHIVE_CHANNEL_NUMBER,
     )
     number = _first_free_number(used, _ARCHIVE_CHANNEL_NUMBER)
 
@@ -4289,7 +4317,7 @@ def _assign_channel_numbers(
         if blocked:
             logger.info(
                 "[ranked_matchups] compact band %d-%d: %d number(s) skipped, already "
-                "used by channels outside our group (the guide keys on the channel "
+                "used by another channel (the guide keys on the channel "
                 "number alone, so a shared number breaks EPG binding)",
                 virtual_base, virtual_base + size - 1, blocked,
             )
@@ -5338,7 +5366,21 @@ def _reserved_channel_numbers(
     from apps.channels.models import Channel
     from django.db.models import Q
 
-    qs = Channel.objects.exclude(_owned_tvg_id_q() & Q(channel_group=target_group))
+    return _published_numbers(
+        Channel.objects.exclude(_owned_tvg_id_q() & Q(channel_group=target_group)),
+        band_start, band_end,
+    )
+
+
+def _published_numbers(qs, band_start: int, band_end: Optional[int] = None) -> set:
+    """The integer channel numbers the channels in `qs` publish under, within
+    [band_start, band_end] (no upper bound when band_end is None). EFFECTIVE
+    numbers (a ChannelOverride wins, as in every output path) and floored, the
+    reasoning for both is in _reserved_channel_numbers.
+
+    The upper bound is ``< band_end + 1``, not ``<= band_end``: a channel at
+    400.5 publishes as 400 over Xtream Codes, so it must reserve 400 even when
+    400 is the top of the band (review finding, #219)."""
     field = "channel_number"
     try:
         from apps.channels.managers import with_effective_values
@@ -5352,7 +5394,7 @@ def _reserved_channel_numbers(
         )
     bounds = {f"{field}__gte": band_start}
     if band_end is not None:
-        bounds[f"{field}__lte"] = band_end
+        bounds[f"{field}__lt"] = band_end + 1
     rows = (
         qs.exclude(**{f"{field}__isnull": True})
         .filter(**bounds)
@@ -5671,11 +5713,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     )
     numbering_mode = _resolve_numbering_mode(settings)
     remembered_base = None
+    games_by_marker_all = {_build_marker_key(g): g for g in games}
     if numbering_mode == NUMBERING_MODE_KICKOFF:
-        games_by_marker = {_build_marker_key(g): g for g in games}
         published = []
         for marker, ch in existing_virtuals.items():
-            g = games_by_marker.get(marker)
+            g = games_by_marker_all.get(marker)
             if g is None or ch.channel_number is None:
                 continue
             published.append(
@@ -5708,6 +5750,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         )
     else:
         reserved_numbers = _reserved_channel_numbers(target_group, virtual_base)
+    # A game that has left the slate but whose channel is still recording is
+    # KEPT this apply (#146) and goes back to its number after parking, unless
+    # a new game was handed that number, in which case it stays at a parking
+    # number and its published number changes mid-recording. Hold those numbers
+    # back from new games too (review finding, #219).
+    reserved_numbers |= _numbers_held_for_recordings(
+        [ch for m, ch in existing_virtuals.items() if m not in games_by_marker_all],
+        archive_enabled,
+    )
     chnum_by_marker = _assign_channel_numbers(
         games, virtual_base, apply_tz,
         mode=numbering_mode,

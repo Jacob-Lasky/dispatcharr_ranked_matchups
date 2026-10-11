@@ -385,3 +385,106 @@ class TestApplyWiring:
         rekey = src.index("marker_renames = _rekey_legacy_virtuals(existing_virtuals, games)")
         resolve = src.index("virtual_base = _resolve_kickoff_base(")
         assert rekey < resolve
+
+
+class _FakeQS:
+    """Just enough queryset for _published_numbers: exclude/filter on one
+    numeric field with __isnull / __gte / __lt / __lte, then values_list."""
+
+    def __init__(self, values):
+        self.values = list(values)
+
+    def exclude(self, *args, **kw):
+        if any(k.endswith("__isnull") for k in kw):
+            return _FakeQS(v for v in self.values if v is not None)
+        return self
+
+    def filter(self, **kw):
+        out = self.values
+        for k, bound in kw.items():
+            op = k.rsplit("__", 1)[1]
+            test = {"gte": lambda v: v >= bound, "lt": lambda v: v < bound,
+                    "lte": lambda v: v <= bound}[op]
+            out = [v for v in out if test(v)]
+        return _FakeQS(out)
+
+    def values_list(self, *_a, **_k):
+        return list(self.values)
+
+
+class TestPublishedNumbers:
+    """The reservation query, driven with a fake queryset (no Django; the
+    effective-number annotation is unavailable here, so the raw column is read,
+    which is what this tests: the bounds and the floor)."""
+
+    def test_a_fraction_at_the_top_of_the_band_reserves_its_floor(self, plugin):
+        """Review finding: `<= band_end` dropped 400.5, which Xtream Codes
+        publishes as 400, so a game could be handed 400 beside it."""
+        got = plugin._published_numbers(_FakeQS([399.0, 400.5, 401.0, None]), 400, 400)
+        assert got == {400}
+
+    def test_no_upper_bound(self, plugin):
+        got = plugin._published_numbers(_FakeQS([5.0, 6892.0, 7000000.25]), 6892)
+        assert got == {6892, 7000000}
+
+
+class TestKeptRecordingChannelsHoldTheirNumbers:
+    """Review finding: a stale channel kept for an active recording went back
+    to its pre-park number only if no new game had been handed it; otherwise it
+    stayed at a parking number mid-recording."""
+
+    def test_only_kept_channels_are_held(self, plugin, monkeypatch):
+        import sys
+        import types
+        from types import SimpleNamespace as NS
+
+        now = datetime.now(timezone.utc)
+        recording = NS(id=11, channel_id=1, start_time=now - timedelta(minutes=30),
+                       end_time=now + timedelta(hours=1), custom_properties={"status": "recording"})
+        done = NS(id=12, channel_id=2, start_time=now - timedelta(hours=3),
+                  end_time=now - timedelta(hours=1), custom_properties={"status": "completed"})
+
+        class _Objects:
+            def filter(self, channel_id__in):
+                return [r for r in (recording, done) if r.channel_id in channel_id__in]
+
+        models = types.ModuleType("apps.channels.models")
+        models.Recording = NS(objects=_Objects())
+        for name in ("apps", "apps.channels"):
+            monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "apps.channels.models", models)
+
+        stale = [NS(id=1, channel_number=6203700.0), NS(id=2, channel_number=6203701.0),
+                 NS(id=3, channel_number=6203702.0), NS(id=4, channel_number=None)]
+        assert plugin._numbers_held_for_recordings(stale, True) == {6203700}
+        # Archive disabled: a channel with only finished recordings is kept too.
+        assert plugin._numbers_held_for_recordings(stale, False) == {6203700, 6203701}
+
+    def test_apply_adds_them_to_the_reservation_in_both_modes(self):
+        src, _fn = _apply_fn()
+        i = src.index("reserved_numbers |= _numbers_held_for_recordings(")
+        assert src.index("reserved_numbers = _reserved_channel_numbers(target_group, virtual_base)") < i
+        assert i < src.index("chnum_by_marker = _assign_channel_numbers(")
+
+    def test_a_held_number_is_not_handed_to_a_new_game(self, plugin):
+        games = _slate()
+        plain = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        m = plugin._build_marker_key(games[0])
+        got = plugin._assign_channel_numbers(
+            games, 6892, timezone.utc, reserved_numbers={plain[m]},
+        )
+        assert plain[m] not in got.values()
+
+
+class TestArchivePlacementIsGlobal:
+    def test_the_archive_avoids_numbers_published_anywhere(self):
+        """Review finding: the archive picked the first free number in ITS
+        group, so a compact game (or a user channel) at 9999 elsewhere shared
+        its guide key."""
+        src = open(os.path.join(REPO_ROOT, "plugin.py"), encoding="utf-8").read()
+        tree = ast.parse(src)
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_ensure_archive_channel")
+        body = ast.get_source_segment(src, fn)
+        assert "_published_numbers(" in body
+        assert "Channel.objects.exclude(tvg_id=ARCHIVE_TVG_ID), _ARCHIVE_CHANNEL_NUMBER" in body

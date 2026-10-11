@@ -281,13 +281,17 @@ class TestReviewFindings:
     def test_reserved_numbers_use_effective_not_raw_values(self):
         """A ChannelOverride can renumber a channel without touching
         Channel.channel_number, and every output path resolves the override
-        first. Reading the raw column misses a channel overridden INTO the band."""
-        fn = _function(_plugin_ast(), "_reserved_channel_numbers")
-        src = ast.get_source_segment(
-            open(os.path.join(REPO_ROOT, "plugin.py")).read(), fn
-        )
+        first. Reading the raw column misses a channel overridden INTO the band.
+        The read lives in _published_numbers (shared with the archive channel's
+        placement since #219); _reserved_channel_numbers must delegate to it."""
+        plugin_src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
+        src = ast.get_source_segment(plugin_src, _function(_plugin_ast(), "_published_numbers"))
         assert "with_effective_values" in src
         assert "effective_channel_number" in src
+        reserved = ast.get_source_segment(
+            plugin_src, _function(_plugin_ast(), "_reserved_channel_numbers"),
+        )
+        assert "_published_numbers(" in reserved
 
     def test_the_reserved_query_keeps_the_recordings_archive_reserved(self):
         """ARCHIVE_TVG_ID carries TVG_ID_PREFIX, so a bare _owned_tvg_id_q()
