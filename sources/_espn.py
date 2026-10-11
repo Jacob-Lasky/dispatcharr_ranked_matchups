@@ -46,6 +46,12 @@ FINISHED would silently empty their cascade. Their sweeps differ on
 purpose. See #190 and #229. A bracket source's `fetch_upcoming` (the EPG
 path) is upcoming-only and uses it like every other.
 
+`dedupe_events` is the one dedupe EVERY ESPN walk goes through, the bracket
+sweeps and full-season walks included (they share the dedupe, just not the
+upcoming filter): first kept copy per `event_identity`, which falls back to
+the event's natural identity when ESPN omits the id. That identity is also the
+`game_id` every ESPN row and record the simulator sees carries (#279).
+
 `fetch_season_type_windows` / `season_type_at` are the third piece: a
 season's phases (regular season, each tournament round) from ESPN's core
 API calendar, for competitions whose events no longer name their own round
@@ -57,7 +63,9 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, TypeVar
+from typing import (
+    Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple, TypeVar,
+)
 
 from .._util import parse_iso_utc
 from .base import report_lost_days
@@ -296,31 +304,117 @@ def _field_event_current(event: Dict[str, Any], window: UpcomingWindow) -> bool:
     return window.admits(parse_iso_utc(event.get("date")), over)
 
 
-def _event_identity(event: Dict[str, Any]) -> Any:
-    """The dedupe key for one scoreboard event: its id, or, when ESPN omits
-    one, its natural identity. A MISSING id must not become the key itself:
-    `None` is a perfectly good dict key, so the first id-less event would
-    claim it for ALL of them and every later one would be dropped as a
-    duplicate of an unrelated match."""
+def _team_identity(team: Dict[str, Any]) -> str:
+    """One side of an id-less event's natural identity: the first field the
+    team carries, of every field any source names a team by (the NCAA
+    sources read `location`)."""
+    for field in ("id", "displayName", "name", "location", "abbreviation"):
+        if team.get(field):
+            return str(team[field])
+    return ""
+
+
+def event_identity(event: Dict[str, Any]) -> Any:
+    """The identity of one scoreboard event: its id, or, when ESPN omits one,
+    its natural identity, as a string. THE key every ESPN dedupe uses
+    (`dedupe_events`) AND the `game_id` every ESPN row and record that reaches
+    the simulator carries (#279), so the upcoming row a refresh scores and the
+    season or bracket record it must match agree on it.
+
+    A MISSING id must not become the key itself: `None` is a perfectly good
+    dict key, so the first id-less event would claim it for ALL of them and
+    every later one would be dropped as a duplicate of an unrelated match.
+
+    The natural identity is a STRING, not a tuple, because a row's `game_id`
+    is written to cache.json and the guide's custom_properties: a tuple would
+    come back from JSON as an unhashable list. The "no-id:" prefix keeps it
+    out of ESPN's all-digit id space."""
     eid = event.get("id")
     if eid:
         return eid
     comps = event.get("competitions") or []
     competitors = (comps[0].get("competitors") or []) if comps and isinstance(comps[0], dict) else []
-    teams = tuple(sorted(
-        ((c.get("team") or {}).get("id") or (c.get("team") or {}).get("displayName")
-         or (c.get("team") or {}).get("name") or "")
-        for c in competitors if isinstance(c, dict)
-    ))
+    teams = sorted(_team_identity(c.get("team") or {}) for c in competitors if isinstance(c, dict))
     # Teams and kickoff, NOT the event's display name: the two overlapping
     # buckets are separate cache entries, and a name edited between them
     # would otherwise make one game two rows. The name stands in only for a
-    # field event, which has no two competitors.
-    who = teams if any(teams) else (event.get("name") or event.get("shortName"))
-    return ("no-id", who, event.get("date"))
+    # field event, which has no two competitors. The kickoff cannot go
+    # either: every game of a series has the same two teams. The cost is that
+    # an id-less game whose kickoff changes between two of a walk's days is
+    # two games; with no id there is nothing else to tie the copies together.
+    if any(teams):
+        who = "teams:" + "|".join(teams)
+    else:
+        who = "name:" + str(event.get("name") or event.get("shortName") or "")
+    # The parsed instant, not the raw text: `...T17:00Z` and `...T17:00:00Z`
+    # are one kickoff, and two keys for it would count one game twice.
+    kickoff = parse_iso_utc(event.get("date"))
+    when = kickoff.isoformat() if kickoff is not None else str(event.get("date"))
+    return f"no-id:{who}@{when}"
 
 
 T = TypeVar("T")
+
+
+def scoreboard_events(pages: Iterable[Any]) -> Iterator[Any]:
+    """Every event on each scoreboard page, in page order. A page that is not
+    a dict (a day that failed or came back empty) contributes none."""
+    for page in pages:
+        if isinstance(page, dict):
+            yield from page.get("events") or []
+
+
+def dedupe_events(
+    events: Iterable[Any],
+    keep: Callable[[Dict[str, Any], Any], Optional[T]],
+    identity: Optional[Callable[[Dict[str, Any]], Any]] = None,
+) -> List[T]:
+    """`keep(event, key)` for each event, in order, keeping the FIRST kept
+    copy of each event: THE dedupe for every ESPN walk, upcoming sweep,
+    bracket sweep and full-season walk alike (#279).
+
+    `key` is `event_identity(event)`, or `identity(event)` for a walk whose
+    own post-processing must see copies `event_identity` would merge (the
+    single-leg soccer cups: `_soccer_bracket_helpers.pk_pair_identity`).
+    DO NOT key a walk on
+    `event.get("id")` (or a record's `id` / `game_id` copied from it): a
+    missing id is None for EVERY id-less event, so the first one claims it
+    and each later one is dropped as its duplicate, or, where a walk skipped
+    a None id outright, every id-less game was lost.
+    `tests/test_event_identity_dedupe.py` fails on such a seen-set anywhere
+    in sources/ outside this module.
+
+    `keep` returns None to skip an event, and a skipped event claims nothing,
+    so a later copy can still be kept; `sweep_upcoming_events` says why that
+    order is load-bearing.
+
+    A record that goes on to the simulator (a season walk's `id`, a bracket
+    game's `game_id`) must carry `key` as its id, NOT `event.get("id")`. The
+    simulator marks a game played by that id (`_applied`), and its drain
+    loop re-asks `remaining_matches` until nothing is left, so a game whose
+    id is None cannot be marked played: `PointsBasedSportSource` never
+    simulates it, and in a bracket the first FINISHED id-less game puts None
+    in `_applied`, which then hides every other id-less game. The upcoming
+    row scored against that record stamps the same `event_identity(event)` as
+    its `game_id`, so the two are one match (`simulation._same_match`,
+    `BracketSportSource.place_upcoming`). `key` IS the id whenever ESPN sends
+    one, so stamping it changes nothing for those.
+    """
+    identity = identity or event_identity
+    out: List[T] = []
+    seen: set = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        key = identity(event)
+        if key in seen:
+            continue
+        item = keep(event, key)
+        if item is None:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def sweep_upcoming_events(
@@ -333,7 +427,7 @@ def sweep_upcoming_events(
 ) -> List[T]:
     """THE upcoming sweep for every ESPN scoreboard source (#256):
     `convert(event)` for each event in `upcoming_window(days_ahead)` that is
-    still upcoming or live, deduped by event, in date order.
+    still upcoming or live, deduped by event (`dedupe_events`), in date order.
 
     `convert` is the source's own extraction and filtering (season type,
     postseason headline, conference); returning None skips the event. It sees
@@ -358,32 +452,24 @@ def sweep_upcoming_events(
     it is the source's own patch point. Days come from `fetch_scoreboard_days`.
     """
     window = upcoming_window(days_ahead)
-    out: List[T] = []
-    seen: set = set()
-    for day, data in fetch_scoreboard_days(
-        http_get, scoreboard_url, window.first_day, window.last_day,
-    ):
-        if not isinstance(data, dict):
-            continue
-        for event in data.get("events") or []:
-            if not isinstance(event, dict):
-                continue
-            if field_events:
-                if day < window.today and not _field_event_current(event, window):
+
+    def admitted() -> Iterator[Dict[str, Any]]:
+        for day, data in fetch_scoreboard_days(
+            http_get, scoreboard_url, window.first_day, window.last_day,
+        ):
+            for event in scoreboard_events([data]):
+                if not isinstance(event, dict):
                     continue
-            elif not window.admits(
-                parse_iso_utc(event.get("date")), scoreboard_event_over(event),
-            ):
-                continue
-            key = _event_identity(event)
-            if key in seen:
-                continue
-            item = convert(event)
-            if item is None:
-                continue
-            seen.add(key)
-            out.append(item)
-    return out
+                if field_events:
+                    if day < window.today and not _field_event_current(event, window):
+                        continue
+                elif not window.admits(
+                    parse_iso_utc(event.get("date")), scoreboard_event_over(event),
+                ):
+                    continue
+                yield event
+
+    return dedupe_events(admitted(), lambda event, _key: convert(event))
 
 
 def extract_espn_scoreboard_event(
@@ -509,7 +595,7 @@ def sweep_upcoming_scoreboard(
         still tagged SCHEDULED, catching ESPN's status lag.
       - Events already seen (the lookback bucket overlaps the first forward
         bucket), deduped by event id, or by natural identity when the id is
-        missing (`_event_identity`).
+        missing (`event_identity`).
 
     `http_get` is injected rather than called directly for two reasons, and the
     second one is the load-bearing one: each source keeps logging under its OWN

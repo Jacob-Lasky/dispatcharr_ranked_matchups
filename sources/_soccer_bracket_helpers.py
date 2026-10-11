@@ -18,6 +18,32 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, FrozenSet, List, Tuple
 
+from ._espn import event_identity, scoreboard_event_over
+
+
+def pk_pair_identity(event: Dict[str, Any]) -> Any:
+    """The dedupe key for a sweep whose records then go through
+    `dedupe_pk_shootout_pairs`: `event_identity`, plus the event's outcome
+    when ESPN omits the id (#279).
+
+    An id-less regulation tie and its PK result share teams and kickoff, so
+    `event_identity` alone would keep whichever came first, often the 0-0,
+    and the selector below, which picks the decisive record, would never see
+    the other. With the outcome in the key both reach it, and it collapses
+    them (and any lagging copy) by stage and teams as it does for id'd pairs.
+    Copies with the same outcome are still one. An event WITH an id keeps it
+    as its key, exactly as before."""
+    key = event_identity(event)
+    if key == event.get("id"):
+        return key
+    comps = event.get("competitions") or []
+    competitors = (comps[0].get("competitors") or []) if comps and isinstance(comps[0], dict) else []
+    scores = "-".join(
+        str(c.get("score")) for side in ("home", "away")
+        for c in competitors if isinstance(c, dict) and c.get("homeAway") == side
+    )
+    return f"{key}#{'over' if scoreboard_event_over(event) else 'open'}:{scores}"
+
 
 def dedupe_pk_shootout_pairs(
     records: List[Dict[str, Any]],

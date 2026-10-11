@@ -36,9 +36,12 @@ from .base import GameRow
 from .points_based import PointsBasedSportSource
 from .._util import http_get_json
 from ._espn import (
+    dedupe_events,
+    event_identity,
     extract_espn_scoreboard_event,
     fetch_scoreboard_days,
     fetch_season_type_windows,
+    scoreboard_events,
     sweep_upcoming_scoreboard,
 )
 
@@ -242,7 +245,10 @@ class NcaaSoccerSource(PointsBasedSportSource):
             days_ahead=days_ahead,
             team_namer=_team_canonical_name,
             http_get=_http_get,
-            extras_fn=_event_season_year,
+            extras_fn=lambda event: {
+                **_event_season_year(event),
+                "_identity": event_identity(event),
+            },
             base=ESPN_BASE,
         )
         out: List[GameRow] = []
@@ -269,7 +275,7 @@ class NcaaSoccerSource(PointsBasedSportSource):
                 extra={
                     "espn_event_id": eid,
                     # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                    "game_id": eid,
+                    "game_id": rec["_identity"],
                     "fd_competition_code": self.league_context_code,
                 },
             ))
@@ -282,7 +288,6 @@ class NcaaSoccerSource(PointsBasedSportSource):
         mid-November, ~110 days, fetched concurrently by
         `_espn.fetch_scoreboard_days`.
         """
-        seen: Dict[Any, Dict[str, Any]] = {}
         season_start = datetime(self.season_year, SEASON_START_MONTH, 1, tzinfo=timezone.utc).date()
         # The REGULAR season's end, not December's: ESPN's NCAA soccer
         # scoreboard gives tournament games the same season slug, type and
@@ -301,20 +306,20 @@ class NcaaSoccerSource(PointsBasedSportSource):
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = season_end
 
-        for _day, data in fetch_scoreboard_days(
-            _http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard", season_start, end,
-        ):
-            if data:
-                for event in data.get("events") or []:
-                    rec = _extract_game_record(event)
-                    if rec is None or rec["id"] is None:
-                        continue
-                    if rec.get("start_time") is not None and rec["start_time"] >= cutoff:
-                        continue
-                    if rec["id"] in seen:
-                        continue
-                    seen[rec["id"]] = rec
-        return list(seen.values())
+        def keep(event: Dict[str, Any], key: Any) -> Optional[Dict[str, Any]]:
+            rec = _extract_game_record(event)
+            if rec is None:
+                return None
+            if rec.get("start_time") is not None and rec["start_time"] >= cutoff:
+                return None
+            rec["id"] = key  # the event's identity, never None: see dedupe_events
+            return rec
+
+        return dedupe_events(scoreboard_events(
+            data for _day, data in fetch_scoreboard_days(
+                _http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard", season_start, end,
+            )
+        ), keep)
 
     # ---------- Rankings ----------
 

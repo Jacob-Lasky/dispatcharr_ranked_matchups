@@ -56,7 +56,13 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 import requests
 
 from .base import GameRow
-from ._espn import fetch_scoreboard_day, sweep_upcoming_events
+from ._espn import (
+    dedupe_events,
+    event_identity,
+    fetch_scoreboard_day,
+    scoreboard_events,
+    sweep_upcoming_events,
+)
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .._util import parse_iso_utc, http_get_json
 
@@ -133,6 +139,16 @@ def _default_season_year() -> int:
     """
     now = datetime.now(timezone.utc)
     return now.year if now.month >= PLAYOFF_START_MONTH else now.year - 1
+
+
+def _event_slug(event: Dict[str, Any]) -> str:
+    """An event's `season.slug`, normalised the way SLUG_TO_STAGE is keyed."""
+    return ((event.get("season") or {}).get("slug") or "").strip().lower()
+
+
+def _event_stage(event: Dict[str, Any]) -> Optional[str]:
+    """The bracket stage an event's slug names, None outside the playoffs."""
+    return SLUG_TO_STAGE.get(_event_slug(event))
 
 
 class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
@@ -233,7 +249,7 @@ class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
             start = rec.get("start_time")
             if start is None:
                 return None
-            eid = rec.get("game_id")
+            eid = event.get("id")
             return GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
@@ -245,7 +261,7 @@ class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
                 extra={
                     "espn_event_id": eid,
                     # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                    "game_id": eid,
+                    "game_id": event_identity(event),
                     "fd_competition_code": self._league_context_code(),
                     "stage": rec.get("stage"),
                 },
@@ -280,8 +296,6 @@ class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
 
         # First pass: collect all candidate records in chronological
         # order. Walk Oct 1 - Dec 15 of season_year.
-        candidates: List[Dict[str, Any]] = []
-        seen_ids: set = set()
         start = datetime(
             self.season_year, PLAYOFF_START_MONTH, 1, tzinfo=timezone.utc,
         ).date()
@@ -296,17 +310,14 @@ class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         if payloads is None:
             # A day failed: NOT cached (#245; see BracketSportSource).
             return []
-        for data in payloads:
-            for event in data.get("events") or []:
-                # Pass matchday=None: the inference loop below
-                # assigns it per (stage, participants) tuple.
-                rec = self._extract_bracket_record(event, matchday=None)
-                if rec is None or rec["game_id"] is None:
-                    continue
-                if rec["game_id"] in seen_ids:
-                    continue
-                seen_ids.add(rec["game_id"])
-                candidates.append(rec)
+
+        def keep(event: Dict[str, Any], _key: Any) -> Optional[Dict[str, Any]]:
+            # Pass matchday=None: the inference loop below
+            # assigns it per (stage, participants) tuple. The record's
+            # game_id is already the event's identity.
+            return self._extract_bracket_record(event, matchday=None)
+
+        candidates = dedupe_events(scoreboard_events(payloads), keep, _sweep_identity)
 
         # Second pass: matchday inference for best-of-3 series + PK
         # dedup for single-leg stages.
@@ -327,8 +338,7 @@ class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         we pass None and infer matchday from chronological order in
         `_assign_matchdays_and_dedupe`.
         """
-        season = event.get("season") or {}
-        slug = (season.get("slug") or "").strip().lower()
+        slug = _event_slug(event)
         stage = SLUG_TO_STAGE.get(slug)
         if stage is None:
             return None
@@ -383,7 +393,7 @@ class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
             ag = None
 
         return {
-            "game_id": event.get("id"),
+            "game_id": event_identity(event),  # never None: see _espn.dedupe_events
             "stage": stage,
             "matchday": matchday,  # may be None: inference assigns later
             "home": home_team,
@@ -402,7 +412,18 @@ class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
 # `_dedupe_pk_shootout_pairs` in this module still find it.
 from ._soccer_bracket_helpers import (
     dedupe_pk_shootout_pairs as _dedupe_pk_shootout_pairs,
+    pk_pair_identity,
 )
+
+
+def _sweep_identity(event: Dict[str, Any]) -> Any:
+    """The bracket sweep's dedupe key. A single-leg stage's records go
+    through the PK-pair selector, which must see both records of an id-less
+    pair (`pk_pair_identity`); a best-of-N stage's do not, and a second copy
+    there would be counted as another game of the series."""
+    if _MLS_SERIES_LENGTHS.get(_event_stage(event) or "", 1) > 1:
+        return event_identity(event)
+    return pk_pair_identity(event)
 
 
 def _assign_matchdays_and_dedupe(

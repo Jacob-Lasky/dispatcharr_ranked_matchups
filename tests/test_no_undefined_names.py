@@ -19,6 +19,7 @@ execution of its branch. Widening this to full pyflakes would bury the signal
 under pre-existing noise and get the file skipped, which is how a gate dies.
 """
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -45,9 +46,9 @@ def _production_files():
 
 @pytest.fixture(scope="module")
 def pyflakes_available():
-    try:
-        import pyflakes  # noqa: F401
-    except ImportError:
+    # find_spec, not a bare `import pyflakes`: pyflakes ignores noqa, so the
+    # probe import read as unused in the very lint run this gate stands for.
+    if importlib.util.find_spec("pyflakes") is None:
         pytest.skip(
             "pyflakes not installed; add it to the test-run deps so this gate "
             "actually runs (see the module docstring for the outage it exists "
