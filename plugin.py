@@ -6780,9 +6780,12 @@ def _run_health_lines(
     labels = tasks.RUN_KIND_LABELS
     lock_state, lock_detail = run_lock or (_LOCK_UNKNOWN, None)
     if lock_state == _LOCK_UNREACHABLE:
+        # The detail is what failed (a connection error, or the client helper
+        # itself), so a reader can tell an outage from a broken client.
         verdict.append(
-            "WARNING: Redis is unreachable, so no refresh, apply or reap can run "
-            "(each needs the run lock); the guide stays as it is until Redis is back."
+            f"WARNING: Redis is unreachable ({str(lock_detail or '?')[:80]}), so no "
+            "refresh, apply or reap can run (each needs the run lock); the guide "
+            "stays as it is until that is fixed."
         )
     elif lock_state == _LOCK_HELD:
         verdict.append(f"Run lock: held by {lock_detail}.")
@@ -8110,7 +8113,7 @@ def _process_label() -> str:
         return "?"
     parts = [os.path.basename(argv[0])]
     for prev, arg in zip(argv[1:], argv[2:] + [""]):
-        if prev.endswith(".py"):
+        if _SCRIPT_NAME_RE.fullmatch(os.path.basename(prev)):
             parts.append(os.path.basename(prev))
         elif prev in _PROCESS_LABEL_WORDS:
             parts.append(prev)
@@ -8122,6 +8125,7 @@ def _process_label() -> str:
 # What _process_label may copy out of argv. See its docstring.
 _PROCESS_LABEL_WORDS = frozenset({"worker", "beat", "shell", "-Q"})
 _QUEUE_LIST_RE = re.compile(r"[A-Za-z0-9_,]{1,40}")
+_SCRIPT_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,40}\.py")
 
 
 def _new_lock_value(kind: str, task_id: str) -> str:
@@ -8249,7 +8253,9 @@ def _run_lock_unavailable_reason() -> str:
     if state == _LOCK_UNREACHABLE:
         return "Redis is unreachable, so the run lock cannot be taken"
     if state == _LOCK_FREE:
-        return "another run held the lock, and has released it since"
+        # Not "someone released it": a Redis blip during the attempt reads
+        # the same way, and nothing here saw a holder.
+        return "the run lock could not be taken, and is free now"
     return "another run held the lock, or Redis was unreachable"
 
 
@@ -8307,12 +8313,13 @@ def _try_acquire_scheduler_lock(kind: str, task_id: str = "") -> Optional[str]:
         return value
     try:
         holder = r.get(_SCHEDULER_LOCK_KEY)
-    except Exception:
-        holder = None
+        who = (_describe_lock_holder(holder) if holder is not None
+               else "a run that released it before it could be read")
+    except Exception as e:
+        who = f"a holder that could not be read ({e})"
     logger.info(
         "[ranked_matchups] run lock wanted by %s (task %s, pid %s) is held by %s",
-        kind, task_id or "-", os.getpid(),
-        _describe_lock_holder(holder) if holder is not None else "a run that has just released it",
+        kind, task_id or "-", os.getpid(), who,
     )
     return None
 

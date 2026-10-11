@@ -294,7 +294,7 @@ Its last line is always the verdict:
   run lock, so you can see what a waiting run is waiting for. A holder described
   as "a plugin version from before holder records" is a thread still running
   old plugin code, which a container restart clears.
-- `WARNING: Redis is unreachable, so no refresh, apply or reap can run ...`
+- `WARNING: Redis is unreachable (<error>), so no refresh, apply or reap can run ...`
   Every run needs the run lock, a plain Refresh included, so nothing changes in
   the guide (or the curated list) until Redis is back.
 - `NOTE: ... requested <time> did not run: <why>.` The why names the run that

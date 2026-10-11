@@ -119,7 +119,9 @@ class TestRefreshFailsClosed:
     def test_show_status_says_redis_is_unreachable(self, plugin_mod, redis):
         redis.down = True
         last = _status(plugin_mod).splitlines()[-1]
-        assert last.startswith("WARNING: Redis is unreachable, so no refresh, apply or reap can run")
+        assert last.startswith("WARNING: Redis is unreachable (")
+        assert "Connection refused" in last
+        assert "so no refresh, apply or reap can run" in last
 
 
     def test_a_client_that_never_connected_counts_as_unreachable(self, plugin_mod, monkeypatch):
@@ -203,6 +205,20 @@ class TestHolderRecord:
         redis.store[plugin_mod._SCHEDULER_LOCK_KEY] = '{"acquired_at": 7}'
         assert plugin_mod._try_acquire_scheduler_lock("auto_pipeline", "t") is None
         assert plugin_mod._run_lock_unavailable_reason().startswith("the run lock is held by")
+
+    def test_a_holder_that_cannot_be_read_is_not_called_released(self, plugin_mod, redis, caplog):
+        redis.store[plugin_mod._SCHEDULER_LOCK_KEY] = "x"
+        real_get = redis.get
+
+        def failing_get(key):
+            raise ConnectionError("reset by peer")
+
+        redis.get = failing_get
+        caplog.set_level(logging.INFO)
+        assert plugin_mod._try_acquire_scheduler_lock("refresh") is None
+        line = next(r.getMessage() for r in caplog.records if "run lock wanted by" in r.getMessage())
+        assert "a holder that could not be read (reset by peer)" in line
+        redis.get = real_get
 
     def test_an_empty_held_value_is_not_reported_free(self, plugin_mod, redis):
         redis.store[plugin_mod._SCHEDULER_LOCK_KEY] = ""
@@ -333,6 +349,7 @@ class TestProcessLabel:
         ["/x/bin/python", "probe.py", "--token=abc123", "--password", "hunter2", "--api-key", "k1"],
         ["/x/bin/python", "worker.py", "-p", "hunter2", "-t", "abc123", "k1"],
         ["/x/bin/celery", "worker", "-Q", "hunter2=x", "--broker", "redis://u:abc123@h/0", "k1"],
+        ["/x/bin/python", "manage.py", "shell", "-c", "--token=abc123.py", "/tmp/k1=hunter2.py"],
     ])
     def test_no_argument_value_is_copied(self, plugin_mod, monkeypatch, argv):
         monkeypatch.setitem(sys.modules, "uwsgi", None)
