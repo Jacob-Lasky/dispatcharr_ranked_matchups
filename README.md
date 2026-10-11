@@ -318,9 +318,11 @@ logs the tail of its own progress and names the step it reached.
 
 ### Clearing out finished games
 
-By default a game's channel stays in the group until the next scheduled
-refresh, which on a five-a-day schedule can be hours after the final whistle.
-Two settings change that, both off by default:
+By default a game's channel stays in the group until the first scheduled
+refresh after its estimated end, which on a five-a-day schedule can be hours
+after the final whistle. A refresh never removes a game that is still on air,
+even when its sport's feed has already dropped it or that feed is down. Two
+settings change when a finished game goes, both off by default:
 
 | Setting | Effect |
 |---|---|

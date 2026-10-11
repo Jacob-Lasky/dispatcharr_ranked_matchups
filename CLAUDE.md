@@ -804,6 +804,10 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   (`_maybe_rematch_after_m3u`, gated on auto-refresh, one run per cooldown
   across all workers). Show current state names it "Refresh + apply after an
   M3U update"; Diagnose explains a late feed instead of calling it a bug
+- A refresh cannot take a live game off air (#240): a game that has kicked off,
+  or one whose source returned nothing this fetch, is held on the applied list
+  (outside the `max_games` cap) and re-matched against the current feeds until
+  the reaper would remove it anyway
 - A scheduled time is no longer lost when something else holds the run lock at
   that second: one worker claims the slot and retries the lock up to 30 minutes
   (never into the next slot), and stands down without running if a refresh +
