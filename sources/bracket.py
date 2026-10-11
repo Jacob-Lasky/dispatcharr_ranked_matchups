@@ -55,11 +55,15 @@ Bracket data shape (returned by `_fetch_bracket_games`):
 
 from __future__ import annotations
 
+import logging
 from abc import abstractmethod
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .base import GameRow, SportSource
+from .base import GameRow, MatchResult, SportSource
+from .._util import poisson_sample
+
+logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.bracket")
 
 
 _SENTINEL_START = datetime(2099, 1, 1, tzinfo=timezone.utc)
@@ -71,6 +75,51 @@ def _game_index(extra: Dict[str, Any]) -> Any:
     not a leg number; see place_upcoming), else `matchday` as before."""
     idx = extra.get("bracket_game_index")
     return idx if isinstance(idx, int) else extra.get("matchday", 1)
+
+
+class ForcedWinnerPoissonSampler:
+    """`sample_result` for a playoff game that cannot end level: Poisson
+    points (goals, runs) for each side from the two teams' strengths, and a
+    tied regulation result resolved by a coin-flipped +1 (overtime, extra
+    innings, a shootout or penalties). Strength asymmetry already biased the
+    means, so the tiebreak adds none. The ONE copy of this model for every
+    playoff source (#249): MLB, NHL, NBA, NFL, WNBA, NCAAW, NCAA baseball,
+    softball and soccer cups, MLS Cup. The regular-season sampler in
+    points_based.py is the same model on purpose.
+
+    DO NOT swap in a sport's regular-season sampler (MLS, NCAA soccer and
+    NHL regular season allow draws or award OT points): a bracket cascade
+    needs every game to have a winner.
+
+    The class needs `_strength_for(strengths, team)` returning
+    `{"pf_per_game", "pa_per_game"}`. Put it BEFORE the bracket base in the
+    bases, or SportSource's NotImplementedError sample_result wins the MRO.
+    """
+
+    # Lowest scoring rate a side is sampled at. Soccer sides set 0.05: a
+    # 0.1 floor would lift two blanking defences' expected goals noticeably.
+    LAMBDA_FLOOR: float = 0.1
+
+    def sample_result(
+        self,
+        state: Dict[str, Any],
+        match: GameRow,
+        strengths: Dict[str, Dict[str, float]],
+        rng: Any,
+    ) -> MatchResult:
+        del state  # per-game classification only
+        h = self._strength_for(strengths, match.home)
+        a = self._strength_for(strengths, match.away)
+        lam_home = max(self.LAMBDA_FLOOR, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
+        lam_away = max(self.LAMBDA_FLOOR, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
+        home = poisson_sample(lam_home, rng)
+        away = poisson_sample(lam_away, rng)
+        if home == away:
+            if rng.random() < 0.5:
+                home += 1
+            else:
+                away += 1
+        return MatchResult(home_goals=home, away_goals=away)
 
 
 class BracketSportSource(SportSource):
@@ -104,6 +153,128 @@ class BracketSportSource(SportSource):
     # SoccerSource heritage share the same attr; if a subclass doesn't
     # initialize it in __init__, the class-level None default applies.
     _initial_state_cache: Optional[Dict[str, Any]] = None
+
+    # ---------- bracket-fetch failure accounting (#245) ----------
+    #
+    # A bracket assembled from a fetch in which ANY request failed is not the
+    # bracket. A missing day of an ESPN day sweep is missing games, so a
+    # series reads 2-1 when it is 3-1 (importance computed against the wrong
+    # series); every day failing is an empty postseason. DO NOT cache either
+    # in `_bracket_games_cache`: the scoring-time placement (#243) and
+    # initial_state() read the bracket again after allow_bracket_scoring_retry,
+    # and a cached failure is what they would get instead of the retry.
+    #
+    # "Never cache a failure" is not "retry forever" (#228, the soccer
+    # season fetch): the failure COUNT is remembered, the result is not.
+    # BRACKET_FETCH_MAX_ATTEMPTS per refresh (sources are built fresh per
+    # refresh, so this is per-instance state), scoring is guaranteed one of
+    # them, and a source that gave up is reported by bracket_fetch_failure()
+    # so the missing stakes are loud in the refresh summary and Show current
+    # state. Once given up, _fetch_bracket_games returns [] with no network:
+    # a partial bracket would file results into wrong ties, which is worse
+    # than no bracket importance (place_upcoming's rule).
+    BRACKET_FETCH_MAX_ATTEMPTS: int = 2
+    # Class defaults; the methods below assign per instance. The day memo is
+    # created per instance (a mutable class default would be shared).
+    _bracket_fetch_attempts: int = 0
+    _bracket_fetch_error: Optional[str] = None
+    _bracket_sweep_memo: Optional[Dict[date, Dict[str, Any]]] = None
+
+    def _bracket_fetch_given_up(self) -> bool:
+        return self._bracket_fetch_attempts >= self.BRACKET_FETCH_MAX_ATTEMPTS
+
+    def _bracket_fetch_failed(self, error: str) -> List[Dict[str, Any]]:
+        """Record one failed bracket fetch and return the [] the caller hands
+        back UNCACHED. Never assign the result of a failed fetch to
+        `_bracket_games_cache`."""
+        self._bracket_fetch_attempts += 1
+        self._bracket_fetch_error = error
+        logger.warning(
+            "[%s] bracket fetch failed (attempt %d of %d this refresh): %s",
+            self.sport_label, self._bracket_fetch_attempts,
+            self.BRACKET_FETCH_MAX_ATTEMPTS, error,
+        )
+        return []
+
+    def _bracket_fetch_retry_pending(self) -> bool:
+        """The last bracket fetch failed and another attempt is allowed. A
+        state built from it must not be cached either: initial_state() is the
+        bracket importance reads, and caching it would pin the failure past
+        the retry exactly as caching the games did."""
+        return self._bracket_fetch_error is not None and not self._bracket_fetch_given_up()
+
+    def _cache_bracket_games(self, games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Cache a COMPLETE bracket fetch, and forget earlier failed attempts:
+        a fetch that recovered is not reported as having given up."""
+        self._bracket_games_cache = games
+        self._bracket_fetch_attempts = 0
+        self._bracket_fetch_error = None
+        return games
+
+    def allow_bracket_scoring_retry(self) -> None:
+        """Guarantee scoring one more bracket fetch however many failed
+        before it; plugin._action_refresh calls this as scoring begins, the
+        bracket counterpart of soccer.allow_scoring_retry. A state that
+        initial_state() cached from the failed fetch (it caches once the
+        budget is spent) is dropped too, or scoring would read it instead of
+        making the attempt this grants."""
+        if self._bracket_fetch_error is None:
+            return
+        self._bracket_fetch_attempts = min(
+            self._bracket_fetch_attempts, self.BRACKET_FETCH_MAX_ATTEMPTS - 1,
+        )
+        self._initial_state_cache = None
+
+    def bracket_fetch_failure(self) -> Optional[str]:
+        """The last error, when this refresh gave up on the bracket fetch;
+        None otherwise (never failed, recovered, or still retryable). The
+        source's games then carry no bracket stakes, so the refresh reports
+        it like a failed source rather than letting a zero pass as real."""
+        return self._bracket_fetch_error if self._bracket_fetch_given_up() else None
+
+    def _sweep_bracket_days(
+        self,
+        start: date,
+        end: date,
+        fetch_day: Callable[[date], Any],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """The payload of every day of [start, end], in date order (MLS Cup
+        numbers series games by it); or None when a day's request failed
+        (recorded through _bracket_fetch_failed, so the caller just returns
+        []).
+
+        `fetch_day(day)` returns the parsed payload, or anything that is not
+        a dict (the sources' `_http_get` gives None) for a failed request. A
+        dict, even an empty one, is an answer: a day with no games.
+
+        Stops at the FIRST failed day: the sweep is discarded either way, and
+        against an ESPN outage every further day is another request timeout.
+        Days that did answer are kept on the instance until the sweep
+        completes, so the retry asks only from the failed day on, not the
+        whole window again. Injected `fetch_day` keeps each source's own
+        patchable `_http_get`."""
+        if self._bracket_fetch_given_up():
+            return None
+        if self._bracket_sweep_memo is None:
+            self._bracket_sweep_memo = {}
+        memo = self._bracket_sweep_memo
+        total = (end - start).days + 1
+        days: List[date] = []
+        day = start
+        while day <= end:
+            if day not in memo:
+                data = fetch_day(day)
+                if not isinstance(data, dict):
+                    self._bracket_fetch_failed(
+                        f"scoreboard for {day.isoformat()} did not answer, "
+                        f"day {len(days) + 1} of {total}"
+                    )
+                    return None
+                memo[day] = data
+            days.append(day)
+            day += timedelta(days=1)
+        self._bracket_sweep_memo = None  # complete: the caller caches the result
+        return [memo[d] for d in days]
 
     # ---------- subclass hooks ----------
 
@@ -319,7 +490,8 @@ class BracketSportSource(SportSource):
             "_bracket": bracket,
             "_round_reached": round_reached,
         }
-        self._initial_state_cache = state
+        if not self._bracket_fetch_retry_pending():
+            self._initial_state_cache = state
         return state
 
     def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
@@ -1112,7 +1284,8 @@ class DoubleEliminationSource(BracketSportSource):
             "_bracket": bracket,
             "_round_reached": round_reached,
         }
-        self._initial_state_cache = state
+        if not self._bracket_fetch_retry_pending():
+            self._initial_state_cache = state
         return state
 
     def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:

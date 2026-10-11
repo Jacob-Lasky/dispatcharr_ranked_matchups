@@ -39,20 +39,18 @@ because EPG entries use the school name.
 from __future__ import annotations
 
 import logging
-import random
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult
-from .bracket import BestOfNSeriesSource, DoubleEliminationSource
+from .base import GameRow
+from .bracket import BestOfNSeriesSource, DoubleEliminationSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import (
     extract_game_number_after_marker,
     parse_iso_utc,
-    poisson_sample as _poisson,
 )
 from ._espn import fetch_days
 
@@ -337,7 +335,7 @@ def _parse_softball_playoff_headline(headline: str) -> Tuple[Optional[str], Opti
     return None, None
 
 
-class _SoftballPlayoffStrengthsMixin:
+class _SoftballPlayoffStrengthsMixin(ForcedWinnerPoissonSampler):
     """Shared per-team Poisson strength tracking + sample_result for the
     two NCAA Softball playoff source classes (Super Regional + WCWS Finals
     via BestOfNSeriesSource; Regional + 8-team WCWS bracket via
@@ -369,27 +367,6 @@ class _SoftballPlayoffStrengthsMixin:
             "pf_per_game": _DEFAULT_RUNS_FOR,
             "pa_per_game": _DEFAULT_RUNS_AGAINST,
         }
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        del state
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.1, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.1, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_runs = _poisson(lam_home, rng)
-        away_runs = _poisson(lam_away, rng)
-        if home_runs == away_runs:
-            if rng.random() < 0.5:
-                home_runs += 1
-            else:
-                away_runs += 1
-        return MatchResult(home_goals=home_runs, away_goals=away_runs)
 
 
 class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSource):
@@ -529,20 +506,22 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
         out: List[Dict[str, Any]] = []
         season_start = datetime(self.season_year, 5, 15, tzinfo=timezone.utc).date()
         season_end = datetime(self.season_year, 6, 15, tzinfo=timezone.utc).date()
-        day = season_start
-        while day <= season_end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if data:
-                for event in data.get("events") or []:
-                    if not _is_postseason_event(event):
-                        continue
-                    rec = self._event_to_bracket_record(event)
-                    if rec is not None:
-                        out.append(rec)
-            day += timedelta(days=1)
+        payloads = self._sweep_bracket_days(
+            season_start, season_end,
+            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+        for data in payloads:
+            for event in data.get("events") or []:
+                if not _is_postseason_event(event):
+                    continue
+                rec = self._event_to_bracket_record(event)
+                if rec is not None:
+                    out.append(rec)
 
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     def _event_to_bracket_record(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         comps = event.get("competitions") or []
@@ -891,31 +870,34 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
         raw: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
         season_start = datetime(self.season_year, 5, 15, tzinfo=timezone.utc).date()
         season_end = datetime(self.season_year, 6, 15, tzinfo=timezone.utc).date()
-        day = season_start
         seen_ids: set = set()
-        while day <= season_end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if data:
-                for event in data.get("events") or []:
-                    if not _is_postseason_event(event):
-                        continue
-                    eid = event.get("id")
-                    if eid in seen_ids:
-                        continue
-                    comps = event.get("competitions") or []
-                    if not comps:
-                        continue
-                    headline = ""
-                    for note in (comps[0].get("notes") or []):
-                        if note.get("type") == "event":
-                            headline = note.get("headline") or ""
-                            break
-                    stage, partial_key = _parse_softball_bracket_headline(headline)
-                    if stage is None:
-                        continue
-                    seen_ids.add(eid)
-                    raw.append((event, stage, partial_key))
-            day += timedelta(days=1)
+        payloads = self._sweep_bracket_days(
+            season_start, season_end,
+            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+        for data in payloads:
+            for event in data.get("events") or []:
+                if not _is_postseason_event(event):
+                    continue
+                eid = event.get("id")
+                if eid in seen_ids:
+                    continue
+                comps = event.get("competitions") or []
+                if not comps:
+                    continue
+                headline = ""
+                for note in (comps[0].get("notes") or []):
+                    if note.get("type") == "event":
+                        headline = note.get("headline") or ""
+                        break
+                stage, partial_key = _parse_softball_bracket_headline(headline)
+                if stage is None:
+                    continue
+                seen_ids.add(eid)
+                raw.append((event, stage, partial_key))
 
         wcws_sub_by_team = _classify_wcws_sub_brackets(
             _wcws_meta_from_raw_events(raw)
@@ -926,8 +908,7 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
             rec = self._event_to_bracket_record(event, stage, partial_key, wcws_sub_by_team)
             if rec is not None:
                 out.append(rec)
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     def _event_to_bracket_record(
         self,

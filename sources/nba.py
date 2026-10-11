@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .base import GameRow
-from .bracket import BestOfNSeriesSource
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
 from ._espn import fetch_days
@@ -376,7 +376,7 @@ class NbaRegularSource(PointsBasedSportSource):
 # =====================================================================
 
 
-class NbaPlayoffSource(BestOfNSeriesSource):
+class NbaPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """NBA playoffs as a best-of-7 BestOfNSeriesSource. Same shape as
     NhlPlayoffSource: 4 rounds, uniform SERIES_LENGTH=7, conference-
     bracket structure where R1 has 8 series total (4 East + 4 West),
@@ -510,43 +510,45 @@ class NbaPlayoffSource(BestOfNSeriesSource):
         # historical and possible-future shifts).
         start = datetime(self.season_end_year, 4, 1, tzinfo=timezone.utc).date()
         end = datetime(self.season_end_year, 7, 1, tzinfo=timezone.utc).date()
-        day = start
-        while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if data:
-                for event in data.get("events") or []:
-                    rec = _extract_game_record(event)
-                    if rec is None or rec["id"] is None:
-                        continue
-                    if rec.get("season_type") != 3:
-                        continue
-                    if rec["id"] in seen_ids:
-                        continue
-                    # Decode stage from notes[0].headline.
-                    headline = None
-                    notes = rec.get("notes") or []
-                    if notes:
-                        headline = (notes[0] or {}).get("headline")
-                    parsed = _parse_stage_from_headline(headline)
-                    if parsed is None:
-                        # Play-in tournament games have headlines like
-                        # "Play-In Tournament" with no game number. They
-                        # aren't part of the 16-team bracket, so skip.
-                        continue
-                    seen_ids.add(rec["id"])
-                    out.append({
-                        "game_id": rec["id"],
-                        "stage": parsed["stage"],
-                        "matchday": parsed["matchday"],
-                        "home": rec["home"],
-                        "away": rec["away"],
-                        "home_goals": rec["home_points"],
-                        "away_goals": rec["away_points"],
-                        "status": rec["status"],
-                        "start_time": rec["start_time"],
-                        "extra": {"headline": headline},
-                    })
-            day += timedelta(days=1)
+        payloads = self._sweep_bracket_days(
+            start, end,
+            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+        for data in payloads:
+            for event in data.get("events") or []:
+                rec = _extract_game_record(event)
+                if rec is None or rec["id"] is None:
+                    continue
+                if rec.get("season_type") != 3:
+                    continue
+                if rec["id"] in seen_ids:
+                    continue
+                # Decode stage from notes[0].headline.
+                headline = None
+                notes = rec.get("notes") or []
+                if notes:
+                    headline = (notes[0] or {}).get("headline")
+                parsed = _parse_stage_from_headline(headline)
+                if parsed is None:
+                    # Play-in tournament games have headlines like
+                    # "Play-In Tournament" with no game number. They
+                    # aren't part of the 16-team bracket, so skip.
+                    continue
+                seen_ids.add(rec["id"])
+                out.append({
+                    "game_id": rec["id"],
+                    "stage": parsed["stage"],
+                    "matchday": parsed["matchday"],
+                    "home": rec["home"],
+                    "away": rec["away"],
+                    "home_goals": rec["home_points"],
+                    "away_goals": rec["away_points"],
+                    "status": rec["status"],
+                    "start_time": rec["start_time"],
+                    "extra": {"headline": headline},
+                })
 
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)

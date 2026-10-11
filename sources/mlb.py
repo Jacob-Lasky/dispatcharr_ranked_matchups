@@ -40,16 +40,15 @@ Off by default.
 from __future__ import annotations
 
 import logging
-import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult
-from .bracket import BestOfNSeriesSource
+from .base import GameRow
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mlb")
 
@@ -267,7 +266,7 @@ class MlbRegularSource(PointsBasedSportSource):
 # =====================================================================
 
 
-class MlbPlayoffSource(BestOfNSeriesSource):
+class MlbPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """MLB postseason as a per-stage variable-length BestOfNSeriesSource.
 
     Series lengths per stage:
@@ -395,31 +394,6 @@ class MlbPlayoffSource(BestOfNSeriesSource):
             "pa_per_game": _DEFAULT_RUNS_AGAINST,
         }
 
-    # ---------- sample_result (per-game Poisson with extra-innings) ----------
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        del state  # per-game classification only
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.1, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.1, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_runs = _poisson(lam_home, rng)
-        away_runs = _poisson(lam_away, rng)
-        # Extra innings: tied regulation always resolves (MLB postseason
-        # has no draws); coin-flip the winner of the extra-innings boost.
-        if home_runs == away_runs:
-            if rng.random() < 0.5:
-                home_runs += 1
-            else:
-                away_runs += 1
-        return MatchResult(home_goals=home_runs, away_goals=away_runs)
-
     # ---------- bracket fetch ----------
 
     def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
@@ -431,13 +405,16 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         """
         if self._bracket_games_cache is not None:
             return self._bracket_games_cache
+        if self._bracket_fetch_given_up():
+            return []
 
         data = _http_get(f"{MLB_API_BASE}/schedule/postseason?season={self.season}")
         if not data:
             # NOT cached: a failed request is not an empty postseason, and
             # caching it would keep the scoring-time retry (#243) from ever
-            # seeing the bracket.
-            return []
+            # seeing the bracket. Counted, so a refresh that gives up says so
+            # (#245; see BracketSportSource).
+            return self._bracket_fetch_failed("postseason schedule did not answer")
 
         out: List[Dict[str, Any]] = []
         for date_entry in data.get("dates", []) or []:
@@ -499,8 +476,7 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         if len(lcs_pair_set) == 2 and ws_emitted == 0:
             out.extend(self._synth_ws_placeholder_games())
 
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     # ---------- WS placeholder synthesis (#27) ----------
 

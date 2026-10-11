@@ -3254,8 +3254,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     _soccer_allow_scoring_retry()
     # Again, now: a bracket whose season fetch failed at fetch time gets its
     # retry here, and a row placed against an empty bracket would otherwise
-    # never reach its tie (#243). Idempotent on rows already placed.
+    # never reach its tie (#243). Idempotent on rows already placed. The
+    # bracket's own fetch (an ESPN day sweep, a series schedule) is
+    # guaranteed that retry the same way as the soccer season lists (#245).
     for src in {id(s): s for s in game_sources}.values():
+        retry = getattr(src, "allow_bracket_scoring_retry", None)
+        if callable(retry):
+            retry()
         _place_in_bracket(src, [g for g, s in zip(all_games, game_sources) if s is src],
                           for_scoring=True)
     # Importance for every game whose source can share simulated seasons,
@@ -3552,6 +3557,20 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # round premium. Before the cache write, so Show current state sees it.
     for code, err in _soccer_season_fetch_failures().items():
         src_summary.append(_source_error_entry(f"{code} season fixtures (stakes not simulated)", err))
+    # Likewise a playoff bracket whose fetch gave up (#245): its games were
+    # not placed in their series, so they carry no bracket stakes. One entry
+    # per label: two sources can share one (the NCAA Baseball Postseason
+    # pair), and one outage must not read as two failed sources.
+    bracket_failures: Dict[str, List[str]] = {}
+    for src in sources:
+        failure = getattr(src, "bracket_fetch_failure", None)
+        err = failure() if callable(failure) else None
+        if isinstance(err, str) and err:
+            errs = bracket_failures.setdefault(src.sport_label, [])
+            if err not in errs:
+                errs.append(err)
+    for label, errs in bracket_failures.items():
+        src_summary.append(_source_error_entry(f"{label} bracket (stakes not simulated)", "; ".join(errs)))
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),

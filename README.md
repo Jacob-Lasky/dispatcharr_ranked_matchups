@@ -689,6 +689,9 @@ needs `supports_importance=True` on the `SportSource` plus the 7-method
 Monte Carlo interface (`estimate_strengths`, `initial_state`,
 `remaining_matches`, `sample_result`, `apply_result`, `terminal_outcomes`,
 `outcome_labels`) — see `sources/soccer.py` for the canonical impl.
+A playoff source built on `BestOfNSeriesSource` or `DoubleEliminationSource`
+gets its `sample_result` by listing `ForcedWinnerPoissonSampler` (in
+`sources/bracket.py`) FIRST among its bases.
 
 Also set `shared_season_importance=True` if — and only if — your
 `sample_result` ignores the `state` argument. That lets every game of your

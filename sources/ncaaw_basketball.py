@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .base import GameRow
-from .bracket import BestOfNSeriesSource
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
 from ._espn import fetch_days
@@ -328,7 +328,7 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
 # =====================================================================
 
 
-class NcaawBasketballPlayoffSource(BestOfNSeriesSource):
+class NcaawBasketballPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """NCAA Women's March Madness as a single-game-elim
     BestOfNSeriesSource with SERIES_LENGTH=1 per stage.
 
@@ -431,38 +431,40 @@ class NcaawBasketballPlayoffSource(BestOfNSeriesSource):
         # Tournament window: March 15 - April 15 of season_end_year.
         start = datetime(self.season_end_year, 3, 15, tzinfo=timezone.utc).date()
         end = datetime(self.season_end_year, 4, 15, tzinfo=timezone.utc).date()
-        day = start
-        while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if data:
-                for event in data.get("events") or []:
-                    rec = _extract_game_record(event)
-                    if rec is None or rec["id"] is None:
-                        continue
-                    if rec.get("season_type") != 3:
-                        continue
-                    if rec["id"] in seen_ids:
-                        continue
-                    headline = None
-                    notes = rec.get("notes") or []
-                    if notes:
-                        headline = (notes[0] or {}).get("headline")
-                    parsed = _parse_stage_from_headline(headline)
-                    if parsed is None:
-                        continue
-                    seen_ids.add(rec["id"])
-                    out.append({
-                        "game_id": rec["id"],
-                        "stage": parsed["stage"],
-                        "matchday": parsed["matchday"],
-                        "home": rec["home"],
-                        "away": rec["away"],
-                        "home_goals": rec["home_points"],
-                        "away_goals": rec["away_points"],
-                        "status": rec["status"],
-                        "start_time": rec["start_time"],
-                        "extra": {"headline": headline},
-                    })
-            day += timedelta(days=1)
-        self._bracket_games_cache = out
-        return out
+        payloads = self._sweep_bracket_days(
+            start, end,
+            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+        for data in payloads:
+            for event in data.get("events") or []:
+                rec = _extract_game_record(event)
+                if rec is None or rec["id"] is None:
+                    continue
+                if rec.get("season_type") != 3:
+                    continue
+                if rec["id"] in seen_ids:
+                    continue
+                headline = None
+                notes = rec.get("notes") or []
+                if notes:
+                    headline = (notes[0] or {}).get("headline")
+                parsed = _parse_stage_from_headline(headline)
+                if parsed is None:
+                    continue
+                seen_ids.add(rec["id"])
+                out.append({
+                    "game_id": rec["id"],
+                    "stage": parsed["stage"],
+                    "matchday": parsed["matchday"],
+                    "home": rec["home"],
+                    "away": rec["away"],
+                    "home_goals": rec["home_points"],
+                    "away_goals": rec["away_points"],
+                    "status": rec["status"],
+                    "start_time": rec["start_time"],
+                    "extra": {"headline": headline},
+                })
+        return self._cache_bracket_games(out)
