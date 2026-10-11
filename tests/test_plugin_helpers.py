@@ -340,6 +340,19 @@ class TestIsPostseasonGame:
         for s in ("regular-season", "torneo-apertura", "torneo-clausura", "preseason", "", None):
             assert plugin._is_postseason_game(slug(s)) is False, s
 
+    def test_an_all_star_slug_is_not_postseason(self, plugin):
+        """Preventive guard. ESPN's soccer slug for an All-Star exhibition is
+        "all-star-game" (measured on usa.1, 2025-07-23). The MLS sources drop
+        it upstream (East/West keep only "regular-season", MLS Cup only its
+        round map), but NWSL and Liga MX go through MlsSource, which passes
+        every slug through, and on their stage-less rows the slug rule would
+        call it a playoff round: rescued past the 'postseason' favorites gate
+        and given the knockout window. Its stage-side twin, ALLSTAR, is
+        already excluded."""
+        g = types.SimpleNamespace(home="A", away="B", extra={"season_slug": "all-star-game"})
+        assert plugin._is_postseason_game(g) is False
+        assert plugin._epg_match_window("NWSL", {"season_slug": "all-star-game"}) == (5, 2.5)
+
     def test_a_stage_outranks_the_slug(self, plugin):
         """An MLS Cup row carries both; a WC group row with a playoff-looking
         slug would still be a group game."""

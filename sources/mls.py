@@ -209,12 +209,17 @@ class MlsSource(SportSource):
                 closeness = self._lookup_closeness(closeness_by_pair, home, away)
                 # ESPN exposes the season/playoff stage in
                 # `event.season.slug`. Carry it through as
-                # `extra.season_slug` for downstream consumers (the
-                # importance simulator filed under #30 will route on
-                # it). MLS values: "regular-season", "mls-cup",
-                # "mls-cup-playoffs". NWSL: "regular-season",
-                # "nwsl-playoffs", etc. Liga MX: "torneo-apertura",
-                # "torneo-clausura", "liguilla".
+                # `extra.season_slug`: plugin._is_postseason_extra reads
+                # it, on these stage-less rows, for the 'postseason'
+                # favorites gate and soccer's knockout window (#257).
+                # Values measured 2025-01..2026-10: NWSL
+                # "regular-season", "playoffs---quarterfinals" ..
+                # "playoffs---championship". Liga MX "torneo-apertura",
+                # "torneo-clausura", then per-round Liguilla slugs such
+                # as "apertura---quarterfinals", "clausura---finals",
+                # "clausura-2025---7th-seed-game". There is NO
+                # "liguilla" slug. A new regular-season slug must go in
+                # plugin._NON_POSTSEASON_SEASON_SLUGS.
                 season_slug = ((event.get("season") or {}).get("slug") or "")
                 out.append(GameRow(
                     sport_prefix=self.sport_prefix,

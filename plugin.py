@@ -2621,6 +2621,8 @@ _NON_POSTSEASON_STAGES = frozenset({
 _NON_POSTSEASON_SEASON_SLUGS = frozenset({
     "regular-season",   # MLS, NWSL
     "preseason",        # exhibitions, where ESPN lists them
+    "all-star-game",    # exhibition, measured on usa.1 2025-07-23 (MLS drops
+                        # it upstream; NWSL / Liga MX would not). ALLSTAR twin
     "torneo-apertura",  # Liga MX fall table
     "torneo-clausura",  # Liga MX spring table
 })
