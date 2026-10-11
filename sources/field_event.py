@@ -9,11 +9,13 @@ Design:
   - Emit one GameRow per scheduled event, with `home = event_name`
     (e.g., "Heineken Chinese GP", "The Masters") and `away = "Field"`
     as a sentinel.
-  - Tag with `tournament_stage = "EVENT"` (regular tour stop) or
-    `"MAJOR"` (golf majors / marquee racing events the source flags
-    as MAJOR). The scoring layer's `tournament` signal handles the
-    rest; both labels map to non-zero stage_score so field events
-    always surface in the guide when toggled on.
+  - Tag with `tournament_stage = "EVENT"` (regular tour stop),
+    `"TOUR_PLAYOFF"` (a tour's own playoff events, between the two:
+    golf's FedEx Cup playoffs, #188) or `"MAJOR"` (golf majors /
+    marquee racing events the source flags as MAJOR). The scoring
+    layer's `tournament` signal handles the rest; every label maps to
+    a non-zero stage_score so field events always surface in the guide
+    when toggled on.
   - No importance simulation, no closeness, no rank: the rarity of
     these events (~1/week) means just-show-it-up is the right product.
     The matcher fuzzy-matches the event name against EPG titles.
@@ -54,6 +56,8 @@ class FieldEventSource(SportSource):
       - `MAJOR_REGEX`: optional compiled regex; when an event name
         matches, the event is tagged tournament_stage="MAJOR"
         (otherwise "EVENT"). Default None means everything is "EVENT".
+      - `PLAYOFF_REGEX`: optional compiled regex for the tour's playoff
+        events, tagged "TOUR_PLAYOFF". MAJOR wins when both match.
     """
 
     # supports_importance left at the SportSource default (False).
@@ -64,6 +68,7 @@ class FieldEventSource(SportSource):
     SPORT_LABEL: str = ""
     FD_COMPETITION_CODE: str = ""
     MAJOR_REGEX: Optional[Pattern[str]] = None
+    PLAYOFF_REGEX: Optional[Pattern[str]] = None
 
     @property
     def sport_prefix(self) -> str:
@@ -107,10 +112,13 @@ class FieldEventSource(SportSource):
                 continue
             seen_ids.add(eid)
             # Detect majors so the score gets bumped to the MAJOR tier
-            # (e.g., golf's Masters / PGA / US Open / British Open).
+            # (e.g., golf's Masters / PGA / US Open / British Open), then the
+            # tour's playoff events (golf's FedEx Cup playoffs).
             stage = "EVENT"
             if self.MAJOR_REGEX is not None and self.MAJOR_REGEX.search(display_name):
                 stage = "MAJOR"
+            elif self.PLAYOFF_REGEX is not None and self.PLAYOFF_REGEX.search(display_name):
+                stage = "TOUR_PLAYOFF"
             out.append(GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
@@ -179,25 +187,48 @@ class NascarSource(FieldEventSource):
 # tournament event whose name contains the major name. Regex is
 # liberal in word ordering to cover ESPN's stylings ("The Masters",
 # "Masters Tournament", "U.S. Open Championship", "The Open
-# Championship", "PGA Championship").
+# Championship", "PGA Championship"). "PGA Championship" must not be the
+# tail of a longer name: the DP World Tour's "BMW PGA Championship" and the
+# "Senior PGA Championship" are not majors.
 _GOLF_MAJOR_RE: Pattern[str] = re.compile(
-    r"\b(masters|pga\s+championship|u\.?s\.?\s+open|"
+    r"\b(masters|(?<!bmw\s)(?<!senior\s)pga\s+championship|u\.?s\.?\s+open|"
     r"the\s+open(?:\s+championship)?|british\s+open)\b",
+    re.IGNORECASE,
+)
+
+
+# The FedEx Cup playoffs (#188): three events in August that decide the
+# season-long title, so they rank above a regular week and below the majors.
+# Names as ESPN publishes them (checked 2025 and 2026): "FedEx St. Jude
+# Championship", "BMW Championship", "TOUR Championship". Each alternative is
+# narrow on purpose:
+#   - "st. jude CHAMPIONSHIP", not "st. jude": the pre-2022 "FedEx St. Jude
+#     Classic" was an ordinary tour stop.
+#   - "bmw championship" does not match the DP World Tour's "BMW PGA
+#     Championship" (and that one is not on this feed).
+#   - "tour championship" is anchored to the start of the name, so it cannot
+#     match some "<sponsor> Tour Championship" on another tour, and "PGA TOUR
+#     Q-School" does not contain it.
+_GOLF_PLAYOFF_RE: Pattern[str] = re.compile(
+    r"\bst\.?\s+jude\s+championship\b|\bbmw\s+championship\b|"
+    r"^\s*(?:the\s+)?tour\s+championship\b",
     re.IGNORECASE,
 )
 
 
 class GolfSource(FieldEventSource):
     """PGA Tour: ~45 tournaments per year. Four majors get the
-    MAJOR tier; everything else is EVENT-tier. The MAJOR_REGEX
-    intentionally catches both "The Open" and "British Open"
-    framings; ESPN has inconsistently used both."""
+    MAJOR tier, the three FedEx Cup playoff events the TOUR_PLAYOFF
+    tier, everything else EVENT. The MAJOR_REGEX intentionally catches
+    both "The Open" and "British Open" framings; ESPN has
+    inconsistently used both."""
 
     ESPN_SLUG = "golf/pga"
     SPORT_PREFIX = "PGA"
     SPORT_LABEL = "PGA Tour"
     FD_COMPETITION_CODE = "PGA"
     MAJOR_REGEX = _GOLF_MAJOR_RE
+    PLAYOFF_REGEX = _GOLF_PLAYOFF_RE
 
 
 # UFC PPV detection. ESPN names PPV events "UFC <number>: <headline>"

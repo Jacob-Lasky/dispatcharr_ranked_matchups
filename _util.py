@@ -316,7 +316,8 @@ def field_event_extra(
     above and sources/field_event.py.
 
     `stage` is "MAJOR" (marquee: golf majors, tennis Slams, UFC PPVs, world-
-    title boxing) or "EVENT" (regular tour stop / fight night).
+    title boxing), "TOUR_PLAYOFF" (golf's FedEx Cup playoffs) or "EVENT"
+    (regular tour stop / fight night).
     """
     return {
         "is_field_event": True,

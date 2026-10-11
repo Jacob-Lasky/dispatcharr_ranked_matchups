@@ -163,6 +163,47 @@ class BracketSportSource(SportSource):
     def _league_context_code(self) -> str:
         """LEAGUE_CONTEXTS key for this bracket (e.g., 'CL', 'NHL_PO')."""
 
+    def place_upcoming(self, games: List[GameRow]) -> int:
+        """Stamp each upcoming row with its bracket position, from this
+        source's own bracket records matched on `extra["game_id"]` (#243).
+        Returns how many rows could not be placed.
+
+        Two consumers need the row's `stage` (and `matchday`), and both fail
+        SILENTLY without it:
+
+        - `apply_result` records the importance simulator's TARGET game into
+          its tie only when `extra["stage"]` is a string. Unstamped, the
+          target's sampled result is thrown away, the same game is replayed
+          from the bracket, and leverage collapses to noise: measured
+          2026-10-11 on live MLB LCS games, about 0.15 instead of about 3.
+        - `plugin._is_postseason_game` reads only `extra["stage"]`, so
+          favorites_only "postseason" mode dropped these playoff games.
+
+        Placed here, from the bracket the simulator itself builds, rather than
+        in each source's fetch_upcoming: the stage must be the SAME string the
+        bracket keys its ties on, and a per-source parser of the schedule
+        payload is a second copy of that vocabulary free to drift. A row that
+        already carries a stage (the soccer and NCAA sources stamp their own)
+        is left alone.
+        """
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for rec in self._fetch_bracket_games():
+            gid = rec.get("game_id")
+            if gid is not None:
+                by_id[str(gid)] = rec
+        unplaced = 0
+        for g in games:
+            extra = g.extra
+            if isinstance(extra.get("stage"), str):
+                continue
+            rec = by_id.get(str(extra.get("game_id")))
+            if rec is None or not isinstance(rec.get("stage"), str):
+                unplaced += 1
+                continue
+            extra["stage"] = rec["stage"]
+            extra.setdefault("matchday", rec.get("matchday") or 1)
+        return unplaced
+
     def initial_state(self) -> Dict[str, Any]:
         if self._initial_state_cache is not None:
             return self._initial_state_cache

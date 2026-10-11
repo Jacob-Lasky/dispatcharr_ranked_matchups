@@ -695,6 +695,19 @@ stay in agreement with that one.
   days" and is neither: it drops `tzinfo`, so comparing the result against an
   aware `start_time` raised `TypeError` and MLB Postseason reported an error on
   every refresh for the whole postseason. Use `now + timedelta(days=N)`.
+- **A bracket source's upcoming row needs its round in `extra["stage"]`, and
+  nothing fails without it** (#243). `BestOfNSeriesSource.apply_result` records
+  the simulator's TARGET game into its tie only when the stage is a string, so
+  an unstamped row's sampled result is dropped and the game replayed: live MLB
+  LCS games scored ~0.15 importance instead of ~3. `_is_postseason_game` reads
+  the same key, so favorites_only "postseason" dropped those games too. The
+  plugin calls `BracketSportSource.place_upcoming` on every bracket source's
+  fetch (`_place_in_bracket`), which copies `stage` + `matchday` from the
+  source's own bracket records matched on `extra["game_id"]`. So a new bracket
+  source needs `game_id` on its upcoming rows equal to its bracket records'
+  `game_id` (`tests/test_match_identity_contract.py` checks the key is there,
+  including `extra = {...}` built as a variable), and a warning names any row
+  it could not place.
 - **The child log's LEADING LEVEL NAME is a contract.** `_pipeline_runner.py`
   sets `format="%(levelname)s %(name)s: %(message)s"`, and
   `tasks._child_line_level` parses that first token so a subprocess WARNING is

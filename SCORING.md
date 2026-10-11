@@ -206,7 +206,8 @@ default 1.5):
 | `ROUND_OF_16` / `LAST_16` | 1.5 | 2.25 |
 | `ROUND_OF_32` / `LAST_32` | 1.0 | 1.5 |
 | `PLAYOFFS` (entry round) | 1.0 | 1.5 |
-| `MAJOR` (golf majors, F1 Monaco, etc) | 4.5 | 6.75 |
+| `MAJOR` (golf majors, tennis Slams, numbered UFC events, title boxing) | 4.5 | 6.75 |
+| `TOUR_PLAYOFF` (golf's FedEx Cup playoffs) | 3.0 | 4.5 |
 | `EVENT` (regular-season field events) | 1.5 | 2.25 |
 | `CUP_R5` (domestic cup 5th round) | 1.8 | 2.7 |
 | `CUP_R4` (domestic cup 4th round) | 1.4 | 2.1 |
@@ -618,9 +619,11 @@ doesn't capture:
   classification the bands cascade reads.
 - **Field events (F1, golf, NASCAR, UFC):** no two-team head-to-head
   structure, so rank / favorite / closeness signals don't fire. The
-  `tournament_stage` band (`EVENT` for regular weekly events, `MAJOR`
-  for golf majors / Monaco GP / etc) is what gets them onto the
-  guide at all.
+  `tournament_stage` band (`EVENT` for regular weekly events,
+  `TOUR_PLAYOFF` for golf's three FedEx Cup playoff events, `MAJOR` for
+  golf majors / tennis Slams / numbered UFC events / title fights) is
+  what gets them onto the guide at all. F1 and NASCAR have no major
+  tier: every race is `EVENT`.
 - **NCAA Women's Basketball / March Madness:** ESPN scoreboard for
   the regular season, dedicated `NcaawSource` knows the 6-round
   single-game elimination shape (R64 → R32 → S16 → E8 → F4 → NCG).

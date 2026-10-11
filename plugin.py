@@ -2405,7 +2405,8 @@ def _clamp_max_games(raw: Any, source: str) -> int:
 # `extra["stage"]` is treated as a knockout/playoff round. DO NOT invert this
 # into an allowlist of postseason stages: every bracket source defines its own
 # stage vocabulary (NFL WC/DIV/CONF/SB, NHL/NBA/MLB rounds + FINALS, NCAA
-# R64..NCG, BSB_REG/SB_REG regionals, soccer LAST_32..FINAL, golf MAJOR) and new
+# R64..NCG, BSB_REG/SB_REG regionals, soccer LAST_32..FINAL, golf MAJOR and
+# TOUR_PLAYOFF) and new
 # ones get added, so over-including an unknown stage as postseason is the safe
 # failure direction (mirrors the source layer's "better to over-emit a new
 # knockout stage than under-emit a known one" rule in sources/soccer.py).
@@ -2438,14 +2439,38 @@ def _empty_refresh_result(msg: str, src_summary: List[str]) -> Dict[str, Any]:
     return {"status": "ok", "message": msg}
 
 
+def _place_in_bracket(src: Any, games: List[Any]) -> None:
+    """Stamp a bracket source's upcoming rows with their round (#243); see
+    BracketSportSource.place_upcoming for why both importance and
+    favorites_only need it. Never fails the fetch: an unplaced row keeps its
+    game, it just scores no bracket importance and reads as regular season,
+    which is what the warning is for."""
+    place = getattr(src, "place_upcoming", None)
+    if not games or not callable(place):
+        return
+    try:
+        unplaced = place(games)
+    except Exception:
+        logger.exception("[ranked_matchups] %s: could not place games in the bracket",
+                         src.sport_label)
+        return
+    if unplaced:
+        logger.warning(
+            "[ranked_matchups] %s: %d of %d upcoming game(s) not found in the "
+            "bracket; they score no bracket importance and count as regular "
+            "season", src.sport_label, unplaced, len(games),
+        )
+
+
 def _is_postseason_game(game: Any) -> bool:
     """True when this game is a postseason/playoff round (vs regular season,
     group stage, or a weekly field event). Reads the source-set
     `extra["stage"]`; see `_NON_POSTSEASON_STAGES` for the taxonomy."""
     stage = (getattr(game, "extra", None) or {}).get("stage")
     if not stage:
-        # No stage = regular-season league play (NFL/NBA/NHL/MLB only stamp a
-        # stage on playoff games; their parsers return None otherwise).
+        # No stage = regular-season league play. The NFL/NBA/NHL/MLB/WNBA/
+        # NCAAW playoff sources do not stamp one themselves: _place_in_bracket
+        # does, at fetch, from the source's own bracket (#243).
         return False
     return str(stage).strip().upper() not in _NON_POSTSEASON_STAGES
 
@@ -3090,6 +3115,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             src_summary.append(_source_error_entry(src.sport_label, e))
             raised_labels.add(src.sport_label)
             continue
+        _place_in_bracket(src, games)
         pulled_by_label[src.sport_label] += len(games)
         all_games.extend(games)
         game_sources.extend([src] * len(games))
@@ -8179,7 +8205,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.33.2"
+    version = "1.34.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

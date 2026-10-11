@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult, SportSource
+from .base import GameRow, MatchResult
 from .bracket import BestOfNSeriesSource
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, poisson_sample as _poisson
@@ -457,6 +457,7 @@ class NhlPlayoffSource(BestOfNSeriesSource):
                         continue
                     extra = {
                         "nhl_game_id": gid,
+                        "game_id": gid,
                         "fd_competition_code": self._league_context_code(),
                     }
                     # Series grounding for the EPG description / LLM context.
