@@ -72,7 +72,7 @@ downstream is sport-agnostic.
 | `logos.py` | TheSportsDB matchup-thumbnail resolver. Looks up the curated game via `searchevents.php` (team-name pair, date-tolerance ±2 days, sport-hint disambiguation), downloads the 960x540 graphic to `/data/logos/ranked_matchups_<sha1>.jpg`, and registers a `Logo` row pointing at it. Persistent per-marker cache (`sportsdb_thumb_cache.json`, 14d positive TTL / 1d negative TTL) means apply only HTTP-probes each fixture once. Field-event sources (`away=="Field"`) and dry_run short-circuit the lookup. Stale-file sweep at the end of each apply prunes JPGs whose marker isn't in the live set. Also resolves the league/tournament BADGE fallback (#102): `SPORTSDB_LEAGUE_IDS` (`sport_prefix` -> verified league id), `league_id_for`, `resolve_league_badge_url` (`lookupleague.php` -> `strBadge`), cached as `ranked_matchups_badge_<id>.png` (distinct prefix the sweep skips). |
 
 State (gitignored, lives in `<plugin_dir>/`):
-- `cache.json` — last refresh result (curated game list with score breakdowns). Carries TWO timestamps: `refreshed_at` (the cache write) and `matched_at` (stamped as matching BEGAN: after scoring, immediately before the EPG/stream sweep). `_match_snapshot_time` reads `matched_at` and falls back to `refreshed_at` for a pre-upgrade cache; anything asking "were these matches taken before X?" must use it, because an M3U refresh that lands DURING a long refresh is older than `refreshed_at` and would never be noticed
+- `cache.json` — last refresh result (curated game list with score breakdowns). Carries TWO timestamps: `refreshed_at` (the cache write) and `matched_at` (stamped as matching BEGAN: after scoring, immediately before the EPG/stream sweep). `_match_snapshot_time` reads `matched_at` and falls back to `refreshed_at` for a pre-upgrade cache; anything asking "were these matches taken before X?" must use it, because an M3U refresh that lands DURING a long refresh is older than `refreshed_at` and would never be noticed. Also carries `empty_slate_known`, which decides whether apply may publish an EMPTY `games` list (#241, see "An empty `games` list can be a slate" below)
 - `recording_stops.json` — planned stops of RUNNING recordings (#216 phase C): written whole by apply under the scheduler lock, only READ by the live handoff timer in `_reaper_loop` (`_run_due_stops`), so the timer never races apply
 - `recordings_state.json` — auto-record bookkeeping (#216): what the plugin last wrote for each recording it created (so a user edit is recognised and left alone), and tombstones for ones the user deleted so they are not re-created
 - `odds_cache.json` — The Odds API responses (#200), one entry per `sport_key|region` with its `fetched_at`, plus `exhausted_until` / `exhausted_key` for the out-of-credits backoff and the last `credits_remaining` header. Written by `sources/_odds.py` with the same per-writer temp + atomic replace as the cache. Holds no API key, and a hand-edited or wrong-shaped file is started over rather than failing every league's fetch
@@ -457,10 +457,11 @@ does when the previous cache was vouched or every source answered with games
 (`_slate_known`), and the reaper carries the answer of the slate it empties.
 "Vouched" (`_cache_vouched`) is stricter than "publishable": a non-empty
 slate written `false` is still published, but its doubt travels to whatever
-is built on it, or an empty slate on top would delete the channel it omitted. Refused: a missing, unreadable or
-non-object file, `games` not a list, a pre-#241 empty cache, and an empty
-refresh after cache.json was lost (the plugin folder is replaced on upgrade)
-with a source failing. Apply's toast says which.
+is built on it, or an empty slate on top would delete the channel it omitted.
+Refused: a missing, unreadable or non-object file, `games` not a list, a
+pre-#241 empty cache, and an empty refresh after cache.json was lost (the
+plugin folder is replaced on upgrade) with a source failing. Apply's toast
+says which.
 
 ## Known gotchas / lessons learned
 
