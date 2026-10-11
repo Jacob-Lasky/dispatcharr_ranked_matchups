@@ -5,6 +5,23 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.33.2] - 2026-10-11
+
+### Fixed
+
+- **The Odds API closeness signal works again, and stays within the free
+  plan.** Every odds request had been failing with 401 since the month's 500
+  credits ran out: each refresh asked every league for three regions (three
+  credits a call), so the allowance lasted days, and the log called it
+  "Unauthorized", which pointed at the key (it was fine). Odds are now asked
+  for one region per league and cached for 24 hours, about 300 credits a
+  month. If the credits do run out, the plugin stops asking for a day, says so
+  plainly in the log, and keeps using the last odds it had. (#200)
+- **MLB Postseason no longer fails with "can't compare offset-naive and
+  offset-aware datetimes".** The source's 7-day window was built without a
+  timezone, so it errored on every refresh and the postseason never reached
+  the guide. (#213)
+
 ## [1.33.1] - 2026-10-10
 
 ### Fixed

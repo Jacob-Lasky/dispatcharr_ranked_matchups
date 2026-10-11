@@ -4244,6 +4244,30 @@ class TestMlbPlayoffSource:
         assert src._winner_advance_label("LDS") is None
         assert src._winner_advance_label("LCS") is None
 
+    def test_fetch_upcoming_returns_games_in_the_window(self, monkeypatch):
+        """#213: the horizon was built with fromordinal(), which is naive, so
+        comparing it with an aware gameDate raised TypeError and the source
+        reported 'MLB Postseason: error' for the whole postseason."""
+        from datetime import datetime, timedelta, timezone
+        import dispatcharr_ranked_matchups.sources.mlb as mlb_mod
+        now = datetime.now(timezone.utc)
+
+        def game(pk, start):
+            return {"gamePk": pk, "gameDate": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "teams": {"home": {"team": {"name": "Seattle Mariners"}},
+                              "away": {"team": {"name": "Toronto Blue Jays"}}}}
+
+        schedule = {"dates": [{"games": [
+            game(1, now - timedelta(days=1)),   # played
+            game(2, now + timedelta(days=2)),   # in the window
+            game(3, now + timedelta(days=9)),   # past the 7-day horizon
+        ]}]}
+        monkeypatch.setattr(mlb_mod, "_http_get", lambda url: schedule)
+
+        games = self._make_source().fetch_upcoming(days_ahead=7)
+
+        assert [g.extra["mlb_game_id"] for g in games] == [2]
+
     def test_outcome_labels_uses_mlb_po_thresholds(self):
         src = self._make_source()
         labels = src.outcome_labels

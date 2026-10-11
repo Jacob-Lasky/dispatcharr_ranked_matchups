@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -334,7 +334,10 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         if not data:
             return out
         now = datetime.now(timezone.utc)
-        horizon = now.fromordinal(now.toordinal() + days_ahead)
+        # DO NOT use now.fromordinal(...): it is a classmethod that drops the
+        # tzinfo, and comparing its naive result against the aware start_time
+        # raised TypeError, so the whole postseason contributed nothing (#213).
+        horizon = now + timedelta(days=days_ahead)
         for date_entry in data.get("dates", []) or []:
             for g in date_entry.get("games", []) or []:
                 gid = g.get("gamePk")
