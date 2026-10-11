@@ -103,13 +103,13 @@ def _default_season_end_year() -> int:
 # not be filed as a first-round tie. The regional city is matched lazily up
 # to the next separator, not as `[^-]+`, so a hyphenated host city
 # ("Winston-Salem") still parses. ESPN's separator has always been " - ";
-# an en dash and a curly apostrophe are accepted too, since either is one
-# typography pass away and costs nothing to allow.
+# an en dash, a curly apostrophe and a trailing period are accepted too,
+# since each is one typography pass away and costs nothing to allow.
 _HEADLINE_RE = re.compile(
     r"^\s*NCAA\s+Women['\u2019]?s?\s+(?:Basketball\s+)?Championship\s*[-\u2013]\s*"
     r"(?:Regional\s+\d+\s+in\s+.+?\s+[-\u2013]\s*)?"
     r"(?P<round>1st\s+Round|2nd\s+Round|Sweet\s*16|Elite\s*8|Final\s+Four|National\s+Championship)"
-    r"\s*$",
+    r"\.?\s*$",
     re.IGNORECASE,
 )
 

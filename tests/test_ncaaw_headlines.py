@@ -29,6 +29,7 @@ from dispatcharr_ranked_matchups.sources import ncaaw_basketball as mod
     # Composed: one typography pass away from the live form.
     ("NCAA Women's Basketball Championship - Regional 2 in Winston-Salem - Sweet 16", "S16"),
     ("NCAA Women’s Basketball Championship - Final Four", "F4"),
+    ("NCAA Women's Basketball Championship - Regional 1 in Fort Worth - Sweet 16. ", "S16"),
     ("NCAA Women's Basketball Championship – Regional 2 in Fort Worth – Sweet 16", "S16"),
 ])
 def test_every_espn_wording_parses(headline, stage):
