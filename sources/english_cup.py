@@ -308,9 +308,11 @@ class EflCupSource(_EnglishDomesticCupBase):
     @property
     def sport_prefix(self) -> str:
         # NOT "EFL": that prefix is already the EFL CHAMPIONSHIP (see
-        # soccer.py::COMPETITIONS["championship"]), and rivalries.json plus
-        # logos.SPORTSDB_TOURNAMENT_LEAGUE_IDS are keyed on sport_prefix, so
-        # reusing it would cross-wire the league and the cup.
+        # soccer.py::COMPETITIONS["championship"]), and the logos.py maps
+        # and the marker key are keyed on sport_prefix, so reusing it would
+        # cross-wire the league and the cup. rivalries.json is the one table
+        # where the two DO share data, and it does so explicitly: both
+        # prefixes name the ENGLISH_CLUBS pool (#192).
         return "EFLCUP"
 
     @property

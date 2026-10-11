@@ -235,8 +235,15 @@ minimum-score threshold that would drop them instead.
 ### Signal: rivalry
 
 Known rivalry games get a flat bonus equal to `weights.rivalry`
-(default 2.0). The shipped rivalry DB covers college football, EPL,
-NHL, and NBA matchups. New rivalries are added to `rivalries.json`.
+(default 2.0). The shipped rivalry DB (`rivalries.json`) is keyed on
+sport prefix and covers college football and basketball, the NFL, NBA,
+NHL and MLB, MLS and Liga MX, and the European soccer leagues. English
+club rivalries are one shared list that the Premier League, the
+Championship, the EFL Cup and the FA Cup all read, so a derby earns the
+bonus in a cup tie exactly as it does in the league, including
+cross-division derbies that only a cup can produce. Club friendlies
+deliberately get no rivalry bonus: a pre-season kickabout is not a
+derby. New rivalries are added to `rivalries.json`.
 
 ### Signal: narrative (off by default)
 

@@ -11194,8 +11194,10 @@ class TestEnglishCupSourcesShape:
 
     def test_efl_cup_prefix_is_not_the_championship_prefix(self):
         """Regression guard. "EFL" is already the EFL CHAMPIONSHIP's prefix,
-        and rivalries.json plus logos.SPORTSDB_TOURNAMENT_LEAGUE_IDS are keyed
-        on sport_prefix, so reusing it would cross-wire the league and the cup.
+        and the logos.py maps and the marker key are keyed on sport_prefix, so
+        reusing it would cross-wire the league and the cup. (rivalries.json
+        shares data between the two on purpose, through the ENGLISH_CLUBS
+        pool, #192.)
         """
         champ = SOCCER_COMPETITIONS["championship"].sport_prefix
         assert champ == "EFL"
@@ -11541,6 +11543,88 @@ class TestEnglishCupStageLabelsAreScored:
                 weights,
             ).breakdown.get("tournament_stage", 0.0)
             assert early < qf, f"{stage} scores {early} >= QF {qf}"
+
+
+class TestCupRivalryThroughRefresh:
+    """#192 end to end: rows built by the REAL cup and club-friendly sources
+    from stubbed ESPN payloads, scored by the real `_action_refresh`, read back
+    from the cache it writes. This is the production path the rivalry bonus
+    takes (`rivalry_name(g.home, g.away, g.sport_prefix)` inside the refresh),
+    so it catches a cup prefix that never reaches the rivalry lookup as well
+    as a missing pair."""
+
+    @staticmethod
+    def _serve(monkeypatch, by_slug):
+        """One `requests.get` stub for all three sources. They share the
+        `requests` module object, so patching it per source (as the per-module
+        helpers above do) would leave only the last stub in place."""
+        import requests
+
+        class FakeResp:
+            status_code = 200
+
+            def __init__(self, events):
+                self._events = events
+
+            def json(self):
+                return {"events": self._events}
+
+        def _get(url, *a, **kw):
+            for slug, events in by_slug.items():
+                if f"/soccer/{slug}/scoreboard" in url:
+                    return FakeResp(events)
+            return FakeResp([])
+
+        monkeypatch.setattr(requests, "get", _get)
+
+    def test_a_cup_derby_scores_the_bonus_and_a_club_friendly_does_not(
+            self, refresh_env, monkeypatch):
+        _write_prior, run, read = refresh_env
+        self._serve(monkeypatch, {
+            "eng.league_cup": [
+                _cup_event("c1", "Arsenal", "Tottenham Hotspur", "quarterfinals"),
+                _cup_event("c2", "Tottenham Hotspur", "Charlton Athletic",
+                           "quarterfinals", hours_from_now=3.0),
+            ],
+            "eng.fa": [
+                _cup_event("f1", "Sheffield Wednesday", "Sheffield United",
+                           "third-round", hours_from_now=4.0),
+            ],
+            "club.friendly": [
+                _friendly_event("x1", "Arsenal", "Tottenham Hotspur",
+                                hours_from_now=5.0),
+            ],
+        })
+        result = run([
+            EflCupSource(), FaCupSource(),
+            ClubFriendliesSource(favorites=[], favorites_only=False),
+        ])
+        assert result["status"] == "ok", result
+        games = {(g["sport_prefix"], g["home"], g["away"]): g
+                 for g in read()["games"]}
+        assert len(games) == 4, sorted(games)
+
+        derby = games[("EFLCUP", "Arsenal", "Tottenham Hotspur")]
+        assert derby["is_rivalry"] is True
+        assert derby["score_breakdown"]["rivalry"] == 2.0
+        assert derby["extra"]["rivalry_trophy"] == "the North London derby"
+
+        # Cross-tier: no league list could hold this pair on its own.
+        steel = games[("FACUP", "Sheffield Wednesday", "Sheffield United")]
+        assert steel["is_rivalry"] is True
+        assert steel["score_breakdown"]["rivalry"] == 2.0
+        assert steel["extra"]["rivalry_trophy"] == "the Steel City derby"
+
+        # A cup tie that is not a derby gets nothing.
+        plain = games[("EFLCUP", "Tottenham Hotspur", "Charlton Athletic")]
+        assert plain["is_rivalry"] is False
+        assert "rivalry" not in plain["score_breakdown"]
+
+        # The friendlies constraint holds: same two clubs, no bonus.
+        friendly = games[("CLUBFRIENDLY", "Arsenal", "Tottenham Hotspur")]
+        assert friendly["is_rivalry"] is False
+        assert "rivalry" not in friendly["score_breakdown"]
+        assert "rivalry_trophy" not in friendly["extra"]
 
 
 # ---------------------------------------------------------------------------
