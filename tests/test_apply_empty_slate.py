@@ -1251,6 +1251,8 @@ def test_harness_redirects_every_state_file_the_plugin_writes():
     assert state_files[("plugin", "NUMBERING_STATE_PATH")] == "numbering_state.json"
     assert state_files[("plugin", "CACHE_PATH")] == "cache.json"
     assert sorted(set(state_files) - set(redirected)) == []
+    # Each listed once (NUMBERING_STATE_PATH was listed twice).
+    assert len(redirected) == len(set(redirected))
 
 
 def test_every_state_file_the_plugin_writes_is_gitignored():

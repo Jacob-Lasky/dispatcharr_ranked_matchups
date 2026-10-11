@@ -89,12 +89,13 @@ CHANNEL_NUMBER_ORIGIN = date(2026, 1, 1)
 # 16 keeps numbers compact while making same-minute hash collisions uncommon
 # (~6% per simultaneous pair); the rare residual is resolved by the deterministic
 # +1 nudge in plugin._place_kickoff_numbers, which also holds a nudged channel on
-# its number on later applies, even past its minute's block (#267), as long as
-# every number the nudge walked over is still taken by a channel kept this apply
-# or a reserved number, and its own number is not reserved (a game below it
-# leaving can release a channel past its block, see the DO NOT there). Raising this
-# renumbers every published channel once. Because the value is < the per-minute
-# stride, it never reorders games across minute boundaries.
+# its number on later applies, even past its minute's block, while its number is
+# free: when numbering_state.json records it was numbered for its game's current
+# kickoff (#278), or, with no record, as long as every number the nudge walked
+# over is still taken by a channel kept this apply or a reserved number (#267;
+# see the DO NOT there). Raising this renumbers every published channel once.
+# Because the value is < the per-minute stride, the hash term never reorders
+# games across minute boundaries (a nudge past a block can, see above).
 CHANNEL_NUMBER_TIEBREAK_SLOTS = 16
 
 
@@ -108,7 +109,7 @@ def stable_channel_number(
     the slate is ranked or which other games are present. (A rescheduled game
     gets its new minute's number; `_place_kickoff_numbers` also keeps a slot a
     channel already holds within its minute, see #217, and one an upward nudge
-    from this number still reaches, see #267.) That stability is
+    from this number reached, see #267 and #278.) That stability is
     the whole point. Both Dispatcharr's default M3U/XMLTV output AND the Xtream
     Codes API bind the EPG to a channel BY its (integer) channel number, so a
     number that MOVES pairs the wrong programme with a channel after the slate
