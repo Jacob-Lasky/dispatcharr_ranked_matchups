@@ -1,7 +1,8 @@
 """NCAA Softball source: ESPN's unofficial site.api.espn.com.
 No API key required.
 
-Two source classes ship under the `enable_ncaa_softball` toggle:
+Two source classes ship under the `enable_ncaa_softball` league (the
+"Softball" half of the NCAA Baseball & Softball setting, #208):
   - `NcaaSoftballRegularSource(PointsBasedSportSource)`: regular-season
     win-count importance (LEAGUE_CONTEXTS["SBL"]).
   - `NcaaSoftballPlayoffSource(BestOfNSeriesSource)`: postseason.

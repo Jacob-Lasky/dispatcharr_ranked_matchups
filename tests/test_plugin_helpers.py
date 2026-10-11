@@ -486,34 +486,38 @@ class TestRankPoolSizeWiring:
 
 
 class TestManifestNcaafDivisionsMatchesCode:
-    """plugin.json's ncaaf_divisions option values must equal the source's
-    DIVISION_SETS keys, mirroring TestManifestFavoritesOnlyMatchesCode. A
-    manifest value the source does not recognise silently degrades to the
-    default, so the UI would offer a setting that does nothing."""
+    """plugin.json's `ncaaf` select (#208: the enable toggle and the divisions
+    select merged) must offer Off plus exactly the source's DIVISION_SETS
+    keys, mirroring TestManifestFavoritesOnlyMatchesCode. A manifest value the
+    source does not recognise silently degrades to the default, so the UI
+    would offer a setting that does nothing."""
 
     def test_options_match_source_constants(self):
+        import json
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+        from dispatcharr_ranked_matchups import merged_settings
+
+        with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
+            manifest = json.load(f)
+        field = next(
+            x for x in manifest["fields"] if x["id"] == merged_settings.NCAAF_SETTING
+        )
+        assert field["type"] == "select"
+        values = [o["value"] for o in field["options"]]
+        assert values[0] == "off"
+        assert set(values) - {"off"} == set(ncaaf_mod.DIVISION_SETS)
+        # Off by default, like every other league.
+        assert field["default"] == "off"
+
+    def test_the_recommended_division_is_the_source_default(self):
         import json
         from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
 
         with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
             manifest = json.load(f)
-        field = next(
-            x for x in manifest["fields"] if x["id"] == "ncaaf_divisions"
-        )
-        assert field["type"] == "select"
-        values = [o["value"] for o in field["options"]]
-        assert set(values) == set(ncaaf_mod.DIVISION_SETS)
-        assert field["default"] == ncaaf_mod.DEFAULT_DIVISIONS
-        assert field["default"] in values
-
-    def test_sits_next_to_its_toggle(self):
-        """The divisions select is meaningless without enable_ncaaf, so it
-        must render adjacent to it rather than elsewhere in an 86-field form."""
-        import json
-        with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
-            manifest = json.load(f)
-        ids = [x["id"] for x in manifest["fields"]]
-        assert ids.index("ncaaf_divisions") == ids.index("enable_ncaaf") + 1
+        field = next(x for x in manifest["fields"] if x["id"] == "ncaaf")
+        recommended = [o["value"] for o in field["options"] if "recommended" in o["label"]]
+        assert recommended == [ncaaf_mod.DEFAULT_DIVISIONS]
 
 
 class TestEmptyRefreshResult:
@@ -636,46 +640,55 @@ class TestBuildWeights:
         assert not hasattr(w, "stakes")
         assert not hasattr(w, "impact_favorite")
 
-    def test_plugin_json_defaults_match_dataclass(self, plugin):
-        # The Dispatcharr loader reads plugin.json WITHOUT executing
-        # plugin code, so the manifest's per-field "default" values are
-        # a third source of truth alongside scoring.Weights and
-        # _build_weights. All three must agree, otherwise the UI shows
-        # one number while the runtime computes with another.
-        #
-        # If someone bumps the dataclass without bumping plugin.json,
-        # new installs surface the wrong default in the form. Saved
-        # settings would then override with stale UI defaults the user
-        # didn't change. This test catches the divergence at CI time.
+    def test_manifest_help_text_states_the_dataclass_defaults(self, plugin):
+        # The Dispatcharr loader reads plugin.json WITHOUT executing plugin
+        # code. Since #208 the weights are one "Scoring weights" text field
+        # whose default is blank (= every Weights default), so the only place
+        # the UI tells a user what each default IS is that field's help text.
+        # It must name every weight with the dataclass's value, or the form
+        # documents one number while the runtime computes with another.
         import json
         import os
+        import re
         from dispatcharr_ranked_matchups.scoring import Weights
+        from dispatcharr_ranked_matchups import merged_settings
         defaults = Weights()
         manifest_path = os.path.join(
             os.path.dirname(os.path.abspath(plugin.__file__)), "plugin.json"
         )
         with open(manifest_path) as fh:
             manifest = json.load(fh)
-        field_defaults = {
-            f["id"]: f.get("default")
-            for f in manifest.get("fields", [])
-            if f["id"].startswith("weight_")
+        field = next(
+            f for f in manifest["fields"]
+            if f["id"] == merged_settings.SCORING_WEIGHTS_SETTING
+        )
+        assert field["type"] == "string"
+        assert field["default"] == ""
+        stated = {
+            name: float(value)
+            for name, value in re.findall(r"\b([a-z]+)=([0-9.]+)", field["help_text"])
         }
-        # weight_<name> in plugin.json must match Weights.<name>.
-        weight_field_names = [
-            "rank", "spread", "favorite", "rivalry",
-            "tournament", "narrative", "importance",
-        ]
-        for name in weight_field_names:
-            assert f"weight_{name}" in field_defaults, (
-                f"plugin.json missing weight_{name} field"
-            )
-            assert field_defaults[f"weight_{name}"] == getattr(defaults, name), (
-                f"plugin.json weight_{name} default "
-                f"({field_defaults[f'weight_{name}']}) disagrees with "
-                f"Weights.{name} default ({getattr(defaults, name)}). "
-                f"Bump both together."
-            )
+        expected = {
+            "rank": 1.0, "spread": 3.0, "favorite": 6.0, "rivalry": 2.0,
+            "tournament": 1.5, "importance": 3.0, "narrative": 0.0,
+        }
+        assert stated == expected
+        assert {n: getattr(defaults, n) for n in merged_settings.WEIGHT_NAMES} == expected, (
+            "Weights defaults changed: update the Scoring weights help text "
+            "in plugin.json AND this test's literal together."
+        )
+
+    def test_no_weight_number_fields_remain(self, plugin):
+        """#208 retired the seven weight_<name> fields. A field re-added under
+        the old id would render a second, competing control for one weight."""
+        import json
+        import os
+        manifest_path = os.path.join(
+            os.path.dirname(os.path.abspath(plugin.__file__)), "plugin.json"
+        )
+        with open(manifest_path) as fh:
+            ids = [f["id"] for f in json.load(fh)["fields"]]
+        assert [i for i in ids if i.startswith("weight_")] == []
 
 
 class TestResolveKey:
@@ -3222,10 +3235,11 @@ class TestBuildSourcesEnglishCups:
         for s in srcs:
             assert not hasattr(s, "favorites_only")
 
-    def test_manifest_cup_fields_match_code(self, plugin):
-        # plugin.json must declare both toggles with default False, or the
-        # settings _build_sources reads would never appear in the UI and the
-        # sources could not be switched on at all. Mirrors
+    def test_manifest_cup_field_matches_code(self, plugin):
+        # plugin.json must declare the English cups select (#208 merged the
+        # two cup toggles into it) offering exactly Off, each cup, and both,
+        # default Off, or the leagues _build_sources reads could never be
+        # switched on from the UI. Mirrors
         # test_manifest_club_friendlies_field_matches_code.
         import json
         import os
@@ -3233,14 +3247,14 @@ class TestBuildSourcesEnglishCups:
         manifest = json.load(
             open(os.path.join(repo, "plugin.json"), encoding="utf-8")
         )
-        for fid in ("enable_efl_cup", "enable_fa_cup"):
-            field = next(
-                (f for f in manifest["fields"] if f["id"] == fid), None,
-            )
-            assert field is not None, f"{fid} missing from plugin.json"
-            assert field["type"] == "boolean"
-            assert field["default"] is False
-            assert field.get("help_text"), f"{fid} has no help_text"
+        field = next(
+            (f for f in manifest["fields"] if f["id"] == "english_cups"), None,
+        )
+        assert field is not None, "english_cups missing from plugin.json"
+        assert field["type"] == "select"
+        assert field["default"] == "off"
+        assert [o["value"] for o in field["options"]] == ["off", "efl", "fa", "both"]
+        assert field.get("help_text"), "english_cups has no help_text"
 
     def test_manifest_help_text_records_why_espn_not_football_data(self, plugin):
         """The 403 is the whole reason this source exists rather than a
@@ -3252,11 +3266,11 @@ class TestBuildSourcesEnglishCups:
         manifest = json.load(
             open(os.path.join(repo, "plugin.json"), encoding="utf-8")
         )
-        for fid in ("enable_efl_cup", "enable_fa_cup"):
-            field = next(f for f in manifest["fields"] if f["id"] == fid)
-            help_text = field["help_text"]
-            assert "ESPN" in help_text
-            assert "Football-Data.org" in help_text
+        field = next(f for f in manifest["fields"] if f["id"] == "english_cups")
+        help_text = field["help_text"]
+        assert "ESPN" in help_text
+        assert "Football-Data.org" in help_text
+        assert "403" in help_text
 
 
 def _stream_stub(sid, name, group_id=None, stats=None):

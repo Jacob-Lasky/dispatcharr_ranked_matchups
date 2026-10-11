@@ -17,21 +17,18 @@
       "id": "_section_sources",
       "type": "info",
       "label": "Sport Sources",
-      "description": "Toggle which sports/leagues the curator pulls from."
+      "description": "Toggle which sports/leagues the curator pulls from. Related leagues share one dropdown (Off / either one / both)."
     },
     {
-      "id": "enable_ncaaf",
-      "type": "boolean",
-      "label": "NCAA Football (CFBD)",
-      "default": false,
-      "help_text": "AP Top-25 + games + betting lines from CollegeFootballData.com. Offseason → no rows produced. Requires the CFBD API key below."
-    },
-    {
-      "id": "ncaaf_divisions",
+      "id": "ncaaf",
       "type": "select",
-      "label": "NCAA Football divisions",
-      "default": "fbs",
+      "label": "NCAA Football (CFBD)",
+      "default": "off",
       "options": [
+        {
+          "value": "off",
+          "label": "Off"
+        },
         {
           "value": "fbs",
           "label": "D1 FBS only (recommended)"
@@ -41,14 +38,32 @@
           "label": "D1 FBS + FCS"
         }
       ],
-      "help_text": "Which divisions NCAA Football pulls. CFBD's feed also carries Division II and III, which can never score (they are outside the simulated season) yet still add to the refresh — opening week 2026 was 157 games of which only 27 involved an FBS team. FBS only is the default and is the recommended setting. Adding FCS widens the simulated season, and scores those games with FBS win-count bands (6 wins = bowl eligible), which is an approximation since FCS has a different postseason."
+      "help_text": "AP Top-25 + games + betting lines from CollegeFootballData.com; requires the CFBD API key below. Offseason → no rows. Pick which divisions to pull. CFBD's feed also carries Division II and III, which can never score (they are outside the simulated season) yet still add to the refresh — opening week 2026 was 157 games of which only 27 involved an FBS team, so FBS only is the recommended setting. Adding FCS widens the simulated season and scores those games with FBS win-count bands (6 wins = bowl eligible), an approximation since FCS has a different postseason."
     },
     {
-      "id": "enable_ncaam",
-      "type": "boolean",
-      "label": "NCAA Men's Basketball (CollegeBasketballData)",
-      "default": false,
-      "help_text": "AP Top-25 + games + betting lines from CollegeBasketballData.com. Same Bearer token as CFBD — flip both on with one key. Season runs Nov-Apr; offseason returns no rows."
+      "id": "ncaa_basketball",
+      "type": "select",
+      "label": "NCAA Basketball",
+      "default": "off",
+      "options": [
+        {
+          "value": "off",
+          "label": "Off"
+        },
+        {
+          "value": "men",
+          "label": "Men's"
+        },
+        {
+          "value": "women",
+          "label": "Women's"
+        },
+        {
+          "value": "both",
+          "label": "Men's + Women's"
+        }
+      ],
+      "help_text": "Men's: AP Top-25 + games + betting lines from CollegeBasketballData.com, using the same Bearer token as CFBD (the CFBD API key below). Women's: D1 regular season + March Madness from ESPN's unofficial API + AP Top 25, no key needed; win-count bands are 20+ tournament bubble, 25+ at-large lock, 28+ top-4 seed, 32+ #1 seed contention, and the bracket runs R64 → Sweet 16 → Final Four → National Championship. Season runs Nov-Apr; offseason returns no rows."
     },
     {
       "id": "enable_epl",
@@ -114,18 +129,29 @@
       "help_text": "UEFA's quadrennial national-team tournament. Both phases are produced: every group-stage match plus the knockout bracket (R16 → QF → SF → Final). The group stage alone is dozens of matches across all participating nations; to see only your country's games, list it in Favorites and set 'Favorites only' below (knockout rounds still score on stage). Requires Football-Data.org key."
     },
     {
-      "id": "enable_intl_friendlies",
-      "type": "boolean",
-      "label": "International Friendlies (Men's)",
-      "default": false,
-      "help_text": "Senior men's national-team friendlies and FIFA-window warm-ups (e.g. a USMNT tune-up the week before the World Cup) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite national team are shown (see 'Friendlies: favorite national teams only' below); add the team to Favorites using the country name as ESPN spells it (e.g. \"United States\", not \"USA\"). Offseason → no rows. No API key required."
-    },
-    {
-      "id": "enable_intl_friendlies_women",
-      "type": "boolean",
-      "label": "International Friendlies (Women's)",
-      "default": false,
-      "help_text": "Senior women's national-team friendlies and FIFA-window warm-ups (e.g. a USWNT tune-up) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite national team are shown (see 'Friendlies: favorite national teams only' below); add the team to Favorites using the country name as ESPN spells it (e.g. \"United States\", not \"USA\"). Offseason → no rows. No API key required."
+      "id": "intl_friendlies",
+      "type": "select",
+      "label": "International Friendlies",
+      "default": "off",
+      "options": [
+        {
+          "value": "off",
+          "label": "Off"
+        },
+        {
+          "value": "men",
+          "label": "Men's"
+        },
+        {
+          "value": "women",
+          "label": "Women's"
+        },
+        {
+          "value": "both",
+          "label": "Men's + Women's"
+        }
+      ],
+      "help_text": "Senior national-team friendlies and FIFA-window warm-ups (e.g. a USMNT or USWNT tune-up the week before a tournament) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite national team are shown (see 'Friendlies: favorites only' below); add the team to Favorites using the country name as ESPN spells it (e.g. \"United States\", not \"USA\"). Offseason → no rows. No API key required."
     },
     {
       "id": "enable_club_friendlies",
@@ -139,21 +165,32 @@
       "type": "boolean",
       "label": "Friendlies: favorites only",
       "default": true,
-      "help_text": "When on (default), the Friendlies toggles above (international men's, international women's, and club) show ONLY games involving a team in your Favorites. A friendly is an exhibition with no standings or rank, so a game between two teams you don't follow has nothing to earn a guide slot, and an unfiltered slate produces dozens of them (Kenya vs Lesotho, Cambodia vs Hong Kong, Bromley vs Crystal Palace, ...). Match by the name as ESPN spells it (\"United States\", not \"USA\"; \"Leeds United\", not \"Leeds\"). Turn this OFF to see every friendly in the lookahead window. No effect unless a Friendlies toggle above is on."
+      "help_text": "When on (default), the friendlies settings above (International Friendlies, men's and women's, and Club Friendlies) show ONLY games involving a team in your Favorites. A friendly is an exhibition with no standings or rank, so a game between two teams you don't follow has nothing to earn a guide slot, and an unfiltered slate produces dozens of them (Kenya vs Lesotho, Cambodia vs Hong Kong, Bromley vs Crystal Palace, ...). Match by the name as ESPN spells it (\"United States\", not \"USA\"; \"Leeds United\", not \"Leeds\"). Turn this OFF to see every friendly in the lookahead window. No effect unless International or Club Friendlies is on."
     },
     {
-      "id": "enable_efl_cup",
-      "type": "boolean",
-      "label": "EFL Cup (Carabao Cup)",
-      "default": false,
-      "help_text": "English League Cup: all 92 Premier League and EFL clubs, from ESPN's unofficial API (no key needed). NOT available from Football-Data.org: it gates every domestic cup behind a paid plan, so the free-tier key returns HTTP 403 for it. Knockout competition with no league table, so there is no importance simulation and no ranks; a tie scores on its round (early rounds low, quarterfinal onward high) plus favorite, rivalry, and narrative. Early-round ties DO score low on purpose: a second-round Wednesday is ~25 fixtures and they belong at the bottom of the list, where 'Max curated games' trims them."
-    },
-    {
-      "id": "enable_fa_cup",
-      "type": "boolean",
-      "label": "FA Cup",
-      "default": false,
-      "help_text": "English FA Cup proper rounds (first round through the final) from ESPN's unofficial API (no key needed). The qualifying rounds are a separate competition and are not included. Same situation as the EFL Cup: Football-Data.org gates it behind a paid plan, so it cannot come from the free-tier key. Premier League and Championship clubs enter at the third round, which is when the ties start scoring meaningfully."
+      "id": "english_cups",
+      "type": "select",
+      "label": "English cups",
+      "default": "off",
+      "options": [
+        {
+          "value": "off",
+          "label": "Off"
+        },
+        {
+          "value": "efl",
+          "label": "EFL Cup (Carabao Cup)"
+        },
+        {
+          "value": "fa",
+          "label": "FA Cup"
+        },
+        {
+          "value": "both",
+          "label": "EFL Cup + FA Cup"
+        }
+      ],
+      "help_text": "The EFL (Carabao) Cup, all 92 Premier League and EFL clubs, and the FA Cup proper rounds (first round through the final; the qualifying rounds are a separate competition and are not included). Both come from ESPN's unofficial API (no key needed). NOT available from Football-Data.org: it gates every domestic cup behind a paid plan, so the free-tier key returns HTTP 403 for them. Knockout competitions with no league table, so there is no importance simulation and no ranks; a tie scores on its round (early rounds low, quarterfinal onward high) plus favorite, rivalry, and narrative. Early-round ties DO score low on purpose: an EFL Cup second-round Wednesday is ~25 fixtures and they belong at the bottom of the list, where 'Max curated games' trims them. Premier League and Championship clubs enter the FA Cup at the third round, which is when its ties start scoring meaningfully."
     },
     {
       "id": "enable_eredivisie",
@@ -261,18 +298,29 @@
       "help_text": "Each professional boxing card surfaces as one 'Event'-tier entry (the card title carries the headliner, e.g., 'Gassiev vs. Kadiru: IBA Pro 19'); explicit world-title cards get 'Major'. REQUIRES the Boxing Data API key below — ESPN has no boxing feed. Free tier looks ahead about 7 days. Note: covers boxing only; UFC/MMA is the separate 'UFC' toggle, and kickboxing/bare-knuckle have no free feed."
     },
     {
-      "id": "enable_atp",
-      "type": "boolean",
-      "label": "ATP Tour (men's tennis)",
-      "default": false,
-      "help_text": "Each active ATP tournament surfaces as one entry. The four Grand Slams (Wimbledon / Australian Open / French Open / US Open) and the year-end ATP Finals get the 'Major' tier; regular tour stops get 'Event'. No API key required — ESPN unofficial."
-    },
-    {
-      "id": "enable_wta",
-      "type": "boolean",
-      "label": "WTA Tour (women's tennis)",
-      "default": false,
-      "help_text": "Same Grand Slam roster as ATP. Each active WTA tournament surfaces as one entry; Slams and the year-end WTA Finals get 'Major', regular tour stops get 'Event'. No API key required — ESPN unofficial."
+      "id": "tennis",
+      "type": "select",
+      "label": "Tennis",
+      "default": "off",
+      "options": [
+        {
+          "value": "off",
+          "label": "Off"
+        },
+        {
+          "value": "atp",
+          "label": "ATP Tour (men's)"
+        },
+        {
+          "value": "wta",
+          "label": "WTA Tour (women's)"
+        },
+        {
+          "value": "both",
+          "label": "ATP + WTA"
+        }
+      ],
+      "help_text": "Each active tournament surfaces as one entry. The four Grand Slams (Wimbledon / Australian Open / French Open / US Open) and the year-end ATP / WTA Finals get the 'Major' tier; regular tour stops get 'Event'. No API key required — ESPN unofficial."
     },
     {
       "id": "enable_wnba",
@@ -282,39 +330,54 @@
       "help_text": "Regular season uses win count (20+ bubble, 25+ playoff-secured, 30+ top-seed pace, 35+ elite) over the 40-game season. Playoffs have mixed series lengths: R1 best-of-3, Semifinals best-of-5, Finals best-of-5 in 2024 / best-of-7 in 2025+. No API key required — uses ESPN's unofficial site.api.espn.com."
     },
     {
-      "id": "enable_ncaaw_basketball",
-      "type": "boolean",
-      "label": "NCAA Women's Basketball (D1 + March Madness)",
-      "default": false,
-      "help_text": "D1 regular season uses win count (20+ tournament bubble, 25+ at-large lock, 28+ top-4 seed, 32+ #1 seed contention). March Madness bracket is single-game elimination: R64 → R32 → Sweet 16 → Elite 8 → Final Four → National Championship → Champion. ESPN unofficial API + AP Top 25. No API key required."
+      "id": "ncaa_baseball_softball",
+      "type": "select",
+      "label": "NCAA Baseball & Softball (D1)",
+      "default": "off",
+      "options": [
+        {
+          "value": "off",
+          "label": "Off"
+        },
+        {
+          "value": "baseball",
+          "label": "Baseball"
+        },
+        {
+          "value": "softball",
+          "label": "Softball"
+        },
+        {
+          "value": "both",
+          "label": "Baseball + Softball"
+        }
+      ],
+      "help_text": "D1 regular seasons from ESPN's unofficial API, ranked by the D1Baseball.com Top 25 (baseball) and the ESPN/USA Softball Collegiate Top 25 (softball). Win-count bands for both: 30+ tournament bubble, 35+ at-large lock, 40+ top regional seed, 45+ national seed, 50+ #1 overall contention. The CWS / WCWS brackets are not yet modeled (favorites + rank still surface postseason matchups). No API key required."
     },
     {
-      "id": "enable_ncaa_baseball",
-      "type": "boolean",
-      "label": "NCAA Baseball (D1)",
-      "default": false,
-      "help_text": "D1 baseball regular season. ESPN unofficial API + D1Baseball.com Top 25 poll. Bands: 30+ wins tournament bubble, 35+ at-large lock, 40+ top regional seed, 45+ national seed, 50+ #1 overall contention. CWS postseason bracket not yet modeled (favorites + rank signal still surface postseason matchups). No API key required."
-    },
-    {
-      "id": "enable_ncaa_softball",
-      "type": "boolean",
-      "label": "NCAA Softball (D1)",
-      "default": false,
-      "help_text": "D1 softball regular season. ESPN unofficial API + ESPN/USA Softball Collegiate Top 25 poll. Bands: 30+ wins bubble, 35+ at-large lock, 40+ top regional, 45+ national seed, 50+ #1 overall. WCWS bracket (double-elimination) not yet modeled. No API key required."
-    },
-    {
-      "id": "enable_ncaa_mens_soccer",
-      "type": "boolean",
-      "label": "NCAA Men's Soccer (D1 + College Cup)",
-      "default": false,
-      "help_text": "D1 men's soccer regular season + College Cup tournament bracket. ESPN unofficial API + United Soccer Coaches Top 25 poll. Regular-season standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. Postseason: single-game elim (R1 -> R2 -> Sweet 16 -> Elite 8 -> College Cup Semis -> Final -> Champion). 48-team field with 16 byes for top seeds. No API key required."
-    },
-    {
-      "id": "enable_ncaa_womens_soccer",
-      "type": "boolean",
-      "label": "NCAA Women's Soccer (D1 + College Cup)",
-      "default": false,
-      "help_text": "D1 women's soccer regular season + College Cup tournament bracket. ESPN unofficial API + United Soccer Coaches Top 25 poll. Regular-season standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. Postseason: single-game elim across 6 rounds (full 64-team field). No API key required."
+      "id": "ncaa_soccer",
+      "type": "select",
+      "label": "NCAA Soccer (D1 + College Cup)",
+      "default": "off",
+      "options": [
+        {
+          "value": "off",
+          "label": "Off"
+        },
+        {
+          "value": "men",
+          "label": "Men's"
+        },
+        {
+          "value": "women",
+          "label": "Women's"
+        },
+        {
+          "value": "both",
+          "label": "Men's + Women's"
+        }
+      ],
+      "help_text": "D1 regular season + College Cup tournament bracket. ESPN unofficial API + United Soccer Coaches Top 25 poll. Regular-season standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. Postseason is single-game elimination: the men's 48-team field gives the top 16 seeds byes (R1 → R2 → Sweet 16 → Elite 8 → College Cup semis → final), the women's is a full 64-team field over 6 rounds. No API key required."
     },
     {
       "id": "_section_keys",
@@ -440,7 +503,7 @@
       "options": [
         {
           "value": "manual",
-          "label": "Manual (use individual weights + max_games below)"
+          "label": "Manual (use Scoring weights + max_games below)"
         },
         {
           "value": "high_curation",
@@ -455,7 +518,7 @@
           "label": "High coverage (~50 games, include smaller stakes)"
         }
       ],
-      "help_text": "Bundles weight + max_games tuning into one knob so you don't have to tune 9 sliders. Picking anything other than 'manual' overrides the individual weight_* settings and max_games below with the preset's values. Stick with 'manual' if you've hand-tuned weights."
+      "help_text": "Bundles weight + max_games tuning into one knob so you don't have to tune each weight by hand. Picking anything other than 'manual' overrides the Scoring weights and Max curated games settings below with the preset's values. Stick with 'manual' if you've hand-tuned weights."
     },
     {
       "id": "max_games",
@@ -508,46 +571,12 @@
       "description": "Each signal contributes to a 0-10 score. Tweak if a signal feels under/over-weighted. Score breakdown is stored per-game in cache.json so you can inspect. Don't want to do the math? Use the 'Curation preset' dropdown above. For worked examples of 'I want X, so I change Y', see the Tuning recipes: https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/blob/main/SCORING.md#tuning"
     },
     {
-      "id": "weight_rank",
-      "type": "number",
-      "label": "Rank-pair weight",
-      "default": 1.0,
-      "help_text": "Multiplier on the rank-pair signal (both ranked > one ranked > neither)."
-    },
-    {
-      "id": "weight_spread",
-      "type": "number",
-      "label": "Close-game weight",
-      "default": 3.0,
-      "help_text": "Multiplier on the close-game signal. For soccer (h2h moneyline path) this is devigged bookmaker probabilities × 2 × min(P_home, P_away), in [0, 1] where 1 = perfect coinflip. For NCAAF / NCAAM (point-spread path) the raw spread normalizes into the same [0, 1] range. Default 3.0 calibrated against the B.3 coinflip-ness formula; pre-B.3 was 0.1 against the old (14-spread)/2 formula. Keep in sync with scoring.Weights.spread."
-    },
-    {
-      "id": "weight_favorite",
-      "type": "number",
-      "label": "Favorite-team boost",
-      "default": 6.0,
-      "help_text": "Flat points added when one of your favorite teams is involved. Keep in sync with scoring.Weights.favorite."
-    },
-    {
-      "id": "weight_rivalry",
-      "type": "number",
-      "label": "Rivalry boost",
-      "default": 2.0,
-      "help_text": "Flat points added when a source flags a game as a rivalry. No sources currently populate this signal (tracked in #8)."
-    },
-    {
-      "id": "weight_tournament",
-      "type": "number",
-      "label": "Tournament-stage weight",
-      "default": 1.5,
-      "help_text": "Knockout-stage cup games (R16, QF, SF, Final). UCL etc."
-    },
-    {
-      "id": "weight_narrative",
-      "type": "number",
-      "label": "LLM narrative weight",
-      "default": 0.0,
-      "help_text": "Optional LLM-judged narrative score. Disabled by default — the Monte Carlo importance signal covers structural standings stakes. Set > 0 to enable Claude-based narrative scoring for storyline / form / managerial-drama factors that the structural simulator can't capture."
+      "id": "scoring_weights",
+      "type": "string",
+      "label": "Scoring weights",
+      "default": "",
+      "placeholder": "e.g. favorite=8, spread=1, importance=3",
+      "help_text": "Blank = defaults. Override any signal's weight as name=number, comma-separated. Names and defaults: rank=1 (rank pair: both ranked > one ranked > neither), spread=3 (close game: devigged moneyline coin-flip-ness for soccer, normalized point spread for NCAAF / NCAAM), favorite=6 (flat boost per favorite-team game), rivalry=2 (flat boost on a known rivalry), tournament=1.5 (knockout-stage cup games), importance=3 (Monte Carlo importance for titles, playoff spots and relegation, including in-league favorites' stakes; 0 disables it), narrative=0 (LLM-judged storyline score; > 0 enables Claude narrative scoring and needs the Anthropic key). Ignored unless Curation preset is 'manual'."
     },
     {
       "id": "adaptive_scoring",
@@ -557,19 +586,12 @@
       "help_text": "Off (default) = absolute scoring: raw signal sum compressed via fixed tanh curve. ★10 saturates late-season; early-season weeks feel flat. On = each refresh batch's median raw score sets the scale, so the top games of any week always feel like top games. Recommended once the season is in full swing; leave off for the simpler absolute mode."
     },
     {
-      "id": "weight_importance",
-      "type": "number",
-      "label": "Monte Carlo importance weight",
-      "default": 3.0,
-      "help_text": "Multiplier on Lahvička match-importance: |Kendall tau-c| × consequence weight, summed across both playing teams' outcome bands AND any in-league favorites' outcome bands (so a non-favorite game that swings a favorite's relegation chance gets credit structurally). Set to 0 to disable."
-    },
-    {
       "id": "importance_seasons",
       "type": "number",
       "label": "Importance: simulated seasons per league",
       "default": 2000,
       "help_text": "How many times each league's remaining season is simulated to measure how much each game matters for titles, playoff spots and relegation. Every game in a league is read off the same simulated seasons, so the cost is per league, not per game: 2000 takes about two minutes for a full slate of several hundred games. More is steadier, fewer is faster; below 500 the ranking starts to wobble between refreshes."
-     },
+    },
     {
       "id": "_section_naming",
       "type": "info",

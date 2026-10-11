@@ -1,8 +1,9 @@
 """The marketing numbers in plugin.json's description are factual claims.
 
 The description says the plugin covers N leagues/tours/competitions, M of
-them soccer. Those are assertions about the `enable_*` toggles in the same
-manifest, and nothing stopped them drifting apart: add a sport and the
+them soccer. Those are assertions about the league toggles in the same
+manifest (an `enable_*` boolean per league, or one select shared by a pair of
+leagues since #208), and nothing stopped them drifting apart: add a sport and the
 number silently becomes a lie on the public listing page.
 
 This is not hypothetical drift-proofing. The README and CLAUDE.md both
@@ -15,6 +16,7 @@ holds it to the code.
 Text-only (no imports of the plugin package, no Django) so it runs
 standalone like tests/test_version_consistency.py.
 """
+import ast
 import json
 import os
 import re
@@ -67,12 +69,39 @@ def _manifest():
     return json.loads(_read("plugin.json"))
 
 
+def _league_pairs():
+    """merged_settings.LEAGUE_PAIRS, read with ast so this file stays
+    text-only: {select_id: ((option, legacy_toggle), (option, legacy_toggle))}."""
+    tree = ast.parse(_read("merged_settings.py"))
+    for node in tree.body:
+        target = getattr(node, "target", None) or (
+            node.targets[0] if isinstance(node, ast.Assign) else None
+        )
+        if isinstance(target, ast.Name) and target.id == "LEAGUE_PAIRS":
+            return ast.literal_eval(node.value)
+    raise AssertionError("LEAGUE_PAIRS literal not found in merged_settings.py")
+
+
 def _toggle_ids():
-    return {
-        f["id"]
-        for f in _manifest()["fields"]
-        if f["id"].startswith("enable_")
-    }
+    """Every LOGICAL league toggle id (#208).
+
+    Most leagues still have their own `enable_*` boolean. Paired leagues share
+    one four-way select, so they are counted through their legacy toggle ids
+    (which plugin._build_sources still asks about by name), and the `ncaaf`
+    select carries NCAA Football, whose logical id is `enable_ncaaf`. Counting
+    raw `enable_*` field ids instead would undercount every merged league."""
+    fields = _manifest()["fields"]
+    ids = {f["id"] for f in fields if f["id"].startswith("enable_") and f["type"] == "boolean"}
+    field_ids = {f["id"] for f in fields}
+    for select_id, members in _league_pairs().items():
+        assert select_id in field_ids, (
+            f"merged_settings.LEAGUE_PAIRS names {select_id!r} but plugin.json "
+            f"has no such field, so neither of its leagues can be switched on"
+        )
+        ids.update(toggle for _option, toggle in members)
+    assert "ncaaf" in field_ids, "plugin.json lost the NCAA Football select"
+    ids.add("enable_ncaaf")
+    return ids
 
 
 def _sport_toggle_ids():

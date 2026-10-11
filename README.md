@@ -180,19 +180,24 @@ form will collect everything needed to scope it.
    '
    ```
 
-   Anthropic key is only needed if you set `weight_narrative > 0` OR want
+   Anthropic key is only needed if you set `narrative` above 0 in **Scoring
+   weights** OR want
    LLM-resolved EPG matching when the regex pre-filter is ambiguous. For
    regex-only matching it's optional.
 
 3. Open Dispatcharr → Plugins → enable **Ranked Matchups (Top Games)**, then
    in the plugin's settings:
-   - Toggle which sports you want under **Sport Sources**
+   - Toggle which sports you want under **Sport Sources** (related leagues,
+     such as men's and women's NCAA soccer or the ATP and WTA tours, share
+     one dropdown: Off, either one, or both)
    - Set your **Favorite teams** (comma-separated) under **Curation**
    - Optionally list **Recorded teams** to have their games recorded
      automatically (see [Recording your teams](#recording-your-teams))
    - Pick your **Local timezone** so "today" classification + EPG dates are
      right
-   - Tune signal **Weights** if any feel under/over-weighted
+   - Tune **Scoring weights** if a signal feels under/over-weighted (one
+     line of `name=number` entries, e.g. `favorite=8, spread=1`; blank keeps
+     the defaults, see [SCORING.md](SCORING.md#tuning))
 
 4. Turn off **Dry run on Apply** (on by default; it prevents channel creation),
    then run **Refresh + apply now** to populate.

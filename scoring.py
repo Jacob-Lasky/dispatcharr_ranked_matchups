@@ -304,11 +304,11 @@ _WC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
 # plugin.py's scoring loop scoped to fd_competition_code == "WC", so only the
 # World Cup is affected.
 #
-# Values chosen so that, at the default weight_importance (3.0) plus each stage's
+# Values chosen so that, at the default `importance` scoring weight (3.0) plus each stage's
 # tournament band, the displayed 0-10 score escalates R32~5.5 -> R16~6.5 ->
 # QF~7.6 -> SF~8.3 -> FINAL~9.2, all clearing placeholder_min_score's 5.0 default.
 # THIRD_PLACE has no tournament band, so its premium is set to still clear 5.0.
-# If weight_importance is retuned, these displayed targets shift proportionally,
+# If the importance weight is retuned, these displayed targets shift proportionally,
 # which is the intended, coherent behavior of an importance weight.
 _WC_KNOCKOUT_IMPORTANCE: Dict[str, float] = {
     "LAST_32":        2.8,
@@ -1288,9 +1288,9 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
 
     # Monte Carlo importance (Lahvička). Already pre-weighted by
     # consequence inside compute_match_importance; multiply only by the
-    # user's weight_importance tunable here. Gating BOTH the points AND
+    # user's `importance` scoring weight here. Gating BOTH the points AND
     # the weight keeps the breakdown clean when the user disables the
-    # signal via weight_importance=0: no 0.0 stub entries.
+    # signal via importance=0: no 0.0 stub entries.
     if signals.importance_points > 0 and weights.importance > 0:
         imp_pts = signals.importance_points * weights.importance
         breakdown["importance"] = round(imp_pts, 2)
