@@ -130,8 +130,13 @@ to sort to the top of group lists):
 - `epg_data` = a per-channel `EPGData` row in our dummy `EPGSource` with same
   name as the group; `ProgramData` description carries the WHY breakdown
 
-A 2-phase renumber dance avoids the unique constraint on
-`(channel_group, channel_number)`: park existing channels at
+A 2-phase renumber dance keeps every in-group number distinct at every step
+(Dispatcharr has NO database constraint on `(channel_group, channel_number)`:
+measured against Postgres on 2026-10-11, the only unique constraints on the
+channel table are `id` and `uuid`; per-group uniqueness lives only in
+`Channel.clean()`, which `.update()` and a plain `save()` never run, so a
+duplicate is written silently and the UI then refuses to save either channel):
+park existing channels at
 `_resolve_park_base` (above both the highest target number this apply will write and the highest number any channel in the group holds, + 1000)
 first, then assign target numbers.
 
@@ -140,8 +145,8 @@ kickoff: everything at or above the lowest number the slate can take under any
 floor, no upper bound, collected BEFORE the floor so the inference sees it, #219):
 every number already published by a channel we do NOT own
 (effective numbers, so a `ChannelOverride` counts; the recordings-archive
-channel counts as somebody else's because it lives in another group). The DB
-constraint is per-group so a duplicate is legal, but the M3U, XMLTV and Xtream
+channel counts as somebody else's because it lives in another group). Nothing
+in the database refuses a duplicate number, in or across groups, but the M3U, XMLTV and Xtream
 Codes outputs all key the guide on the bare channel number, so a shared number
 binds the guide arbitrarily for BOTH channels. The numbers of stale channels
 this apply will KEEP for an active recording (`_numbers_held_for_recordings`,
@@ -150,9 +155,10 @@ take the number such a channel is restored to after parking. All of it reads
 through `_published_numbers` (effective, floored, upper bound `< top + 1` so a
 400.5 reserves 400), which `_ensure_archive_channel` also uses so the archive
 never takes a number published in ANY group. Within our own group it also
-reserves the RAW numbers of channels that are not ours (the unique constraint
-is on raw numbers, so a hand-added channel overridden elsewhere would otherwise
-fail the write; integral raw numbers only). A ChannelOverride on one of OUR
+reserves the RAW numbers of channels that are not ours (`Channel.clean()`
+compares raw numbers, so a hand-added channel overridden elsewhere would
+otherwise share a raw number with a game, which the UI then refuses to save;
+integral raw numbers only). A ChannelOverride on one of OUR
 game channels is deliberately NOT reserved (it would refuse that channel its own
 slot). Reserved numbers are skipped
 (kickoff: never kept by either hold, a fresh game nudges +1 past them); if
@@ -809,8 +815,9 @@ says which.
   on some pool rows), and the two lists must NOT be merged. Three consequences
   live in `_action_apply` and have to stay: `_unique_by_marker` runs before
   anything else, because two cached rows for one event (two sources listing it,
-  names differing) would otherwise create two channels on one number and fail
-  the whole transaction on the unique constraint; `_rekey_legacy_virtuals` runs
+  names differing) would otherwise create two channels on one number, both
+  published, with the guide bound arbitrarily between them (no database
+  constraint refuses it); `_rekey_legacy_virtuals` runs
   after `existing_virtuals` is built and BEFORE numbering, and persists via
   queryset `.update(tvg_id=...)` (never `ch.save()`, see the `post_save` trap
   below) so an upgraded install renames its channels instead of recreating them

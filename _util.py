@@ -192,8 +192,9 @@ def allocate_compact_numbers(
     the settings help text says so.
 
     `reserved` is EVERY channel number already used by a channel we do not own,
-    and skipping those is not optional. The database's unique constraint is on
-    ``(channel_group, channel_number)``, so nothing stops our channel 401 from
+    and skipping those is not optional. Dispatcharr checks channel-number
+    uniqueness only per group, and only in ``Channel.clean()`` (no database
+    constraint, verified against Postgres 2026-10-11), so nothing stops our channel 401 from
     coexisting with the user's channel 401 in another group. But the M3U, XMLTV
     and Xtream Codes outputs all key the guide on the channel number ALONE, with
     no group in it, so two channels sharing a number collapse into one
