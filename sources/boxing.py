@@ -13,7 +13,7 @@ contract every field event uses:
     `extra["fd_competition_code"] = "BOXING"`.
 
 DO NOT subclass FieldEventSource. That base hardcodes the ESPN site API
-(ESPN_SLUG + scoreboard range query), and ESPN exposes NO boxing feed
+(ESPN_SLUG + the per-day scoreboard walk), and ESPN exposes NO boxing feed
 (verified 2026-07-10: site + core APIs both 404 for boxing, while mma/ufc
 works). Boxing's upstream is a DIFFERENT API (RapidAPI Boxing Data API),
 so this is a standalone SportSource that reuses the field-event OUTPUT
@@ -47,7 +47,7 @@ from typing import Any, List, Optional, Pattern
 import requests
 
 from .base import GameRow, SportSource
-from .._util import FIELD_AWAY_SENTINEL, field_event_extra, parse_iso_utc
+from .._util import FIELD_AWAY_SENTINEL, field_event_extra, http_get_json, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.boxing")
 
@@ -121,7 +121,9 @@ class BoxingSource(SportSource):
     # golf / UFC / racing. No Monte Carlo importance.
 
     def __init__(self, api_key: str) -> None:
-        self.api_key = api_key
+        # Stripped: a key pasted with a leading space or trailing newline is
+        # an invalid header value, which `requests` rejects outright.
+        self.api_key = (api_key or "").strip()
 
     @property
     def sport_prefix(self) -> str:
@@ -215,12 +217,12 @@ class BoxingSource(SportSource):
         )
 
     def _http_get(self, url: str, params: dict, timeout: float = 15.0) -> Optional[Any]:
-        try:
-            r = requests.get(url, params=params, headers=self._headers(), timeout=timeout)
-            if r.status_code >= 400:
-                logger.warning("[boxing] %s -> %d", url, r.status_code)
-                return None
-            return r.json()
-        except (requests.RequestException, ValueError) as exc:
-            logger.warning("[boxing] %s failed: %s", url, exc)
-            return None
+        """Patch point for this module's HTTP; the body is `_util.http_get_json`.
+
+        A method rather than a module function because the RapidAPI key rides
+        in `self._headers()`; `http_get_json` masks header values in the one
+        log line that could echo them (a `requests` InvalidHeader message)."""
+        return http_get_json(
+            requests, url, log=logger, tag="boxing", timeout=timeout,
+            params=params, headers=self._headers(),
+        )

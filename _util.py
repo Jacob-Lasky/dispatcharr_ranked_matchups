@@ -591,6 +591,100 @@ def redact_secrets(value: Any) -> str:
     return text
 
 
+def http_get_json(
+    requests_mod: Any,
+    url: str,
+    *,
+    log: Any,
+    tag: str,
+    timeout: float = 15.0,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+) -> Optional[Any]:
+    """GET `url` and return its parsed JSON, or None after logging a WARNING.
+
+    The ONE body behind every source module's `_http_get` (#193). A status of
+    400 or above, any `requests` exception and an unparseable body all come
+    back as None, which every caller already reads as "no data from this
+    feed". Both log lines go through `redact_secrets`, on the URL AND on the
+    exception text, because `requests` renders the full URL (query string
+    included) into its exception messages and no caller can sanitise those.
+
+    DO NOT import `requests` in this module, and DO NOT "simplify" the
+    per-module `_http_get` wrappers away. Each source keeps a thin
+    `_http_get` that passes ITS OWN module-level `requests` symbol and logger:
+
+      - The `requests` symbol is the patch point. Source tests replace
+        `<module>._http_get`, or `get` on `<module>.requests`, and a source
+        that stopped resolving its own symbol at call time would turn a
+        test stub into a live call against ESPN / NHL / MLB that the suite
+        cannot see. `requests_mod.get` is looked up per call, so a stub
+        installed after import is honoured.
+        `tests/test_sources_http.py` pins this for every wrapper.
+      - The logger and `tag` keep each failing feed attributed to its own
+        `plugins.dispatcharr_ranked_matchups.<source>` channel.
+
+    `params` and `headers` are forwarded only when given, so a wrapper that
+    never took them makes the same `requests.get(url, timeout=...)` call it
+    always did.
+    """
+    kwargs: Dict[str, Any] = {"timeout": timeout}
+    if params is not None:
+        kwargs["params"] = params
+    if headers is not None:
+        kwargs["headers"] = headers
+    try:
+        r = requests_mod.get(url, **kwargs)
+        if r.status_code >= 400:
+            log.warning("[%s] %s -> %d", tag, redact_secrets(url), r.status_code)
+            return None
+        return r.json()
+    except (requests_mod.RequestException, ValueError) as exc:
+        log.warning(
+            "[%s] %s failed: %s", tag, redact_secrets(url),
+            _redact_header_values(redact_secrets(exc), headers),
+        )
+        return None
+
+
+_SECRET_HEADER_NAME_RE = re.compile(r"key|token|secret|auth|pass", re.IGNORECASE)
+
+
+def _redact_header_values(text: str, headers: Optional[Dict[str, Any]]) -> str:
+    """Mask the value of every credential-named header that appears in `text`.
+
+    `requests` puts a malformed header value in its exception message
+    verbatim (`InvalidHeader: ... in header value: ' <key>'`, measured with a
+    RapidAPI key pasted with a leading space), and a header is where boxing's
+    key travels, so the key-shape regexes in `redact_secrets` never see it.
+    The raw value and its `repr` body are both masked, because the message
+    quotes the value with `!r` (a trailing newline arrives as a literal
+    backslash-n); a bytes value is masked in both its decoded and its
+    `b'...'` repr forms.
+
+    Values shorter than _MIN_MASKED_HEADER_VALUE are left alone: masking is a
+    plain substring replace, and a one-letter "key" would shred every word of
+    the message it appears in. No real credential is that short.
+    """
+    for name, value in (headers or {}).items():
+        if not _SECRET_HEADER_NAME_RE.search(str(name)):
+            continue  # e.g. x-rapidapi-host: the host name helps diagnose, and is public
+        if isinstance(value, bytes):
+            forms = (repr(value)[2:-1], value.decode("latin-1"))
+        elif isinstance(value, str):
+            forms = (repr(value)[1:-1], value)
+        else:
+            continue
+        for form in forms:
+            for variant in (form, form.strip()):
+                if len(variant) >= _MIN_MASKED_HEADER_VALUE:
+                    text = text.replace(variant, "***")
+    return text
+
+
+_MIN_MASKED_HEADER_VALUE = 8
+
+
 _ORDINAL_SUFFIXES = ("th", "st", "nd", "rd")
 
 

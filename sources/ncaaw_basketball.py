@@ -12,8 +12,10 @@ Two source classes:
     before R64 and only feed 4 of the 64 R64 slots).
 
 API patterns:
-  - /scoreboard?dates=YYYYMMDD for per-day games (range syntax caps at
-    25 events).
+  - /scoreboard?dates=YYYYMMDD&limit=1000 for per-day games, via
+    `_espn.fetch_scoreboard_day`. NOT `dates=YYYYMM`: for the 2025-26
+    season it returned 742 of the 1033 games the per-day walk found,
+    without reaching its limit (see `_espn.SCOREBOARD_EVENT_LIMIT`).
   - /rankings exposes AP Top 25 + Coaches Poll. Prefer AP.
   - Tournament stage in competition.notes[0].headline, e.g.
       "NCAA Women's Championship - Regional 2 in Birmingham - 1st Round"
@@ -38,8 +40,8 @@ import requests
 from .base import GameRow
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc
-from ._espn import fetch_days
+from .._util import parse_iso_utc, http_get_json
+from ._espn import fetch_scoreboard_day, fetch_scoreboard_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaaw_basketball")
 
@@ -55,15 +57,8 @@ SEASON_START_MONTH = 11  # November
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[ncaaw_basketball] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[ncaaw_basketball] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="ncaaw_basketball", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -219,9 +214,10 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -286,8 +282,8 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
         return ranks_by_team
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
-        """Walk every day from season start through min(today + 7d,
-        regular season end). Filter to regular-season games only
+        """Walk every day from season start through the regular season's
+        end (#229). Filter to regular-season games only
         (season.type == 2) so the tournament doesn't pollute the
         win-count importance signal: the playoff source has its own
         bracket-based importance."""
@@ -307,10 +303,9 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = regular_end
 
-        def day_board(day):
-            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-
-        for _day, data in fetch_days(season_start, end, day_board):
+        for _day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard", season_start, end,
+        ):
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)
@@ -372,9 +367,10 @@ class NcaawBasketballPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSour
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -437,7 +433,7 @@ class NcaawBasketballPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSour
         end = datetime(self.season_end_year, 4, 15, tzinfo=timezone.utc).date()
         payloads = self._sweep_bracket_days(
             start, end,
-            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+            lambda d: fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", d),
         )
         if payloads is None:
             # A day failed: NOT cached (#245; see BracketSportSource).

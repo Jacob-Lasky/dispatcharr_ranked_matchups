@@ -8,7 +8,6 @@ from an old one cannot reintroduce it.
 """
 import ast
 import glob
-import inspect
 import os
 import textwrap
 from datetime import date, datetime, timezone
@@ -65,7 +64,7 @@ class TestNflWalksToTheRegularSeasonEnd:
         days = []
 
         def fake_get(url):
-            days.append(url.rsplit("dates=", 1)[1])
+            days.append(url.rsplit("dates=", 1)[1][:8])
             return {"events": []}
         with patch.object(nfl, "_http_get", side_effect=fake_get):
             src._fetch_full_season_games()

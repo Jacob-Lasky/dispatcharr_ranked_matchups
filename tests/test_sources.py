@@ -4,6 +4,7 @@ doesn't ship silently."""
 
 from typing import Any, Dict, List, Tuple
 
+import itertools
 import random
 from datetime import date, datetime, timedelta, timezone
 
@@ -5753,10 +5754,11 @@ class TestNcaaSoccerCupSource:
         )
         # Two events: one tournament (third-round) and one regular-season.
         # Only the tournament event should be emitted.
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 {"id": "tournament-event", "date": "2030-11-30T19:00:00Z",
@@ -6467,10 +6469,11 @@ class TestMlsStandingsConferenceFilter:
             mod, "_fetch_conference_map",
             lambda: {"A": "East", "B": "East", "C": "West", "D": "West"},
         )
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_, **__):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 # (1) A vs B: intra-East, should appear
@@ -6813,10 +6816,11 @@ class TestMlsStandingsConferenceFilter:
             mod, "_fetch_conference_map",
             lambda: {"A": "East", "B": "East"},
         )
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_, **__):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 {"id": 100, "date": "2025-04-01T19:00:00Z",
@@ -6876,19 +6880,16 @@ class TestMlsStandingsFixtureWindow:
         calls = self._capture_calls(monkeypatch, mod, [])
         # season_year in the past so "now" cannot influence the window.
         MlsEastSource(season_year=2025)._fetch_full_season_games()
-        assert len(calls) == 1, (
-            f"expected ONE range call for the whole season, got {len(calls)}"
-        )
-        _, params = calls[0]
-        assert params["dates"] == "20250201-20251130", (
-            "importance sweep must span the full Feb-Nov season window, "
-            f"got dates={params['dates']!r}"
-        )
+        days = sorted(url.split("dates=")[1][:8] for url, _ in calls)
+        # Literals: Feb 1 - Nov 30 2025 is 303 days, one request each (#182).
+        assert (days[0], days[-1], len(days), len(set(days))) == (
+            "20250201", "20251130", 303, 303,
+        ), "importance sweep must request every day of the Feb-Nov season"
 
     def test_season_fetch_passes_the_paging_limit(self, monkeypatch):
-        """Without `limit` ESPN silently returns only the first page of a
-        date range, which would truncate the season back to a partial
-        fixture list -- the same starvation, harder to spot."""
+        """Without `limit` ESPN pages a scoreboard silently (100 events per
+        day), which would truncate the season back to a partial fixture
+        list -- the same starvation, harder to spot."""
         from dispatcharr_ranked_matchups.sources.mls_standings import (
             MlsEastSource,
         )
@@ -6898,10 +6899,44 @@ class TestMlsStandingsFixtureWindow:
         )
         calls = self._capture_calls(monkeypatch, mod, [])
         MlsEastSource(season_year=2025)._fetch_full_season_games()
-        _, params = calls[0]
-        assert params.get("limit") == mod.SCOREBOARD_EVENT_LIMIT, (
-            f"scoreboard range call must pass limit, got params={params!r}"
+        assert calls and all(url.endswith("&limit=1000") for url, _ in calls), (
+            f"every scoreboard call must pass limit=1000, got {calls[:2]!r}"
         )
+
+    def test_season_fetch_survives_espn_rejecting_the_range_form(
+        self, monkeypatch,
+    ):
+        """WITNESS for the live outage (#182): ESPN answers the
+        `dates=<start>-<end>` form with HTTP 400 for team sports (measured
+        2026-10-11; the plugin log shows it from 2026-10-07), and the old
+        single ranged call turned that into an EMPTY MLS season. Emulate
+        ESPN exactly: range URL -> None (what `_http_get` returns on a 400),
+        one-day URL -> that day's events."""
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map", lambda: {"A": "East", "B": "East"},
+        )
+        fixture = {"id": "S9", "date": "2025-10-25T19:00:00Z",
+                   "season": {"slug": "regular-season"},
+                   "competitions": [{
+                       "status": {"type": {"completed": False, "state": "pre"}},
+                       "competitors": [
+                           {"homeAway": "home", "team": {"displayName": "A"}},
+                           {"homeAway": "away", "team": {"displayName": "B"}},
+                       ],
+                   }]}
+
+        def espn(url, *_a, **params):
+            dates = params.get("dates") or url.split("dates=")[1].split("&")[0]
+            if "-" in dates:
+                return None
+            return {"events": [fixture] if dates == "20251025" else []}
+        monkeypatch.setattr(mod, "_http_get", espn)
+        games = MlsEastSource(season_year=2025)._fetch_full_season_games()
+        assert [g["id"] for g in games] == ["S9"]
 
     def test_far_future_fixture_reaches_remaining_matches(self, monkeypatch):
         """End-to-end pin on the behaviour #65 is about: a fixture months
@@ -6941,28 +6976,6 @@ class TestMlsStandingsFixtureWindow:
         ids = {(m.extra or {}).get("game_id") for m in remaining}
         assert ids == {"S1"}, (
             f"far-future fixture must survive into remaining_matches, got {ids}"
-        )
-
-    def test_range_helper_warns_when_response_hits_the_limit(
-        self, monkeypatch, caplog,
-    ):
-        """A response exactly at the limit is the only symptom ESPN gives
-        for a truncated page: it must not pass silently."""
-        import logging
-        from dispatcharr_ranked_matchups.sources import mls_standings as mod
-        monkeypatch.setattr(mod, "SCOREBOARD_EVENT_LIMIT", 3)
-        monkeypatch.setattr(
-            mod, "_http_get",
-            lambda *_a, **_k: {"events": [{"id": 1}, {"id": 2}, {"id": 3}]},
-        )
-        with caplog.at_level(logging.WARNING, logger=mod.logger.name):
-            events = mod._fetch_scoreboard_range(
-                date(2025, 2, 1), date(2025, 11, 30),
-            )
-        assert len(events) == 3
-        messages = [r.getMessage() for r in caplog.records]
-        assert any("truncated" in m for m in messages), (
-            f"expected a truncation warning, got {messages}"
         )
 
     def test_range_helper_returns_empty_for_inverted_window(self):
@@ -7367,10 +7380,11 @@ class TestMlsCupFetchUpcoming:
     def test_fetch_upcoming_emits_only_bracket_games(self, monkeypatch):
         from dispatcharr_ranked_matchups.sources import mls_cup as mod
         from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 # Scheduled bracket game: should emit.
@@ -7410,10 +7424,11 @@ class TestMlsCupFetchUpcoming:
         don't appear in the user's Top Matchups guide either."""
         from dispatcharr_ranked_matchups.sources import mls_cup as mod
         from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 # Phantom game-3: state=post, completed=False, 0-0.
@@ -10784,7 +10799,7 @@ def _patch_friendlies_http(monkeypatch, events):
         def json(self): return {"events": events}
 
     def _get(url, *a, **kw):
-        requested_dates.append(url.split("dates=")[1])
+        requested_dates.append(url.split("dates=")[1][:8])
         return FakeResp()
 
     monkeypatch.setattr(friendlies_mod.requests, "get", _get)
@@ -11128,17 +11143,34 @@ def _cup_event(eid, home, away, season_slug, *, hours_from_now=2.0,
 
 
 def _patch_cup_http_per_bucket(monkeypatch, buckets):
-    """Stub english_cup's requests.get so each successive `dates=` bucket gets
-    its OWN payload, rather than every bucket receiving the same events.
+    """Stub english_cup's requests.get so each `dates=` bucket gets its OWN
+    payload, rather than every bucket receiving the same events.
 
     Needed because the interesting dedupe defects are about DISAGREEMENT
     between two buckets carrying the same event, which a stub that serves one
     identical response to every date cannot express. `buckets` is a list of
-    event-lists, applied in sweep order; requests past the end get [].
+    event-lists, one per day in sweep order starting at the lookback day;
+    days past the end get [].
+
+    Keyed by the requested DATE, not by arrival order: the sweep fetches its
+    days concurrently, so arrival order is not date order, and a stub that
+    handed out payloads by arrival could give the stale copy to the later
+    bucket and pass without testing the premise.
     """
     from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
+    from dispatcharr_ranked_matchups.sources import _espn
 
-    calls = {"n": 0}
+    # Pin the sweep's clock to the instant the buckets are laid out, so a run
+    # straddling UTC midnight cannot shift the sweep's first day past ours.
+    now = datetime.now(timezone.utc)
+
+    class _PinnedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(_espn, "datetime", _PinnedDatetime)
+    first = now.date() - timedelta(days=_espn.SCOREBOARD_LOOKBACK_DAYS)
 
     class FakeResp:
         def __init__(self, events): self._events = events
@@ -11146,12 +11178,11 @@ def _patch_cup_http_per_bucket(monkeypatch, buckets):
         def json(self): return {"events": self._events}
 
     def _get(url, *a, **kw):
-        i = calls["n"]
-        calls["n"] += 1
-        return FakeResp(buckets[i] if i < len(buckets) else [])
+        day = datetime.strptime(url.split("dates=")[1][:8], "%Y%m%d").date()
+        i = (day - first).days
+        return FakeResp(buckets[i] if 0 <= i < len(buckets) else [])
 
     monkeypatch.setattr(cup_mod.requests, "get", _get)
-    return calls
 
 
 def _patch_cup_http(monkeypatch, events):
@@ -11167,7 +11198,7 @@ def _patch_cup_http(monkeypatch, events):
         def json(self): return {"events": events}
 
     def _get(url, *a, **kw):
-        requested_dates.append(url.split("dates=")[1])
+        requested_dates.append(url.split("dates=")[1][:8])
         return FakeResp()
 
     monkeypatch.setattr(cup_mod.requests, "get", _get)
@@ -11376,7 +11407,8 @@ class TestEnglishCupFetch:
         yesterday = (datetime.now(timezone.utc).date()
                      - timedelta(days=1)).strftime("%Y%m%d")
         today = datetime.now(timezone.utc).date().strftime("%Y%m%d")
-        assert dates == [yesterday, today]
+        # sorted: the days are fetched concurrently, so arrival order is not date order.
+        assert sorted(dates) == [yesterday, today]
 
     def test_dedupes_an_event_seen_in_two_buckets(self, monkeypatch):
         """The lookback bucket overlaps the first forward bucket, and the stub

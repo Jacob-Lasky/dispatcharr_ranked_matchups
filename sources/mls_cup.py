@@ -56,8 +56,9 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 import requests
 
 from .base import GameRow
+from ._espn import fetch_scoreboard_day, fetch_scoreboard_days
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
-from .._util import parse_iso_utc
+from .._util import parse_iso_utc, http_get_json
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_cup")
 
@@ -109,15 +110,8 @@ SLUG_TO_STAGE: Dict[str, str] = {
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[mls_cup] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[mls_cup] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="mls_cup", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -233,11 +227,10 @@ class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(
-                f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}"
-            )
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not isinstance(data, dict):
                 continue
             for event in data.get("events") or []:
@@ -308,7 +301,7 @@ class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         ).date()
         payloads = self._sweep_bracket_days(
             start, end,
-            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+            lambda d: fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", d),
         )
         if payloads is None:
             # A day failed: NOT cached (#245; see BracketSportSource).

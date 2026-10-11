@@ -39,16 +39,93 @@ sweeps differ on purpose. See #190.
 """
 from __future__ import annotations
 
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .._util import parse_iso_utc
 
+logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.espn")
+
 # ESPN's soccer competition root. Every soccer slug this plugin sweeps
 # (eng.1, eng.league_cup, eng.fa, fifa.friendly, club.friendly,
 # usa.ncaa.m.1, ...) hangs off it.
 ESPN_SOCCER_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+
+# Every ESPN scoreboard request goes ONE DAY AT A TIME with an explicit page
+# size, through `scoreboard_day_url` / `fetch_scoreboard_day`. Three measured
+# facts (2026-10-11, #182) decide that, and each rules out a shortcut:
+#
+#   1. A single day PAGES silently at 100 events. `dates=20261025` on
+#      `soccer/usa.ncaa.w.1` returned 100; `&limit=1000` returned 101. Over the
+#      2026 women's NCAA soccer regular season the bare per-day walk saw 3001
+#      games and the limited one 3226: 225 games missing from the season the
+#      importance simulator replays, with nothing logged. `limit` is why
+#      SCOREBOARD_EVENT_LIMIT exists, and it applies to every per-day call.
+#   2. `limit` above 1000 does NOT raise the cap. ESPN silently answers with
+#      a 25-event page instead: one `soccer/usa.ncaa.w.1` query returned 999
+#      events at limit=999, 1000 at limit=1000 and 25 at limit=1001. A
+#      25-event page is the likely origin of the old "range queries cap at
+#      25" comments. DO NOT raise this constant past 1000.
+#   3. The multi-day forms are not a substitute for the per-day walk:
+#        - `dates=YYYYMMDD-YYYYMMDD` (with or without `limit`) answers
+#          HTTP 400 "Failed to get events endpoint." for every team sport
+#          tried: NBA, NFL, NHL, MLS, Premier League, NCAA soccer. It worked
+#          for MLS on 2026-08-15 (#65), and the live plugin log shows
+#          `mls_standings` getting 400s on it since at least 2026-10-07 (the
+#          oldest retained log). It still answers for racing and tennis, but
+#          EXCLUDES the window's last day (`racing/nascar-premier`
+#          20261011-20261018 omitted the Oct 18 race) and missed an
+#          in-progress tournament the per-day buckets carry (`tennis/atp`,
+#          the Shanghai Masters on 2026-10-11).
+#        - `dates=YYYYMM` returned 742 of the 1033 games the per-day walk
+#          found for the 2025-26 women's college basketball season, WITHOUT
+#          reaching the limit, so "count == limit" cannot detect it.
+#      A form that fails loudly costs a fallback request; a form that drops
+#      events quietly costs correctness with no symptom. Neither is worth the
+#      requests it saves while every per-day walk runs concurrently
+#      (`fetch_scoreboard_days`).
+#
+# A per-day page that still comes back AT the limit is logged by
+# `fetch_scoreboard_day`, since that is the only symptom truncation gives.
+SCOREBOARD_EVENT_LIMIT = 1000
+
+
+def scoreboard_day_url(scoreboard_url: str, day: date) -> str:
+    """The one-day scoreboard URL for `day`, with the explicit page size.
+
+    `scoreboard_url` is the league's `.../scoreboard` endpoint, no query.
+    Every source builds its day URLs here; `tests/test_espn_scoreboard.py`
+    fails any `scoreboard?dates=` literal elsewhere in `sources/`, because a
+    URL without `limit` silently loses events past the 100th of a busy day.
+    """
+    return f"{scoreboard_url}?dates={day.strftime('%Y%m%d')}&limit={SCOREBOARD_EVENT_LIMIT}"
+
+
+def fetch_scoreboard_day(
+    http_get: Callable[[str], Optional[Dict[str, Any]]],
+    scoreboard_url: str,
+    day: date,
+) -> Optional[Dict[str, Any]]:
+    """`http_get(scoreboard_day_url(...))`, warning when the page is full.
+
+    `http_get` is injected for the same reason as everywhere in this module:
+    it is the source's own `_http_get`, the patch point its tests stub.
+    Returns whatever `http_get` returned (a dict, or None on failure).
+    """
+    data = http_get(scoreboard_day_url(scoreboard_url, day))
+    if isinstance(data, dict):
+        n = len(data.get("events") or [])
+        if n >= SCOREBOARD_EVENT_LIMIT:
+            logger.warning(
+                "[espn] %s dates=%s returned %d events, at the page limit of "
+                "%d: that day may be truncated",
+                scoreboard_url, day.strftime("%Y%m%d"), n, SCOREBOARD_EVENT_LIMIT,
+            )
+    return data
+
 
 # How many extra days BEHIND today-UTC the sweep reaches. ESPN buckets its
 # scoreboard by US EASTERN calendar date, not UTC, so the `dates=YYYYMMDD`
@@ -185,10 +262,10 @@ def sweep_upcoming_scoreboard(
     Shared by `friendlies.py` and `english_cup.py`; see the module docstring
     for why the bracket sources deliberately do NOT use it.
 
-    ESPN's date-RANGE syntax silently caps at 25 events, so this walks ONE DAY
-    AT A TIME (the same trap documented in `ncaa_baseball.py` and
-    `ncaa_soccer.py`). The BUCKETS run from `SCOREBOARD_LOOKBACK_DAYS` before
-    today-UTC through `days_ahead` after it.
+    Walks ONE DAY AT A TIME through `fetch_scoreboard_day`; see
+    SCOREBOARD_EVENT_LIMIT for why no multi-day form replaces that. The
+    BUCKETS run from `SCOREBOARD_LOOKBACK_DAYS` before today-UTC through
+    `days_ahead` after it.
 
     `days_ahead` bounds the buckets requested, NOT the kickoff timestamps
     returned, and the two are not the same thing. ESPN buckets by US Eastern
@@ -226,11 +303,10 @@ def sweep_upcoming_scoreboard(
     oldest_kickoff = now - MAX_AGE_AFTER_KICKOFF
     out: List[Dict[str, Any]] = []
     seen_ids: set = set()
-    for offset in range(days_ahead + SCOREBOARD_LOOKBACK_DAYS + 1):
-        day = start_day + timedelta(days=offset)
-        data = http_get(
-            f"{base}/{slug}/scoreboard?dates={day.strftime('%Y%m%d')}"
-        )
+    for _day, data in fetch_scoreboard_days(
+        http_get, f"{base}/{slug}/scoreboard",
+        start_day, start_day + timedelta(days=days_ahead + SCOREBOARD_LOOKBACK_DAYS),
+    ):
         if not data:
             continue
         for event in data.get("events") or []:
@@ -300,9 +376,12 @@ def fetch_days(
     this module: each source's tests stub its own `_http_get`, and a helper
     that made requests itself would turn those stubs into silent no-ops.
     Results come back in date order so callers' "first occurrence wins"
-    dedupe behaves exactly as their old sequential loops did. Runs only on
-    the importance path, inside the pipeline subprocess (never a uwsgi
-    worker), where real threads are fine.
+    dedupe behaves exactly as their old sequential loops did.
+
+    Real threads are fine here because every source fetch runs inside the
+    pipeline subprocess (`_action_refresh` is reached only through
+    `_pipeline_runner.py`), never in a gevent-patched uwsgi worker. DO NOT
+    call a source's fetch from a worker without revisiting that.
     """
     days: List[date] = []
     day = start
@@ -313,3 +392,141 @@ def fetch_days(
         return []
     with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(days)))) as pool:
         return list(zip(days, pool.map(fetch_day, days)))
+
+
+# A walk is fetched in chunks of this many days (two concurrent batches), and
+# gives up on a scoreboard that is HANGING: a chunk in which every day came
+# back None AND that took at least SCOREBOARD_SLOW_CHUNK_SECONDS stops the
+# walk. Both halves are load-bearing (#182 review):
+#
+#   - All None, because a day with no games is a 200 with an empty `events`
+#     list. A whole chunk of None means the endpoint itself is failing, not a
+#     quiet stretch of calendar, and it is checked on EVERY chunk, so an
+#     endpoint that answers day one and then hangs is still caught.
+#   - Slow, because only a hang threatens the pipeline's 25-minute ceiling.
+#     Every request timing out at 15 s costs ~30 s per chunk, so a 303-day
+#     MLS walk would take ~570 s and two or three such walks in a row overran
+#     the ceiling. An endpoint that fails FAST (a 503, a refused connection)
+#     costs nothing to keep asking, and it may recover mid-walk, so it is
+#     walked to the end rather than silently truncating the season.
+#
+# A hang that lets one request through per chunk defeats the all-None rule, so
+# every walk ALSO stops once it has spent SCOREBOARD_WALK_BUDGET_SECONDS. The
+# slowest healthy walk measured 2026-10-11 took ~5 s (MLS, 303 days), so 120 s
+# is ~24x headroom and only a degraded endpoint reaches it.
+#
+# The cost is that a walk which meets a hang loses the rest of its window for
+# this refresh (a WARNING says so); the next refresh retries it.
+#
+# A walk re-requests its failed days ONCE, but only when they are a blip: at
+# least one day answered, no more than one day in SCOREBOARD_WALK_CHUNK_DAYS
+# failed (at least one allowed), no more than one batch of
+# _SEASON_WALK_WORKERS days, walk budget left, and the last chunk did not hang
+# (all failed, slow), which is an outage starting mid-walk.
+# A single read timeout is not hypothetical: one 303-day MLS walk measured
+# 2026-10-11 lost 20261006 to it, and every finished game in a lost day drops
+# out of the standings the importance simulator starts from, silently. The
+# share cap is what keeps the retry off a degraded endpoint: a partial hang
+# fails most days, retrying those is the cost the hang rules exist to avoid,
+# so it gets no retry; a blip costs at most ONE more batch, one timeout.
+# An abandoned walk never qualifies: the hang rule leaves a hung chunk, and
+# the budget rule leaves no budget.
+SCOREBOARD_WALK_CHUNK_DAYS = 2 * _SEASON_WALK_WORKERS
+SCOREBOARD_SLOW_CHUNK_SECONDS = 10.0
+SCOREBOARD_WALK_BUDGET_SECONDS = 120.0
+
+
+def fetch_scoreboard_days(
+    http_get: Callable[[str], Optional[Dict[str, Any]]],
+    scoreboard_url: str,
+    start: date,
+    end: date,
+) -> List[Tuple[date, Optional[Dict[str, Any]]]]:
+    """`[(day, page), ...]` for the scoreboard days from `start` to `end`
+    inclusive, IN DATE ORDER, each fetched through `fetch_scoreboard_day`
+    and run concurrently by `fetch_days`.
+
+    The one per-day walk every ESPN source uses: upcoming sweeps, full-season
+    walks and bracket walks alike. Concurrency keeps a long window
+    affordable: a slow endpoint costs one timeout per `_SEASON_WALK_WORKERS`
+    days instead of one per day.
+
+    Stops early, with a WARNING, at the first chunk that is entirely None AND
+    slow, or once the walk has used SCOREBOARD_WALK_BUDGET_SECONDS (see
+    SCOREBOARD_WALK_CHUNK_DAYS), so the result can be SHORTER than the
+    window. A walk that ran to its end retries a blip of failed days once
+    (`_retry_failed_days`). A day still None after that reads as "no games
+    that day" to every caller.
+    """
+    fetch = lambda day: fetch_scoreboard_day(http_get, scoreboard_url, day)  # noqa: E731
+    pages: List[Tuple[date, Optional[Dict[str, Any]]]] = []
+    walk_began = time.monotonic()
+    chunk_start = start
+    hung = False
+    while chunk_start <= end:
+        chunk_end = min(end, chunk_start + timedelta(days=SCOREBOARD_WALK_CHUNK_DAYS - 1))
+        began = time.monotonic()
+        chunk = fetch_days(chunk_start, chunk_end, fetch)
+        pages.extend(chunk)
+        took = time.monotonic() - began
+        hung = (all(page is None for _day, page in chunk)
+                and took >= SCOREBOARD_SLOW_CHUNK_SECONDS)
+        if chunk_end < end and hung:
+            logger.warning(
+                "[espn] %s: every day %s-%s failed and took %.0f s; not "
+                "requesting the remaining days through %s",
+                scoreboard_url, chunk_start.strftime("%Y%m%d"),
+                chunk_end.strftime("%Y%m%d"), took, end.strftime("%Y%m%d"),
+            )
+            break
+        spent = time.monotonic() - walk_began
+        if chunk_end < end and spent >= SCOREBOARD_WALK_BUDGET_SECONDS:
+            logger.warning(
+                "[espn] %s: walk took %.0f s by %s, past its %.0f s budget; "
+                "not requesting the remaining days through %s",
+                scoreboard_url, spent, chunk_end.strftime("%Y%m%d"),
+                SCOREBOARD_WALK_BUDGET_SECONDS, end.strftime("%Y%m%d"),
+            )
+            break
+        chunk_start = chunk_end + timedelta(days=1)
+    if not hung:  # a hung LAST chunk is an outage too, not a blip to retry
+        _retry_failed_days(fetch, pages, scoreboard_url, walk_began)
+    return pages
+
+
+def _retry_failed_days(
+    fetch: Callable[[date], Optional[Dict[str, Any]]],
+    pages: List[Tuple[date, Optional[Dict[str, Any]]]],
+    scoreboard_url: str,
+    walk_began: float,
+) -> None:
+    """Re-request a walk's failed days once, in place, when they are a blip.
+
+    A blip: at least one day answered, and at most max(1, len // CHUNK) days
+    failed, capped at one batch of _SEASON_WALK_WORKERS so the retry costs at
+    most one request timeout. Skipped once the walk budget is spent. See
+    SCOREBOARD_WALK_CHUNK_DAYS for why the caps exist; DO NOT raise the batch
+    cap to a chunk, or a walk abandoned for a hang would retry the hung chunk.
+    A retried day that now answers takes its own date slot, so a caller's
+    first-occurrence dedupe sees exactly what a walk with no failure would. Pages stay in
+    date order because each retried day replaces its own slot.
+    """
+    failed = [i for i, (_day, page) in enumerate(pages) if page is None]
+    allowed = min(_SEASON_WALK_WORKERS,
+                  max(1, len(pages) // SCOREBOARD_WALK_CHUNK_DAYS))
+    if not failed or len(failed) == len(pages) or len(failed) > allowed:
+        return
+    if time.monotonic() - walk_began >= SCOREBOARD_WALK_BUDGET_SECONDS:
+        return
+    days = [pages[i][0] for i in failed]
+    with ThreadPoolExecutor(max_workers=len(days)) as pool:
+        retried = list(pool.map(fetch, days))
+    recovered = 0
+    for i, page in zip(failed, retried):
+        if page is not None:
+            pages[i] = (pages[i][0], page)
+            recovered += 1
+    logger.info(
+        "[espn] %s: retried %d failed day(s), recovered %d",
+        scoreboard_url, len(failed), recovered,
+    )

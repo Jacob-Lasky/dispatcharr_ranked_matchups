@@ -30,9 +30,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from ._espn import fetch_scoreboard_days
 from ._odds import fetch_odds_events
 from .base import GameRow, SportSource
-from .._util import TEAM_SUFFIX_TOKENS, parse_iso_utc, redact_secrets
+from .._util import TEAM_SUFFIX_TOKENS, http_get_json, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls")
 
@@ -47,23 +48,9 @@ ODDS_SPORT_KEY = "soccer_usa_mls"
 # matcher; both code paths reuse the same source of truth.
 
 
-def _http_get(url: str, timeout: float = 15.0, **params: Any) -> Optional[Any]:
-    """HTTP GET wrapper that logs on non-2xx and returns parsed JSON or
-    None on any failure. Used for both ESPN (returns dict) and Odds API
-    (returns list of dicts) calls: return type is union, caller does
-    its own shape check."""
-    try:
-        r = requests.get(url, timeout=timeout, params=params or None)
-        if r.status_code >= 400:
-            logger.warning("[mls] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        # redact_secrets on BOTH: odds calls pass apiKey as a query param, and a
-        # requests ConnectionError renders the full URL (params included) in its
-        # message even though `url` here is the bare base. See #156.
-        logger.warning("[mls] %s failed: %s", redact_secrets(url), redact_secrets(exc))
-        return None
+def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="mls", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -178,21 +165,9 @@ class MlsSource(SportSource):
         all upcoming matches for this league; ESPN gives the schedule,
         Odds API gives the moneyline market.
 
-        The per-day loop is here because ESPN's scoreboard range syntax
-        (`dates=YYYYMMDD-YYYYMMDD`) truncates silently. The cap is NOT
-        25, though, and it is not fixed: it is an unstated page size,
-        and passing an explicit `limit` lifts it. Measured live
-        2026-08-15 on `soccer/usa.1` over the whole 2026 season window:
-        the bare range returned 100 events, `&limit=1000` returned 511,
-        and 303 per-day calls returned the same 511 with identical ids
-        and kickoff times (see mls_standings.SCOREBOARD_EVENT_LIMIT).
-
-        This lookahead is at most 8 days of MLS fixtures (~30 events),
-        so the per-day loop is not WRONG here, just ~8x the calls it
-        needs. Left as-is deliberately: this class is the base for
-        NwslSource / LigaMxSource, whose event volumes have not been
-        measured, and #65 only needed the fix on the importance path.
-        The same stale 25-event claim is repeated across ~11 sources.
+        One request per day through `_espn.fetch_scoreboard_day`; see
+        `_espn.SCOREBOARD_EVENT_LIMIT` for why no multi-day form replaces
+        the walk (#182).
         """
         closeness_by_pair = self._fetch_closeness()
 
@@ -200,9 +175,10 @@ class MlsSource(SportSource):
         out: List[GameRow] = []
         seen_ids: set = set()
         espn_base = self._espn_base()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(f"{espn_base}/scoreboard", dates=day.strftime("%Y%m%d"))
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{espn_base}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not isinstance(data, dict):
                 continue
             for event in data.get("events") or []:

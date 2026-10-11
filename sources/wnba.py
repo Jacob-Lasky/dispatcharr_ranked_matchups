@@ -40,8 +40,8 @@ import requests
 from .base import GameRow
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc
-from ._espn import fetch_days
+from .._util import parse_iso_utc, http_get_json
+from ._espn import fetch_scoreboard_day, fetch_scoreboard_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.wnba")
 
@@ -73,17 +73,8 @@ _WNBA_SERIES_LENGTHS_LEGACY: Dict[str, int] = {
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    """ESPN unofficial API wrapper. Returns parsed JSON or None on
-    any error. Logs at WARNING."""
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[wnba] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[wnba] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="wnba", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -238,9 +229,10 @@ class WnbaRegularSource(PointsBasedSportSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -274,9 +266,9 @@ class WnbaRegularSource(PointsBasedSportSource):
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
         """Walk every day of the regular season window. WNBA's regular
         season is mid-May through mid-September; this covers May
-        through end of September with daily iteration. ESPN's range
-        endpoint silently caps at 25 events; daily queries return
-        everything for that day."""
+        through end of September with daily iteration
+        (`_espn.fetch_scoreboard_day`; see `_espn.SCOREBOARD_EVENT_LIMIT`
+        for why not a date range)."""
         seen: Dict[Any, Dict[str, Any]] = {}
         season_start = datetime(self.season_year, SEASON_START_MONTH, 1,
                                 tzinfo=timezone.utc).date()
@@ -290,10 +282,9 @@ class WnbaRegularSource(PointsBasedSportSource):
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = regular_end
 
-        def day_board(day):
-            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-
-        for _day, data in fetch_days(season_start, end, day_board):
+        for _day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard", season_start, end,
+        ):
             if data:
                 for event in data.get("events") or []:
                     rec = _extract_game_record(event)
@@ -372,9 +363,10 @@ class WnbaPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         today = datetime.now(timezone.utc).date()
         out: List[GameRow] = []
         seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+        for day, data in fetch_scoreboard_days(
+            _http_get, f"{ESPN_BASE}/scoreboard",
+            today, today + timedelta(days=days_ahead),
+        ):
             if not data:
                 continue
             for event in data.get("events") or []:
@@ -440,7 +432,7 @@ class WnbaPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         end = datetime(self.season_year, 11, 15, tzinfo=timezone.utc).date()
         payloads = self._sweep_bracket_days(
             start, end,
-            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+            lambda d: fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", d),
         )
         if payloads is None:
             # A day failed: NOT cached (#245; see BracketSportSource).

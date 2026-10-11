@@ -40,9 +40,10 @@ ESPN endpoints used:
   - `/apis/v2/sports/soccer/usa.1/standings`: conference rosters +
     current standings points (3 W / 1 D / 0 L). Fetched once per
     refresh; the team→conference map is cached on the source instance.
-  - `/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=<range>&limit=`:
-    the Feb-Nov regular season, whole window in one call. See
-    SCOREBOARD_EVENT_LIMIT for why `limit` is not optional.
+  - `/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=YYYYMMDD&limit=`:
+    one request per day of the Feb-Nov regular season, fetched
+    concurrently. See `_fetch_scoreboard_range` for why not one ranged
+    call.
 
 Remaining-fixtures coverage (#65, resolved 2026-08-15). This module used
 to carry a "known limitation" claiming ESPN publishes only ~1-2 weeks of
@@ -83,12 +84,12 @@ from .mls import (
     _h2h_to_closeness,
     _team_canonical_name,
 )
-from .._util import redact_secrets
-from ._espn import extract_espn_scoreboard_event
+from .._util import http_get_json
+from ._espn import extract_espn_scoreboard_event, fetch_scoreboard_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_standings")
 
-ESPN_SCOREBOARD_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1"
+ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard"
 ESPN_STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/soccer/usa.1/standings"
 
 # MLS regular season runs late February through late October in the
@@ -96,23 +97,6 @@ ESPN_STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/soccer/usa.1/stan
 # either side of the bookend weekends.
 SEASON_START_MONTH = 2
 SEASON_END_MONTH = 11
-
-# ESPN's scoreboard accepts `dates=YYYYMMDD-YYYYMMDD`, but it PAGINATES
-# and truncates silently: without an explicit `limit` a range returns
-# only its first 100 events and says nothing about the rest. Passing
-# `limit` lifts the page size and the whole window arrives in one call.
-#
-# DO NOT drop this param and DO NOT go back to a per-day sweep to work
-# around a short result. Measured live 2026-08-15 against
-# `soccer/usa.1`, full 2026 season window (Feb 1 - Nov 30):
-#   dates=<range>                -> 100 events (silently truncated)
-#   dates=<range>&limit=1000     -> 511 events
-#   303 individual per-day calls -> 511 events
-# The range-with-limit and per-day event-ID sets were IDENTICAL, with
-# identical kickoff timestamps on every shared id. One call replaces
-# 303. `_fetch_scoreboard_range` warns if a response ever comes back at
-# the limit, which is the only symptom truncation would show.
-SCOREBOARD_EVENT_LIMIT = 1000
 
 # Per-team goal averages cluster around 1.4 goals/game in modern MLS
 # (slightly higher than NCAA soccer's 1.5/game prior because pro-level
@@ -122,56 +106,34 @@ _DEFAULT_GOALS_FOR = 1.4
 _DEFAULT_GOALS_AGAINST = 1.4
 
 
-def _http_get(url: str, timeout: float = 15.0, **params: Any) -> Optional[Any]:
-    """HTTP GET wrapper. Return type is Optional[Any] because the
-    callers hit two shapes: ESPN endpoints return dicts (standings,
-    scoreboard) while The Odds API returns a JSON list. Caller checks
-    via isinstance before iterating.
-    """
-    try:
-        r = requests.get(url, timeout=timeout, params=params or None)
-        if r.status_code >= 400:
-            logger.warning("[mls_standings] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        # redact_secrets on BOTH: odds calls pass apiKey as a query param, and a
-        # requests ConnectionError renders the full URL (params included) in its
-        # message even though `url` here is the bare base. See #156.
-        logger.warning("[mls_standings] %s failed: %s", redact_secrets(url), redact_secrets(exc))
-        return None
+def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="mls_standings", timeout=timeout)
 
 
 def _fetch_scoreboard_range(start: date, end: date) -> List[Dict[str, Any]]:
-    """Every ESPN MLS scoreboard event with a kickoff in [start, end].
+    """Every ESPN MLS scoreboard event in the day buckets [start, end],
+    in date order, ONE REQUEST PER DAY (fetched concurrently).
 
-    One HTTP call for the whole window (see SCOREBOARD_EVENT_LIMIT for
-    why the `limit` param is mandatory). Returns [] on any failure, which
-    the callers treat as "no games" rather than an error: a refresh that
-    can't reach ESPN emits nothing instead of a wrong signal.
+    DO NOT collapse this back into one `dates=<start>-<end>&limit=` call.
+    That form returned the whole 2026 season (511 events) on 2026-08-15
+    (#65), then began answering HTTP 400 "Failed to get events endpoint."
+    for every team sport; the live plugin log shows this function getting
+    400s since at least 2026-10-07 (the oldest retained log), which emptied MLS East/West (no upcoming rows and
+    an empty simulated season) with nothing but a WARNING to show for it.
+    Measured and explained at `_espn.SCOREBOARD_EVENT_LIMIT` (#182).
+
+    A day that fails is retried once when it is a blip (see
+    `_espn.SCOREBOARD_WALK_CHUNK_DAYS`); one still failing contributes
+    nothing and the rest still arrive, which callers treat as "fewer games"
+    rather than an error, the same as every other ESPN source's walk.
     """
     if end < start:
         return []
-    window = f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
-    data = _http_get(
-        f"{ESPN_SCOREBOARD_BASE}/scoreboard",
-        timeout=30.0,
-        dates=window,
-        limit=SCOREBOARD_EVENT_LIMIT,
-    )
-    if not isinstance(data, dict):
-        return []
-    events = data.get("events") or []
-    if len(events) >= SCOREBOARD_EVENT_LIMIT:
-        # Only symptom ESPN gives for a truncated page. A full MLS season
-        # is ~511 events, so hitting the limit means either the window grew
-        # or ESPN changed its paging: say so rather than silently modeling
-        # a partial season.
-        logger.warning(
-            "[mls_standings] scoreboard dates=%s returned %d events, at the "
-            "requested limit of %d: the result may be truncated",
-            window, len(events), SCOREBOARD_EVENT_LIMIT,
-        )
+    events: List[Dict[str, Any]] = []
+    for _day, data in fetch_scoreboard_days(_http_get, ESPN_SCOREBOARD_URL, start, end):
+        if isinstance(data, dict):
+            events.extend(data.get("events") or [])
     return events
 
 
