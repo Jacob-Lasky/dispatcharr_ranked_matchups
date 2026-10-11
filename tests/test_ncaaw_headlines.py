@@ -3,10 +3,11 @@
 ESPN puts the round in `competitions[0].notes[0].headline`. Through 2025 it
 read "NCAA Women's Championship - ..."; from the 2026 tournament it reads
 "NCAA Women's Basketball Championship - ...". A headline that does not parse
-drops the game from the bracket AND from fetch_upcoming, so a wording change
-silently empties the whole tournament. The strings below are copied from the
-live scoreboard (fetched 2026-10-11), not composed, and the expected stages
-are literals on purpose.
+drops the game from the importance BRACKET (fetch_upcoming selects on season
+type 3 and still airs it, with no stakes), so a wording change silently
+flattens the whole tournament. The real strings below are copied from the
+live scoreboard (fetched 2026-10-11, the `dates=` noted), not composed, and
+the expected stages are literals on purpose.
 """
 import pytest
 
@@ -14,27 +15,42 @@ from dispatcharr_ranked_matchups.sources import ncaaw_basketball as mod
 
 
 @pytest.mark.parametrize("headline,stage", [
-    # 2025 wording (dates=20250322 and the 2025 Final Four).
-    ("NCAA Women's Championship - Regional 4 in Spokane - 1st Round", "R64"),
-    ("NCAA Women's Championship - Regional 3 in Birmingham - 1st Round", "R64"),
+    # 2025 wording, live.
+    ("NCAA Women's Championship - Regional 4 in Spokane - 1st Round", "R64"),     # 20250322
+    ("NCAA Women's Championship - Regional 3 in Birmingham - 1st Round", "R64"),  # 20250322
     ("NCAA Women's Championship - Final Four", "F4"),
-    # 2026 wording (dates=20260321, dates=20260403).
-    ("NCAA Women's Basketball Championship - Regional 4 in Sacramento - 1st Round", "R64"),
-    ("NCAA Women's Basketball Championship - Regional 1 in Fort Worth - 1st Round", "R64"),
-    ("NCAA Women's Basketball Championship - Final Four", "F4"),
+    # 2026 wording, live: one of every round.
+    ("NCAA Women's Basketball Championship - Regional 4 in Sacramento - 1st Round", "R64"),  # 20260321
+    ("NCAA Women's Basketball Championship - Regional 3 in Fort Worth - 2nd Round", "R32"),  # 20260322
+    ("NCAA Women's Basketball Championship - Regional 1 in Fort Worth - Sweet 16", "S16"),   # 20260327
+    ("NCAA Women's Basketball Championship - Regional 1 in Fort Worth - Elite 8", "E8"),     # 20260329
+    ("NCAA Women's Basketball Championship - Final Four", "F4"),                             # 20260403
+    ("NCAA Women's Basketball Championship - National Championship", "NCG"),                # 20260405
+    # Composed: one typography pass away from the live form.
+    ("NCAA Women's Basketball Championship - Regional 2 in Winston-Salem - Sweet 16", "S16"),
+    ("NCAA Women’s Basketball Championship - Final Four", "F4"),
+    ("NCAA Women's Basketball Championship – Regional 2 in Fort Worth – Sweet 16", "S16"),
 ])
 def test_every_espn_wording_parses(headline, stage):
     assert mod._parse_stage_from_headline(headline) == {"stage": stage, "matchday": 1}
 
 
-def test_other_womens_events_still_do_not_parse():
-    """The widened prefix must not admit the WNIT or a regular-season note."""
-    for headline in (
-        "Women's National Invitation Tournament - 1st Round",
-        "NCAA Women's Volleyball Championship - 1st Round",
-        "Big Ten Women's Basketball Tournament - Final",
-    ):
-        assert mod._parse_stage_from_headline(headline) is None, headline
+@pytest.mark.parametrize("headline", [
+    # Live (20260318): the play-in is not a bracket round.
+    "NCAA Women's Basketball Championship - Regional 2 in Sacramento - First Four",
+    # Other women's events, including the conference finals ESPN files as type 2.
+    "Women's National Invitation Tournament - 1st Round",
+    "NCAA Women's Volleyball Championship - 1st Round",
+    "Big Ten Women's Basketball Tournament - Final",
+    "CAA Championship - Final",
+    # A tournament title embedded in another one, a longer round word, and a
+    # First Four game whose round is in a suffix: the anchors exclude each.
+    "WNIT: NCAA Women's Basketball Championship - Final Four",
+    "NCAA Women's Basketball Championship - Final Fourteen",
+    "NCAA Women's Basketball Championship - 1st Round (First Four)",
+])
+def test_other_headlines_do_not_parse(headline):
+    assert mod._parse_stage_from_headline(headline) is None
 
 
 def _event(eid, headline):
