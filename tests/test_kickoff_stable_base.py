@@ -491,25 +491,21 @@ class TestArchivePlacementIsGlobal:
 
 
 class TestReservedNumbersCoverOurOwnGroup:
-    """Third review round: the per-group unique constraint sees RAW numbers, and
-    an override of one of OUR channels publishes under the override."""
+    """Third review round: the per-group unique constraint sees RAW numbers."""
 
-    def _run(self, plugin, monkeypatch, override_raises=False):
+    def _run(self, plugin, monkeypatch):
         import sys
         import types
         from unittest.mock import MagicMock
 
-        Channel = MagicMock(name="Channel")
-        if override_raises:
-            Channel.objects.filter.return_value.filter.side_effect = Exception("no override")
         models = types.ModuleType("apps.channels.models")
-        models.Channel = Channel
+        models.Channel = MagicMock(name="Channel")
         for name in ("apps", "apps.channels"):
             monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
         monkeypatch.setitem(sys.modules, "apps.channels.models", models)
 
         calls = []
-        results = iter([{500}, {400}, {6203700}])
+        results = iter([{500}, {400}])
 
         def fake(qs, lo, hi=None, effective=True):
             calls.append(effective)
@@ -518,16 +514,16 @@ class TestReservedNumbersCoverOurOwnGroup:
         monkeypatch.setattr(plugin, "_published_numbers", fake)
         return plugin._reserved_channel_numbers(object(), 400, 401), calls
 
-    def test_raw_in_group_and_our_overrides_are_reserved(self, plugin, monkeypatch):
+    def test_raw_numbers_of_strangers_in_our_group_are_reserved(self, plugin, monkeypatch):
         got, calls = self._run(plugin, monkeypatch)
-        assert got == {500, 400, 6203700}
-        assert calls == [True, False, True], "the in-group query must read RAW numbers"
-
-    def test_a_build_without_overrides_still_reserves_the_rest(self, plugin, monkeypatch):
-        got, calls = self._run(plugin, monkeypatch, override_raises=True)
         assert got == {500, 400}
-        assert calls == [True, False]
+        assert calls == [True, False], "the in-group query must read RAW numbers"
 
     def test_effective_false_reads_the_raw_column(self, plugin):
         got = plugin._published_numbers(_FakeQS([400.0, 401.0]), 400, 400, effective=False)
         assert got == {400}
+
+    def test_a_fractional_raw_number_does_not_block_its_floor(self, plugin):
+        """Round 4: raw 400.5 is not raw 400 to the unique constraint."""
+        got = plugin._published_numbers(_FakeQS([400.5, 401.0]), 400, 401, effective=False)
+        assert got == {401}

@@ -5363,39 +5363,30 @@ def _reserved_channel_numbers(
     single integer is predictable. Reserving the floor covers the common case
     without over-reserving the whole band.
 
-    Two more, from the third review round (#219), both about our OWN group:
+    RAW NUMBERS OF A STRANGER IN OUR GROUP (third review round, #219). The
+    unique constraint is on the RAW ``(channel_group, channel_number)``. A
+    channel someone added to our group by hand at raw 400, overridden to publish
+    as 500, reserves only 500 above; a game handed 400 would then fail the write
+    and roll back every apply. So those are reserved at their raw number too,
+    integral ones only: a raw 400.5 does not conflict with our 400.
 
-    RAW NUMBERS OF A STRANGER IN OUR GROUP. The unique constraint is on the RAW
-    ``(channel_group, channel_number)``. A channel someone added to our group by
-    hand at raw 400, overridden to publish as 500, reserves only 500 above; a
-    game handed 400 would then fail the write and roll back every apply.
-
-    OUR OWN OVERRIDDEN CHANNELS. A channel of ours the user overrode publishes
-    under its override, not under the raw number we manage, so that override is
-    somebody else's number as far as the other games are concerned. Only an
-    override that DIFFERS from the raw number is reserved, or the channel would
-    be refused its own number.
+    NOT COVERED, on purpose: a ChannelOverride on one of OUR game channels. The
+    plugin manages those numbers; reserving the override would refuse a channel
+    its own slot (an override of 400 to 400.5 floors back to 400, and two
+    channels with swapped overrides would block each other), so a user who
+    overrides a matchups channel's number owns any collision that causes.
     """
     from apps.channels.models import Channel
-    from django.db.models import F, Q
+    from django.db.models import Q
 
-    ours_here = _owned_tvg_id_q() & Q(channel_group=target_group)
-    reserved = _published_numbers(Channel.objects.exclude(ours_here), band_start, band_end)
+    reserved = _published_numbers(
+        Channel.objects.exclude(_owned_tvg_id_q() & Q(channel_group=target_group)),
+        band_start, band_end,
+    )
     reserved |= _published_numbers(
         Channel.objects.filter(channel_group=target_group).exclude(_owned_tvg_id_q()),
         band_start, band_end, effective=False,
     )
-    try:
-        overridden = (
-            Channel.objects.filter(ours_here)
-            .filter(override__channel_number__isnull=False)
-            .exclude(override__channel_number=F("channel_number"))
-        )
-        reserved |= _published_numbers(overridden, band_start, band_end)
-    except Exception:
-        # A build without ChannelOverride has no override relation to filter
-        # on, and then no override to reserve either.
-        logger.debug("[ranked_matchups] no ChannelOverride relation", exc_info=True)
     return reserved
 
 
@@ -5406,7 +5397,9 @@ def _published_numbers(
     [band_start, band_end] (no upper bound when band_end is None). EFFECTIVE
     numbers (a ChannelOverride wins, as in every output path) and floored, the
     reasoning for both is in _reserved_channel_numbers. `effective=False` reads
-    the raw column instead, which is what the per-group unique constraint sees.
+    the raw column instead, which is what the per-group unique constraint sees,
+    and keeps only INTEGRAL values: that constraint compares exact numbers, so a
+    raw 400.5 does not stop us writing 400.
 
     The upper bound is ``< band_end + 1``, not ``<= band_end``: a channel at
     400.5 publishes as 400 over Xtream Codes, so it must reserve 400 even when
@@ -5431,6 +5424,8 @@ def _published_numbers(
         .filter(**bounds)
         .values_list(field, flat=True)
     )
+    if not effective:
+        return {int(n) for n in rows if float(n).is_integer()}
     return {int(n) for n in rows}
 
 
