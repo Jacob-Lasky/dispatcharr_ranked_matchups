@@ -122,12 +122,105 @@ def test_postseason_mode_keeps_a_playoff_game_without_a_favorite(mlb, refresh_en
     assert ("Cleveland Guardians", "Tampa Bay Rays") in kept
 
 
-def test_a_failed_placement_keeps_the_games(mlb, refresh_env, monkeypatch, caplog):
-    def boom(_rows):
+def test_a_failed_bracket_fetch_keeps_the_games_as_postseason(mlb, refresh_env, monkeypatch, caplog):
+    """The rows are flagged before the bracket is fetched, so postseason mode
+    still keeps them when that fetch blows up."""
+    def boom():
         raise RuntimeError("bracket fetch blew up")
-    monkeypatch.setattr(mlb, "place_upcoming", boom)
+    monkeypatch.setattr(mlb, "_fetch_bracket_games", boom)
     _write_prior, run, read = refresh_env
-    run([mlb])
+    run([mlb], favorites="Arsenal", favorites_only="postseason")
     # One channel per series, as for any refresh.
     assert {g["home"] for g in read()["games"]} == {"Cleveland Guardians", "Milwaukee Brewers"}
     assert "could not place games in the bracket" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Guards: a wrong placement files a result into the wrong tie, worse than none
+# ---------------------------------------------------------------------------
+
+def _row(home, away, **extra):
+    from dispatcharr_ranked_matchups.sources.base import GameRow
+    return GameRow(sport_prefix="MLB", sport_label="MLB Postseason", home=home, away=away,
+                   rank_home=None, rank_away=None, start_time=datetime.now(UTC), extra=extra)
+
+
+def test_an_id_of_another_type_is_not_placed(mlb):
+    """Simulation compares ids exactly, so "3" is not game 3."""
+    row = _row("Cleveland Guardians", "Tampa Bay Rays", game_id="3")
+    assert mlb.place_upcoming([row]) == 1
+    assert "stage" not in row.extra
+
+
+def test_a_team_mismatch_is_not_placed(mlb):
+    row = _row("Boston Red Sox", "Tampa Bay Rays", game_id=3)
+    assert mlb.place_upcoming([row]) == 1
+    assert "stage" not in row.extra
+
+
+def test_an_id_on_two_bracket_games_is_not_placed(mlb, monkeypatch):
+    """One id in two rounds, same two teams: which round the game is in cannot
+    be known, so it is not guessed."""
+    def game(stage):
+        return {"game_id": 3, "stage": stage, "matchday": 1,
+                "home": "Cleveland Guardians", "away": "Tampa Bay Rays"}
+    bracket = {
+        "LDS": [{"stage": "LDS", "games": [game("LDS")]}],
+        "LCS": [{"stage": "LCS", "games": [game("LCS")]}],
+    }
+    monkeypatch.setattr(mlb, "initial_state", lambda: {"_bracket": bracket})
+    row = _row("Cleveland Guardians", "Tampa Bay Rays", game_id=3)
+    assert mlb.place_upcoming([row]) == 1
+    assert "stage" not in row.extra
+
+
+def test_league_phase_is_not_postseason(plugin):
+    """UCL / UEL / UECL league phase rows carry LEAGUE_STAGE (live cache,
+    2026-10-11); it is their group stage."""
+    from types import SimpleNamespace
+    assert not plugin._is_postseason_game(SimpleNamespace(extra={"stage": "LEAGUE_STAGE"}))
+
+
+# ---------------------------------------------------------------------------
+# Soccer knockouts: Football-Data's matchday is not a leg number
+# ---------------------------------------------------------------------------
+
+def _fd_match(fd_id, stage, matchday, home, away, hg=None, ag=None):
+    return {
+        "id": fd_id, "stage": stage, "matchday": matchday,
+        "status": "FINISHED" if hg is not None else "SCHEDULED",
+        "homeTeam": {"name": home}, "awayTeam": {"name": away},
+        "score": {"fullTime": {"home": hg, "away": ag}, "duration": "REGULAR", "penalties": None},
+        "utcDate": "2026-05-01T18:00:00Z",
+    }
+
+
+@pytest.mark.parametrize("fd_matchday", [None, 0, 7, 1])
+def test_soccer_final_has_importance_whatever_fd_calls_its_matchday(fd_matchday):
+    """Football-Data gives a final's matchday as 0 (UCL 2024), None (UCL 2025,
+    every 2026 World Cup knockout) or the tournament day (EURO 2024 final: 7).
+    Read as a leg number, anything but 1 filed the final as leg 2, the tie
+    never completed, and the final scored 0.0. The row is built the way
+    fetch_upcoming builds it: fd_id, FD's matchday, no game_id."""
+    from dispatcharr_ranked_matchups.simulation import monte_carlo_importance
+    from dispatcharr_ranked_matchups.sources.base import GameRow
+    from dispatcharr_ranked_matchups.sources.soccer import KnockoutSoccerSource
+    src = KnockoutSoccerSource("ucl", fd_api_key="fake")
+    src._all_matches_cache = [
+        _fd_match(201, "SEMI_FINALS", 1, "A", "B", 2, 0),
+        _fd_match(202, "SEMI_FINALS", 2, "B", "A", 1, 1),
+        _fd_match(203, "SEMI_FINALS", 1, "C", "D", 2, 0),
+        _fd_match(204, "SEMI_FINALS", 2, "D", "C", 0, 0),
+        _fd_match(301, "FINAL", fd_matchday, "A", "C"),
+    ]
+    # Symmetric strengths so the final is a coin flip (tau-c is capped by an
+    # unbalanced W/L marginal); the bracket mechanics are under test.
+    src.estimate_strengths = lambda: {t: {"sh": 1.2, "ch": 1.2, "sa": 1.0, "ca": 1.0} for t in "ABCD"}
+    final = GameRow(sport_prefix="UCL", sport_label="UEFA Champions League", home="A", away="C",
+                    rank_home=None, rank_away=None, start_time=datetime(2026, 5, 30, 19, tzinfo=UTC),
+                    extra={"fd_id": 301, "matchday": fd_matchday, "stage": "FINAL",
+                           "fd_competition_code": "CL"})
+    assert src.place_upcoming([final]) == 0
+    assert final.extra["matchday"] == fd_matchday  # the EPG text keeps FD's own
+    imp = monte_carlo_importance(src, final, "A", "winner", n_sims=400, rng=random.Random(13))
+    assert imp > 0.95

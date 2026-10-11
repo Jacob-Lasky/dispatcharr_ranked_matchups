@@ -695,19 +695,32 @@ stay in agreement with that one.
   days" and is neither: it drops `tzinfo`, so comparing the result against an
   aware `start_time` raised `TypeError` and MLB Postseason reported an error on
   every refresh for the whole postseason. Use `now + timedelta(days=N)`.
-- **A bracket source's upcoming row needs its round in `extra["stage"]`, and
-  nothing fails without it** (#243). `BestOfNSeriesSource.apply_result` records
-  the simulator's TARGET game into its tie only when the stage is a string, so
-  an unstamped row's sampled result is dropped and the game replayed: live MLB
-  LCS games scored ~0.15 importance instead of ~3. `_is_postseason_game` reads
-  the same key, so favorites_only "postseason" dropped those games too. The
-  plugin calls `BracketSportSource.place_upcoming` on every bracket source's
-  fetch (`_place_in_bracket`), which copies `stage` + `matchday` from the
-  source's own bracket records matched on `extra["game_id"]`. So a new bracket
-  source needs `game_id` on its upcoming rows equal to its bracket records'
-  `game_id` (`tests/test_match_identity_contract.py` checks the key is there,
-  including `extra = {...}` built as a variable), and a warning names any row
-  it could not place.
+- **The simulator's TARGET is the row `fetch_upcoming` built, not the one the
+  bracket emits, and a bracket needs more on it than a source supplies**
+  (#243). Nothing fails when it is missing; the importance is just wrong:
+  - no `extra["stage"]` (the NFL/NBA/NHL/MLB/WNBA/NCAAW playoff rows): the
+    sampled result is dropped, live MLB LCS ~0.15 importance instead of ~3,
+    and `_is_postseason_game` reads the row as regular season;
+  - a `matchday` that is not the leg number: Football-Data gives a UCL final
+    0 or None, 2026 World Cup knockouts None, EURO 2024 knockouts 4-7, and
+    anything but 1 was filed as leg 2, so the tie never completed (0.0);
+  - no `is_decisive_leg`: a final or second leg sampled with no extra time
+    or penalties, so it can end level.
+  The plugin calls `BracketSportSource.place_upcoming` for every bracket
+  source at fetch (`_place_in_bracket`). It matches each row to its bracket
+  game by `game_id` (else `fd_id`), exactly and only when the team pair agrees
+  and the id is unique, then merges `_sim_extra` (the ONE builder of a
+  simulated row's extra, shared with `_emit_remaining_games_for_tie`) under
+  the row's own keys, storing the bracket's game number as
+  `bracket_game_index`, which `apply_result` prefers over `matchday` (the
+  source's `matchday` is what the EPG text shows). Playoff-only shapes
+  (`ALL_ROWS_POSTSEASON`) flag every row `postseason` first, so a failed
+  bracket fetch cannot demote them. A new bracket source needs an id on its
+  upcoming rows equal to its bracket games' (`tests/test_match_identity_contract.py`
+  checks `game_id`, including `extra = {...}` built as a variable); a warning
+  names any row that could not be placed. Tests that take the target from
+  `remaining_matches` cannot see any of this: build it the way
+  `fetch_upcoming` does.
 - **The child log's LEADING LEVEL NAME is a contract.** `_pipeline_runner.py`
   sets `format="%(levelname)s %(name)s: %(message)s"`, and
   `tasks._child_line_level` parses that first token so a subprocess WARNING is

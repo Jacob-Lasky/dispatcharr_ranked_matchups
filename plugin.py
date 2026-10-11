@@ -2418,6 +2418,7 @@ def _clamp_max_games(raw: Any, source: str) -> int:
 _NON_POSTSEASON_STAGES = frozenset({
     "REGULAR_SEASON",  # FD.org soccer league play
     "GROUP_STAGE",     # WC / EURO group phase
+    "LEAGUE_STAGE",    # UCL / UEL / UECL league phase: their GROUP_STAGE since 2024
     "ALLSTAR",         # exhibition (most sources reject it upstream anyway)
     "EVENT",           # field-event regular tour stop (weekly golf/F1/NASCAR)
 })
@@ -2465,8 +2466,13 @@ def _place_in_bracket(src: Any, games: List[Any]) -> None:
 def _is_postseason_game(game: Any) -> bool:
     """True when this game is a postseason/playoff round (vs regular season,
     group stage, or a weekly field event). Reads the source-set
-    `extra["stage"]`; see `_NON_POSTSEASON_STAGES` for the taxonomy."""
-    stage = (getattr(game, "extra", None) or {}).get("stage")
+    `extra["stage"]`; see `_NON_POSTSEASON_STAGES` for the taxonomy. A row
+    flagged `postseason` by a playoff-only source counts whatever its stage,
+    so a failed bracket fetch cannot demote it (#243)."""
+    extra = getattr(game, "extra", None) or {}
+    if extra.get("postseason") is True:
+        return True
+    stage = extra.get("stage")
     if not stage:
         # No stage = regular-season league play. The NFL/NBA/NHL/MLB/WNBA/
         # NCAAW playoff sources do not stamp one themselves: _place_in_bracket
