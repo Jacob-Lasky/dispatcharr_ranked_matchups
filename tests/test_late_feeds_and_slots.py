@@ -115,7 +115,8 @@ def _pipeline(monkeypatch, plugin, outcomes):
 
 def _skips(monkeypatch, plugin):
     calls = []
-    monkeypatch.setattr(plugin.tasks, "record_skipped_run", lambda kind: calls.append(kind))
+    monkeypatch.setattr(plugin.tasks, "record_skipped_run",
+                        lambda kind, reason=None: calls.append(kind))
     return calls
 
 
@@ -464,17 +465,19 @@ class TestRematchAfterM3U:
 class TestRunUnderLockRetryContract:
     def test_lost_lock_with_retry_returns_false_and_records_nothing(self, tasks_mod, monkeypatch):
         plugin_stub = type(sys)("stub")
-        plugin_stub._try_acquire_scheduler_lock = lambda destructive=True: None
+        plugin_stub._try_acquire_scheduler_lock = lambda kind, task_id="": None
         plugin_stub._release_scheduler_lock = lambda token: None
+        plugin_stub._run_lock_unavailable_reason = lambda: "the run lock is held by X"
         monkeypatch.setitem(sys.modules, f"{tasks_mod.__name__.rsplit('.', 1)[0]}.plugin", plugin_stub)
         skips = []
-        monkeypatch.setattr(tasks_mod, "record_skipped_run", lambda kind: skips.append(kind))
+        monkeypatch.setattr(tasks_mod, "record_skipped_run",
+                            lambda kind, reason=None: skips.append((kind, reason)))
         target = MagicMock()
         assert tasks_mod._run_under_lock("scheduled_auto_pipeline", "t", target, {},
                                          record_skip=False) is False
         assert skips == []
         assert tasks_mod._run_under_lock("auto_pipeline", "t", target, {}) is False
-        assert skips == ["auto_pipeline"]
+        assert skips == [("auto_pipeline", "the run lock is held by X")]
         target.assert_not_called()
 
 

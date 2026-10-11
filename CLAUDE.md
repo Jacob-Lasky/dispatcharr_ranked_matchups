@@ -403,6 +403,48 @@ hazard — including `_run_scheduled_slot`'s own retry wait, which re-reads
 settings and bails after each `_scheduler_sleep` so turning auto-refresh off
 while a slot is waiting for the lock cancels it.
 
+### The run lock: every run takes it, and it says who holds it
+
+`_try_acquire_scheduler_lock(kind, task_id)` is the ONE cross-worker mutex for
+refresh, apply, reap and every refresh + apply (manual, scheduled, M3U
+rematch). Two properties are load-bearing:
+
+- **It fails CLOSED for every caller when Redis is unreachable, refresh
+  included** (#199). Refresh used to fail open on the theory that it is
+  non-destructive, but it PUBLISHES `cache.json`, and `cache.json` is what apply
+  and reap delete by: a reap reads the cache, rewrites it, runs apply (which
+  reads it again) and writes its own copy back, so a refresh landing in between
+  makes apply delete against a generation the reap never saw and is then erased
+  by the reap's write. Redis dropping mid-run is exactly when a destructive
+  holder is still running, so "no lock" is not "nobody is writing". DO NOT
+  reintroduce a fail-open path. Show current state says "Redis is unreachable"
+  so the refusal is never silent.
+- **The lock VALUE is a JSON holder record** (#239): `kind`, `task_id`, `pid`,
+  `process` (`uwsgi worker N`, or the argv of a Celery/daphne process),
+  `thread`, plugin `version`, `acquired_at`, plus a unique `token`. Release
+  compares the WHOLE string, so ownership works as before. A contended acquire
+  logs the holder at INFO, take and release are logged at INFO, the busy apply
+  toast and the skipped-run note name the holder
+  (`_run_lock_unavailable_reason`), and Show current state prints a
+  `Run lock: held by ...` line. A value that is not JSON is a holder running
+  code from before #239.
+
+**The plugin runs in more processes than the uwsgi workers.** Measured on
+Tower 2026-10-10/11 (Dispatcharr's `celery.py` runs plugin discovery in
+`worker_process_init`, i.e. in every Celery prefork child and thread worker):
+daphne (pid 415) and Celery pool children (pids 422501, 533697) each run their
+own scheduler and reaper, and they take part in every scheduled slot. Two
+consequences. The plugin reload restarts threads only in the uwsgi worker that
+serves it, so the other processes keep the code they loaded until they exit or
+the container restarts. And **the plugin's INFO lines from a Celery process do
+not reach the container log** while its WARNING lines do (measured, mechanism
+not pinned down): pid 533697 claimed and ran the whole 10:00 slot on
+2026-10-11 and left no log line at all, only its `last_run.json` record. A
+Celery-side copy that wins a slot therefore leaves every visible copy logging
+"lock unavailable" with no visible winner, which is the most likely explanation
+of the 16:00 wait #239 was filed for (see the issue). The holder record above
+is what names such a holder now.
+
 ### cache.json has TWO lists: `games` and `bench`
 
 `games` is what apply puts on air; `bench` is scored-but-not-applied stock the
@@ -650,8 +692,9 @@ stay in agreement with that one.
   `record_skipped_run` itself only once it gives up, since `_run_under_lock`'s
   bool return ("did the work run?") is what a retry loop steers on and a lock
   that frees a minute later must not leave a stale "did not run" note; the
-  per-writer temp name in `_write_last_run` exists because refresh fails open
-  when Redis is down, so two workers can write at once; and `_run_health_lines`
+  per-writer temp name in `_write_last_run` exists because a skip note is
+  written by a caller that did NOT get the lock, so it can race the holder's
+  verdict or another worker's skip; and `_run_health_lines`
   orders the lines data warnings → config notices → verdict LAST, with a
   running pipeline stated IN the verdict so the last line never presents the
   previous run's outcome as the answer to the click just made.

@@ -274,8 +274,8 @@ class TestSecondOpinionFindings:
         assert "LAST RUN FAILED" in _status(plugin_mod, {"games": [], "summary": []}, bad)
 
     def test_temp_file_is_writer_unique(self, tasks_mod, monkeypatch):
-        # Refresh runs without the lock when Redis is down, so two workers can
-        # write at once; a shared temp name lets one replace the other's file.
+        # A skip note is written WITHOUT the lock, so it can race the holder's
+        # verdict; a shared temp name lets one replace the other's file.
         seen = []
         real_replace = tasks_mod.os.replace
         monkeypatch.setattr(tasks_mod.os, "replace", lambda a, b: (seen.append(a), real_replace(a, b)))

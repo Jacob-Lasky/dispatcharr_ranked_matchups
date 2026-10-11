@@ -138,7 +138,7 @@ class TestWiring:
     def test_the_reaper_loop_runs_stops_before_deciding_to_reap(self, src):
         body = _body(src, "_reaper_loop")
         sleep = body.index("if _scheduler_sleep(stop_event, delay):")
-        assert sleep < body.index("_run_due_stops(settings)") < body.index("_action_reap_locked(settings)")
+        assert sleep < body.index("_run_due_stops(settings)") < body.index("_action_reap_locked(settings")
         assert "recording_policy.next_stop_delay(_read_stops(), now)" in body
         assert "_HANDOFF_RECHECK_SECONDS" in body
 

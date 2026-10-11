@@ -6619,13 +6619,13 @@ def _action_apply_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
     token is a parent-process global, so acquiring again in the child would fail
     and silently skip the work.
     """
-    token = _try_acquire_scheduler_lock(destructive=True)
+    token = _try_acquire_scheduler_lock("apply", "apply")
     if not token:
         return {
             "status": "busy",
             "message": (
-                "Another refresh or apply is already running (or Redis is "
-                "unreachable). Nothing was changed. Try again shortly."
+                f"Nothing was changed: {_run_lock_unavailable_reason()}. "
+                "Try again shortly."
             ),
         }
     try:
@@ -6744,6 +6744,7 @@ def _fmt_run_time(iso: Optional[str], tz) -> str:
 def _run_health_lines(
     cache: Dict[str, Any], last_run: Optional[Dict[str, Any]], tz,
     inflight: Optional[Dict[str, Any]] = None,
+    run_lock: Optional[Tuple[str, Optional[str]]] = None,
 ) -> Tuple[List[str], List[str]]:
     """The verdict block that ends Show current state (#227): did the last
     background run work, is one running now, and did the result contain
@@ -6763,13 +6764,28 @@ def _run_health_lines(
     unticking dry run fixes nothing. Because the warnings sit ABOVE it and
     can scroll off, an OK verdict says how many there are, and a run in
     progress is stated in the verdict too, so the last line never presents
-    the PREVIOUS run's result as the answer to the click just made."""
+    the PREVIOUS run's result as the answer to the click just made.
+
+    `run_lock` is _read_run_lock()'s answer. A HELD lock names its holder
+    (#239), which is the only surface that can: an apply, a reap, or a thread
+    in a process whose INFO log never reaches the container log (a Celery
+    worker) holds it without writing the inflight key. An UNREACHABLE Redis is
+    said outright, because every run now refuses to start without the lock
+    (#199) and the guide stops updating until Redis is back."""
     out = [
         f"WARNING: {problem}."
         for problem in _slate_problems(cache.get("summary") or [], cache.get("games") or [])
     ]
     verdict: List[str] = []
     labels = tasks.RUN_KIND_LABELS
+    lock_state, lock_detail = run_lock or (_LOCK_UNKNOWN, None)
+    if lock_state == _LOCK_UNREACHABLE:
+        verdict.append(
+            "WARNING: Redis is unreachable, so no refresh, apply or reap can run "
+            "(each needs the run lock); the guide stays as it is until Redis is back."
+        )
+    elif lock_state == _LOCK_HELD:
+        verdict.append(f"Run lock: held by {lock_detail}.")
     if inflight:
         running = labels.get(inflight.get("kind"), inflight.get("kind") or "A run")
         verdict.append(
@@ -6798,9 +6814,9 @@ def _run_health_lines(
         skipped_at = last_run.get("skipped_at")
         if skipped_at and str(skipped_at) > str(last_run.get("finished_at") or "") and not inflight:
             skipped = labels.get(last_run.get("skipped_kind"), last_run.get("skipped_kind") or "A run")
+            why = last_run.get("skipped_reason") or "another run held the lock, or Redis was unreachable"
             verdict.append(
-                f"NOTE: {skipped} requested {_fmt_run_time(skipped_at, tz)} did not run: "
-                "another run held the lock, or Redis was unreachable."
+                f"NOTE: {skipped} requested {_fmt_run_time(skipped_at, tz)} did not run: {why}."
             )
     return out, verdict
 
@@ -6851,7 +6867,8 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     # verdict after them as the very last line, because whether the pipeline
     # works at all is what a confused user needs most. See _run_health_lines.
     status_tz = _resolve_tz((settings or {}).get("local_timezone", "UTC"))
-    data_warnings, run_verdict = _run_health_lines(cache, tasks.read_last_run(), status_tz, inflight)
+    data_warnings, run_verdict = _run_health_lines(
+        cache, tasks.read_last_run(), status_tz, inflight, _read_run_lock())
     notices = data_warnings + notices + run_verdict
 
     games = cache.get("games", [])
@@ -7651,7 +7668,7 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
         if datetime.now(timezone.utc) <= deadline:
             tasks.run_scheduled_pipeline(settings)
         else:
-            tasks.record_skipped_run("scheduled_auto_pipeline")
+            tasks.record_skipped_run("scheduled_auto_pipeline", _run_lock_unavailable_reason())
         return False
     while True:
         # Checked BEFORE each attempt too, so a late wake never starts this
@@ -7660,12 +7677,12 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
                 tasks.run_scheduled_pipeline(settings, record_skip=False):
             return False
         if datetime.now(timezone.utc) + timedelta(seconds=_SCHEDULED_RETRY_SECONDS) > deadline:
+            reason = _run_lock_unavailable_reason()
             logger.warning(
-                "[ranked_matchups] scheduled run for %s did NOT run: the run lock was "
-                "still held at %s (another refresh, apply or reap kept it, or Redis is "
-                "unreachable). The next scheduled time picks it up.",
-                slot.isoformat(), deadline.isoformat())
-            tasks.record_skipped_run("scheduled_auto_pipeline")
+                "[ranked_matchups] scheduled run for %s did NOT run: by %s %s. "
+                "The next scheduled time picks it up.",
+                slot.isoformat(), deadline.isoformat(), reason)
+            tasks.record_skipped_run("scheduled_auto_pipeline", reason)
             return False
         logger.info("[ranked_matchups] scheduled run for %s waiting %ds for the run lock",
                     slot.isoformat(), _SCHEDULED_RETRY_SECONDS)
@@ -7700,10 +7717,6 @@ _SCHEDULER_LOCK_KEY = f"plugins:{PLUGIN_KEY}:scheduler:lock"
 # pre-pass; see _resolve_max_games, which clamps max_games against this budget.
 _SCHEDULER_LOCK_TTL_SECONDS = 90 * 60
 
-# Sentinel returned by _try_acquire_scheduler_lock on the fail-open path: the
-# caller may proceed but holds nothing, so releasing must be a no-op.
-_LOCK_NOT_HELD = "__not_held__"
-
 # Atomic compare-and-delete. Plain get-then-delete is racy: the lock can expire
 # and be re-acquired between the two calls, which is the exact bug this replaces.
 _RELEASE_LOCK_LUA = """
@@ -7714,9 +7727,11 @@ return 0
 """
 
 
-def _action_reap_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
+def _action_reap_locked(settings: Dict[str, Any], task_id: str = "reap_now") -> Dict[str, Any]:
     """HTTP/scheduler-facing reap: takes the cross-worker lock, runs the body
-    OUT OF PROCESS.
+    OUT OF PROCESS. `task_id` names the trigger in the lock's holder record
+    (#239): the reaper loop passes its own, the Reap now button keeps the
+    default.
 
     Reaping deletes Channels, ChannelStreams and EPGData and then re-applies,
     so it is exactly as destructive as apply and races it just as badly. It
@@ -7728,12 +7743,12 @@ def _action_reap_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
     bulk DB writes wedged a gevent worker even after the transaction was
     shrunk to sub-second, and reap ends by calling apply.
     """
-    token = _try_acquire_scheduler_lock(destructive=True)
+    token = _try_acquire_scheduler_lock("reap", task_id)
     if not token:
         return {
             "status": "ok",
             "lock_busy": True,
-            "message": "Another refresh/apply is in flight; skipping this reap.",
+            "message": f"Skipping this reap: {_run_lock_unavailable_reason()}.",
         }
     try:
         return tasks.run_pipeline_subprocess(tasks.ACTION_REAP, settings)
@@ -8047,7 +8062,7 @@ def _reaper_loop(plugin_ref, stop_event):
                     logger.exception("[ranked_matchups] M3U rematch check failed")
                 if reap_delay is None or delay + 1 < reap_delay:
                     continue
-                result = _action_reap_locked(settings)
+                result = _action_reap_locked(settings, task_id=f"reaper-{os.getpid()}")
                 if result.get("reaped") or result.get("promoted"):
                     logger.info(
                         "[ranked_matchups] reaper: %s", result.get("message", ""),
@@ -8069,9 +8084,142 @@ def _reaper_loop(plugin_ref, stop_event):
         _scheduler_close_db()
 
 
-def _try_acquire_scheduler_lock(destructive: bool = True) -> Optional[str]:
+def _process_label() -> str:
+    """Which process this is, for the lock's holder record (#239).
+
+    The plugin runs in more processes than the uwsgi workers: every process
+    whose Django start discovers plugins builds a Plugin and starts its
+    threads, Celery workers and daphne included, and those keep whatever code
+    they loaded until the container restarts. A pid alone does not say which
+    of them holds the lock. Arguments longer than 40 characters are dropped,
+    so a `manage.py shell -c "<script>"` exec never copies its script (or
+    anything secret in it) into Redis and the log."""
+    try:
+        import uwsgi  # type: ignore[import-not-found]  # only importable under uwsgi
+        return f"uwsgi worker {uwsgi.worker_id()}"
+    except Exception:
+        pass
+    argv = list(sys.argv or [])
+    if not argv:
+        return "?"
+    parts = [os.path.basename(str(argv[0]))]
+    parts += [str(a) for a in argv[1:9] if len(str(a)) <= 40]
+    return " ".join(parts)[:120] or "?"
+
+
+def _new_lock_value(kind: str, task_id: str) -> str:
+    """The VALUE stored under the run lock: who holds it, as JSON (#239).
+
+    It used to be a bare uuid, so a run that found the lock held could only
+    say "another refresh / auto_pipeline is in flight, or Redis is
+    unreachable", and a 16:00 slot waited seven minutes on a holder nothing
+    could name. The value is still unique per acquire (the `token` field), and
+    the WHOLE string is what release compares, so the compare-and-delete
+    ownership guarantee is unchanged."""
+    return json.dumps({
+        "token": uuid.uuid4().hex,
+        "kind": kind,
+        "task_id": task_id or "",
+        "pid": os.getpid(),
+        "process": _process_label(),
+        "thread": threading.current_thread().name,
+        "version": Plugin.version,
+        "acquired_at": datetime.now(timezone.utc).isoformat(),
+    }, sort_keys=True)
+
+
+def _parse_lock_value(raw: Any) -> Optional[Dict[str, Any]]:
+    """The holder record from a lock value, or None for a value that is not
+    one: a bare token written by a plugin version from before #239 (still
+    possible in any process the reload did not reach), or garbage."""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        rec = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+def _describe_lock_holder(raw: Any, now: Optional[datetime] = None) -> str:
+    """One line naming whoever holds the run lock, for logs and toasts."""
+    rec = _parse_lock_value(raw)
+    if rec is None:
+        return ("a plugin version from before holder records (#239), so no "
+                "details: likely a thread still running old code in a process "
+                "the plugin reload did not reach, such as a Celery worker")
+    kind = str(rec.get("kind") or "?")
+    label = tasks.RUN_KIND_LABELS.get(kind, kind)
+    bits = [label]
+    if rec.get("task_id"):
+        bits.append(f"task {rec['task_id']}")
+    bits.append(f"pid {rec.get('pid', '?')} ({rec.get('process') or '?'})")
+    if rec.get("version"):
+        bits.append(f"plugin {rec['version']}")
+    acquired = parse_iso_utc(rec.get("acquired_at"))
+    if acquired is not None:
+        age = ((now or datetime.now(timezone.utc)) - acquired).total_seconds()
+        bits.append(f"held {_fmt_duration(age)}")
+    return ", ".join(bits)
+
+
+# What _read_run_lock reports.
+_LOCK_FREE = "free"
+_LOCK_HELD = "held"
+_LOCK_UNREACHABLE = "unreachable"
+_LOCK_UNKNOWN = "unknown"
+
+
+def _read_run_lock() -> Tuple[str, Optional[str]]:
+    """(state, holder description) for the run lock right now. UNKNOWN when
+    there is no Redis client at all (no Dispatcharr, as in the tests), which
+    says nothing, unlike UNREACHABLE, where the client exists and the read
+    failed. Never raises."""
+    r = tasks._redis()
+    if r is None:
+        return _LOCK_UNKNOWN, None
+    try:
+        raw = r.get(_SCHEDULER_LOCK_KEY)
+    except Exception as e:
+        return _LOCK_UNREACHABLE, str(e)
+    if not raw:
+        return _LOCK_FREE, None
+    return _LOCK_HELD, _describe_lock_holder(raw)
+
+
+def _run_lock_unavailable_reason() -> str:
+    """Why a caller just failed to take the lock, worded to finish a sentence.
+    Re-reads the lock, so the holder can have changed (or left) since the
+    attempt; that is said rather than guessed."""
+    state, detail = _read_run_lock()
+    if state == _LOCK_HELD:
+        return f"the run lock is held by {detail}"
+    if state == _LOCK_UNREACHABLE:
+        return "Redis is unreachable, so the run lock cannot be taken"
+    if state == _LOCK_FREE:
+        return "another run held the lock, and has released it since"
+    return "another run held the lock, or Redis was unreachable"
+
+
+def _try_acquire_scheduler_lock(kind: str, task_id: str = "") -> Optional[str]:
     """Cross-worker mutex via Redis. Returns the caller's TOKEN on success (a
     truthy string), or None if the lock is held elsewhere / we refuse to run.
+
+    `kind` and `task_id` name the caller in the holder record stored as the
+    lock's value (#239), which is what a contended attempt logs and Show
+    current state prints. Use the RUN_KIND_LABELS ids (plus "apply" and
+    "reap").
 
     Pass the returned token to _release_scheduler_lock. DO NOT stash it in a
     module global: the scheduler daemon thread and an HTTP request greenlet can
@@ -8079,43 +8227,53 @@ def _try_acquire_scheduler_lock(destructive: bool = True) -> Optional[str]:
     one clobber the other's token and turn its release into a silent no-op,
     leaking the lock until the TTL expires.
 
-    The VALUE stored in Redis is that unique token so release can prove
+    The VALUE stored in Redis is unique per acquire so release can prove
     ownership. DO NOT go back to a constant: with one, a run that overruns the
     TTL deletes the lock belonging to the run that replaced it, and a third run
     then starts while the second is still writing.
 
-    `destructive` selects the behavior when REDIS ITSELF is unreachable, which
-    is a real judgement call rather than an oversight:
-      - destructive=False (refresh): fail OPEN, returning _LOCK_NOT_HELD.
-        Refresh only reads upstream APIs and rewrites cache.json, so a duplicate
-        run wastes API quota but cannot corrupt anything. Silently freezing all
-        refreshes because Redis blipped is the worse outcome.
-      - destructive=True (apply / auto_pipeline, the default): fail CLOSED,
-        returning None. These delete Channels and ProgramData and renumber the
-        guide. Two concurrent runs can drop channels the other just created. A
-        skipped cycle is recoverable; an interleaved apply is not.
+    FAILS CLOSED FOR EVERY CALLER when Redis is unreachable, refresh included
+    (#199). DO NOT reintroduce a fail-open path for "non-destructive" refresh:
+    refresh PUBLISHES cache.json, and cache.json is what apply and reap delete
+    by. A reap reads the cache, rewrites it, runs apply (which reads it AGAIN)
+    and then writes its own copy back, so a refresh landing in between makes
+    apply delete against a generation the reap never saw and is then erased by
+    the reap's write. Redis going away mid-run is exactly when the destructive
+    holder is still running, so "no lock" is not "no one is writing". The cost
+    is that no refresh runs while Redis is down, which costs little: apply,
+    reap and the scheduled pipeline already refuse to run then, so a refreshed
+    cache could not reach the guide anyway, and Dispatcharr itself (streams,
+    Celery) does not work without Redis. The refusal is logged at ERROR and
+    Show current state says Redis is unreachable, so it is never silent.
     """
-    token = uuid.uuid4().hex
+    value = _new_lock_value(kind, task_id)
     try:
         from core.utils import RedisClient
         r = RedisClient.get_client()
         acquired = bool(r.set(
-            _SCHEDULER_LOCK_KEY, token, nx=True, ex=_SCHEDULER_LOCK_TTL_SECONDS,
+            _SCHEDULER_LOCK_KEY, value, nx=True, ex=_SCHEDULER_LOCK_TTL_SECONDS,
         ))
     except Exception as e:
-        if destructive:
-            logger.error(
-                "[ranked_matchups] redis lock unavailable (%s); REFUSING to run a "
-                "destructive action unserialized (two concurrent applies can drop "
-                "channels). Retry once Redis is reachable.", e,
-            )
-            return None
-        logger.warning(
-            "[ranked_matchups] redis lock unavailable (%s); proceeding without it "
-            "(non-destructive action, worst case is duplicate upstream fetches)", e,
+        logger.error(
+            "[ranked_matchups] redis lock unavailable (%s); REFUSING to run %s "
+            "unserialized (an unlocked run can publish or delete against a cache "
+            "another run is using). Retry once Redis is reachable.", e, kind,
         )
-        return _LOCK_NOT_HELD
-    return token if acquired else None
+        return None
+    if acquired:
+        logger.info("[ranked_matchups] run lock taken by %s (task %s, pid %s)",
+                    kind, task_id or "-", os.getpid())
+        return value
+    try:
+        holder = r.get(_SCHEDULER_LOCK_KEY)
+    except Exception:
+        holder = None
+    logger.info(
+        "[ranked_matchups] run lock wanted by %s (task %s, pid %s) is held by %s",
+        kind, task_id or "-", os.getpid(),
+        _describe_lock_holder(holder) if holder else "a run that has just released it",
+    )
+    return None
 
 
 def _release_scheduler_lock(token: Optional[str]) -> None:
@@ -8126,11 +8284,12 @@ def _release_scheduler_lock(token: Optional[str]) -> None:
     run start while the second was still applying. The token check makes an
     overrun release a no-op instead.
 
-    `token` is whatever _try_acquire_scheduler_lock returned. None or
-    _LOCK_NOT_HELD means nothing was acquired, so there is nothing to release.
+    `token` is whatever _try_acquire_scheduler_lock returned. None means
+    nothing was acquired, so there is nothing to release.
     """
-    if not token or token == _LOCK_NOT_HELD:
+    if not token:
         return
+    rec = _parse_lock_value(token) or {}
     try:
         from core.utils import RedisClient
         r = RedisClient.get_client()
@@ -8142,6 +8301,12 @@ def _release_scheduler_lock(token: Optional[str]) -> None:
                 "If this recurs, the TTL or max_games needs revisiting.",
                 _SCHEDULER_LOCK_TTL_SECONDS,
             )
+            return
+        acquired = parse_iso_utc(rec.get("acquired_at"))
+        held = (_fmt_duration((datetime.now(timezone.utc) - acquired).total_seconds())
+                if acquired is not None else "?")
+        logger.info("[ranked_matchups] run lock released by %s (task %s) after %s",
+                    rec.get("kind", "?"), rec.get("task_id") or "-", held)
     except Exception as e:
         logger.warning("[ranked_matchups] scheduler lock release failed: %s", e)
 
@@ -8199,8 +8364,12 @@ class Plugin:
         #     clears reg.thread, so we fall through and start a fresh one; the old
         #     thread was already signaled and releases its DB connection in
         #     _scheduler_loop's finally, and the new one parks holding none.
-        # Either way no connection leaks. Code updates ship via container restart
-        # (fresh process -> fresh thread), so a kept thread never runs stale code.
+        # Either way no connection leaks. A kept thread DOES run stale code after
+        # a deploy: only a container restart gives every process fresh threads.
+        # The reload endpoint restarts them in the one worker serving it, and
+        # the copies in the other workers, daphne and the Celery workers (all
+        # run discovery) keep their code until the process exits. See
+        # CLAUDE.md, "The run lock".
         # START THE REAPER FIRST, and unconditionally. It is a SEPARATE thread
         # with its own registry, so it must not sit behind the scheduler's
         # early return: on the common path (a discovery where the scheduler is

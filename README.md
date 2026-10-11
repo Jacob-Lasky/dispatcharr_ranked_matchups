@@ -289,8 +289,16 @@ Its last line is always the verdict:
 - `RUNNING NOW: ... since <time>; the results above are from before it.` printed
   above the previous run's verdict, so the last line is never mistaken for an
   answer to the click you just made.
-- `NOTE: ... requested <time> did not run: another run held the lock, or Redis
-  was unreachable.` A *scheduled* run no longer gives up at the first busy
+- `Run lock: held by <what>, task <id>, pid <n> (<process>), plugin <version>,
+  held <how long>.` printed whenever a refresh, apply or reap is holding the
+  run lock, so you can see what a waiting run is waiting for. A holder described
+  as "a plugin version from before holder records" is a thread still running
+  old plugin code, which a container restart clears.
+- `WARNING: Redis is unreachable, so no refresh, apply or reap can run ...`
+  Every run needs the run lock, a plain Refresh included, so nothing changes in
+  the guide (or the curated list) until Redis is back.
+- `NOTE: ... requested <time> did not run: <why>.` The why names the run that
+  held the lock (or says Redis was unreachable). A *scheduled* run no longer gives up at the first busy
   moment: one worker takes ownership of that scheduled time and keeps waiting
   for the lock for up to half an hour (never into the next scheduled time), so
   this line means the lock stayed held the whole while, not that something else
