@@ -405,29 +405,35 @@ EPG_POST_HOURS = 4    # 4 hours after game starts (default; covers OT)
 # on the prefix for those: WC, EURO, UCL, MLS, NWSL and Liga MX are mostly
 # group or league games, which keep 2.5 h.
 #
+# The English cups (EFLCUP, FACUP) need no entry of their own: every row
+# sources/english_cup.py emits carries a cup round (CUP_R1 .. FINAL), which
+# _is_postseason_extra reads as a knockout, and a fixture whose round it cannot
+# map is skipped, never emitted stage-less.
+#
 # A prefix in _SOCCER_EVERY_GAME_LONG_WINDOW gets the long window for EVERY
 # game, because its rows cannot tell a game that may need extra time from one
-# that cannot. EFLCUP and FACUP are cups (every tie is decided on the day; a
-# round the slug map has not seen yet arrives with no stage at all). NCAA
-# soccer's regular-season source also carries the conference tournaments,
-# which go to two overtimes and penalties, with nothing on the ESPN event to
-# tell them apart: measured 2026-10-11, October 2025 games were all "FT" while
-# November's carried "AET", "AGT" and "FT-Pens" under the same season slug,
-# `altGameNote` and empty `notes`. Friendlies (FRIENDLY, FRIENDLYW,
-# CLUBFRIENDLY) never play extra time, so they are plain league-window soccer.
+# that cannot. NCAA soccer's regular-season source also carries the conference
+# tournaments, which go to two overtimes and penalties, with nothing on the
+# ESPN event to tell them apart: measured 2026-10-11, October 2025 games were
+# all "FT" while November's carried "AET", "AGT" and "FT-Pens" under the same
+# season slug, `altGameNote` and empty `notes`. (The College Cup rows carry a
+# stage and would get the long window anyway.) Friendlies (FRIENDLY,
+# FRIENDLYW, CLUBFRIENDLY) never play extra time, so they are plain
+# league-window soccer.
 #
 # Every member must be a sport_prefix a source emits; tests/
 # test_mapped_prefixes.py fails on a dead one (#183), and fails on a soccer
 # prefix a source emits that is missing here (#257: NCAAMSOC/NCAAWSOC, the
 # English cups and the friendlies all fell back to the 4 h gridiron window).
 _SOCCER_KNOCKOUT_POST_HOURS = 3.0
-_SOCCER_EVERY_GAME_LONG_WINDOW = frozenset({"EFLCUP", "FACUP", "NCAAMSOC", "NCAAWSOC"})
+_SOCCER_EVERY_GAME_LONG_WINDOW = frozenset({"NCAAMSOC", "NCAAWSOC"})
 _SOCCER_PREFIXES = frozenset({
     "EPL", "EFL", "UCL",
     "BL1", "LaLiga", "SerieA", "Ligue1",
     "Eredivisie", "PrimeiraLiga", "BSA",
     "WC", "EURO",
     "MLS", "NWSL", "LigaMX",
+    "EFLCUP", "FACUP",
     "FRIENDLY", "FRIENDLYW", "CLUBFRIENDLY",
 }) | _SOCCER_EVERY_GAME_LONG_WINDOW
 _MATCH_WINDOW_OVERRIDE_PRE_MIN: Dict[str, int] = {p: 5 for p in _SOCCER_PREFIXES}

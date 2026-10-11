@@ -624,11 +624,12 @@ says which.
   an ESPN `season_slug`, any slug outside `_NON_POSTSEASON_SEASON_SLUGS` (so
   their playoff games also pass the 'postseason' favorites gate). WC, EURO, UCL,
   MLS, NWSL and Liga MX are mostly league or group games, so they must stay
-  per-game. `_SOCCER_EVERY_GAME_LONG_WINDOW` gives every game the 3h window
-  where the row cannot tell: EFLCUP / FACUP (all cup ties) and NCAAMSOC /
-  NCAAWSOC, whose regular-season source also carries the conference
-  tournaments (two overtimes and penalties) with nothing on the ESPN event to
-  mark them. Friendlies never play extra time and keep 2.5h. Every soccer
+  per-game. The English cups need nothing extra: every row carries a cup round,
+  and an unmapped round is skipped, not emitted stage-less.
+  `_SOCCER_EVERY_GAME_LONG_WINDOW` gives every game the 3h window where the row
+  cannot tell: NCAAMSOC / NCAAWSOC, whose regular-season source also carries
+  the conference tournaments (two overtimes and penalties) with nothing on the
+  ESPN event to mark them. Friendlies never play extra time and keep 2.5h. Every soccer
   prefix a source emits must be in `_SOCCER_PREFIXES`: `tests/
   test_mapped_prefixes.py` classifies each built source by the soccer API it
   fetches (an ESPN `/sports/soccer` or football-data.org URL in its code) and

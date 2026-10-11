@@ -53,11 +53,10 @@ KNOCKOUTS = [
     ("LigaMX", {"season_slug": "apertura---8th-seed-game"}),
     # A playoff source's own flag, whatever the stage says (#243).
     ("UCL", {"stage": "LEAGUE_STAGE", "postseason": True}),
-    # Cups: every tie, with or without a mapped round.
-    ("EFLCUP", {"stage": "CUP_R2"}),
-    ("EFLCUP", {}),
-    ("FACUP", {"stage": "FINAL"}),
-    ("FACUP", {}),
+    # Cups: every round the source maps (all of them: TestEverySourcesKnockout
+    # Vocabulary below), and it skips a fixture it cannot map.
+    ("EFLCUP", {"stage": "CUP_R2", "season_slug": "second-round"}),
+    ("FACUP", {"stage": "FINAL", "season_slug": "final"}),
     # NCAA soccer: the College Cup, and the regular-season source, which also
     # carries the conference tournaments with nothing to tell them apart.
     ("NCAAMSOC", {"stage": "R64"}),
@@ -110,6 +109,35 @@ class TestTheWindow:
         anything at or past EPG_POST_HOURS would be clipped by _live_window's
         min(), silently giving the knockout the cap instead."""
         assert 2.75 < plugin._SOCCER_KNOCKOUT_POST_HOURS < plugin.EPG_POST_HOURS
+
+
+class TestEverySourcesKnockoutVocabulary:
+    """Class guard, read off the sources' OWN round tables rather than a
+    literal list: a round a source can emit that the window took for a league
+    game would cut that round's shootout off. A new round added to any of
+    these tables is covered without editing this test."""
+
+    def _vocab(self):
+        from dispatcharr_ranked_matchups.sources import english_cup, mls_cup, ncaa_soccer_cup
+        from dispatcharr_ranked_matchups.sources.soccer import KnockoutSoccerSource
+        out = [("EFLCUP", st) for _slug, st in english_cup.EFL_CUP_ROUNDS]
+        out += [("FACUP", st) for _slug, st in english_cup.FA_CUP_ROUNDS]
+        out += [("MLS", st) for st in mls_cup.SLUG_TO_STAGE.values()]
+        out += [("NCAAMSOC", st) for st in ncaa_soccer_cup.SLUG_TO_STAGE.values()]
+        # FD.org knockout rounds, plus the third-place match, which the KO
+        # source passes through without a bracket slot.
+        out += [(p, st) for p in ("WC", "EURO", "UCL")
+                for st in KnockoutSoccerSource.KO_STAGES + ("THIRD_PLACE",)]
+        return out
+
+    def test_every_round_a_knockout_source_emits_gets_three_hours(self, plugin):
+        vocab = self._vocab()
+        # Instrument check: the tables loaded and hold rounds we know of.
+        assert ("FACUP", "CUP_R5") in vocab and ("MLS", "MLS_CUP") in vocab
+        assert ("NCAAMSOC", "NCG") in vocab and ("UCL", "PLAYOFFS") in vocab
+        short = [(p, st) for p, st in vocab
+                 if plugin._epg_match_window(p, {"stage": st}) != (5, 3.0)]
+        assert not short, f"knockout rounds on the league window: {short}"
 
 
 class TestEveryConsumerEndsAKnockoutAfterTheShootout:

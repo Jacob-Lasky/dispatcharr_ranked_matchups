@@ -350,8 +350,8 @@ settings change when a finished game goes, both off by default:
 The end of a game is **estimated**, because no feed publishes one: the plugin
 reuses the same per-sport window the EPG matcher uses, roughly 4 hours for
 gridiron and 2.5 for soccer, or 3 for a soccer knockout or cup tie that can go
-to extra time and penalties (NCAA soccer and the English cups get 3 for every
-game, since their listings do not say which ones can). So `remove_finished_after_minutes = 30` means
+to extra time and penalties (NCAA soccer gets 3 for every game, since its
+listings do not mark the conference tournaments, which can). So `remove_finished_after_minutes = 30` means
 about four and a half hours after a college football kickoff, not thirty
 minutes. A game whose start time cannot be parsed is never reaped.
 
