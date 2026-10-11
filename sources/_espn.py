@@ -183,9 +183,15 @@ SCOREBOARD_LOOKBACK_DAYS = 1
 # channels are numbered by kickoff time. Six hours clears any football match
 # (90 minutes plus halftime, stoppage, and extra time) with wide margin while
 # still discarding yesterday's leftovers, and it clears a full NFL, NBA, NHL or
-# college baseball game too. The ONE exception is a field event (a fight card,
-# race or tournament), whose listed `date` is the start of something that runs
-# far longer: see `_field_event_current`.
+# college baseball game too.
+#
+# DO NOT exempt a row ESPN still calls live (`in`) from this floor, tempting as
+# a rain-delayed doubleheader or a long fight card makes it. The plugin dates a
+# game's end at kickoff plus its post window (`plugin._game_end_utc`: 4 h by
+# default, 2.5 h for soccer), so a game six hours past kickoff is already a
+# "Past:" guide entry due for reaping; admitting it again only republishes a
+# finished slot. A game that was already applied stays on air through
+# `plugin._rows_to_hold` until the reaper retires it either way.
 MAX_AGE_AFTER_KICKOFF = timedelta(hours=6)
 
 
@@ -254,31 +260,29 @@ def scoreboard_event_over(event: Dict[str, Any]) -> bool:
 
 def _field_event_current(event: Dict[str, Any], window: UpcomingWindow) -> bool:
     """Whether a field event (race, golf or tennis tournament, fight card)
-    from a LOOKBACK bucket is still on: not over, and either live or kicked
-    off no earlier than `window.oldest_kickoff`.
+    from a LOOKBACK bucket is admitted: `window.admits` on its EVENT-level
+    status and `date`.
 
-    Reads the EVENT-level status, not `competitions[0]`: a fight card's first
+    EVENT-level, not `competitions[0]` as for a game: a fight card's first
     competition is its first prelim bout, finished long before the main event.
-    A live (`in`) event skips the age floor because its `date` is when the
-    whole event began: a UFC card listed at 22:00Z runs to ~05:00Z, past the
-    six hours a single game is given. Measured 2026-10-11 on
-    `mma/ufc?dates=20261010`: the Fight Night card is dated 21:00Z.
+    A multi-day event in a lookback bucket ages out of it (its `date` is the
+    first day), which loses nothing: an event still running is also filed
+    under every later day it spans, so the forward bucket carries it.
 
     Only the lookback buckets are filtered for field events. The forward
     buckets keep everything, as they always have, because a multi-day event's
-    status describes the CURRENT DAY's play, not the event: the same morning
-    `tennis/atp?dates=20261011` reported the Rolex Shanghai Masters (running to
-    2026-10-19) as `post`, `completed`. Filtering forward buckets on that would
-    drop a tournament with a week to go.
+    status and `date` do not describe the event: the same morning
+    `tennis/atp?dates=20261011` reported the Rolex Shanghai Masters (running
+    to 2026-10-19) as `post`, `completed`, and a golf event's `date` is its
+    first round days ago. `endDate` does not rescue a forward filter either:
+    golf's is the START of the final day (Baycurrent Classic: `date`
+    2026-10-08T04:00Z, `endDate` 2026-10-11T04:00Z), so treating it as the
+    end would drop a tournament during its final round. Measured 2026-10-11.
     """
     status_type = (event.get("status") or {}).get("type") or {}
     state = (status_type.get("state") or "").lower()
-    if status_type.get("completed") or state == "post":
-        return False
-    if state == "in":
-        return True
-    start = parse_iso_utc(event.get("date"))
-    return start is not None and start >= window.oldest_kickoff
+    over = bool(status_type.get("completed")) or state == "post"
+    return window.admits(parse_iso_utc(event.get("date")), over)
 
 
 def _event_identity(event: Dict[str, Any]) -> Any:
@@ -309,6 +313,7 @@ def sweep_upcoming_events(
     convert: Callable[[Dict[str, Any]], Optional[T]],
     *,
     field_events: bool = False,
+    observe: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> List[T]:
     """THE upcoming sweep for every ESPN scoreboard source (#256):
     `convert(event)` for each event in `upcoming_window(days_ahead)` that is
@@ -324,6 +329,13 @@ def sweep_upcoming_events(
         lag) are dropped wherever they sit.
       - `field_events=True`: only the lookback buckets are filtered, by
         `_field_event_current`; see it for why the forward ones cannot be.
+
+    `observe(event)`, when given, sees EVERY event in the window, in date
+    order, before admission: finished ones included, a duplicate once per
+    bucket it appears in. It is for context a source needs from games already
+    played, never for rows: the NCAA baseball and softball bracket sources
+    learn the College World Series sub-brackets from opening-day pairings
+    that are usually FINISHED by the time the next game is upcoming.
 
     Admission runs BEFORE the dedupe, and an event's key is claimed only once
     `convert` keeps it, and both orders are load-bearing. The overlapping
@@ -347,6 +359,8 @@ def sweep_upcoming_events(
         for event in data.get("events") or []:
             if not isinstance(event, dict):
                 continue
+            if observe is not None:
+                observe(event)
             if field_events:
                 if day < window.today and not _field_event_current(event, window):
                     continue

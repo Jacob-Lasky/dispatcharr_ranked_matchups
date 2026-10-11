@@ -747,11 +747,25 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
                 return None
             return event, stage, partial_key
 
+        # The WCWS sub-brackets are read off opening-day pairings, which
+        # are FINISHED by the time the next game is upcoming, so they are
+        # classified from EVERY bracket event in the window (`observe`),
+        # not only from the upcoming ones the sweep keeps: from those alone
+        # a team whose opener has ended has no sub-bracket and its next game
+        # was dropped (#256 review). place_upcoming still overwrites the
+        # provisional key with the bracket's own.
+        played: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
+
+        def observe(event: Dict[str, Any]) -> None:
+            tagged = staged(event)
+            if tagged is not None:
+                played.append(tagged)
+
         raw_events = sweep_upcoming_events(
-            _http_get, f"{ESPN_BASE}/scoreboard", days_ahead, staged,
+            _http_get, f"{ESPN_BASE}/scoreboard", days_ahead, staged, observe=observe,
         )
         wcws_sub_by_team = _classify_wcws_sub_brackets(
-            _wcws_meta_from_raw_events(raw_events)
+            _wcws_meta_from_raw_events(played)
         )
         out: List[GameRow] = []
         for event, stage, partial_key in raw_events:

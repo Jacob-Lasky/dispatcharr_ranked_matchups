@@ -176,7 +176,10 @@ class MlbRegularSource(PointsBasedSportSource):
         The window's drops then apply: a FINISHED game (`abstractGameState`
         "Final", which is also how a postponed or cancelled game reads) and a
         stale one. A postponed game is also listed again on its makeup date
-        under the same gamePk (29 such in the 2026 season), hence the dedupe.
+        under the same gamePk (29 such in the 2026 season), hence the dedupe, in
+        which the LATEST admitted listing wins: a game moved to a later date can
+        still carry a not-yet-retagged copy under its old date, and keeping that
+        one would publish the abandoned slot.
         """
         window = upcoming_window(days_ahead)
         url = (
@@ -184,14 +187,13 @@ class MlbRegularSource(PointsBasedSportSource):
             f"&startDate={window.first_day.isoformat()}&endDate={window.last_day.isoformat()}"
         )
         data = _http_get(url)
-        out: List[GameRow] = []
         if not data:
-            return out
-        seen: set = set()
+            return []
+        by_pk: Dict[Any, GameRow] = {}
         for date_entry in data.get("dates", []) or []:
             for g in date_entry.get("games", []) or []:
                 gid = g.get("gamePk")
-                if gid is None or gid in seen:
+                if gid is None:
                     continue
                 teams = g.get("teams") or {}
                 home = ((teams.get("home") or {}).get("team") or {}).get("name")
@@ -202,8 +204,7 @@ class MlbRegularSource(PointsBasedSportSource):
                 over = (g.get("status") or {}).get("abstractGameState") == "Final"
                 if not window.admits(start, over):
                     continue
-                seen.add(gid)
-                out.append(GameRow(
+                by_pk[gid] = GameRow(
                     sport_prefix=self.sport_prefix,
                     sport_label=self.sport_label,
                     home=home,
@@ -217,8 +218,8 @@ class MlbRegularSource(PointsBasedSportSource):
                         "game_id": gid,
                         "fd_competition_code": self.league_context_code,
                     },
-                ))
-        return out
+                )
+        return list(by_pk.values())
 
     # ---------- _fetch_full_season_games (importance side) ----------
 

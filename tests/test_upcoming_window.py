@@ -219,6 +219,12 @@ class TestTheSharedSweep:
                              convert=lambda ev: ev["name"])
         assert out == ["A1 at H1", "A2 at H2"]
 
+    def test_observe_sees_every_event_finished_ones_included(self, monkeypatch):
+        seen = []
+        out, _ = self._sweep(monkeypatch, _evening(), observe=lambda ev: seen.append(ev["id"]))
+        assert out == ["live-1"]
+        assert seen == ["live-1", "done-1", "stale-1"]
+
     def test_field_events_filter_only_the_lookback_buckets(self, monkeypatch):
         # A tournament's status describes the current day's play: the forward
         # bucket's `post` Shanghai Masters (measured 2026-10-11) runs to the 19th.
@@ -293,10 +299,10 @@ class TestEveningGameIsFound:
         assert _homes(src.fetch_upcoming(days_ahead=1)) == ["Home Live"]
 
     def test_ufc_main_card_is_found_after_midnight_utc(self, monkeypatch):
-        # 04:30Z (00:30 EDT): the card listed at 22:00Z is 6.5 h old, past the
-        # single-game floor, and ESPN still says it is live.
+        # 03:30Z (23:30 EDT): the card listed at 22:00Z is filed under the
+        # 10th, live, 5.5 h after its listed start.
         mod, src = _src("field_event", "UfcSource")
-        _pin_clock(monkeypatch, datetime(2026, 10, 11, 4, 30, tzinfo=timezone.utc))
+        _pin_clock(monkeypatch, datetime(2026, 10, 11, 3, 30, tzinfo=timezone.utc))
         _serve_buckets(monkeypatch, mod, {LOOKBACK_BUCKET: [
             _event("ufc-live", "UFC 330: Main vs Event", "Field",
                    datetime(2026, 10, 10, 22, 0, tzinfo=timezone.utc), "in",
@@ -309,6 +315,62 @@ class TestEveningGameIsFound:
                    name="UFC Fight Night: Stale"),
         ]})
         assert _homes(src.fetch_upcoming(days_ahead=1)) == ["UFC 330: Main vs Event"]
+
+    def test_a_card_past_the_age_floor_is_not_readmitted_even_live(self, monkeypatch):
+        # 04:30Z: 6.5 h after the listed start. plugin._game_end_utc dated the
+        # card's end at start + 4 h, so it is already a Past slot; an applied
+        # card stays on air through _rows_to_hold, a new one is not added.
+        mod, src = _src("field_event", "UfcSource")
+        _pin_clock(monkeypatch, datetime(2026, 10, 11, 4, 30, tzinfo=timezone.utc))
+        _serve_buckets(monkeypatch, mod, {LOOKBACK_BUCKET: [
+            _event("ufc-live", "UFC 330: Main vs Event", "Field",
+                   datetime(2026, 10, 10, 22, 0, tzinfo=timezone.utc), "in",
+                   name="UFC 330: Main vs Event"),
+        ]})
+        assert src.fetch_upcoming(days_ahead=1) == []
+
+    @pytest.mark.parametrize("module_name,cls_name,headline,sub1,sub2", [
+        ("ncaa_baseball", "NcaaBaseballPlayoffBracketSource",
+         "Men's College World Series - Double Elimination Round", "MCWS_sub1", "MCWS_sub2"),
+        ("ncaa_softball", "NcaaSoftballPlayoffBracketSource",
+         "Women's College World Series - Double Elimination Round", "WCWS_sub1", "WCWS_sub2"),
+    ])
+    def test_world_series_game_keeps_its_sub_bracket_after_the_opener_ends(
+            self, monkeypatch, module_name, cls_name, headline, sub1, sub2):
+        """Opening night: one opener FINISHED (18:00Z), the other live
+        (23:00Z). The sub-brackets come from opening-day pairings, so the
+        finished opener's teams must still be classified, or their Day 3
+        game has no sub-bracket and is dropped (codex review of #256).
+        Literal keys: Day 1 pairs are sub-bracket 1, Day 2 pairs sub-bracket 2."""
+        mod, src = _src(module_name, cls_name)
+        _pin_clock(monkeypatch, datetime(2026, 6, 13, 23, 30, tzinfo=timezone.utc))
+        shape = {"season_type": 5, "headline": headline}
+        _serve_buckets(monkeypatch, mod, {
+            "20260613": [
+                _event("op-1", "Arizona", "Coastal Carolina",
+                       datetime(2026, 6, 13, 18, 0, tzinfo=timezone.utc), "post", **shape),
+                _event("op-2", "Louisville", "Oregon State",
+                       datetime(2026, 6, 13, 23, 0, tzinfo=timezone.utc), "in", **shape),
+            ],
+            "20260614": [
+                _event("d2-1", "Murray State", "UCLA",
+                       datetime(2026, 6, 14, 18, 0, tzinfo=timezone.utc), "pre", **shape),
+                _event("d2-2", "LSU", "Arkansas",
+                       datetime(2026, 6, 14, 23, 0, tzinfo=timezone.utc), "pre", **shape),
+            ],
+            "20260615": [
+                _event("d3-1", "Arizona", "Coastal Carolina",
+                       datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc), "pre", **shape),
+            ],
+        })
+        rows = src.fetch_upcoming(days_ahead=3)
+        keys = {(r.home, r.start_time.day): r.extra["grouping_key"] for r in rows}
+        assert keys == {
+            ("Louisville", 13): sub1,
+            ("Murray State", 14): sub2,
+            ("LSU", 14): sub2,
+            ("Arizona", 15): sub1,
+        }
 
     def test_nhl_late_game_is_found(self, monkeypatch):
         from dispatcharr_ranked_matchups.sources import nhl
@@ -375,6 +437,23 @@ class TestEveningGameIsFound:
         rows = mlb.MlbRegularSource().fetch_upcoming(days_ahead=7)
         assert _homes(rows) == ["Mariners", "Padres"]
         assert "startDate=2026-10-10&endDate=2026-10-18" in urls[0]
+
+    def test_mlb_keeps_the_latest_listing_of_a_moved_game(self, monkeypatch):
+        """One gamePk under its old date (not yet retagged) and its new one:
+        the later listing is where the game will be played (codex review)."""
+        from dispatcharr_ranked_matchups.sources import mlb
+        _pin_clock(monkeypatch)
+
+        def listing(day, start):
+            return {"date": day, "games": [{
+                "gamePk": 7, "gameDate": start, "status": {"abstractGameState": "Preview"},
+                "teams": {"home": {"team": {"name": "Padres"}}, "away": {"team": {"name": "Giants"}}}}]}
+        monkeypatch.setattr(mlb, "_http_get", lambda *a, **k: {"dates": [
+            listing("2026-10-10", "2026-10-11T03:00:00Z"),
+            listing("2026-10-12", "2026-10-12T23:00:00Z"),
+        ]})
+        rows = mlb.MlbRegularSource().fetch_upcoming(days_ahead=7)
+        assert [r.start_time.isoformat() for r in rows] == ["2026-10-12T23:00:00+00:00"]
 
 
 # ---------------------------------------------------------------- class guard
@@ -473,7 +552,9 @@ _DATED = (
 def every_source_under_a_pinned_clock(plugin, monkeypatch):
     """Every source `_build_sources` builds with everything switched on, each
     `fetch_upcoming` run once against a stub that records the dated requests.
-    Returns {class name: earliest date requested}."""
+    Returns {class name: EARLIEST date requested}. Earliest, not first:
+    the days are fetched concurrently, and the sweep's dedupe runs in date
+    order whatever order the requests went out in."""
     import requests
     from tests.test_mapped_prefixes import _all_on_settings
 
@@ -503,22 +584,23 @@ def every_source_under_a_pinned_clock(plugin, monkeypatch):
             if m:
                 day = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
                 name = current["name"]
-                current["firsts"][name] = min(day, current["firsts"].get(name, day))
+                current["earliest"][name] = min(day, current["earliest"].get(name, day))
         return _Resp()
 
     monkeypatch.setattr(requests, "get", fake_get)
-    current["firsts"] = {}
+    current["earliest"] = {}
     for src in sources:
         current["name"] = type(src).__name__
         src.fetch_upcoming(days_ahead=2)
-    return current["firsts"]
+    return current["earliest"]
 
 
 class TestEverySourceStartsAtTheLookbackDay:
     """Behavioural half: the AST check cannot see a date computed some other
     way (a helper, `time.time()`, an arithmetic on a datetime). Under a clock
-    pinned at 2026-10-11T02:00Z, every dated request any source makes must
-    start at 2026-10-10."""
+    pinned at 2026-10-11T02:00Z, the earliest day any source requests must be
+    2026-10-10: not later (the #256 defect), and not earlier either (a window
+    that drifted back would admit the day before as well)."""
 
     def test_the_instrument_reaches_the_dated_sweeps(self, every_source_under_a_pinned_clock):
         # mls_standings is absent on purpose: with no standings it returns
@@ -534,6 +616,6 @@ class TestEverySourceStartsAtTheLookbackDay:
         assert missing == set()
 
     def test_every_dated_sweep_starts_one_day_before_today_utc(self, every_source_under_a_pinned_clock):
-        late = {name: first.isoformat() for name, first in every_source_under_a_pinned_clock.items()
-                if first != date(2026, 10, 10)}
+        late = {name: earliest.isoformat() for name, earliest in every_source_under_a_pinned_clock.items()
+                if earliest != date(2026, 10, 10)}
         assert late == {}

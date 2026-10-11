@@ -88,8 +88,8 @@ class FieldEventSource(SportSource):
         The window starts one day BEFORE today-UTC (#256): ESPN files a
         UFC main card or a NASCAR night race under its US Eastern date, so
         from 00:00Z the event in progress sits in yesterday's bucket. Only
-        that lookback bucket is filtered (over events dropped, stale ones
-        dropped unless ESPN says they are live); the forward buckets keep
+        that lookback bucket is filtered (over and stale events dropped,
+        by event-level status); the forward buckets keep
         every event as they always have. `_espn._field_event_current` has
         the measurements behind both halves.
 
