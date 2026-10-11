@@ -117,15 +117,19 @@ the **Test naming convention** action to preview a template before applying it.
 ### NCAA Football divisions
 
 CFBD's feed carries every NCAA division, not just Division I. The
-**NCAA Football divisions** setting selects what actually reaches the guide:
+**NCAA Football (CFBD)** setting both switches the league on and selects what
+actually reaches the guide (before #208 these were two settings, an on/off
+toggle and a divisions dropdown):
 
 | Setting | What is pulled |
 |---|---|
-| `D1 FBS only` (default) | Games where either side is FBS, including FBS-vs-FCS |
-| `D1 FBS + FCS` | The above, plus FCS-vs-FCS |
+| `Off` (default) | Nothing; NCAA Football is not fetched |
+| `D1 FBS only (recommended)` | Games where either side is FBS, including FBS-vs-FCS (and the rare FBS-vs-Division II) |
+| `D1 FBS + FCS` | Games where either side is FBS or FCS: the above, plus FCS-vs-FCS and FCS against a Division II or III opponent |
 
-Division II and III are never pulled under either setting. They are not
-merely uninteresting: the Monte Carlo importance simulation replays only the
+A game is kept when EITHER side is in the selected divisions, so a game
+between two Division II or III teams is never pulled under either setting.
+Those games are not merely uninteresting: the Monte Carlo importance simulation replays only the
 selected divisions' season, so a team outside it scores 0.00 every time while
 still being played out in every simulated season. Opening week 2026 returned
 157 games in a seven-day window of which 27 involved an FBS team, so the
@@ -138,7 +142,7 @@ an FCS game can still score on stakes alone. Under `D1 FBS + FCS` those
 stakes are measured with FBS win-count bands (6 wins = bowl eligible,
 10+ = playoff contender), which FCS's own postseason does not work that
 way — treat FCS importance as an approximation rather than a like-for-like
-comparison with FBS. This is why FBS-only is the default.
+comparison with FBS. This is why FBS-only is the recommended choice.
 
 
 Adding a sport is a new file in `sources/` implementing the `SportSource`
@@ -180,19 +184,24 @@ form will collect everything needed to scope it.
    '
    ```
 
-   Anthropic key is only needed if you set `weight_narrative > 0` OR want
+   Anthropic key is only needed if you set `narrative` above 0 in **Scoring
+   weights** OR want
    LLM-resolved EPG matching when the regex pre-filter is ambiguous. For
    regex-only matching it's optional.
 
 3. Open Dispatcharr → Plugins → enable **Ranked Matchups (Top Games)**, then
    in the plugin's settings:
-   - Toggle which sports you want under **Sport Sources**
+   - Toggle which sports you want under **Sport Sources** (related leagues,
+     such as men's and women's NCAA soccer or the ATP and WTA tours, share
+     one dropdown: Off, either one, or both)
    - Set your **Favorite teams** (comma-separated) under **Curation**
    - Optionally list **Recorded teams** to have their games recorded
      automatically (see [Recording your teams](#recording-your-teams))
    - Pick your **Local timezone** so "today" classification + EPG dates are
      right
-   - Tune signal **Weights** if any feel under/over-weighted
+   - Tune **Scoring weights** if a signal feels under/over-weighted (one
+     line of `name=number` entries, e.g. `favorite=8, spread=1`; blank keeps
+     the defaults, see [SCORING.md](SCORING.md#tuning))
 
 4. Turn off **Dry run on Apply** (on by default; it prevents channel creation),
    then run **Refresh + apply now** to populate.

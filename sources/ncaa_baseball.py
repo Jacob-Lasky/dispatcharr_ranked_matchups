@@ -6,7 +6,8 @@ a homelab TV-guide curator. If it ever 404s, `fetch_upcoming` and
 drops out of the guide for that refresh cycle: graceful-degrade is
 already the contract.
 
-Two source classes ship under the `enable_ncaa_baseball` toggle:
+Two source classes ship under the `enable_ncaa_baseball` league (the
+"Baseball" half of the NCAA Baseball & Softball setting, #208):
   - `NcaaBaseballRegularSource(PointsBasedSportSource)`: regular-season
     win-count importance. Tournament-bubble through national-seed bands
     (see LEAGUE_CONTEXTS["BSB"]).

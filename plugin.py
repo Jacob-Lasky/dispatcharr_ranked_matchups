@@ -78,6 +78,8 @@ from ._util import (
 from . import tasks  # noqa: F401, E402
 # Pure auto-record policy (#216); the ORM calls around it live in this file.
 from . import recording as recording_policy  # noqa: E402
+from . import merged_settings  # noqa: E402
+from .merged_settings import league_enabled  # noqa: E402
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -2357,7 +2359,7 @@ def _parse_favorites(raw: str) -> List[str]:
 # Curation presets (#9). Each preset bundles a Weights tuning + a max_games
 # cap so users don't have to tune 9 individual knobs to get a "vibe":
 #
-# - "manual": read individual weight + max_games settings (V0 behavior).
+# - "manual": read the Scoring weights + max_games settings (V0 behavior).
 # - "high_curation": narrow to ~10 high-leverage games; weights emphasize
 #   structural importance + rank, downweight favorites/spread so they don't
 #   dominate the list when the user wants tight curation.
@@ -2366,7 +2368,7 @@ def _parse_favorites(raw: str) -> List[str]:
 #   matchups still show up even on quiet days.
 #
 # Manual mode and a non-manual preset are mutually exclusive in spirit but
-# not enforced. Picking a preset overrides individual weight + max_games
+# not enforced. Picking a preset overrides the Scoring weights + max_games
 # settings during refresh; users who tune individual knobs should leave the
 # preset on "manual".
 _CURATION_PRESETS: Dict[str, Dict[str, float]] = {
@@ -2399,10 +2401,10 @@ def _build_weights(settings: Dict[str, Any]):
     from .scoring import Weights
     d = Weights()
 
-    # Preset path: if a non-manual preset is selected, individual weight_*
-    # settings are IGNORED and the preset bundle wins. Manual (or any
-    # unrecognized preset name) falls through to the individual-setting
-    # path so power-users keep their tuning.
+    # Preset path: if a non-manual preset is selected, the Scoring weights
+    # setting is IGNORED and the preset bundle wins. Manual (or any
+    # unrecognized preset name) falls through to the user's weights so
+    # power-users keep their tuning.
     preset_key = str(settings.get("curation_preset", "manual") or "manual").lower()
     if preset_key != "manual" and preset_key in _CURATION_PRESETS:
         p = _CURATION_PRESETS[preset_key]
@@ -2416,15 +2418,15 @@ def _build_weights(settings: Dict[str, Any]):
             importance=float(p["importance"]),
         )
 
-    return Weights(
-        rank=float(settings.get("weight_rank", d.rank)),
-        spread=float(settings.get("weight_spread", d.spread)),
-        favorite=float(settings.get("weight_favorite", d.favorite)),
-        rivalry=float(settings.get("weight_rivalry", d.rivalry)),
-        tournament=float(settings.get("weight_tournament", d.tournament)),
-        narrative=float(settings.get("weight_narrative", d.narrative)),
-        importance=float(settings.get("weight_importance", d.importance)),
-    )
+    # Manual path: the "Scoring weights" text (#208, which replaced seven
+    # weight_<name> number fields), with a stored legacy weight_<name> filling
+    # any weight the text does not name on an install saved before #208. A
+    # weight named nowhere keeps the dataclass default.
+    overrides, problems = merged_settings.weight_overrides(settings)
+    for problem in problems:
+        logger.warning("[ranked_matchups] ignoring scoring weight %s", problem)
+    return Weights(**{name: overrides.get(name, getattr(d, name))
+                      for name in merged_settings.WEIGHT_NAMES})
 
 
 DEFAULT_MAX_GAMES = 25
@@ -2669,17 +2671,18 @@ def _build_sources(settings: Dict[str, Any]):
     cfbd_key = _resolve_key(settings, "cfbd_api_key", CFBD_KEY_PATH)
     fd_key = _resolve_key(settings, "football_data_api_key", FD_KEY_PATH)
     odds_key = _resolve_key(settings, "odds_api_key", ODDS_KEY_PATH)
-    if settings.get("enable_ncaaf", False) and cfbd_key:
+    if league_enabled(settings, "enable_ncaaf") and cfbd_key:
         # Divisions gate BOTH the emitted games and the Monte Carlo season
-        # population; see sources/ncaaf.py. DO NOT spell the default value
-        # here: NcaafSource normalizes an unset or unrecognised value to its
-        # own DEFAULT_DIVISIONS, so this stays a single source of truth.
+        # population; see sources/ncaaf.py. They come from the same `ncaaf`
+        # select as the on/off (#208). DO NOT normalise the value here:
+        # NcaafSource maps an unrecognised one to its own DEFAULT_DIVISIONS
+        # (and warns), so that stays a single source of truth.
         sources.append(NcaafSource(
             api_key=cfbd_key,
-            divisions=settings.get("ncaaf_divisions"),
+            divisions=merged_settings.ncaaf_divisions(settings),
         ))
     # NCAAM uses the same CFBD/CBB-Data Bearer token as NCAAF.
-    if settings.get("enable_ncaam", False) and cfbd_key:
+    if league_enabled(settings, "enable_ncaam") and cfbd_key:
         sources.append(NcaamSource(api_key=cfbd_key))
 
     def _make_soccer(comp_key: str):
@@ -2693,22 +2696,22 @@ def _build_sources(settings: Dict[str, Any]):
         cls = KnockoutSoccerSource if (ctx and ctx.format == "knockout") else SoccerSource
         return cls(comp_key, fd_api_key=fd_key, odds_api_key=odds_key)
 
-    if settings.get("enable_epl", False) and fd_key:
+    if league_enabled(settings, "enable_epl") and fd_key:
         sources.append(_make_soccer("epl"))
-    if settings.get("enable_championship", False) and fd_key:
+    if league_enabled(settings, "enable_championship") and fd_key:
         sources.append(_make_soccer("championship"))
-    if settings.get("enable_ucl", False) and fd_key:
+    if league_enabled(settings, "enable_ucl") and fd_key:
         sources.append(_make_soccer("ucl"))
     # Top-flight European leagues. Same FD.org key as EPL etc.;
     # _make_soccer routes each to SoccerSource because their LEAGUE_CONTEXTS
     # entries default to format="league".
-    if settings.get("enable_bundesliga", False) and fd_key:
+    if league_enabled(settings, "enable_bundesliga") and fd_key:
         sources.append(_make_soccer("bundesliga"))
-    if settings.get("enable_la_liga", False) and fd_key:
+    if league_enabled(settings, "enable_la_liga") and fd_key:
         sources.append(_make_soccer("la_liga"))
-    if settings.get("enable_serie_a", False) and fd_key:
+    if league_enabled(settings, "enable_serie_a") and fd_key:
         sources.append(_make_soccer("serie_a"))
-    if settings.get("enable_ligue_1", False) and fd_key:
+    if league_enabled(settings, "enable_ligue_1") and fd_key:
         sources.append(_make_soccer("ligue_1"))
     # International tournaments. Each toggle fans out to TWO sources
     # sharing the same FD.org competition fetch:
@@ -2717,7 +2720,7 @@ def _build_sources(settings: Dict[str, Any]):
     #     up with the group-stage source.
     #   - GroupStageSoccerSource for the per-group "advance / eliminated"
     #     importance signal (top 2 per group).
-    if settings.get("enable_world_cup", False) and fd_key:
+    if league_enabled(settings, "enable_world_cup") and fd_key:
         wc_knockout = _make_soccer("world_cup")
         wc_groups = GroupStageSoccerSource(
             "world_cup", fd_api_key=fd_key, odds_api_key=odds_key,
@@ -2732,7 +2735,7 @@ def _build_sources(settings: Dict[str, Any]):
             wc_groups.set_paired_knockout_source(wc_knockout)
         sources.append(wc_knockout)
         sources.append(wc_groups)
-    if settings.get("enable_euros", False) and fd_key:
+    if league_enabled(settings, "enable_euros") and fd_key:
         sources.append(_make_soccer("euros"))
         sources.append(GroupStageSoccerSource(
             "euros", fd_api_key=fd_key, odds_api_key=odds_key,
@@ -2759,13 +2762,13 @@ def _build_sources(settings: Dict[str, Any]):
         + _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, ""))
     )
     friendlies_favorites_only_setting = bool(settings.get("friendlies_favorites_only", True))
-    if settings.get("enable_intl_friendlies", False):
+    if league_enabled(settings, "enable_intl_friendlies"):
         sources.append(InternationalFriendliesSource(
             gender="m",
             favorites=friendlies_favorites,
             favorites_only=friendlies_favorites_only_setting,
         ))
-    if settings.get("enable_intl_friendlies_women", False):
+    if league_enabled(settings, "enable_intl_friendlies_women"):
         sources.append(InternationalFriendliesSource(
             gender="w",
             favorites=friendlies_favorites,
@@ -2781,7 +2784,7 @@ def _build_sources(settings: Dict[str, Any]):
     # This is the only path for a club pre-season friendly to reach the guide:
     # Football-Data.org's competition codes carry no friendlies at all, and
     # fifa.friendly is national teams only. See #153.
-    if settings.get("enable_club_friendlies", False):
+    if league_enabled(settings, "enable_club_friendlies"):
         sources.append(ClubFriendliesSource(
             favorites=friendlies_favorites,
             favorites_only=friendlies_favorites_only_setting,
@@ -2802,19 +2805,19 @@ def _build_sources(settings: Dict[str, Any]):
     # scoring.py and sort to the bottom, where max_games trims them. That is
     # the plugin's standing philosophy: thin-slate filler is intended, and
     # absolute score floors are not a lever this plugin offers.
-    if settings.get("enable_efl_cup", False):
+    if league_enabled(settings, "enable_efl_cup"):
         sources.append(EflCupSource())
-    if settings.get("enable_fa_cup", False):
+    if league_enabled(settings, "enable_fa_cup"):
         sources.append(FaCupSource())
 
     # Additional FD.org free-tier leagues. Same _make_soccer
     # router; LEAGUE_CONTEXTS uses format="league" so dispatch goes
     # to SoccerSource (not KnockoutSoccerSource).
-    if settings.get("enable_eredivisie", False) and fd_key:
+    if league_enabled(settings, "enable_eredivisie") and fd_key:
         sources.append(_make_soccer("eredivisie"))
-    if settings.get("enable_primeira_liga", False) and fd_key:
+    if league_enabled(settings, "enable_primeira_liga") and fd_key:
         sources.append(_make_soccer("primeira_liga"))
-    if settings.get("enable_brazilian_serie_a", False) and fd_key:
+    if league_enabled(settings, "enable_brazilian_serie_a") and fd_key:
         sources.append(_make_soccer("brazilian_serie_a"))
 
     # NFL: no API key required (ESPN unofficial). Same pair-and-seed
@@ -2823,7 +2826,7 @@ def _build_sources(settings: Dict[str, Any]):
     # -> SB. Strength sharing matters most here because NFL teams
     # play only 17 regular-season games: even fewer baseline games
     # than WNBA.
-    if settings.get("enable_nfl", False):
+    if league_enabled(settings, "enable_nfl"):
         nfl_reg = NflRegularSource()
         sources.append(nfl_reg)
         nfl_po = NflPlayoffSource()
@@ -2839,7 +2842,7 @@ def _build_sources(settings: Dict[str, Any]):
     # 70-game per-team baseline informs playoff-game sampling instead
     # of the league-average prior. If the user enables only one of the
     # two, the playoff source falls back to the 3.0/3.0 prior.
-    if settings.get("enable_nhl", False):
+    if league_enabled(settings, "enable_nhl"):
         nhl_reg = NhlRegularSource()
         sources.append(nhl_reg)
         nhl_po = NhlPlayoffSource()
@@ -2859,7 +2862,7 @@ def _build_sources(settings: Dict[str, Any]):
     # strength estimates from the regular source so postseason game-
     # sampling reflects per-team scoring skill instead of the 4.5/4.5
     # league-average prior.
-    if settings.get("enable_mlb", False):
+    if league_enabled(settings, "enable_mlb"):
         mlb_reg = MlbRegularSource()
         sources.append(mlb_reg)
         mlb_po = MlbPlayoffSource()
@@ -2876,7 +2879,7 @@ def _build_sources(settings: Dict[str, Any]):
     # informs playoff-game sampling instead of the 115/115 league-average
     # prior. If the user enables only one of the two, the playoff source
     # falls back to that default.
-    if settings.get("enable_nba", False):
+    if league_enabled(settings, "enable_nba"):
         nba_reg = NbaRegularSource()
         sources.append(nba_reg)
         nba_po = NbaPlayoffSource()
@@ -2901,7 +2904,7 @@ def _build_sources(settings: Dict[str, Any]):
     # WC/LDS/LCS/WS mix). Strengths are merged across both conferences
     # before seeding the cup source: the MLS Cup Final is cross-
     # conference, so per-team scoring rates need to be in one dict.
-    if settings.get("enable_mls", False):
+    if league_enabled(settings, "enable_mls"):
         mls_east = MlsEastSource(odds_api_key=odds_key or "")
         mls_west = MlsWestSource(odds_api_key=odds_key or "")
         sources.append(mls_east)
@@ -2919,35 +2922,35 @@ def _build_sources(settings: Dict[str, Any]):
     # NWSL: same V1 minimal pattern as MLS (schedule + closeness).
     # Subclasses MlsSource with NWSL-specific endpoint and Odds API
     # key. No importance / playoff bracket in V1.
-    if settings.get("enable_nwsl", False):
+    if league_enabled(settings, "enable_nwsl"):
         sources.append(NwslSource(odds_api_key=odds_key or ""))
 
     # Liga MX: Mexican top-flight. Same V1 minimal pattern.
-    if settings.get("enable_liga_mx", False):
+    if league_enabled(settings, "enable_liga_mx"):
         sources.append(LigaMxSource(odds_api_key=odds_key or ""))
 
     # Field events (racing + golf). No two-team head-to-head;
     # each row is one race or tournament. Low event volume (~1/week)
     # means "surface if toggled" is the right product: no importance
     # ranking needed.
-    if settings.get("enable_f1", False):
+    if league_enabled(settings, "enable_f1"):
         sources.append(F1Source())
-    if settings.get("enable_nascar", False):
+    if league_enabled(settings, "enable_nascar"):
         sources.append(NascarSource())
-    if settings.get("enable_golf", False):
+    if league_enabled(settings, "enable_golf"):
         sources.append(GolfSource())
 
     # UFC. Same field-event shape: each fight card is one
     # row with home=card title ("UFC 309: Jones vs. Miocic"). PPVs
     # (numbered UFC events) get MAJOR tier, Fight Nights get EVENT.
-    if settings.get("enable_ufc", False):
+    if league_enabled(settings, "enable_ufc"):
         sources.append(UfcSource())
 
     # Boxing. Same field-event shape as UFC (one row per fight card), but a
     # DIFFERENT upstream: ESPN has no boxing feed (verified 2026-07-10), so
     # boxing pulls from the Boxing Data API (RapidAPI) and REQUIRES a key.
     # Enabled-but-unkeyed is a no-op with a warning, matching the CFBD/FD gate.
-    if settings.get("enable_boxing", False):
+    if league_enabled(settings, "enable_boxing"):
         boxing_key = _resolve_key(settings, "boxing_data_api_key", BOXING_KEY_PATH)
         if boxing_key:
             sources.append(BoxingSource(api_key=boxing_key))
@@ -2959,16 +2962,16 @@ def _build_sources(settings: Dict[str, Any]):
     # matches: so tennis fits the FieldEventSource model. Grand
     # Slams + year-end Finals get MAJOR; regular tour stops get
     # EVENT.
-    if settings.get("enable_atp", False):
+    if league_enabled(settings, "enable_atp"):
         sources.append(AtpSource())
-    if settings.get("enable_wta", False):
+    if league_enabled(settings, "enable_wta"):
         sources.append(WtaSource())
 
     # WNBA: ESPN unofficial API; same pair-and-seed pattern as NHL/MLB/
     # NBA. Per-stage series lengths via BestOfNSeriesSource hooks: R1
     # best-of-3, SF best-of-5, FINALS best-of-5 in 2024 / best-of-7
     # in 2025+.
-    if settings.get("enable_wnba", False):
+    if league_enabled(settings, "enable_wnba"):
         wnba_reg = WnbaRegularSource()
         sources.append(wnba_reg)
         wnba_po = WnbaPlayoffSource()
@@ -2981,7 +2984,7 @@ def _build_sources(settings: Dict[str, Any]):
     # NCAA Women's Basketball + March Madness: no API key required.
     # Single-game-elim bracket (SERIES_LENGTH=1 per stage). Pair-and-
     # seed strength sharing identical to NHL/MLB/NBA/WNBA.
-    if settings.get("enable_ncaaw_basketball", False):
+    if league_enabled(settings, "enable_ncaaw_basketball"):
         ncaaw_reg = NcaawBasketballRegularSource()
         sources.append(ncaaw_reg)
         ncaaw_po = NcaawBasketballPlayoffSource()
@@ -3003,7 +3006,7 @@ def _build_sources(settings: Dict[str, Any]):
     #     inference + headline site labels for grouping.
     # All three (regular + 2 playoff sources) share strength data so
     # postseason Poisson sampling reflects per-team scoring skill.
-    if settings.get("enable_ncaa_baseball", False):
+    if league_enabled(settings, "enable_ncaa_baseball"):
         ncbsb_reg = NcaaBaseballRegularSource()
         sources.append(ncbsb_reg)
         try:
@@ -3022,7 +3025,7 @@ def _build_sources(settings: Dict[str, Any]):
     # baseball above: NcaaSoftballPlayoffSource owns the best-of-3
     # stages (SB_SR + WCWS_F), NcaaSoftballPlayoffBracketSource owns
     # the Regional + 8-team WCWS bracket (SB_REG + WCWS).
-    if settings.get("enable_ncaa_softball", False):
+    if league_enabled(settings, "enable_ncaa_softball"):
         ncsbl_reg = NcaaSoftballRegularSource()
         sources.append(ncsbl_reg)
         try:
@@ -3049,7 +3052,7 @@ def _build_sources(settings: Dict[str, Any]):
     # `set_regular_season_strengths`. Without the seed, College Cup
     # samples fall back to the 1.5/1.5 league-average prior; with it,
     # the 20-game regular season informs scoring rates for each team.
-    if settings.get("enable_ncaa_mens_soccer", False):
+    if league_enabled(settings, "enable_ncaa_mens_soccer"):
         ncaa_msoc_reg = NcaaSoccerSource(gender="m")
         sources.append(ncaa_msoc_reg)
         ncaa_msoc_cup = NcaaSoccerCupSource(gender="m")
@@ -3060,7 +3063,7 @@ def _build_sources(settings: Dict[str, Any]):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ncaa_mens_soccer] could not seed cup strengths: %s", exc)
         sources.append(ncaa_msoc_cup)
-    if settings.get("enable_ncaa_womens_soccer", False):
+    if league_enabled(settings, "enable_ncaa_womens_soccer"):
         ncaa_wsoc_reg = NcaaSoccerSource(gender="w")
         sources.append(ncaa_wsoc_reg)
         ncaa_wsoc_cup = NcaaSoccerCupSource(gender="w")
@@ -3427,7 +3430,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # Monte Carlo importance. Queries cover the two playing teams'
         # outcome bands AND any in-league favorites' outcome bands
         # (so a non-favorite game that swings a favorite's relegation
-        # chance gets credit structurally). weight_importance=0
+        # chance gets credit structurally). An `importance=0` scoring weight
         # disables the per-game cost entirely. Catches any exception
         # so a flaky source can't take down the entire refresh.
         importance_pts: float = 0.0
@@ -3529,7 +3532,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # game should beat a 9.5-rated title-race contender for THIS user.
         # The favorite-weight bump alone wasn't enough: Man City still
         # dominated the top-5 because their stakes+rank pile was bigger
-        # than weight_favorite=6 could overcome. Adding favorite-match as
+        # than the default favorite weight (6) could overcome. Adding favorite-match as
         # a hard sort key guarantees slots 1..N_favorites belong to the
         # favorite-involved games whenever they exist in the bucket.
         game, signals, score = item
@@ -8652,6 +8655,83 @@ _ACTION_HANDLERS = {
 }
 
 
+def _read_settings_migrating() -> Optional[Dict[str, Any]]:
+    """The stored settings, with the merge #208 made written into them once.
+
+    Returns the (migrated) stored dict, or None when there is no config row or
+    Dispatcharr is not importable. Raises on a DB error; callers decide.
+
+    The runtime does not NEED the write: every reader resolves a merged
+    setting through merged_settings, which falls back to the legacy keys. The
+    MODAL does: it shows `value ?? field.default`, so without a stored value
+    for the new field it would show "Off" for a league a legacy toggle still
+    runs, and blank weights while the old tuned ones are in force. Doing it on
+    every raw read too means the scheduler and reaper always see the migrated
+    dict, which matters once a save has stored a new field at its default
+    (only the raw dict can tell that was saved; see merged_settings).
+
+    The write is a compare-and-swap on the whole settings JSON
+    (`.filter(settings=<what we read>).update(...)`): a user saving the form
+    between our read and our write makes the filter match nothing, so their
+    save is never overwritten; we then re-read and return their dict, and it
+    is migrated on the next read. Anything but a successful write returns
+    what is STORED, never an in-memory migration, so this path and run()
+    always resolve the same row. `.update()` skips signals, which is fine:
+    nothing listens to PluginConfig saves for settings.
+    """
+    try:
+        from apps.plugins.models import PluginConfig
+        from django.db import transaction
+    except ImportError:
+        return None  # not inside Dispatcharr (tests, offline tools)
+    pc = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
+    if pc is None:
+        return None
+    stored = pc.settings if isinstance(pc.settings, dict) else {}
+    migrated = merged_settings.migrate_stored_settings(stored)
+    if migrated is None:
+        return dict(stored)
+    try:
+        # A savepoint, so a failed write cannot poison a transaction the
+        # loader might be running discovery inside.
+        with transaction.atomic():
+            written = PluginConfig.objects.filter(
+                pk=pc.pk, settings=stored,
+            ).update(settings=migrated)
+    except Exception as e:  # noqa: BLE001
+        # Return what is STORED, not the in-memory migration: run() reads the
+        # stored dict too, and the two paths must resolve the same settings
+        # (a saved new key at its default reads differently before and after
+        # migration). The next read retries the write.
+        logger.warning("[ranked_matchups] could not save migrated settings: %s", e)
+        return dict(stored)
+    if written:
+        logger.info(
+            "[ranked_matchups] migrated saved settings to the merged layout "
+            "(#208): %s",
+            ", ".join(sorted(k for k in migrated if migrated.get(k) != stored.get(k))),
+        )
+        return migrated
+    # Lost the race: somebody saved in between. Their dict is the truth, so
+    # re-read it rather than hand back the snapshot they just replaced; it is
+    # migrated on the next read.
+    fresh = PluginConfig.objects.filter(pk=pc.pk).first()
+    if fresh is None or not isinstance(fresh.settings, dict):
+        return {}
+    return dict(fresh.settings)
+
+
+def _migrate_stored_settings() -> None:
+    """Discovery hook (Plugin.__init__): migrate before the plugins list is
+    served, so the modal opens on migrated settings. Never raises: a failed
+    migration leaves the legacy fallback in charge, which behaves identically,
+    so it is logged and retried on the next discovery."""
+    try:
+        _read_settings_migrating()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ranked_matchups] could not migrate saved settings: %s", e)
+
+
 class Plugin:
     name = "Ranked Matchups (Top Games)"
     # The version the loader DISPLAYS: it prefers this class attr over
@@ -8701,6 +8781,11 @@ class Plugin:
         # fire a schedule or a handoff from inside a run.
         if os.environ.get(tasks.PIPELINE_CHILD_ENV) == "1":
             return
+        # Before the scheduler's early return for the same reason as the
+        # reaper: that return is the COMMON path, so anything after it would
+        # only run on a cold worker. Discovery runs before the plugins list is
+        # served, so the modal loads already-migrated settings.
+        _migrate_stored_settings()
         self._start_reaper()
         if reg.thread is not None and reg.thread.is_alive():
             return
@@ -8734,11 +8819,10 @@ class Plugin:
         logger.info("[ranked_matchups] reaper thread started (pid=%s)", os.getpid())
 
     def get_current_settings(self) -> Dict[str, Any]:
+        """The raw stored settings (no manifest defaults merged in), migrated
+        to the #208 layout on the way through; see _read_settings_migrating."""
         try:
-            from apps.plugins.models import PluginConfig
-            pc = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
-            if pc and pc.settings:
-                return dict(pc.settings)
+            return _read_settings_migrating() or {}
         except Exception as e:
             logger.warning("[ranked_matchups] could not read settings from DB: %s", e)
         return {}
