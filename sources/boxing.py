@@ -46,7 +46,8 @@ from typing import Any, List, Optional, Pattern
 
 import requests
 
-from .base import GameRow, SportSource
+from ._espn import upcoming_window
+from .base import GameRow, SportSource, report_lost_day_range
 from .._util import FIELD_AWAY_SENTINEL, field_event_extra, http_get_json, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.boxing")
@@ -142,23 +143,33 @@ class BoxingSource(SportSource):
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Pull upcoming boxing cards in the next `days_ahead` days (clamped to
         the free-tier cap). Empty list on any error or when nothing is
-        scheduled; the caller does not filter by date."""
+        scheduled; the caller does not filter by date.
+
+        A failed request (no JSON object back, or an in-band `error`) is
+        reported as losing every day it asked for, today-UTC through `days`
+        after it (#261, `base.report_lost_day_range`), so the refresh keeps
+        the cards it had published for them instead of reading a quiet week.
+        """
         if not self.api_key:
             logger.warning("[boxing] no Boxing Data API key; skipping")
             return []
         days = max(1, min(days_ahead, _FREE_TIER_MAX_DAYS))
+        # Read BEFORE the request: a call failing across UTC midnight
+        # covered the days from the date it was sent on.
+        window = upcoming_window(days)
         params = {"days": days, "date_sort": "ASC", "page_size": 25}
         data = self._http_get(_SCHEDULE_URL, params=params)
-        if not isinstance(data, dict):
-            return []
-        err = data.get("error")
+        events = data.get("data") if isinstance(data, dict) else None
+        err = (data.get("error") if isinstance(data, dict) else None) or (
+            None if isinstance(events, list) else "no data list in the response")
         if err:
             # DateOutOfRange (or any subscription error) comes back in-band with
             # HTTP 200 and an empty data list. Log and yield nothing rather than
             # raising: a source that can't fetch should be a no-op, not a crash.
+            # No answer for those days all the same, so they are reported.
             logger.warning("[boxing] API error: %s", err)
+            report_lost_day_range(window.today, window.last_day)
             return []
-        events = data.get("data") or []
         out: List[GameRow] = []
         for ev in events:
             row = self._to_row(ev)

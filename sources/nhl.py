@@ -123,10 +123,13 @@ def _upcoming_schedule_games(days_ahead: int) -> List[Dict[str, Any]]:
     day = window.first_day
     while day <= window.last_day:
         data = _http_get(f"{NHL_API_BASE}/schedule/{day.isoformat()}")
-        if not data:
+        if not (isinstance(data, dict) and isinstance(data.get("gameWeek"), list)):
             # A lost day, not a quiet one: the refresh holds the games it
-            # had published for it (#261, see base.report_lost_days).
+            # had published for it (#261, see base.report_lost_days). Every
+            # answer carries `gameWeek`, a quiet July day included (measured
+            # 2026-10-11), so a body without one (an error object) failed.
             report_lost_days([day])
+            data = None
         weeks: Dict[date, List[Dict[str, Any]]] = {}
         for week in (data or {}).get("gameWeek", []) or []:
             week_day = _parse_week_date(week.get("date"))
