@@ -352,9 +352,14 @@ def record_skipped_run(kind: str, reason: Optional[str] = None) -> None:
 # "reap" never reach last_run.json (they do not run through _run_under_lock);
 # they are here because they also take the run lock, and the lock's holder
 # record (#239) is described with these names.
+# The kind a scheduled slot's run records and holds the lock under. Read back
+# by name (plugin._scheduler_staleness treats a lock held by one as a busy
+# scheduler), so it is one constant, not a literal at each end.
+SCHEDULED_RUN_KIND = "scheduled_auto_pipeline"
+
 RUN_KIND_LABELS = {
     "auto_pipeline": "Refresh + apply",
-    "scheduled_auto_pipeline": "Scheduled refresh + apply",
+    SCHEDULED_RUN_KIND: "Scheduled refresh + apply",
     "m3u_rematch": "Refresh + apply after an M3U update",
     "refresh": "Refresh",
     "apply": "Apply",
@@ -589,7 +594,7 @@ def run_scheduled_pipeline(settings: Dict[str, Any], *, record_skip: bool = True
     The kind/task_id mark this as a scheduled run so show_status can tell it
     apart from an HTTP-queued one. Returns _run_under_lock's ran flag."""
     return _run_under_lock(
-        "scheduled_auto_pipeline",
+        SCHEDULED_RUN_KIND,
         f"scheduler-{os.getpid()}",
         partial(run_pipeline_subprocess, ACTION_AUTO_PIPELINE),
         settings,

@@ -36,7 +36,11 @@ REPO_ROOT = os.path.dirname(TESTS_DIR)
 # Every file the plugin writes next to its own code, as (module, attribute).
 # Each is redirected into the scenario's temp dir. Anything missed here lands
 # in the repo checkout, which the before/after snapshot in main() turns into a
-# failure rather than a stray or silently overwritten file.
+# failure rather than a stray or silently overwritten file. The snapshot sees
+# WRITES only: a missed file the checkout already holds is READ instead, and
+# passes. numbering_state.json (#219) was missed that way, so this harness
+# failed on a clean checkout and passed beside a stale copy whose floor
+# matched, which apply then did not rewrite.
 _REDIRECTED_PATHS = (
     ("plugin", "CACHE_PATH"),
     ("plugin", "RECORDING_STATE_PATH"),
@@ -44,6 +48,7 @@ _REDIRECTED_PATHS = (
     ("plugin", "LLM_DESCRIPTIONS_CACHE_PATH"),
     ("plugin", "SPORTSDB_THUMB_CACHE_PATH"),
     ("plugin", "GAMETHUMBS_CACHE_PATH"),
+    ("plugin", "NUMBERING_STATE_PATH"),
     ("sources._odds", "CACHE_PATH"),
     ("tasks", "LAST_RUN_PATH"),
 )

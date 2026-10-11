@@ -335,6 +335,9 @@ class TestKindsHaveLabels:
         kinds = set(re.findall(r'_try_acquire_scheduler_lock\(\s*"(\w+)"', src))
         kinds |= set(re.findall(r'_run_under_lock,\s*args=\(\s*"(\w+)"', src))
         kinds |= set(re.findall(r'_run_under_lock\(\s*"(\w+)"', src))
+        # The scheduled kind is passed as its constant (it is read back by name).
+        if re.search(r'_run_under_lock\(\s*SCHEDULED_RUN_KIND\b', src):
+            kinds.add(tasks_mod.SCHEDULED_RUN_KIND)
         assert {"apply", "reap", "auto_pipeline", "refresh",
                 "scheduled_auto_pipeline", "m3u_rematch"} <= kinds, kinds  # the scan works
         assert kinds <= set(tasks_mod.RUN_KIND_LABELS), kinds - set(tasks_mod.RUN_KIND_LABELS)

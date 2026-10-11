@@ -355,7 +355,8 @@ has that asymmetry.
 ### Two daemon threads, not one
 
 `Plugin.__init__` starts BOTH a scheduler (periodic refresh+apply) and a
-reaper (removes finished games between refreshes, #196). They have SEPARATE
+reaper (removes finished games between refreshes, #196), in uwsgi workers only
+(#252, see "The plugin is LOADED in more processes" below). They have SEPARATE
 reload-stable registries and must both be torn down in `stop()`.
 
 The reaper loop does triple duty: besides reaping it runs the live handoff
@@ -450,9 +451,20 @@ runs on a cold worker, so the reaper shipped inert on upgrade until it was
 moved above the return. Any future third thread has the same hazard.
 
 `stop()` uses `_clear_if_exited`, which only nulls a registry slot whose
-thread actually died. Clearing a slot whose thread is still alive (the reaper
-can be parked on a subprocess well past the 5s join) makes the next
-`__init__` spawn a duplicate.
+thread actually died, so a second `stop()` still finds and joins a thread that
+outlived the 5s join (a scheduled pipeline or a reap runs for minutes). But
+`__init__` asks `_thread_running`, which counts only a thread that is alive AND
+not signaled: the reload endpoint calls `stop()` and then rebuilds the Plugin in
+the same worker, and keeping a signaled mid-run thread as "the" scheduler left
+that worker with none once it finished (#252; since only uwsgi workers run
+threads, a single-worker install then had no scheduler anywhere). The signaled
+thread finishes the work in hand and exits without firing another slot, so the
+replacement overlaps it harmlessly (each run takes the run lock). Replacement
+is BOUNDED (`_may_start`, `_MAX_RETIRING_THREADS = 2` per registry): a signaled
+thread that never finishes (a reaper blocked on a row lock holds a DB
+connection) must not be replaced on every reload, which would be the #82
+connection leak with a new trigger. Past the bound the worker logs a WARNING
+and starts no replacement until one exits.
 
 **Settings read before a sleep are not settings** (#223). `_scheduler_loop`
 reads settings at the top of the loop to work out WHEN to fire, then sleeps
@@ -514,21 +526,86 @@ rematch). Two properties are load-bearing:
   #239. `apply` and `reap` have `RUN_KIND_LABELS` entries for this description
   only; they never reach `last_run.json`'s `kind`.
 
-**The plugin runs in more processes than the uwsgi workers.** Measured on
-Tower 2026-10-10/11 (Dispatcharr's `celery.py` runs plugin discovery in
-`worker_process_init`, i.e. in every Celery prefork child and thread worker):
-daphne (pid 415) and Celery pool children (pids 422501, 533697) each run their
-own scheduler and reaper, and they take part in every scheduled slot. Two
-consequences. The plugin reload restarts threads only in the uwsgi worker that
-serves it, so the other processes keep the code they loaded until they exit or
-the container restarts. And **the plugin's INFO lines from a Celery process do
-not reach the container log** while its WARNING lines do (measured, mechanism
-not pinned down): pid 533697 claimed and ran the whole 10:00 slot on
-2026-10-11 and left no log line at all, only its `last_run.json` record. A
-Celery-side copy that wins a slot therefore leaves every visible copy logging
-"lock unavailable" with no visible winner, which is the most likely explanation
-of the 16:00 wait #239 was filed for (see the issue). The holder record above
-is what names such a holder now.
+**The plugin is LOADED in more processes than the uwsgi workers, and only the
+workers run its threads (#252).** Every process whose Django start runs plugin
+discovery builds a `Plugin`: Dispatcharr's `celery.py` discovers in
+`worker_process_init` (every Celery prefork child and the thread worker), daphne
+at Django start, and so does any `django.setup()` exec. Before #252 each of
+those started its own scheduler and reaper (measured on Tower 2026-10-10/11:
+daphne pid 415 and Celery pool children 422501 and 533697 took part in every
+scheduled slot, and 533697 ran the whole 10:00 slot on 2026-10-11), on code the
+plugin reload never reaches. Now `Plugin.__init__` asks `_thread_host()`:
+
+- **uwsgi worker** (`import uwsgi` works and `uwsgi.worker_id() > 0`): start
+  both. The `uwsgi` module is built into the uwsgi binary; the venv python that
+  runs Celery, daphne and `manage.py` has none (measured: pip's uWSGI ships
+  only `uwsgidecorators.py`). DO NOT detect by environment: uwsgi exports
+  `UWSGI_ORIGINAL_PROC_NAME` and `UWSGI_RELOADS` to its attach-daemons, so
+  Celery and daphne carry them and the workers do not (`/proc/<pid>/environ`,
+  measured).
+- **`celery`, `daphne` (also `python -m celery`), `manage.py <anything but
+  runserver>`**: start neither, and log one INFO line saying so.
+- **gunicorn, `manage.py runserver`**: start both (other ways to serve the app).
+- **Anything else** (uwsgi with worker id 0, an unknown program, a probe script
+  calling `django.setup()`): START both and log a WARNING (once per process).
+  A wrong "no" means no
+  scheduler anywhere; an extra copy is what every process did before, and the
+  slot claim makes it harmless. DO NOT invert this default. A probe that must
+  stay threadless sets `RANKED_MATCHUPS_PIPELINE_CHILD=1`
+  (`tasks.PIPELINE_CHILD_ENV`), which also skips the settings migration.
+
+Settings migration still runs in every process (the pipeline child excepted);
+only the threads are gated.
+
+**No scheduler anywhere is made visible** (`_scheduler_staleness`). The slot
+claim every firing scheduler makes doubles as a heartbeat: if the most recent
+slot that should have fired, allowing `_SCHEDULER_STALE_GRACE_SECONDS` (15 min),
+has no claim key, no process ran its scheduler then. Show current state ends
+with that WARNING (after the run verdict, because "Last run OK" is true and
+still the wrong answer), and `_warn_if_scheduler_stale` logs it once per missed
+slot per process from every reaper tick and from `Plugin.__init__` in the
+processes that start no threads (Celery children start throughout the day and
+their WARNING lines do reach the log, so they still report it when every uwsgi
+copy is gone). NOT from `__init__` in a uwsgi worker: discovery runs there on
+every plugins-list fetch, and that is no place for Redis round trips. A Redis watch key (`..:scheduler:watch`, `{sig, since}`)
+records when the check started expecting claims for the current schedule
+(auto-refresh on/off, parsed times, resolved zone), so a fresh install, a Redis
+restart, or turning the schedule on or changing it never counts earlier slots.
+The signature is built from RESOLVED values because the reaper reads the raw
+stored dict and Show current state the merged one. Claim keys now live 48 h, not
+24 h: with one daily time the newest due slot can be 24 h + grace old, and an
+expired claim would read as "nobody ran it". Redis unreachable means unknown,
+never stale, and so does a run lock held by a SCHEDULED run
+(`scheduled_auto_pipeline` in the holder record): the scheduler can be inside
+an earlier slot's pipeline when the next one comes due (one worker, close
+times), which is busy, not missing. Any other holder (a manual run, a reap, a
+pre-#239 bare token) does not suppress it, or clicking Refresh would hide a
+dead scheduler. Known blind spots, by design: the first slot after
+the watch (re)starts is never judged (a Redis restart, which Dispatcharr's
+non-persistent Redis has on every container restart, delays the warning by one
+slot), and a claim proves a scheduler WOKE for the slot, not that the run
+succeeded (the run verdict and the skipped-run note cover that). Missing `scheduled_times` falls back to `_DEFAULT_SCHEDULED_TIMES`
+(the manifest default, pinned by a test) everywhere; the scheduler used to fall
+back to `"0400"` while the modal showed four times.
+
+**Why the Celery copies were silent.** Dispatcharr starts the aio image's
+Celery workers without `-l` (`docker/uwsgi.ini` attach-daemons), so the CLI's
+`--loglevel` default of WARNING reaches the ROOT logger (Celery 5.6's
+`setup_logging_subsystem` sets root to the worker's level when no
+`setup_logging` receiver exists, and Dispatcharr connects none). That is the
+mechanism the source shows; the measurements below fit it. `worker_log_level` in Dispatcharr's
+`celery.py` is not a Celery setting and changes nothing. Loggers under `apps.*`
+carry their own INFO level in `settings.LOGGING`, so they show; this plugin's
+`plugins.*` loggers inherit root and do not. Measured on Tower 2026-10-11: no
+`Memory usage after <task>` line (`dispatcharr.celery`, INFO, root-propagated)
+in 48 h of M3U refreshes, no `ranked_matchups ... thread started` line from any
+prefork pid, while `apps.plugins.m3u_watchdog` start lines from the SAME pids
+appear. The modular image's `entrypoint.celery.sh` passes `-l info`, so there
+Celery INFO is visible. With the threads gone from Celery, nothing of this
+plugin that matters runs there any more, so the loggers keep their
+`plugins.<key>` names (renaming ~30 loggers would change every line Jake and
+the skills grep for, for no remaining benefit). The upstream fix is `-l
+$(DISPATCHARR_LOG_LEVEL)` on the attach-daemons.
 
 ### cache.json has TWO lists: `games` and `bench`
 
@@ -938,10 +1015,12 @@ docker exec dispatcharr git -C /data/plugins/dispatcharr_ranked_matchups pull
 # or rsync from your dev box → /data/plugins/ in the container
 ```
 
-Smoke-test refresh:
+Smoke-test refresh (the `-e` keeps this exec from starting a scheduler and
+reaper of its own: `python -c` is a process `_thread_host` cannot place, so it
+would otherwise start both, with a WARNING):
 
 ```bash
-docker exec dispatcharr python -c "
+docker exec -e RANKED_MATCHUPS_PIPELINE_CHILD=1 dispatcharr python -c "
 import django, os, sys
 sys.path.insert(0, '/app')
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dispatcharr.settings')
@@ -1053,6 +1132,11 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   apply that started after the slot finishes OK while it waits. Scheduler clock
   maths is DST-safe, and the
   pipeline subprocess starts no scheduler or reaper of its own
+- Only the uwsgi workers run the scheduler and reaper (#252): Celery, daphne
+  and `manage.py` processes load the plugin but start neither, and a process
+  that cannot be placed starts both with a WARNING rather than risk none
+  running. When no scheduler claimed the latest due slot, Show current state
+  ends with a WARNING and the log says so once per missed slot
 - Every run takes the cross-worker run lock and refuses to start without it,
   a plain refresh included (#199), and the lock names its holder (#239) in the
   log, the busy toast, the skipped-run note and Show current state
