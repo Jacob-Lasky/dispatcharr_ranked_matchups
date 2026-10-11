@@ -590,19 +590,25 @@ folder (cache.json with it) on every upgrade. So apply stamps the cache row
 each channel was published from on its LIVE ProgramData entry
 (`custom_properties["ranked_matchups_row"]`, `_published_row_stamp`; the
 XMLTV writer reads only its own keys from that dict), and when the cache is
-not vouched `_prior_games` adds the rows `_published_rows` reads back (a stamp
-counts only when its marker equals its channel's tvg_id; the archive channel
-is skipped). A vouched cache is used alone, as before. Channels with no usable
-stamp are counted, and `_slate_known` vouches an outage-free result only
-when that count is 0, because a healthy ncaaf.py fetch still omits a game
-that has kicked off. For those unstamped channels (published before the
-stamp existed, i.e. the first refresh after upgrading to it) apply has a
-fallback: on a slate it cannot vouch for, a stale channel whose own guide
-shows a current Live or Past entry (`_stale_on_air_ids`, `_is_upcoming_title`)
-is kept like one kept for a recording (`keep_ids` in
-`_partition_stale_for_recordings`, number reserved and restored), and the
-slate stays unvouched until it goes. DO NOT count the Upcoming entry as on
-air: a game that left the slate for real would then stay until it ended.
+not vouched `_prior_games` adds the rows `_published_rows` reads back
+(`_published_guide`: only entries whose ProgramData.tvg_id is the channel's
+own marker, and a stamp only when its row builds that marker). A vouched
+cache is used alone, as before. A DB error there fails the refresh on
+purpose. For channels with no usable stamp (published before the stamp
+existed: the first refresh after upgrading to it) apply has a fallback: on a
+slate it cannot vouch for, a stale channel is kept by its own guide
+(`_kept_by_guide`: a current Live or Past entry for any channel, any entry
+not yet ended for an UNSTAMPED one), like one kept for a recording
+(`keep_ids` in `_partition_stale_for_recordings`, number reserved and
+restored), and the slate stays unvouched until it goes. The set
+(`guide_kept_ids`) is read BEFORE apply's group-rename cleanup, which leaves
+a kept channel's old guide entries for a later apply. `_published_rows`
+counts the channels that fallback would keep, and `_slate_known` vouches an
+outage-free result only when that count is 0 (a healthy ncaaf.py fetch still
+omits a game that has kicked off, and a vouched slate turns the fallback
+off). DO NOT keep a STAMPED channel that is not on air: the refresh had its
+row and dropped it on purpose, and keeping it would freeze cap-dropped games
+until they end, with the unvouched state.
 
 **Reaping delegates deletion to `_action_apply` on purpose.** Apply already
 reaps owned channels missing from the cache, with DVR-recording protection,

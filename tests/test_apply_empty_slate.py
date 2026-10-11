@@ -402,7 +402,7 @@ def scenario_outage_after_the_cache_was_lost_removes_nothing(env):
         assert env.plugin._action_refresh(_settings())["status"] == "ok"
     assert _read_cache(env)["empty_slate_known"] is False  # one channel unaccounted
     result = env.plugin._action_apply(_settings())
-    assert "Kept on air (not in the cache): 1" in result["message"], result
+    assert "Kept until their guide ends (not in the cache): 1" in result["message"], result
     assert "ranked_matchups:CFB:401" in _owned(env)
 
     _end_guide(env, "ranked_matchups:CFB:401")
@@ -748,16 +748,20 @@ def scenario_a_lost_cache_holds_a_failed_sources_upcoming_game(env):
 
 def scenario_a_lost_cache_does_not_freeze_a_healthy_sources_upcoming_game(env):
     """Guard: the DB record is held by the same rule as the cache. A game that
-    has not started, from a source that answered and no longer lists it, goes."""
+    has not started, from a source that answered and no longer lists it, goes.
+    The off-season source keeps the slate unvouched, so apply's fallback runs
+    too, and must not keep a STAMPED channel the refresh judged."""
     user_ch, _ = _seed_source_channel(env)
     _publish(env, [_row(401, _now() + timedelta(hours=3), user_ch.id)])
     os.remove(env.plugin.CACHE_PATH)
     later = _game_row("Texas", "Oklahoma", _now() + timedelta(days=1), cfbd_id=777)
 
-    with _sources(env, _StubSource([later])):
+    with _sources(env, _StubSource([later]), _off_season_source()):
         assert env.plugin._action_refresh(_settings())["status"] == "ok"
-    assert env.plugin._action_apply(_settings())["status"] == "ok"
+    assert _read_cache(env)["empty_slate_known"] is False
+    result = env.plugin._action_apply(_settings())
 
+    assert "Kept until their guide ends" not in result["message"], result
     assert "ranked_matchups:CFB:401" not in _owned(env)
 
 
@@ -781,7 +785,7 @@ def scenario_a_live_channel_published_before_the_stamp_is_kept_while_on_air(env)
     result = env.plugin._action_apply(_settings())
 
     assert result["status"] == "ok", result
-    assert "Kept on air (not in the cache): 1" in result["message"], result
+    assert "Kept until their guide ends (not in the cache): 1" in result["message"], result
     assert "slate_vouched" not in result, result
     assert "ranked_matchups:CFB:401" in _owned(env), "the live CFB channel was deleted"
 
@@ -791,22 +795,77 @@ def scenario_a_live_channel_published_before_the_stamp_is_kept_while_on_air(env)
     assert "ranked_matchups:CFB:401" not in _owned(env)
 
 
-def scenario_an_unstamped_channel_that_has_not_started_is_not_kept(env):
-    """Guard for the fallback's limit: an Upcoming guide entry is not "on
-    air". Keeping it would hold a game that left the slate for real until it
-    ended, and the unvouched state with it."""
+def scenario_an_unstamped_failed_sources_upcoming_channel_is_kept_until_its_guide_ends(env):
+    """WITNESS: the first refresh after upgrading to the stamping release, CFB
+    failing two hours before kickoff, NFL answering. The refresh has no row
+    for the CFB game (no stamp), so it is the #240 outage case with nothing
+    to hold it; apply keeps the channel by its own guide instead, and lets it
+    go once that guide has run out."""
     user_ch, _ = _seed_source_channel(env)
-    _publish(env, [_row(401, _now() + timedelta(hours=3), user_ch.id)])
+    _publish(env, [_row(401, _now() + timedelta(hours=2), user_ch.id)])
     _strip_stamps(env)
     os.remove(env.plugin.CACHE_PATH)
 
-    with _sources(env, _StubSource([_game_row("Texas", "Oklahoma", _now() + timedelta(days=1))])):
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
         assert env.plugin._action_refresh(_settings())["status"] == "ok"
     result = env.plugin._action_apply(_settings())
 
-    assert result["status"] == "ok", result
-    assert "Kept on air" not in result["message"], result
+    assert "Kept until their guide ends (not in the cache): 1" in result["message"], result
+    assert "ranked_matchups:CFB:401" in _owned(env)
+
+    _end_guide(env, "ranked_matchups:CFB:401")
+    result = env.plugin._action_apply(_settings())
     assert "ranked_matchups:CFB:401" not in _owned(env)
+    assert result.get("slate_vouched") is True, result
+
+
+def scenario_a_channel_on_someone_elses_guide_is_not_kept(env):
+    """The fallback reads only the entries apply wrote for the channel. A
+    plugin channel a user pointed at an ordinary EPG feed (always something
+    current on it) must not read as a game on air, or it would be kept, and
+    the slate left unvouched, for as long as the feed runs."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() + timedelta(hours=3), user_ch.id)])
+    feed = m.EPGSource.objects.create(name="Provider", source_type="xmltv")
+    espn = m.EPGData.objects.create(epg_source=feed, tvg_id="espn.us", name="ESPN")
+    m.ProgramData.objects.create(epg=espn, tvg_id="espn.us", title="SportsCenter",
+                                 start_time=_now() - timedelta(hours=1),
+                                 end_time=_now() + timedelta(hours=1))
+    m.Channel.objects.filter(pk=owned["ranked_matchups:CFB:401"].pk).update(epg_data_id=espn.id)
+    os.remove(env.plugin.CACHE_PATH)
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    result = env.plugin._action_apply(_settings())
+
+    assert "Kept until their guide ends" not in result["message"], result
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
+def scenario_a_kept_channel_survives_a_group_rename(env):
+    """Apply's rename cleanup deletes the old group's EPG source, guide entries
+    and all. Read after it, an unstamped live channel's guide was gone and the
+    channel was reaped mid-game; the keep is read before the cleanup, and the
+    cleanup leaves the kept channel's guide for a later apply."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    _strip_stamps(env)
+    os.remove(env.plugin.CACHE_PATH)
+    renamed = _settings(channel_profile_name="Top Games")
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
+        assert env.plugin._action_refresh(renamed)["status"] == "ok"
+    result = env.plugin._action_apply(renamed)
+
+    assert result["status"] == "ok", result
+    live = m.Channel.objects.filter(tvg_id="ranked_matchups:CFB:401")
+    assert [c.channel_group.name for c in live] == ["Top Games"], result
+    assert m.ProgramData.objects.filter(tvg_id="ranked_matchups:CFB:401").exists()
 
 
 def scenario_a_healthy_empty_refresh_keeps_an_unstamped_live_channel(env):
@@ -853,7 +912,8 @@ def scenario_a_stamp_that_names_another_game_is_not_read(env):
 
 def scenario_a_lost_cache_reads_nothing_from_the_archive_channel(env):
     """The recordings archive is ours but is never a published game: it must
-    neither be held nor count as a channel the hold could not see."""
+    neither be held nor count as a channel the hold could not see, or it
+    would keep every outage-free empty result unvouched for good."""
     env.plugin._ensure_archive_channel("Matchups Recordings")
 
     rows, unaccounted = env.plugin._published_rows()
@@ -982,3 +1042,31 @@ def test_read_cache_keeps_a_damaged_stamped_file_for_show_state(plugin, tmp_path
     cache = plugin._read_cache()
     assert cache["summary"] == ["NCAA Football: error (HTTP 525)"]
     assert cache["refreshed_at"] == "2026-10-11T12:00:00+00:00"
+
+
+class TestKeptByGuide:
+    """The fallback's rule, pure (#264). Literal titles, as apply writes them."""
+
+    NOW = datetime(2026, 10, 11, 20, 0, tzinfo=timezone.utc)
+
+    def _p(self, start_h, end_h, title):
+        return (self.NOW + timedelta(hours=start_h), self.NOW + timedelta(hours=end_h), title)
+
+    def test_live_entry_keeps_even_a_stamped_channel(self, plugin):
+        assert plugin._kept_by_guide({"x": 1}, [self._p(-1, 2, "Alabama vs Georgia ᴸᶦᵛᵉ")], self.NOW)
+
+    def test_past_entry_is_still_on_air(self, plugin):
+        assert plugin._kept_by_guide({"x": 1}, [self._p(-1, 1, "Past: Alabama vs Georgia")], self.NOW)
+
+    def test_upcoming_entry_keeps_only_an_unstamped_channel(self, plugin):
+        up = [self._p(-2, 1, "Upcoming: Alabama vs Georgia, Sat 7:30 PM"),
+              self._p(1, 4, "Alabama vs Georgia ᴸᶦᵛᵉ")]
+        assert plugin._kept_by_guide(None, up, self.NOW) is True
+        assert plugin._kept_by_guide({"x": 1}, up, self.NOW) is False
+
+    def test_recording_dot_upcoming_is_still_upcoming(self, plugin):
+        up = [self._p(-2, 1, "🔴 Upcoming: Alabama vs Georgia")]
+        assert plugin._kept_by_guide({"x": 1}, up, self.NOW) is False
+
+    def test_nothing_left_keeps_nothing(self, plugin):
+        assert plugin._kept_by_guide(None, [], self.NOW) is False
