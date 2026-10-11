@@ -50,7 +50,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .base import GameRow
-from .bracket import BestOfNSeriesSource
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
 from ._espn import fetch_days
@@ -376,7 +376,7 @@ class NbaRegularSource(PointsBasedSportSource):
 # =====================================================================
 
 
-class NbaPlayoffSource(BestOfNSeriesSource):
+class NbaPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """NBA playoffs as a best-of-7 BestOfNSeriesSource. Same shape as
     NhlPlayoffSource: 4 rounds, uniform SERIES_LENGTH=7, conference-
     bracket structure where R1 has 8 series total (4 East + 4 West),

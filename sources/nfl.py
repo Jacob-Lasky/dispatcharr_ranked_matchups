@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .base import GameRow
-from .bracket import BestOfNSeriesSource
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
 from ._espn import fetch_days
@@ -301,7 +301,7 @@ class NflRegularSource(PointsBasedSportSource):
 # =====================================================================
 
 
-class NflPlayoffSource(BestOfNSeriesSource):
+class NflPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """NFL playoffs as single-game-elim BestOfNSeriesSource (same shape
     as March Madness, just with 4 rounds instead of 6).
 

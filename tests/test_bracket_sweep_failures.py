@@ -462,8 +462,7 @@ def _mls_event(eid, home, away, start, slug):
 def test_a_game_on_the_failed_day_gets_its_importance_after_the_retry(monkeypatch):
     """The importance half, measured: MLS Cup is on the day that failed at
     fetch. Cached, the bracket had no final and the game scored no stakes;
-    retried at scoring it decides the Cup. (MLS Cup, not NBA: the NBA, NFL,
-    WNBA and NCAAW playoff sources have no sample_result.)"""
+    retried at scoring it decides the Cup."""
     import random
     from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, compute_match_importance
     start = datetime.now(UTC) + timedelta(days=1)

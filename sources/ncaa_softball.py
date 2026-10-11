@@ -39,20 +39,18 @@ because EPG entries use the school name.
 from __future__ import annotations
 
 import logging
-import random
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult
-from .bracket import BestOfNSeriesSource, DoubleEliminationSource
+from .base import GameRow
+from .bracket import BestOfNSeriesSource, DoubleEliminationSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import (
     extract_game_number_after_marker,
     parse_iso_utc,
-    poisson_sample as _poisson,
 )
 from ._espn import fetch_days
 
@@ -337,7 +335,7 @@ def _parse_softball_playoff_headline(headline: str) -> Tuple[Optional[str], Opti
     return None, None
 
 
-class _SoftballPlayoffStrengthsMixin:
+class _SoftballPlayoffStrengthsMixin(ForcedWinnerPoissonSampler):
     """Shared per-team Poisson strength tracking + sample_result for the
     two NCAA Softball playoff source classes (Super Regional + WCWS Finals
     via BestOfNSeriesSource; Regional + 8-team WCWS bracket via
@@ -369,27 +367,6 @@ class _SoftballPlayoffStrengthsMixin:
             "pf_per_game": _DEFAULT_RUNS_FOR,
             "pa_per_game": _DEFAULT_RUNS_AGAINST,
         }
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        del state
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.1, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.1, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_runs = _poisson(lam_home, rng)
-        away_runs = _poisson(lam_away, rng)
-        if home_runs == away_runs:
-            if rng.random() < 0.5:
-                home_runs += 1
-            else:
-                away_runs += 1
-        return MatchResult(home_goals=home_runs, away_goals=away_runs)
 
 
 class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSource):

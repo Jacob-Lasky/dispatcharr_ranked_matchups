@@ -52,15 +52,14 @@ viewership of any D1 soccer game by an order of magnitude.
 from __future__ import annotations
 
 import logging
-import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import GameRow, MatchResult
-from .bracket import BestOfNSeriesSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .base import GameRow
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
+from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_soccer_cup")
 
@@ -136,7 +135,7 @@ def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
     return (team_obj.get("name") or team_obj.get("abbreviation") or "").strip()
 
 
-class NcaaSoccerCupSource(BestOfNSeriesSource):
+class NcaaSoccerCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """NCAA D1 soccer College Cup bracket, parametrized on gender.
 
     Six single-game elim rounds (R64 → R32 → S16 → E8 → F4 → NCG).
@@ -152,6 +151,8 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
     KO_STAGES = ("R64", "R32", "S16", "E8", "F4", "NCG")
     SERIES_LENGTH = 1
     supports_importance = True
+    # Goals, not points: see ForcedWinnerPoissonSampler.LAMBDA_FLOOR.
+    LAMBDA_FLOOR = 0.05
 
     def __init__(
         self,
@@ -234,40 +235,6 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
             "pf_per_game": _DEFAULT_GOALS_FOR,
             "pa_per_game": _DEFAULT_GOALS_AGAINST,
         }
-
-    # ---------- sample_result (force a winner: bracket games) ----------
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        """Bracket games CANNOT end in a draw: NCAA postseason soccer
-        goes to OT then PKs if needed. Sample Poisson goals; on a tied
-        regulation result, coin-flip the +1 boost so the bracket
-        cascade gets a clean winner. Distinct from NcaaSoccerSource
-        regular-season sample_result which allows draws (1 standings
-        point each): bracket scenarios have no draw outcome at all.
-        """
-        del state  # interface-required, per-game classification only
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.05, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.05, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_goals = _poisson(lam_home, rng)
-        away_goals = _poisson(lam_away, rng)
-        if home_goals == away_goals:
-            # OT / PKs in real life; coin-flip the +1 here. Strength
-            # asymmetry already biased the Poisson means: no further
-            # bias added (PK shootouts are roughly coin-flips empirically
-            # at the NCAA level).
-            if rng.random() < 0.5:
-                home_goals += 1
-            else:
-                away_goals += 1
-        return MatchResult(home_goals=home_goals, away_goals=away_goals)
 
     # ---------- fetch_upcoming (EPG display side) ----------
 

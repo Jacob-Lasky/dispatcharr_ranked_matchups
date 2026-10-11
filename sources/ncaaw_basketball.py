@@ -36,7 +36,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .base import GameRow
-from .bracket import BestOfNSeriesSource
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
 from ._espn import fetch_days
@@ -328,7 +328,7 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
 # =====================================================================
 
 
-class NcaawBasketballPlayoffSource(BestOfNSeriesSource):
+class NcaawBasketballPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """NCAA Women's March Madness as a single-game-elim
     BestOfNSeriesSource with SERIES_LENGTH=1 per stage.
 

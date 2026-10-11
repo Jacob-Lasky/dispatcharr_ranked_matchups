@@ -60,7 +60,8 @@ from abc import abstractmethod
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .base import GameRow, SportSource
+from .base import GameRow, MatchResult, SportSource
+from .._util import poisson_sample
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.bracket")
 
@@ -74,6 +75,51 @@ def _game_index(extra: Dict[str, Any]) -> Any:
     not a leg number; see place_upcoming), else `matchday` as before."""
     idx = extra.get("bracket_game_index")
     return idx if isinstance(idx, int) else extra.get("matchday", 1)
+
+
+class ForcedWinnerPoissonSampler:
+    """`sample_result` for a playoff game that cannot end level: Poisson
+    points (goals, runs) for each side from the two teams' strengths, and a
+    tied regulation result resolved by a coin-flipped +1 (overtime, extra
+    innings, a shootout or penalties). Strength asymmetry already biased the
+    means, so the tiebreak adds none. The ONE copy of this model for every
+    playoff source (#249): MLB, NHL, NBA, NFL, WNBA, NCAAW, NCAA baseball,
+    softball and soccer cups, MLS Cup. The regular-season sampler in
+    points_based.py is the same model on purpose.
+
+    DO NOT swap in a sport's regular-season sampler (MLS, NCAA soccer and
+    NHL regular season allow draws or award OT points): a bracket cascade
+    needs every game to have a winner.
+
+    The class needs `_strength_for(strengths, team)` returning
+    `{"pf_per_game", "pa_per_game"}`. Put it BEFORE the bracket base in the
+    bases, or SportSource's NotImplementedError sample_result wins the MRO.
+    """
+
+    # Lowest scoring rate a side is sampled at. Soccer sides set 0.05: a
+    # 0.1 floor would lift two blanking defences' expected goals noticeably.
+    LAMBDA_FLOOR: float = 0.1
+
+    def sample_result(
+        self,
+        state: Dict[str, Any],
+        match: GameRow,
+        strengths: Dict[str, Dict[str, float]],
+        rng: Any,
+    ) -> MatchResult:
+        del state  # per-game classification only
+        h = self._strength_for(strengths, match.home)
+        a = self._strength_for(strengths, match.away)
+        lam_home = max(self.LAMBDA_FLOOR, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
+        lam_away = max(self.LAMBDA_FLOOR, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
+        home = poisson_sample(lam_home, rng)
+        away = poisson_sample(lam_away, rng)
+        if home == away:
+            if rng.random() < 0.5:
+                home += 1
+            else:
+                away += 1
+        return MatchResult(home_goals=home, away_goals=away)
 
 
 class BracketSportSource(SportSource):

@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .base import GameRow
-from .bracket import BestOfNSeriesSource
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
 from ._espn import fetch_days
@@ -315,7 +315,7 @@ class WnbaRegularSource(PointsBasedSportSource):
 # =====================================================================
 
 
-class WnbaPlayoffSource(BestOfNSeriesSource):
+class WnbaPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """WNBA playoffs with per-stage variable series lengths.
 
     Series lengths (since 2022 reseeding format):
@@ -360,6 +360,11 @@ class WnbaPlayoffSource(BestOfNSeriesSource):
     def _winner_advance_label(self, stage: str) -> Optional[str]:
         if stage == "FINALS":
             return "WNBA_WINNER"
+        if stage == "SF":
+            # SF sits at depth 1 and FINALS at 3 (the NBA's label, shared),
+            # so the default "one deeper" would leave a semifinal winner at
+            # 2, short of the Finals band: no semifinal stakes (#249).
+            return "FINALS"
         return None
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:

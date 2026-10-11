@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from .base import GameRow, MatchResult
-from .bracket import BestOfNSeriesSource
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, poisson_sample as _poisson
 
@@ -367,7 +367,7 @@ _CUP_FINAL_TOP_SENTINEL = "CF_A_WINNER"
 _CUP_FINAL_BOT_SENTINEL = "CF_B_WINNER"
 
 
-class NhlPlayoffSource(BestOfNSeriesSource):
+class NhlPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """Stanley Cup Playoffs as a best-of-7 BracketSportSource.
 
     Series resolve at 4 wins (`SERIES_LENGTH = 7` → clinching at ceil(7/2) = 4).
@@ -622,33 +622,6 @@ class NhlPlayoffSource(BestOfNSeriesSource):
             "pf_per_game": _DEFAULT_GOALS_FOR,
             "pa_per_game": _DEFAULT_GOALS_AGAINST,
         }
-
-    # ---------- sample_result (per-game Poisson with OT) ----------
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        del state  # series-state lookup not needed; per-game classification only
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.1, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.1, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_goals = _poisson(lam_home, rng)
-        away_goals = _poisson(lam_away, rng)
-        # Playoff OT is sudden-death continuous (no SO), so a tied
-        # regulation always resolves in OT. We still need a winner:
-        # add +1 to a coin-flipped side (slight bias by strength? skip
-        # for V1; pen-shootout variance dominates the calibration).
-        if home_goals == away_goals:
-            if rng.random() < 0.5:
-                home_goals += 1
-            else:
-                away_goals += 1
-        return MatchResult(home_goals=home_goals, away_goals=away_goals)
 
     # ---------- bracket fetch ----------
 

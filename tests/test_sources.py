@@ -5072,7 +5072,8 @@ class TestWnbaPlayoffSource:
         src = self._make_source()
         assert src._winner_advance_label("FINALS") == "WNBA_WINNER"
         assert src._winner_advance_label("R1") is None
-        assert src._winner_advance_label("SF") is None
+        # SF is depth 1 and FINALS 3: the winner jumps to FINALS, not 2 (#249).
+        assert src._winner_advance_label("SF") == "FINALS"
 
     def test_outcome_labels(self):
         labels = self._make_source().outcome_labels
