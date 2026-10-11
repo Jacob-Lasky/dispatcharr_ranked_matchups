@@ -299,15 +299,16 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
         `_stage_for_event` places in a tournament round surface here;
         regular-season games are filtered out.
 
-        RAISES `CalendarUnavailable` when an event in the tournament months
-        cannot be placed because ESPN's season calendar is unreachable.
+        RAISES `CalendarUnavailable` when the board holds an event in the
+        tournament months and ESPN's season calendar is unreachable.
         Returning only the few events ESPN tags (1 of 25 on the 2025
         women's Nov 14 board) would read as a real, shorter slate: the
         refresh would not hold the channels already published and apply
         could reap them. A raise is what the refresh treats as this
-        source's outage (it holds the previous rows, #240). Before
-        November nothing can be a tournament game, so a missing calendar
-        then costs nothing and is not an error.
+        source's outage (it holds the previous rows, #240). Even a tagged
+        event is not published then, because the importance bracket needs
+        the calendar too. Before November nothing can be a tournament game,
+        so a missing calendar then costs nothing and is not an error.
         """
         # The shared upcoming sweep owns the Eastern-bucket lookback, the
         # FINISHED drop, the stale-SCHEDULED floor and the id dedupe (see
@@ -326,15 +327,19 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
         )
         out: List[GameRow] = []
         for rec in recs:
+            year = rec["_season_year"]
+            # Checked for EVERY tournament-month event, tagged ones too: the
+            # importance bracket (`_fetch_bracket_games`) is empty without
+            # the calendar, so a tagged row published now would be scored
+            # against no bracket at all.
+            if (rec["start_time"].month >= TOURNAMENT_START_MONTH
+                    and self._season_windows(year) is None):
+                raise CalendarUnavailable(
+                    f"ESPN {year} season calendar for {self._espn_slug} is "
+                    f"unavailable, so tournament rounds cannot be placed"
+                )
             routed = rec.get("_routed")
             if routed is None:
-                year = rec["_season_year"]
-                if (rec["start_time"].month >= TOURNAMENT_START_MONTH
-                        and self._season_windows(year) is None):
-                    raise CalendarUnavailable(
-                        f"ESPN {year} season calendar for {self._espn_slug} is "
-                        f"unavailable, so tournament rounds cannot be placed"
-                    )
                 continue
             eid = rec.get("id")
             out.append(GameRow(

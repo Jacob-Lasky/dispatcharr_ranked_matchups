@@ -229,6 +229,14 @@ class TestCalendarUnavailable:
             _upcoming(src, cup_mod, fake, pinned, 0)
         assert len([u for u in fake.urls if "/seasons/" in u]) == 1
 
+    def test_tagged_rows_are_not_published_without_a_calendar(self):
+        """2024 tagged every event, so routing needs no calendar; but the
+        importance bracket does, and it is [] without one. Publishing the
+        R64 row would score it against no bracket."""
+        src, fake = _cup("m2024", calendar=False, not_yet_played=True)
+        with pytest.raises(cup_mod.CalendarUnavailable):
+            _upcoming(src, cup_mod, fake, datetime(2024, 11, 21, 12, 0, tzinfo=timezone.utc), 0)
+
     def test_no_calendar_before_november_is_not_an_outage(self):
         src = cup_mod.NcaaSoccerCupSource(gender="m", season_year=2026)
         ev = _event(["oct-1", "2026-10-11T23:00Z", 2026, 14219, "2026-ncaa-division-i-men",
@@ -429,6 +437,16 @@ class TestSeasonTypeWindows:
         first_round_only = [t for t in DATA["m2025"]["season_types"] if t["slug"] == "first-round"]
         assert _espn.fetch_season_type_windows(
             "x", 2025, lambda u: {"types": {"count": 7, "items": first_round_only}}) is None
+
+    def test_calendar_without_a_regular_phase_falls_back(self):
+        """`count` matches but the regular season is absent: the first round
+        must not become the regular season's boundary."""
+        rounds = [t for t in DATA["m2025"]["season_types"] if not t["slug"].startswith("2025-")]
+        assert len(rounds) == 6
+        src = reg_mod.NcaaSoccerSource(gender="m", season_year=2025)
+        with patch.object(reg_mod, "_http_get",
+                          return_value={"types": {"count": 6, "items": rounds}}):
+            assert src._regular_season_cutoff() == datetime(2025, 11, 19, 5, 0, tzinfo=timezone.utc)
 
     def test_partial_calendar_falls_back_in_the_regular_source(self):
         first_round_only = [t for t in DATA["m2025"]["season_types"] if t["slug"] == "first-round"]

@@ -180,7 +180,7 @@ class NcaaSoccerSource(PointsBasedSportSource):
         """The first UTC instant AFTER the regular season (exclusive).
 
         From ESPN's season calendar when it answers: the end of the
-        season's first season type, the regular season, whose windows
+        season's regular-season type (named after the season), whose windows
         were checked to sit in the gap before the first round for both
         genders in 2024, 2025 and 2026. The College Cup's games carry
         the same season slug, type and notes as an October game (#229,
@@ -192,15 +192,21 @@ class NcaaSoccerSource(PointsBasedSportSource):
         dropping the College Cup row and its stage.
 
         Falls back to `_REGULAR_SEASON_END` (the end of that Eastern
-        date) when the calendar is unreachable or incomplete. Memoised per instance;
+        date) when the calendar is unreachable, incomplete, or names no
+        single regular-season phase. Memoised per instance;
         the next refresh builds a new source and asks again.
         """
         if self._cutoff is not None:
             return self._cutoff
-        windows = fetch_season_type_windows(self._espn_slug, self.season_year, _http_get)
-        if windows:
+        windows = fetch_season_type_windows(self._espn_slug, self.season_year, _http_get) or []
+        # The regular-season phase is the one ESPN names after the season
+        # ("2025-ncaa-division-i-men"; every season 2024-2026). Found by
+        # NAME, never by position: a calendar missing it would otherwise
+        # hand this source the first round's end as its boundary.
+        regular = [w for w in windows if w.slug.startswith(f"{self.season_year}-")]
+        if len(regular) == 1:
             # ESPN's end bound is inclusive at minute precision.
-            self._cutoff = windows[0].end + timedelta(minutes=1)
+            self._cutoff = regular[0].end + timedelta(minutes=1)
         else:
             month, day_of_month = _fallback_regular_season_end(self.gender, self.season_year)
             logger.warning(
