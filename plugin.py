@@ -801,14 +801,26 @@ def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled
     return reapable, kept, rehome_rec_ids
 
 
+def _unwritten_channels(existing_virtuals: Dict[str, Any], seen_markers) -> List[Any]:
+    """Our channels whose game the write loop will not write this apply: the
+    stale set. The ONE definition, used by the reap and by the numbers held
+    back for the channels it keeps (#286). DO NOT hold numbers back from any
+    other set: they were once taken only from the games that had left the
+    slate, while the reap also keeps in-slate games the write loop skips, and
+    a kept recording channel lost its number to a new game."""
+    return [ch for marker, ch in existing_virtuals.items() if marker not in seen_markers]
+
+
 def _numbers_held_for_recordings(stale, archive_enabled, keep_ids=frozenset()) -> set:
     """Channel numbers of stale channels this apply will KEEP, for a recording
     or because they are in `keep_ids` (kept by their guide, #264).
 
     Same policy as the reap step (_partition_stale_for_recordings), evaluated
-    before numbering so a new game is never handed a number a kept channel is
-    about to be restored to. Fractional numbers are floored like every other
-    reservation (Xtream Codes floors them)."""
+    so a new game is never handed a number a kept channel is about to be
+    restored to: before numbering for the games that left the slate, and again
+    after apply's pre-pass for every channel the write loop will not write
+    (#286). Fractional numbers are floored like every other reservation (Xtream
+    Codes floors them)."""
     candidates = [ch for ch in stale if ch.channel_number is not None]
     if not candidates:
         return set()
@@ -6803,7 +6815,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # held back from new games (review finding, #219). Collected BEFORE the
     # floor because they do not depend on it, and the kickoff floor inference
     # needs them to run the placement apply will run. A channel kept by its
-    # guide (guide_kept_ids, #264) is held back the same way.
+    # guide (guide_kept_ids, #264) is held back the same way. An in-slate game
+    # the write loop will skip is only known after the pre-pass, which places
+    # again if one of those is kept too (#286).
     held_for_recordings = _numbers_held_for_recordings(
         leaving, archive_enabled, guide_kept_ids,
     )
@@ -6851,26 +6865,34 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             _reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings
         )
         remembered_base, remembered_record = _load_numbering_state()
-        virtual_base = _resolve_kickoff_base(
-            settings, highest_other, remembered_base, published, apply_tz,
-            unpublished=unpublished, reserved=reserved_numbers,
-        )
-        # What each channel was numbered for (#278), from this floor only.
-        numbered_for = _numbered_for_floor(remembered_record, virtual_base, marker_renames)
+
+        def _kickoff_floor(reserved):
+            # The floor, judged with `reserved`, and what each channel was
+            # numbered for from it (#278). A closure because apply judges it
+            # twice: an inferred floor must be judged with every number the
+            # placement will hold back, and the pre-pass can add some (#286).
+            base = _resolve_kickoff_base(
+                settings, highest_other, remembered_base, published, apply_tz,
+                unpublished=unpublished, reserved=reserved,
+            )
+            return base, _numbered_for_floor(remembered_record, base, marker_renames)
+
+        virtual_base, numbered_for = _kickoff_floor(reserved_numbers)
     else:
         virtual_base = _resolve_virtual_base(settings, highest_other)
         reserved_numbers = _reserved_channel_numbers(
             target_group, virtual_base, virtual_base + band_size - 1,
         ) | held_for_recordings
+    existing_numbers = {
+        marker: int(ch.channel_number)
+        for marker, ch in existing_virtuals.items()
+        if ch.channel_number is not None
+    }
     chnum_by_marker = _assign_channel_numbers(
         games, virtual_base, apply_tz,
         mode=numbering_mode,
         band_size=band_size,
-        existing_numbers={
-            marker: int(ch.channel_number)
-            for marker, ch in existing_virtuals.items()
-            if ch.channel_number is not None
-        },
+        existing_numbers=existing_numbers,
         reserved_numbers=reserved_numbers,
         numbered_for=numbered_for,
     )
@@ -6914,23 +6936,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             )
         games = placeable
 
-    max_target = max(chnum_by_marker.values(), default=virtual_base)
-    # Park above every number ANY channel in the group holds (see
-    # _resolve_park_base): a hand-added channel in our group is reserved from
-    # assignment, but not from the parking range.
-    highest_in_group = (
-        Channel.objects.filter(channel_group=target_group)
-        .aggregate(m=_Max("channel_number"))["m"] or 0
-    ) if target_group is not None else 0
-    park_base = _resolve_park_base(max_target, highest_in_group)
-    logger.info(
-        "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r, "
-        "remembered=%s), mode=%s, band_size=%d, max_target=%d, park_base=%d",
-        virtual_base, highest_other,
-        settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE),
-        remembered_base,
-        numbering_mode, band_size, max_target, park_base,
-    )
 
     created = 0
     updated = 0
@@ -7426,6 +7431,57 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             prepass_budget.seconds, len(games), prepass_budget.skipped,
         )
 
+    # Numbers of channels this apply KEEPS without writing them are held back
+    # from every other game (#286). Kept means the reap's own policy (an
+    # active recording, #146, or kept by its guide, #264), and not written
+    # means not in seen_markers: the stale set the reap below works from. The
+    # first placement held back only channels whose game had LEFT the slate,
+    # because which in-slate games the write loop skips (no feed, too low for
+    # a placeholder) is only known now. Such a game whose kickoff moved no
+    # longer numbers onto its channel's number, so a new game could be handed
+    # it, the restore after parking found it taken, and the recording channel
+    # sat on a parking number. When the pre-pass found any, place again with
+    # them held back; the only change is the reservation (a floor that was
+    # inferred, with none remembered, is judged again with it, so the
+    # inference still runs the placement apply runs). COMPACT needs no
+    # second pass: allocate_compact_numbers keeps every published game on its
+    # own slot (marker-held, never released by a reschedule), so a skipped
+    # game's slot is never handed to another.
+    if numbering_mode == NUMBERING_MODE_KICKOFF:
+        kept_numbers = _numbers_held_for_recordings(
+            _unwritten_channels(existing_virtuals, seen_markers),
+            archive_enabled, guide_kept_ids,
+        )
+        if not kept_numbers <= reserved_numbers:
+            reserved_numbers = reserved_numbers | kept_numbers
+            virtual_base, numbered_for = _kickoff_floor(reserved_numbers)
+            chnum_by_marker = _assign_channel_numbers(
+                games, virtual_base, apply_tz,
+                mode=numbering_mode,
+                band_size=band_size,
+                existing_numbers=existing_numbers,
+                reserved_numbers=reserved_numbers,
+                numbered_for=numbered_for,
+            )
+
+    max_target = max(chnum_by_marker.values(), default=virtual_base)
+    # Park above every number ANY channel in the group holds (see
+    # _resolve_park_base): a hand-added channel in our group is reserved from
+    # assignment, but not from the parking range.
+    highest_in_group = (
+        Channel.objects.filter(channel_group=target_group)
+        .aggregate(m=_Max("channel_number"))["m"] or 0
+    ) if target_group is not None else 0
+    park_base = _resolve_park_base(max_target, highest_in_group)
+    logger.info(
+        "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r, "
+        "remembered=%s), mode=%s, band_size=%d, max_target=%d, park_base=%d",
+        virtual_base, highest_other,
+        settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE),
+        remembered_base,
+        numbering_mode, band_size, max_target, park_base,
+    )
+
     # Set by step 8 inside the transaction; stays None on a dry run so the
     # summary can tell "no profiles touched" apart from "nothing to say".
     profile_stats: Optional[Dict[str, Any]] = None
@@ -7699,7 +7755,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # re-home completed recordings onto a persistent archive channel and skip
         # reaping any channel whose recording is still active (it reconciles next
         # cycle once the recording finishes).
-        stale = [ch for marker, ch in existing_virtuals.items() if marker not in seen_markers]
+        stale = _unwritten_channels(existing_virtuals, seen_markers)
         if stale and not dry_run:
             now_reap = datetime.now(timezone.utc)
             stale_ids_all = [c.id for c in stale]

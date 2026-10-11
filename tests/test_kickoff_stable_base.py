@@ -439,7 +439,7 @@ class TestApplyWiring:
     def test_the_floor_is_resolved_after_existing_channels_are_rekeyed(self):
         src, _fn = _apply_fn()
         rekey = src.index("marker_renames = _rekey_legacy_virtuals(existing_virtuals, games)")
-        resolve = src.index("virtual_base = _resolve_kickoff_base(")
+        resolve = src.index("virtual_base, numbered_for = _kickoff_floor(reserved_numbers)")
         assert rekey < resolve
 
 
@@ -520,7 +520,7 @@ class TestKeptRecordingChannelsHoldTheirNumbers:
         src, _fn = _apply_fn()
         held = src.index("held_for_recordings = _numbers_held_for_recordings(")
         kickoff = src.index("_reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings")
-        resolve = src.index("virtual_base = _resolve_kickoff_base(")
+        resolve = src.index("virtual_base, numbered_for = _kickoff_floor(reserved_numbers)")
         compact = src.index(") | held_for_recordings", resolve)
         assert held < kickoff < resolve < compact
         assert compact < src.index("chnum_by_marker = _assign_channel_numbers(")
@@ -746,7 +746,12 @@ class TestInferenceRunsTheRealPlacement:
         (call,) = _calls(fn, "_resolve_kickoff_base")
         kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
         assert kw.get("unpublished") == "unpublished"
-        assert kw.get("reserved") == "reserved_numbers"
+        assert kw.get("reserved") == "reserved"
+        # ...and the closure around it is always handed the full reservation,
+        # in the first placement and in the #286 second one.
+        floors = _calls(fn, "_kickoff_floor")
+        assert len(floors) == 2
+        assert all([ast.unparse(a) for a in c.args] == ["reserved_numbers"] for c in floors)
 
     def test_one_placement_implementation(self):
         """_assign_channel_numbers and the inference must share the placement:
@@ -1144,11 +1149,14 @@ class TestTheRecordHoldsANudgedChannel:
         _src, fn = _apply_fn()
         (filt,) = _calls(fn, "_numbered_for_floor")
         assert [ast.unparse(a) for a in filt.args] == [
-            "remembered_record", "virtual_base", "marker_renames",
+            "remembered_record", "base", "marker_renames",
         ]
-        (assign,) = _calls(fn, "_assign_channel_numbers")
-        kw = {k.arg: ast.unparse(k.value) for k in assign.keywords}
-        assert kw.get("numbered_for") == "numbered_for"
+        assigns = _calls(fn, "_assign_channel_numbers")
+        assert len(assigns) == 2  # the placement, and its #286 second pass
+        for assign in assigns:
+            kw = {k.arg: ast.unparse(k.value) for k in assign.keywords}
+            assert kw.get("numbered_for") == "numbered_for"
+            assert kw.get("existing_numbers") == "existing_numbers"
 
     def test_only_entries_numbered_from_this_floor_are_trusted(self, plugin):
         """A kept recording channel keeps the number floor 6892 gave it after
@@ -1244,3 +1252,65 @@ class TestTheRecordFile:
         with open(plugin.NUMBERING_STATE_PATH, "w", encoding="utf-8") as f:
             f.write('{"kickoff_base": 0, "numbered_for": {"m": [6672015, 6678908, 6892]}}')
         assert plugin._load_numbering_state() == (None, {})
+
+
+class TestKeptChannelsKeepTheirNumbers:
+    """#286, the class: a channel apply keeps without writing it (an active
+    recording, #146, or kept by its guide, #264) must not lose its number to
+    another game, whatever the reason it is not written (its game left the
+    slate, or the write loop skipped it). The numbers held back come from the
+    SAME stale set and the SAME keep policy as the reap, so a new keep reason
+    or a new skip in the write loop is covered without touching this."""
+
+    def test_the_reap_and_the_second_placement_share_the_stale_set(self):
+        _src, fn = _apply_fn()
+        stale_calls = _calls(fn, "_unwritten_channels")
+        assert len(stale_calls) == 2
+        for call in stale_calls:
+            assert [ast.unparse(a) for a in call.args] == ["existing_virtuals", "seen_markers"]
+        held = [c for c in _calls(fn, "_numbers_held_for_recordings")
+                if ast.unparse(c.args[0]).startswith("_unwritten_channels(")]
+        assert len(held) == 1
+        assert [ast.unparse(a) for a in held[0].args[1:]] == ["archive_enabled", "guide_kept_ids"]
+        partitions = _calls(fn, "_partition_stale_for_recordings")
+        assert partitions and all(
+            ast.unparse(c.args[3]) == "archive_enabled" and ast.unparse(c.args[4]) == "guide_kept_ids"
+            for c in partitions
+        )
+
+    def test_every_keep_reason_of_the_reap_is_held(self, plugin, monkeypatch):
+        """Second opinion on #286: the AST guard above shows both sites pass
+        the keep arguments, not that the helper honours them. Channel 1 is
+        recording, channel 2 is kept by its guide (#264), channel 3 neither:
+        exactly what _partition_stale_for_recordings keeps is held."""
+        import sys
+        import types
+        from types import SimpleNamespace as NS
+
+        now = datetime.now(timezone.utc)
+        recording = NS(id=11, channel_id=1, start_time=now - timedelta(minutes=30),
+                       end_time=now + timedelta(hours=1), custom_properties={"status": "recording"})
+
+        class _Objects:
+            def filter(self, channel_id__in):
+                return [r for r in (recording,) if r.channel_id in channel_id__in]
+
+        models = types.ModuleType("apps.channels.models")
+        models.Recording = NS(objects=_Objects())
+        for name in ("apps", "apps.channels"):
+            monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "apps.channels.models", models)
+
+        stale = [NS(id=1, channel_number=33772827.0), NS(id=2, channel_number=33772840.0),
+                 NS(id=3, channel_number=33772841.0)]
+        held = plugin._numbers_held_for_recordings(stale, True, keep_ids={2})
+        _reapable, kept, _rehome = plugin._partition_stale_for_recordings(
+            stale, {1: [recording]}, now, True, {2},
+        )
+        assert held == {int(c.channel_number) for c in kept} == {33772827, 33772840}
+
+    def test_the_stale_set_is_every_channel_not_written(self, plugin):
+        kept, written = object(), object()
+        assert plugin._unwritten_channels(
+            {"a": kept, "b": written}, {"b"},
+        ) == [kept]
