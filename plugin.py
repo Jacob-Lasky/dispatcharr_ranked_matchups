@@ -2151,7 +2151,8 @@ def _cache_has_slate(cache: Dict[str, Any]) -> bool:
     slate only when its writer set `_EMPTY_SLATE_KNOWN_KEY`: a refresh that
     either built on a vouched cache or heard back from every source
     (`_slate_known`), and the reaper, which carries forward the answer of the
-    slate it is emptying (`_cache_vouched`). Publishing an empty slate
+    slate it is emptying (`_cache_vouched`), which apply stamps once it has
+    published that slate for real (`_vouch_published_slate`). Publishing an empty slate
     deletes every channel the plugin owns, and the only defence against doing
     that during a source outage is _rows_to_hold carrying the previous games
     forward, which needs the previous slate. Everything else is refused:
@@ -2176,7 +2177,8 @@ def _cache_vouched(cache: Dict[str, Any]) -> bool:
     Stricter than _cache_has_slate: a NON-empty slate is published whatever
     its key says, but one written `empty_slate_known: false` (cache lost during
     an outage) may omit a live channel, and that doubt must travel with it to
-    the reaper and to the next refresh. DO NOT use _cache_has_slate here: it
+    the reaper and to the next refresh, until an apply publishes it and
+    stamps it (_vouch_published_slate). DO NOT use _cache_has_slate here: it
     launders the doubt away, and an empty slate built on such a cache would
     delete the channel it omitted. A cache from before the key existed is
     vouched when non-empty (its own refresh read the cache before it) and not
@@ -2185,6 +2187,39 @@ def _cache_vouched(cache: Dict[str, Any]) -> bool:
     if not isinstance(games, list):
         return False
     return cache.get(_EMPTY_SLATE_KNOWN_KEY, bool(games)) is True
+
+
+def _vouch_published_slate(cache: Dict[str, Any]) -> bool:
+    """Record that apply has just published `cache` for real, so it now lists
+    everything the plugin has on air and `_cache_vouched` holds (#241).
+
+    Why apply may vouch: its stale reap deletes every plugin channel the slate
+    does not list, so once a non-dry-run apply has finished with no stale
+    channel kept for an active recording (the caller checks), no channel on
+    air can be missing from the slate. Without this, an unvouched slate (cache.json
+    lost, which Dispatcharr's plugin import does on every upgrade by replacing
+    the folder) stays unvouched for good: a real install always has a source
+    answering with no games (a tournament out of season), so `_slate_known`
+    never sees zero outages, and every later refresh and reap inherits the
+    doubt, which re-opens #241 for as long as the install runs.
+
+    Writes only when the cache on disk is still the one apply read (same
+    `refreshed_at` and `reaped_at`; refresh and reap each change one of those
+    whenever they change `games`). Apply runs under the scheduler lock, so a
+    mismatch means the lock failed open and another writer got in; vouching
+    for ITS slate would be a guess, so this leaves it alone. Returns whether
+    the stamp was written."""
+    on_disk = _read_cache()
+    identity = ("refreshed_at", "reaped_at")
+    if any(on_disk.get(k) != cache.get(k) for k in identity):
+        logger.warning(
+            "[ranked_matchups] apply: cache.json changed during apply; not "
+            "marking the slate it published as vouched (#241)"
+        )
+        return False
+    on_disk[_EMPTY_SLATE_KNOWN_KEY] = True
+    _write_cache(on_disk)
+    return True
 
 
 def _slate_known(prior_cache: Dict[str, Any], outage_labels: set) -> bool:
@@ -5123,6 +5158,15 @@ def _carry_forward(
     return out
 
 
+def _carry_apply_vouch(cache: Dict[str, Any], apply_result: Dict[str, Any]) -> None:
+    """Keep the stamp apply just wrote (`slate_vouched`, see
+    _vouch_published_slate) in the reaper's copy of the cache, which it
+    writes back after apply returns. DO NOT drop this: the reaper's write
+    would erase the stamp and leave the slate unvouched (#241)."""
+    if apply_result.get("slate_vouched") is True:
+        cache[_EMPTY_SLATE_KNOWN_KEY] = True
+
+
 def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Drop finished games from the guide, and backfill from the bench.
 
@@ -5161,6 +5205,7 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("[ranked_matchups] reap: retrying an apply left pending")
         retry = _action_apply(settings)
         if str(retry.get("status", "ok")).lower() != "error":
+            _carry_apply_vouch(cache, retry)
             cache["reap_apply_pending"] = False
             _write_cache(cache)
         else:
@@ -5222,6 +5267,7 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     apply_result = _action_apply(settings)
     failed = str(apply_result.get("status", "ok")).lower() == "error"
     if not failed:
+        _carry_apply_vouch(cache, apply_result)
         cache["reap_apply_pending"] = False
         _write_cache(cache)
     else:
@@ -6628,7 +6674,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # the ones they configured, and that is the most important thing in
         # this message (#126).
         msg = f"WARNING: {tmpl_problem}\n\n{msg}"
-    return {"status": "ok", "message": msg}
+    result = {"status": "ok", "message": msg}
+    # The DB now matches this slate, so it can vouch for an empty one built on
+    # it (#241, see _vouch_published_slate). Only for a real run that left
+    # nothing behind: a dry run deleted nothing, and a stale channel kept for
+    # its active recording is on air without being in the slate (it may be a
+    # live game whose source was failing when the cache was lost).
+    # `slate_vouched` tells the reaper, which rewrites the cache after this
+    # returns and would otherwise drop the stamp.
+    if (not dry_run and not kept_for_recording_n and not _cache_vouched(cache)
+            and _vouch_published_slate(cache)):
+        result["slate_vouched"] = True
+    return result
 
 
 # ---------- auto pipeline ----------

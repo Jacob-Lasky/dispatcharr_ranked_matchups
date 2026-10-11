@@ -454,7 +454,14 @@ doing that during a source outage is `_rows_to_hold` carrying the previous
 games forward, which needs the previous cache. So an empty list counts only
 when its writer set `empty_slate_known: true` (`_cache_has_slate`): a refresh
 does when the previous cache was vouched or every source answered with games
-(`_slate_known`), and the reaper carries the answer of the slate it empties.
+(`_slate_known`), the reaper carries the answer of the slate it empties, and
+apply sets it once it has published a slate for real (`_vouch_published_slate`):
+its stale reap leaves nothing on air that the slate omits. DO NOT drop that
+last writer. A real install always has a source answering with no games (a
+tournament out of season), so "every source answered" never holds there, and
+without apply's stamp the doubt from a lost cache.json (Dispatcharr's plugin
+import replaces the folder on every upgrade) would never clear: every later
+refresh and reap would inherit it and the last game's channel would stay.
 "Vouched" (`_cache_vouched`) is stricter than "publishable": a non-empty
 slate written `false` is still published, but its doubt travels to whatever
 is built on it, or an empty slate on top would delete the channel it omitted.

@@ -269,12 +269,36 @@ def _sources(env, *sources):
         env.plugin._build_sources = real
 
 
-def _game_row(home, away, start):
+def _game_row(home, away, start, cfbd_id=777):
     from dispatcharr_ranked_matchups.sources.base import GameRow
     return GameRow(
         sport_prefix="CFB", sport_label="NCAA Football", home=home, away=away,
-        rank_home=None, rank_away=None, start_time=start, extra={"cfbd_id": 777},
+        rank_home=None, rank_away=None, start_time=start, extra={"cfbd_id": cfbd_id},
     )
+
+
+def _off_season_source():
+    """A source that answers with NO games, as a tournament out of season does
+    on every refresh of a real install (Tower's cache, 2026-10-11, lists 15 of
+    its 29 sources at "0 games": both World Cups, every playoff source, the
+    cups). `_rows_to_hold` counts such a label as an outage, so on a real
+    install "every source answered" is never true."""
+    src = _StubSource()
+    src.sport_prefix, src.sport_label = "WC", "FIFA World Cup"
+    return src
+
+
+def _finish_cached_games(env, cfbd_ids=None):
+    """Time passing, as the reaper sees it: the cached games (all, or those
+    with `cfbd_ids`) kicked off ten hours ago. Rewrites the file directly so
+    every other key, the `empty_slate_known` stamp included, stays exactly as
+    the plugin left it."""
+    cache = _read_cache(env)
+    for g in cache["games"]:
+        if cfbd_ids is None or g["extra"]["cfbd_id"] in cfbd_ids:
+            g["start_time_utc"] = (_now() - timedelta(hours=10)).isoformat()
+    with open(env.plugin.CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(cache, f)
 
 
 def scenario_refresh_that_finds_no_games_clears_the_guide(env):
@@ -376,6 +400,135 @@ def scenario_lost_cache_then_a_healthy_empty_refresh_clears_the_guide(env):
 
     assert env.plugin._action_apply(settings)["status"] == "ok"
     assert _owned(env) == {}
+
+
+def scenario_reaping_the_last_game_after_the_cache_was_lost(env):
+    """#241 on a real install after an upgrade. Dispatcharr's plugin import
+    replaces the plugin folder, so cache.json is gone, and some source always
+    answers with no games, so no refresh after that can say every source
+    answered. Once apply has published a slate, the DB holds nothing that slate
+    omits, and reaping its last game must take the channel down. Before apply
+    vouched for what it published, the doubt from the lost cache passed from
+    refresh to refresh forever and this channel stayed on air."""
+    user_ch, _ = _seed_source_channel(env, name="Oklahoma at Texas")
+    assert not os.path.exists(env.plugin.CACHE_PATH)
+    game = _game_row("Texas", "Oklahoma", _now() + timedelta(hours=1))
+    sources = (_StubSource([game]), _off_season_source())
+
+    with _sources(env, *sources):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    assert _read_cache(env)["empty_slate_known"] is False  # the lost-cache doubt
+    assert env.plugin._action_apply(_settings())["status"] == "ok"
+    assert set(_owned(env)) == {"ranked_matchups:CFB:777"}
+    # A later scheduled refresh, same sources, same game.
+    with _sources(env, *sources):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    assert env.plugin._action_apply(_settings())["status"] == "ok"
+
+    _finish_cached_games(env)
+    result = env.plugin._action_reap(_settings())
+
+    assert result["status"] == "ok" and result["reaped"] == 1, result
+    assert OUTAGE_MESSAGE_PART not in result["message"], result
+    assert _owned(env) == {}, "the finished game's channel is still on air"
+
+
+def scenario_reaper_keeps_the_stamp_its_apply_wrote(env):
+    """The reaper rewrites the cache after its apply returns. When that apply
+    published an unvouched slate (a manual refresh after the cache was lost,
+    no apply since), the reaper's write must keep apply's stamp, or the reap
+    that later empties the slate is refused and the last channel stays."""
+    _seed_source_channel(env, name="Oklahoma at Texas")
+    _seed_source_channel(env, name="Alabama at Georgia")
+    first = _game_row("Texas", "Oklahoma", _now() + timedelta(hours=1), cfbd_id=777)
+    second = _game_row("Georgia", "Alabama", _now() + timedelta(days=1), cfbd_id=778)
+    with _sources(env, _StubSource([first, second]), _off_season_source()):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    assert _read_cache(env)["empty_slate_known"] is False
+    # The first game finishes before any apply ran.
+    _finish_cached_games(env, cfbd_ids={777})
+
+    reaped = env.plugin._action_reap(_settings())
+    assert reaped["status"] == "ok" and reaped["remaining"] == 1, reaped
+    assert set(_owned(env)) == {"ranked_matchups:CFB:778"}
+    assert _read_cache(env)["empty_slate_known"] is True, "the reaper erased apply's stamp"
+
+    _finish_cached_games(env)
+    result = env.plugin._action_reap(_settings())
+    assert result["status"] == "ok" and result["reaped"] == 1, result
+    assert _owned(env) == {}, "the last game's channel is still on air"
+
+
+def scenario_a_dry_run_apply_does_not_vouch(env):
+    """A dry run deletes nothing, so the DB can still hold a channel the slate
+    omits, and the slate must stay unvouched."""
+    _seed_source_channel(env, name="Oklahoma at Texas")
+    game = _game_row("Texas", "Oklahoma", _now() + timedelta(hours=1))
+    with _sources(env, _StubSource([game]), _off_season_source()):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+
+    # The group already exists, or a dry run returns before it would vouch.
+    env.m.ChannelGroup.objects.create(name="Top Matchups")
+
+    result = env.plugin._action_apply(_settings(dry_run=True))
+
+    assert result["status"] == "ok" and "stale_deleted=" in result["message"], result
+    assert "slate_vouched" not in result, result
+    assert _read_cache(env)["empty_slate_known"] is False
+
+
+def scenario_apply_does_not_vouch_while_it_keeps_an_unlisted_recording_channel(env):
+    """cache.json was lost while a CFB game was on air and recording, and its
+    source is failing. The next refresh lists only another game, and apply
+    keeps the CFB channel for its recording without the slate listing it. The
+    slate does not cover what is on air, so it must stay unvouched, or a later
+    empty slate would take the CFB channel down once the recording stops."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    m.Recording.objects.create(
+        channel=owned["ranked_matchups:CFB:401"], start_time=_now() - timedelta(minutes=30),
+        end_time=_now() + timedelta(hours=3), custom_properties={"status": "recording"},
+    )
+    os.remove(env.plugin.CACHE_PATH)
+    _seed_source_channel(env, name="Oklahoma at Texas")
+    other = _game_row("Texas", "Oklahoma", _now() + timedelta(days=1))
+    with _sources(env, _StubSource([other]), _off_season_source()):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+
+    result = env.plugin._action_apply(_settings())
+
+    assert result["status"] == "ok" and "1 channel(s) kept" in result["message"], result
+    assert set(_owned(env)) == {"ranked_matchups:CFB:401", "ranked_matchups:CFB:777"}
+    assert "slate_vouched" not in result, result
+    assert _read_cache(env)["empty_slate_known"] is False
+
+
+def scenario_apply_does_not_vouch_for_a_cache_rewritten_under_it(env):
+    """The stamp is for the slate apply published. If cache.json changed while
+    apply ran (the scheduler lock failed open and a refresh got in), the file
+    now holds a slate apply never saw, and it must not be vouched for."""
+    _seed_source_channel(env, name="Oklahoma at Texas")
+    game = _game_row("Texas", "Oklahoma", _now() + timedelta(hours=1))
+    with _sources(env, _StubSource([game]), _off_season_source()):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    real = env.plugin._autorecord_finish
+
+    def refresh_lands_mid_apply(*a, **k):
+        cache = _read_cache(env)
+        cache["refreshed_at"] = (_now() + timedelta(minutes=1)).isoformat()
+        with open(env.plugin.CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+        return real(*a, **k)
+
+    env.plugin._autorecord_finish = refresh_lands_mid_apply
+    try:
+        result = env.plugin._action_apply(_settings())
+    finally:
+        env.plugin._autorecord_finish = real
+
+    assert result["status"] == "ok" and "slate_vouched" not in result, result
+    assert _read_cache(env)["empty_slate_known"] is False
 
 
 def scenario_empty_slate_keeps_a_channel_that_is_recording(env):
