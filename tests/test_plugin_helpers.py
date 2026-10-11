@@ -1097,10 +1097,11 @@ class TestAssignChannelNumbers:
         assert plugin._build_marker_key(games[2]) not in markers
 
     def test_collisions_resolved_to_unique_values(self, plugin, monkeypatch):
-        # Force every game onto the SAME raw number; the resolver must still
+        # Force every game onto the SAME raw number (offset 0 from the floor,
+        # as the real function's base + offset); the resolver must still
         # hand back all-distinct numbers (nudge path) and stay deterministic.
         monkeypatch.setattr(plugin, "stable_channel_number",
-                            lambda base, start, marker, tz: 1000)
+                            lambda base, start, marker, tz: base)
         games = [self._game(i, "2026-06-13T16:00:00Z") for i in range(5)]
         assigned = plugin._assign_channel_numbers(games, 1000, timezone.utc)
         assert len(assigned) == 5

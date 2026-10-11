@@ -78,7 +78,7 @@ State (gitignored, lives in `<plugin_dir>/`):
 - `cache.json` — last refresh result (curated game list with score breakdowns). Carries TWO timestamps: `refreshed_at` (the cache write) and `matched_at` (stamped as matching BEGAN: after scoring, immediately before the EPG/stream sweep). `_match_snapshot_time` reads `matched_at` and falls back to `refreshed_at` for a pre-upgrade cache; anything asking "were these matches taken before X?" must use it, because an M3U refresh that lands DURING a long refresh is older than `refreshed_at` and would never be noticed. Also carries `empty_slate_known` (written by refresh, the reaper, and apply after a real publish), which decides whether apply may publish an EMPTY `games` list (#241, see "An empty `games` list can be a slate" below)
 - `recording_stops.json` — planned stops of RUNNING recordings (#216 phase C): written whole by apply under the scheduler lock, only READ by the live handoff timer in `_reaper_loop` (`_run_due_stops`), so the timer never races apply
 - `recordings_state.json` — auto-record bookkeeping (#216): what the plugin last wrote for each recording it created (so a user edit is recognised and left alone), and tombstones for ones the user deleted so they are not re-created
-- `numbering_state.json` — `{"kickoff_base": N}`, the floor kickoff numbering last used (#219). Written by apply only (under the scheduler lock, after the transaction commits, never on a dry run), read back so auto mode does not re-derive the floor from the lineup. A missing or malformed file is not an error: the next apply infers the same floor from the published channels
+- `numbering_state.json` — `{"kickoff_base": N, "numbered_for": {marker: [offset, number, floor]}}`: the floor kickoff numbering last used (#219), and for each published channel the kickoff offset (`stable_channel_number(0, ...)`), number and floor it was numbered for (#278; per entry, because a channel kept for a recording keeps an earlier floor's number across a floor change, and only entries naming the current floor are trusted, `_numbered_for_floor`, which also moves an entry to a #217 re-keyed marker). Written by apply only (under the scheduler lock, after the transaction commits, never on a dry run), rebuilt each time from the numbers the run WROTE plus kept channels still on their recorded number, so a game no longer published drops out. Read back so auto mode does not re-derive the floor from the lineup, and so a channel nudged past its block keeps its number (see `channel_number` below). A missing or malformed file is not an error: the next apply infers the floor from the published channels, and a missing or bad record entry falls back to the chain rule for that channel. A failed save REMOVES the old file when it names another floor (that floor would otherwise be read back as current) and keeps it when it names the same one (its record is only older, and each entry is checked against the live number). `kickoff_base` keeps its pre-#278 shape, so older code still reads the floor
 - `odds_cache.json` — The Odds API responses (#200), one entry per `sport_key|region` with its `fetched_at`, plus `exhausted_until` / `exhausted_key` for the out-of-credits backoff and the last `credits_remaining` header. Written by `sources/_odds.py` with the same per-writer temp + atomic replace as the cache. Holds no API key, and a hand-edited or wrong-shaped file is started over rather than failing every league's fetch
 - `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock, with `skipped_reason` (naming the holder, #239) stamped by `skipped_reason_at`. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict AND by `_slot_already_covered` to decide a waiting scheduled slot has already been done for it (see the scheduler section) — so `kind`, `status` and `started_at` steer behaviour, not just display. `kind` is one of the `_run_under_lock` kinds in `RUN_KIND_LABELS` (`auto_pipeline`, `scheduled_auto_pipeline`, `m3u_rematch`, `refresh`; its `apply` and `reap` entries only describe lock holders) — the label is what names WHY a run happened, so a new background trigger needs an entry there or Show current state cannot explain itself, plus a decision about whether it belongs in `_PIPELINE_RUN_KINDS`. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
 - `cfbd_api_key`, `football_data_api_key`, `odds_api_key`, `anthropic_api_key` — file fallback when settings field is blank.
@@ -106,11 +106,16 @@ to sort to the top of group lists):
   `base + minutes-since-CHANNEL_NUMBER_ORIGIN × SLOTS + hash%SLOTS`, so a game's
   number does not move while its kickoff holds (#121; a slot already held in the
   kickoff minute is kept, #217; a channel a same-minute collision nudged PAST its
-  minute's block is kept too, but only while every number from its computed one
-  up to its own is still taken by a channel that stays or a reserved number,
-  #267: apply cannot see the kickoff a channel was numbered for, so a looser
-  "within 16 above" rule would also hold a game rescheduled one minute earlier,
-  see the DO NOT in `_place_kickoff_numbers`) and the list sorts by start time. `compact`:
+  minute's block is kept too, while its number is free, when `numbered_for`
+  says it was numbered for its game's current kickoff minute and still carries
+  that number, #278, so a game below it leaving no longer moves it (a
+  reschedule gets no recorded hold; one whose old number lands inside its NEW
+  minute's block keeps it by the #217 in-block hold, as before); with no record for it, the
+  #267 chain rule decides: kept only while every number from its computed one
+  up to its own is still taken by a channel that stays or a reserved number. A
+  looser "within 16 above" rule without the record would also hold a game
+  rescheduled one minute earlier, see the DO NOT in `_place_kickoff_numbers`)
+  and the list sorts by start time. `compact`:
   `allocate_compact_numbers` keeps every number inside
   `[base, base+compact_band_size)`, holds a published game on its slot, and
   allocates new games ABOVE the highest in use. Handing a freed number to the
@@ -169,7 +174,9 @@ nothing and reaping the group.
 **The kickoff floor is remembered, NOT re-derived from the lineup (#219).**
 `_resolve_kickoff_base`: explicit `virtual_channel_base` > the floor in
 `numbering_state.json` > `_infer_kickoff_base` (the floor the published channels
-were numbered from, so upgrading or losing the file moves nothing) > highest
+were numbered from, the floor keeping the most published numbers, so upgrading or
+losing the file normally moves nothing; with no record, a channel nudged past
+its block over a gap is the exception) > highest
 other channel + 1 (fresh install, nothing published). The inference judges each
 candidate floor by RUNNING `_place_kickoff_numbers`, the one kickoff placement
 `_assign_channel_numbers` also uses, over the whole slate and every number apply
@@ -179,16 +186,18 @@ candidates include every floor an upward nudge could have reached it from, as
 far as the slate and the reserved numbers could push it (`longest_nudge`, #267:
 the hold keeps a nudge of any length), with at most `_INFER_RESERVED_RUN` (64)
 reserved numbers walked per channel in total, since every number walked is a candidate scored by
-two placements that each scan the run. DO NOT route kickoff mode
+two placements that each scan the run. The inference runs the placement with no
+`numbered_for` record, which is what apply runs then too: it only infers when no
+floor is remembered, and the loader then returns no record either. DO NOT route kickoff mode
 through `_resolve_virtual_base` again: with the time term in the millions the
 floor buys no separation, and following the lineup renumbered every published
 game by the same delta whenever the top of the lineup changed (measured live
 2026-09-26, -53 on all seven unchanged games). The reservation above is what
 keeps kickoff numbers off the user's channels now. Compact auto still follows
-the lineup, because there the base IS the first number. The floor is saved only
-AFTER apply's transaction commits: saved earlier, a failed apply would leave a
-floor no published channel uses, and the next apply would renumber every game
-onto it.
+the lineup, because there the base IS the first number. The floor and the
+record are saved only AFTER apply's transaction commits: saved earlier, a failed
+apply would leave a floor no published channel uses, and the next apply would
+renumber every game onto it.
 
 ## The interestingness signals (priority order)
 
