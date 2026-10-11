@@ -445,6 +445,15 @@ the archive re-home, ChannelStream/EPGData cleanup, and signal-safe queryset
 deletes. Do NOT add a second deletion path; it would be a copy that has to
 stay in agreement with that one.
 
+**An empty `games` list is a slate, not a missing cache (#241).** Reaping the
+last game, or a refresh that finds nothing to air, leaves `games == []` with
+`refreshed_at` stamped, and apply must run on it: the stale reap, orphan-EPG
+sweep, recording stops file and auto-record state all depend on it. Apply
+returns "Cache empty; run refresh first." ONLY when `refreshed_at` is missing,
+which `_read_cache` reports for a missing, unparseable or wrong-shaped file
+(not an object, or `games` not a list), so a file it cannot read never reaps
+the group.
+
 ## Known gotchas / lessons learned
 
 - **A game's end time is ESTIMATED, and there is exactly one estimate.**
@@ -758,6 +767,14 @@ Inspect what the cache contains:
 ```bash
 docker exec dispatcharr cat /data/plugins/dispatcharr_ranked_matchups/cache.json | head -80
 ```
+
+Run apply and reap against a real ORM, with no container: `tests/orm_harness`
+holds field-for-field copies of the Dispatcharr models apply touches and a
+runner that drives the real `plugin.py` over in-memory sqlite, in a subprocess
+so Django never loads into the rest of the suite. `tests/test_apply_empty_slate.py`
+is the worked example: write `scenario_<name>(env)` functions and the module's
+driver runs each against a fresh database. Prefer it to a MagicMock queryset for
+any claim about which rows apply leaves behind.
 
 Read live container logs:
 

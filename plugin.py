@@ -2119,11 +2119,24 @@ def _resolve_key(settings: Dict[str, Any], setting_id: str, *fallback_paths: str
 
 
 def _read_cache() -> Dict[str, Any]:
+    """The last refresh's cache, or the empty shape when there is none to read.
+
+    Missing, unreadable (bad JSON, bad UTF-8) and wrong-shaped (not an object,
+    or no `games` list) all return `{"games": [], "refreshed_at": None}`. The
+    `None` is load-bearing: `_action_apply` tells "no cache at all" apart from
+    "a refresh really did leave no games" by `refreshed_at`, and applying a
+    file it could not make sense of as an empty slate would reap every channel
+    the plugin owns (#241). Every writer stores `games` as a list.
+    """
     try:
         with open(CACHE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"games": [], "refreshed_at": None}
+            data = json.load(f)
+    except (FileNotFoundError, ValueError):
+        # ValueError covers json.JSONDecodeError and UnicodeDecodeError.
+        data = None
+    if isinstance(data, dict) and isinstance(data.get("games"), list):
+        return data
+    return {"games": [], "refreshed_at": None}
 
 
 def _write_cache(data: Dict[str, Any]) -> None:
@@ -5053,7 +5066,9 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     EPGData cleanup, and the signal-safe queryset deletes. A second deletion
     path here would be a copy that has to stay in agreement with that one,
     and the two would drift silently: see the plugin's own history of
-    exactly that failure mode. So: edit the cache, then call apply.
+    exactly that failure mode. So: edit the cache, then call apply. That holds
+    for the LAST game too: a reap can leave `games` empty, and apply must run
+    on that empty slate rather than treat it as "no cache" (#241).
     """
     remove_after = _reap_settings(settings)
     if remove_after <= 0:
@@ -5266,7 +5281,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     cache = _read_cache()
     games, dup_dropped = _unique_by_marker(cache.get("games", []))
-    if not games:
+    # An empty slate is only "nothing to do" when there is NO cache to speak
+    # of: _read_cache returns the same empty shape, with refreshed_at None, for
+    # a missing or unreadable file, and applying that would reap every channel
+    # we own on the strength of a file we could not read. DO NOT widen this
+    # back to `if not games`. A real cache with no games (the reaper took the
+    # last one off, #241; or a refresh that found nothing to air) is a slate
+    # like any other, and the stale reap, the orphan-EPG sweep and the
+    # auto-record bookkeeping below all have to run for it. Returning here
+    # left the last finished game's channel on air until the next refresh
+    # that produced games.
+    if not games and not cache.get("refreshed_at"):
         return {"status": "ok", "message": "Cache empty; run refresh first."}
     if dup_dropped:
         logger.warning(
@@ -6506,6 +6531,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         f"{profile_msg} "
         f"WHY descriptions written to EPG source."
     )
+    if not games:
+        # Otherwise the toast reads like a normal run that happened to delete
+        # everything, with no hint of why the group just emptied (#241).
+        msg = f"No games to air (the cache is empty). {msg}"
     # The "[dry] " prefix alone reads as a label, not as "and therefore your
     # channels do not exist"; state the consequence and the fix (#170).
     msg = _dry_run_report(msg, dry_run)
