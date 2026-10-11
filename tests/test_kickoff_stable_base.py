@@ -462,9 +462,12 @@ class TestKeptRecordingChannelsHoldTheirNumbers:
 
     def test_apply_adds_them_to_the_reservation_in_both_modes(self):
         src, _fn = _apply_fn()
-        i = src.index("reserved_numbers |= _numbers_held_for_recordings(")
-        assert src.index("reserved_numbers = _reserved_channel_numbers(target_group, virtual_base)") < i
-        assert i < src.index("chnum_by_marker = _assign_channel_numbers(")
+        held = src.index("held_for_recordings = _numbers_held_for_recordings(")
+        kickoff = src.index("_reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings")
+        resolve = src.index("virtual_base = _resolve_kickoff_base(")
+        compact = src.index(") | held_for_recordings", resolve)
+        assert held < kickoff < resolve < compact
+        assert compact < src.index("chnum_by_marker = _assign_channel_numbers(")
 
     def test_a_held_number_is_not_handed_to_a_new_game(self, plugin):
         games = _slate()
@@ -527,3 +530,162 @@ class TestReservedNumbersCoverOurOwnGroup:
         """Round 4: raw 400.5 is not raw 400 to the unique constraint."""
         got = plugin._published_numbers(_FakeQS([400.5, 401.0]), 400, 401, effective=False)
         assert got == {401}
+
+
+def _epl_row(gid, start):
+    GameRow = _gamerow_cls()
+    return _cache_row(GameRow(
+        sport_prefix="EPL", sport_label="Premier League",
+        home=f"Home{gid}", away=f"Away{gid}", rank_home=None, rank_away=None,
+        start_time=start, extra={"fd_id": gid},
+    ))
+
+
+def _saturday_slate(first_id=500000):
+    """Ten Premier League games kicking off in the same minute (a Saturday
+    3pm), then three a minute apart. Same-minute games collide on the 16 hash
+    slots, and some collisions nudge a game past the end of its minute's block."""
+    t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+    return [_epl_row(first_id + i, t0) for i in range(10)] + [
+        _epl_row(first_id + 10 + i, t0 + timedelta(minutes=i + 1)) for i in range(3)
+    ]
+
+
+class TestInferenceRunsTheRealPlacement:
+    """Review finding (verifier, #219): the inference scored candidates by how
+    many channels sat inside their block. A same-minute collision nudges a
+    channel past its block's end, and the true floor reproduces that nudge every
+    apply, so the channel does not move; the proxy counted it as lost and let a
+    floor one or two higher win, which moved the channel on its block's first
+    slot. Measured: 8 of 3000 random slates moved one channel on the upgrade
+    apply; the Saturday slate below is the first realistic one tried."""
+
+    def test_witness_a_saturday_slate_upgrades_without_moving(self, plugin):
+        games = _saturday_slate()
+        old = plugin._assign_channel_numbers(games, 6892, timezone.utc)
+        # Precondition: at least one channel was nudged out of its block, the
+        # shape that fooled the in-block proxy.
+        out_of_block = 0
+        for g in games:
+            m = plugin._build_marker_key(g)
+            off = plugin.stable_channel_number(0, plugin.parse_iso_utc(g["start_time_utc"]), m, timezone.utc)
+            blk = 6892 + off - off % 16
+            out_of_block += not (blk <= old[m] < blk + 16)
+        assert out_of_block >= 1
+        base, again = _apply_numbers(plugin, games, {}, 6838, old)
+        assert again == old
+        assert base == 6892
+
+    def test_witness_random_slates_upgrade_without_moving(self, plugin):
+        import random
+        tz = timezone.utc
+        t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+        moved_slates = []
+        for trial in range(400):
+            rng = random.Random(trial)
+            games = [
+                _epl_row(700000 + trial * 100 + i, t0 + timedelta(
+                    minutes=rng.choice([0, 0, 0, 30, 60, 180, 1440]) + 15 * rng.randint(0, 2)))
+                for i in range(rng.randint(2, 30))
+            ]
+            floor = rng.randint(100, 20000)
+            old = plugin._assign_channel_numbers(games, floor, tz)
+            published = _published(plugin, games, old)
+            base = plugin._resolve_kickoff_base({}, floor - 1 + rng.randint(-200, 200), None, published, tz)
+            again = plugin._assign_channel_numbers(games, base, tz, existing_numbers=old)
+            if again != old:
+                moved_slates.append(trial)
+        assert moved_slates == []
+
+    @pytest.mark.parametrize("trial", [38, 84, 105, 135])
+    def test_witness_new_games_and_held_numbers_are_part_of_the_placement(self, plugin, trial):
+        """The upgrade apply also has games with no channel yet, and numbers it
+        holds back for channels kept for a recording. Both change where a nudged
+        channel lands, so a floor judged without them moved one or two channels
+        on these slates (found by search; 38 turns on the held numbers, 84 on
+        the newcomer) while the floor judged with them moves none. Only the
+        PUBLISHED numbers are pinned: the newcomer has none yet, and on 84 the
+        floor that keeps every published channel puts it elsewhere than the
+        seeding floor would, which is the point."""
+        import random
+        tz = timezone.utc
+        t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+        rng = random.Random(trial)
+        n = rng.randint(3, 14)
+        games = [
+            _epl_row(800000 + trial * 20 + i, t0 + timedelta(minutes=rng.choice([0, 0, 0, 1])))
+            for i in range(n)
+        ]
+        plain = plugin._assign_channel_numbers(games, 6892, tz)
+        k = rng.randint(0, 2)
+        newcomers, rest = games[:k], games[k:]
+        held = set(rng.sample(sorted(plain.values()), rng.randint(0, 3)))
+        old = plugin._assign_channel_numbers(rest, 6892, tz, reserved_numbers=held)
+        unpublished = [
+            (plugin.parse_iso_utc(g["start_time_utc"]), plugin._build_marker_key(g))
+            for g in newcomers
+        ]
+        base = plugin._resolve_kickoff_base(
+            {}, 6838, None, _published(plugin, rest, old), tz,
+            unpublished=unpublished, reserved=held,
+        )
+        again = plugin._assign_channel_numbers(
+            games, base, tz, existing_numbers=old, reserved_numbers=held,
+        )
+        assert {m: again[m] for m in old} == old
+
+    def test_a_strangers_number_is_part_of_the_placement(self, plugin):
+        """Second-opinion repro: a channel we do not own sits between two of our
+        published numbers. Judged without it, the inference picked floor 100 and
+        the placement then nudged fd_8 off 6672116; judged with it, nothing moves."""
+        tz = timezone.utc
+        t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+        rows = {gid: _epl_row(gid, t0) for gid in (11, 6, 8, 14, 29, 19)}
+        old = {plugin._build_marker_key(rows[gid]): n
+               for gid, n in ((11, 6672114), (6, 6672109), (8, 6672116))}
+        published = [(n, t0, m) for m, n in old.items()]
+        unpublished = [(t0, plugin._build_marker_key(rows[gid])) for gid in (14, 29, 19)]
+        stranger = {6672115}
+        base = plugin._resolve_kickoff_base(
+            {}, 6672115, None, published, tz, unpublished=unpublished, reserved=stranger,
+        )
+        again = plugin._assign_channel_numbers(
+            list(rows.values()), base, tz, existing_numbers=old, reserved_numbers=stranger,
+        )
+        assert {m: again[m] for m in old} == old
+
+    def test_a_channel_nudged_past_its_block_still_names_its_floor(self, plugin):
+        """Second-opinion repro, round two: a lone published channel nudged off
+        a stranger's number past the end of its block named only floors above
+        the true one, so the hint could not pick it. Nothing published moved
+        either way; the true floor keeps later games where they would have been."""
+        tz = timezone.utc
+        t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+        game = _epl_row(8, t0)
+        m = plugin._build_marker_key(game)
+        natural = plugin.stable_channel_number(6892, t0, m, tz)
+        stranger = {natural}
+        old = plugin._assign_channel_numbers([game], 6892, tz, reserved_numbers=stranger)
+        off = natural - 6892
+        block = 6892 + off - off % 16
+        assert not (block <= old[m] < block + 16), "precondition: nudged past its block"
+        base = plugin._resolve_kickoff_base(
+            {}, 6891, None, [(old[m], t0, m)], tz, reserved=stranger,
+        )
+        assert base == 6892
+
+    def test_apply_hands_the_inference_its_slate_and_held_numbers(self):
+        _src, fn = _apply_fn()
+        (call,) = _calls(fn, "_resolve_kickoff_base")
+        kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
+        assert kw.get("unpublished") == "unpublished"
+        assert kw.get("reserved") == "reserved_numbers"
+
+    def test_one_placement_implementation(self):
+        """_assign_channel_numbers and the inference must share the placement:
+        a second copy would let the floor be judged by rules apply does not run."""
+        tree = ast.parse(open(os.path.join(REPO_ROOT, "plugin.py")).read())
+        fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        for name in ("_assign_channel_numbers", "_infer_kickoff_base"):
+            assert _calls(fns[name], "_place_kickoff_numbers"), name
+            assert not _calls(fns[name], "_first_free_number"), name

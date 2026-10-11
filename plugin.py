@@ -39,7 +39,7 @@ import types
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     from zoneinfo import ZoneInfo
@@ -4082,53 +4082,105 @@ def _explicit_virtual_base(settings: Dict[str, Any]) -> Optional[int]:
 
 
 def _infer_kickoff_base(
-    published: List[Tuple[Any, datetime, str]], tz, hint: Optional[int] = None,
+    published: List[Tuple[Any, datetime, str]],
+    tz,
+    hint: Optional[int] = None,
+    unpublished: Sequence[Tuple[datetime, str]] = (),
+    reserved: Optional[set] = None,
 ) -> Optional[int]:
     """Recover the floor the published KICKOFF channels were numbered from.
 
     `published` is (live channel number, the game's kickoff, its marker) for
-    every game that already has a channel. A kickoff number is
-    ``base + minutes * SLOTS + slot``, so each channel admits SLOTS candidate
-    floors that put it inside its own kickoff minute's block, and
-    _assign_channel_numbers keeps any channel whose number is in its block. The
-    winner is therefore the candidate that keeps the MOST channels in-block,
-    i.e. moves the fewest. Ties go to the candidate most channels name exactly
-    (a channel on its marker's hash slot), then to the one nearest `hint` (the
-    floor auto mode would otherwise pick), then the lowest.
+    every game that already has a channel; `unpublished` is (kickoff, marker)
+    for the slate's games that do not have one yet, and `reserved` the numbers
+    apply will hold back (other channels' numbers, and those of channels kept
+    for a recording; apply collects both before the floor for this reason). A
+    kickoff number is ``base + minutes * SLOTS + slot``, so each channel admits
+    SLOTS candidate floors that put it inside its own kickoff minute's block.
 
-    Why every block candidate and not just the exact ones: a channel can sit
-    off its hash slot (a same-minute nudge, or the #217 hold after its marker
-    was re-keyed from the legacy hash), and when no channel names the true floor
-    exactly, an exact-only search cannot find it. Why the `hint`: two channels,
-    one of them rescheduled since it was numbered, name two floors that each keep
-    one channel; the rescheduled one is off by whole hours (1920 per two hours),
-    while the hint is off by at most the lineup's drift since the last apply.
-    Candidates below 1 are ignored: those are COMPACT numbers, not a floor.
+    Each candidate is scored by RUNNING the placement apply will run
+    (_place_kickoff_numbers, the same function _assign_channel_numbers uses) and
+    counting the published channels that come out on the number they already
+    carry. DO NOT go back to counting channels inside their block as a proxy for
+    "does not move": a same-minute collision nudges a channel past the end of its
+    block, and under the true floor the same nudge reproduces it every apply, so
+    it does not move, yet the proxy counts it as lost. On a ten-game Saturday
+    slate two such nudges made the floor one higher win, and that floor moved the
+    channel sitting on the first slot of its block (review finding, #219).
+
+    Ties go to the candidate most channels name exactly (a channel on the number
+    a fresh placement from that floor would give it: its marker's hash slot, or
+    the nudge above it), then to the one nearest `hint` (the floor auto mode
+    would otherwise pick), then the lowest. Why every block candidate and not just the
+    exact ones: a channel can sit off its hash slot (the #217 hold after its
+    marker was re-keyed from the legacy hash), and when no channel names the true
+    floor exactly, an exact-only search cannot find it. Why the `hint`: two
+    channels, one of them rescheduled since it was numbered, name two floors that
+    each keep one channel; the rescheduled one is off by whole hours (1920 per
+    two hours), while the hint is off by at most the lineup's drift since the
+    last apply.
 
     Only consulted when NUMBERING_STATE_PATH has no floor (the first apply after
     upgrading, or a lost file), so that apply keeps every published number
     instead of re-deriving the floor from the lineup (#219).
     """
     slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
-    rows: List[Tuple[int, int, int]] = []  # (number, offset from base, block start)
+    rows: List[Tuple[str, int, int, int]] = []  # (marker, number, offset, block start)
     for number, start_dt, marker in published:
         if number is None or start_dt is None:
             continue
         offset = stable_channel_number(0, start_dt, marker, tz)
-        rows.append((int(number), offset, offset - offset % slots))
+        rows.append((marker, int(number), offset, offset - offset % slots))
+    # Each channel names the SLOTS floors that put it inside its own block, and
+    # the SLOTS - 1 floors from which an upward nudge of 1..SLOTS-1 reaches it:
+    # a channel nudged past its block's end names its true floor only that way,
+    # and without it the hint cannot pick the true floor among floors that keep
+    # every channel. Candidates below 1 are COMPACT numbers, not a floor.
     candidates = {
-        n - blk - s for n, _off, blk in rows for s in range(slots) if n - blk - s >= 1
+        c
+        for _m, n, off, blk in rows
+        for c in [n - blk - s for s in range(slots)] + [n - off - k for k in range(1, slots)]
+        if c >= 1
     }
     if not candidates:
         return None
+    entries = [(m, off) for m, _n, off, _blk in rows] + [
+        (marker, stable_channel_number(0, start_dt, marker, tz))
+        for start_dt, marker in unpublished if start_dt is not None
+    ]
+    held = {m: n for m, n, _off, _blk in rows}
+    blocked = {int(n) for n in (reserved or ())}
+
+    def bound(c: int) -> int:
+        # Most channels candidate `c` could keep: one is kept only by the
+        # in-block hold, or by an upward nudge from below its own number.
+        return sum(
+            1 for _m, n, off, blk in rows
+            if (c + blk <= n < c + blk + slots and n not in blocked) or n > c + off
+        )
 
     def score(c: int) -> Tuple[int, int, int, int]:
-        in_block = sum(1 for n, _off, blk in rows if c + blk <= n < c + blk + slots)
-        exact = sum(1 for n, off, _blk in rows if n - off == c)
+        placed, _collisions, _blocked = _place_kickoff_numbers(entries, c, held, blocked)
+        stays = sum(1 for m, n, _off, _blk in rows if placed.get(m) == n)
+        # "Exact": the number the channel would get from `c` with no hold at all,
+        # nudges included, so a channel nudged off a neighbour or a stranger
+        # still names its own floor rather than the one a nudge above it.
+        fresh, _collisions, _blocked = _place_kickoff_numbers(entries, c, {}, blocked)
+        exact = sum(1 for m, n, _off, _blk in rows if fresh.get(m) == n)
         near = -abs(c - hint) if hint is not None else 0
-        return (in_block, exact, near, -c)
+        return (stays, exact, near, -c)
 
-    return max(candidates, key=score)
+    # Branch and bound: a full placement per candidate is O(slate log slate), so
+    # skip any candidate that cannot reach the best count already found.
+    best: Optional[int] = None
+    best_score: Optional[Tuple[int, int, int, int]] = None
+    for c in sorted(candidates, key=bound, reverse=True):
+        if best_score is not None and bound(c) < best_score[0]:
+            break
+        sc = score(c)
+        if best_score is None or sc > best_score:
+            best, best_score = c, sc
+    return best
 
 
 def _resolve_kickoff_base(
@@ -4137,6 +4189,8 @@ def _resolve_kickoff_base(
     remembered: Optional[int],
     published: List[Tuple[Any, datetime, str]],
     tz,
+    unpublished: Sequence[Tuple[datetime, str]] = (),
+    reserved: Optional[set] = None,
 ) -> int:
     """The floor for KICKOFF numbering, which must not follow the user's lineup.
 
@@ -4153,8 +4207,10 @@ def _resolve_kickoff_base(
     Precedence:
       1. A positive `virtual_channel_base`: used as given, as before.
       2. `remembered`, the floor the last kickoff apply used (numbering_state.json).
-      3. The floor the published channels were numbered from (_infer_kickoff_base),
-         so upgrading, or losing the state file, moves nothing.
+      3. The floor the published channels were numbered from (_infer_kickoff_base,
+         given the slate's `unpublished` games and the `reserved` numbers apply
+         already holds back, so it can run the real placement), so upgrading, or
+         losing the state file, moves nothing.
       4. Highest other channel + 1 (_resolve_virtual_base's auto rule), for a
          fresh install with nothing published, where no number can move.
 
@@ -4169,7 +4225,9 @@ def _resolve_kickoff_base(
     if remembered is not None and int(remembered) >= 1:
         return int(remembered)
     lineup_floor = _resolve_virtual_base(settings, highest_non_virtual)
-    inferred = _infer_kickoff_base(published, tz, hint=lineup_floor)
+    inferred = _infer_kickoff_base(
+        published, tz, hint=lineup_floor, unpublished=unpublished, reserved=reserved,
+    )
     return inferred if inferred is not None else lineup_floor
 
 
@@ -4256,6 +4314,70 @@ def _resolve_compact_band_size(settings: Dict[str, Any], game_count: int) -> int
     return max(1, int(game_count))
 
 
+def _place_kickoff_numbers(
+    entries: Sequence[Tuple[str, int]],
+    virtual_base: int,
+    held: Dict[str, int],
+    reserved_numbers: Optional[set] = None,
+) -> Tuple[Dict[str, int], int, int]:
+    """KICKOFF placement: the ONE implementation, shared by
+    _assign_channel_numbers and _infer_kickoff_base (which runs it once per
+    candidate floor, so the floor it recovers is judged by what apply will really
+    do; DO NOT give the inference its own copy of these rules).
+
+    `entries` is (marker, offset) per game, offset being
+    ``stable_channel_number(0, ...)``: the number is ``virtual_base + offset``.
+    `held` maps a marker to the number its live channel carries. Returns
+    (marker -> number, +1 nudges taken, games whose number was reserved).
+    """
+    # A game whose channel already holds a number inside its OWN kickoff
+    # minute's block keeps it, even when the tiebreak hash would now pick a
+    # different slot. The hash is of the marker, so without this the #217
+    # marker migration would shuffle same-minute games between slots, and a
+    # number vacated by one game could be handed to another: the #117
+    # wrong-programme binding. A reschedule changes the minute, so the old
+    # number falls outside the new block and is released, as it should be.
+    #
+    # `reserved_numbers` (numbers other channels publish under) are never handed
+    # out, held or fresh: the guide keys on the bare number, so sharing one with
+    # the user's channel binds the wrong programme to both (#202). The floor no
+    # longer tracks the lineup (#219), so this is what keeps the two apart.
+    slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
+    reserved = {int(n) for n in (reserved_numbers or ())}
+    pairs: List[Tuple[str, int, int]] = []  # (marker, number, 0 if kept else 1)
+    for marker, offset in entries:
+        number = virtual_base + offset
+        block = number - offset % slots
+        prior = held.get(marker)
+        if (
+            prior is not None
+            and block <= int(prior) < block + slots
+            and int(prior) not in reserved
+        ):
+            pairs.append((marker, int(prior), 0))
+        else:
+            pairs.append((marker, number, 1))
+
+    # Kept numbers are placed BEFORE any fresh one, not merely sorted ahead of
+    # it at equal value: a fresh game nudged +1 off a neighbour could otherwise
+    # land on a slot a later kept game holds, and push that kept game out of
+    # its minute's block. Kept numbers are distinct (they are live channel
+    # numbers in one group), so placing them first never collides.
+    pairs.sort(key=lambda p: (p[2], p[1], p[0]))
+    assigned: Dict[str, int] = {}
+    used: set = set(reserved)
+    collisions = 0
+    blocked = 0
+    for marker, number, _kept in pairs:
+        if number in reserved:
+            blocked += 1
+        free = _first_free_number(used, number)
+        collisions += free - number  # == number of +1 nudges taken
+        used.add(free)
+        assigned[marker] = free
+    return assigned, collisions, blocked
+
+
 def _assign_channel_numbers(
     games: List[Dict[str, Any]],
     virtual_base: int,
@@ -4333,56 +4455,18 @@ def _assign_channel_numbers(
             )
         return assigned
 
-    # A game whose channel already holds a number inside its OWN kickoff
-    # minute's block keeps it, even when the tiebreak hash would now pick a
-    # different slot. The hash is of the marker, so without this the #217
-    # marker migration would shuffle same-minute games between slots, and a
-    # number vacated by one game could be handed to another: the #117
-    # wrong-programme binding. A reschedule changes the minute, so the old
-    # number falls outside the new block and is released, as it should be.
-    #
-    # `reserved_numbers` (numbers other channels publish under) are never handed
-    # out, held or fresh: the guide keys on the bare number, so sharing one with
-    # the user's channel binds the wrong programme to both (#202). The floor no
-    # longer tracks the lineup (#219), so this is what keeps the two apart.
-    slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
-    held = existing_numbers or {}
-    reserved = {int(n) for n in (reserved_numbers or ())}
-    pairs: List[Tuple[str, int, int]] = []  # (marker, number, 0 if kept else 1)
+    # The hold, the reservation and the nudge live in _place_kickoff_numbers.
+    entries: List[Tuple[str, int]] = []
     for g in games:
         start_dt = parse_iso_utc(g.get("start_time_utc"))
         if start_dt is None:
             continue
         marker = _build_marker_key(g)
         number = stable_channel_number(virtual_base, start_dt, marker, tz)
-        block = number - (number - virtual_base) % slots
-        prior = held.get(marker)
-        if (
-            prior is not None
-            and block <= int(prior) < block + slots
-            and int(prior) not in reserved
-        ):
-            pairs.append((marker, int(prior), 0))
-        else:
-            pairs.append((marker, number, 1))
-
-    # Kept numbers are placed BEFORE any fresh one, not merely sorted ahead of
-    # it at equal value: a fresh game nudged +1 off a neighbour could otherwise
-    # land on a slot a later kept game holds, and push that kept game out of
-    # its minute's block. Kept numbers are distinct (they are live channel
-    # numbers in one group), so placing them first never collides.
-    pairs.sort(key=lambda p: (p[2], p[1], p[0]))
-    assigned: Dict[str, int] = {}
-    used: set = set(reserved)
-    collisions = 0
-    blocked = 0
-    for marker, number, _kept in pairs:
-        if number in reserved:
-            blocked += 1
-        free = _first_free_number(used, number)
-        collisions += free - number  # == number of +1 nudges taken
-        used.add(free)
-        assigned[marker] = free
+        entries.append((marker, number - virtual_base))
+    assigned, collisions, blocked = _place_kickoff_numbers(
+        entries, virtual_base, existing_numbers or {}, reserved_numbers,
+    )
     if blocked:
         logger.warning(
             "[ranked_matchups] %d game(s) moved off a channel number another of your "
@@ -5339,8 +5423,9 @@ def _reserved_channel_numbers(
 ) -> set:
     """Every channel number in [band_start, band_end] that some OTHER channel
     already publishes under, so numbering can route around it. `band_end=None`
-    means no upper bound: KICKOFF mode passes its floor alone, because a game
-    nudged off a reserved number can walk past any fixed top (#219).
+    means no upper bound: KICKOFF mode passes the lowest number its slate can
+    take under any floor, alone, because a game nudged off a reserved number can
+    walk past any fixed top (#219).
 
     Two things this must get right, both found by review after the live test:
 
@@ -5740,21 +5825,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     numbering_mode = _resolve_numbering_mode(settings)
     remembered_base = None
     games_by_marker_all = {_build_marker_key(g): g for g in games}
-    if numbering_mode == NUMBERING_MODE_KICKOFF:
-        published = []
-        for marker, ch in existing_virtuals.items():
-            g = games_by_marker_all.get(marker)
-            if g is None or ch.channel_number is None:
-                continue
-            published.append(
-                (ch.channel_number, parse_iso_utc(g.get("start_time_utc")), marker)
-            )
-        remembered_base = _load_kickoff_base()
-        virtual_base = _resolve_kickoff_base(
-            settings, highest_other, remembered_base, published, apply_tz,
-        )
-    else:
-        virtual_base = _resolve_virtual_base(settings, highest_other)
+    # A game that has left the slate but whose channel is still recording is
+    # KEPT this apply (#146) and goes back to its number after parking, unless
+    # a new game was handed that number, in which case it stays at a parking
+    # number and its published number changes mid-recording. Those numbers are
+    # held back from new games (review finding, #219). Collected BEFORE the
+    # floor because they do not depend on it, and the kickoff floor inference
+    # needs them to run the placement apply will run.
+    held_for_recordings = _numbers_held_for_recordings(
+        [ch for m, ch in existing_virtuals.items() if m not in games_by_marker_all],
+        archive_enabled,
+    )
     band_size = _resolve_compact_band_size(settings, len(games))
     # Per-game channel numbers (marker -> number). Computed once up front so
     # collision resolution sees the whole slate and so park_base can be set above
@@ -5762,29 +5843,51 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # the slate reaches rather than by the game count; in COMPACT mode it is the
     # top of the band. Existing numbers are passed so COMPACT can hold a
     # published game on the slot it already has (see allocate_compact_numbers).
-    # Every number in use by a channel we do NOT own, in BOTH modes. The DB
-    # constraint is per-group, so nothing stops a collision, but the M3U, XMLTV
-    # and Xtream Codes outputs all key the guide on the bare channel number, so
-    # a shared number silently binds the wrong programme. Measured live on
+    # Every number in use by a channel we do NOT own is reserved, in BOTH modes.
+    # The DB constraint is per-group, so nothing stops a collision, but the M3U,
+    # XMLTV and Xtream Codes outputs all key the guide on the bare channel number,
+    # so a shared number silently binds the wrong programme. Measured live on
     # 2026-08-29 against a Peacock lineup occupying 400-499. Kickoff mode used to
     # skip this because its floor followed the lineup; since #219 the floor is
     # fixed, so a channel the user later adds in the millions is routed around
     # here instead. No upper bound in kickoff mode: a nudge can walk past any.
-    if numbering_mode == NUMBERING_MODE_COMPACT:
-        reserved_numbers = _reserved_channel_numbers(
-            target_group, virtual_base, virtual_base + band_size - 1,
+    if numbering_mode == NUMBERING_MODE_KICKOFF:
+        published = []
+        unpublished = []
+        for marker, g in games_by_marker_all.items():
+            ch = existing_virtuals.get(marker)
+            start_dt = parse_iso_utc(g.get("start_time_utc"))
+            if ch is None or ch.channel_number is None:
+                unpublished.append((start_dt, marker))
+            else:
+                published.append((ch.channel_number, start_dt, marker))
+        # Kickoff reserves from the lowest number this slate can take under ANY
+        # floor (a floor is at least 1), not from the floor itself: the floor is
+        # not known yet, and _infer_kickoff_base must judge each candidate with
+        # the same reservations the real placement will honour (review finding,
+        # #219: a stranger on a published slot made the inference pick a floor
+        # that then nudged a published game). Nothing below this can be assigned.
+        starts = [(start_dt, marker) for _n, start_dt, marker in published] + unpublished
+        lowest_kickoff = 1 + min(
+            (
+                stable_channel_number(0, start_dt, marker, apply_tz)
+                for start_dt, marker in starts if start_dt is not None
+            ),
+            default=0,
+        )
+        reserved_numbers = (
+            _reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings
+        )
+        remembered_base = _load_kickoff_base()
+        virtual_base = _resolve_kickoff_base(
+            settings, highest_other, remembered_base, published, apply_tz,
+            unpublished=unpublished, reserved=reserved_numbers,
         )
     else:
-        reserved_numbers = _reserved_channel_numbers(target_group, virtual_base)
-    # A game that has left the slate but whose channel is still recording is
-    # KEPT this apply (#146) and goes back to its number after parking, unless
-    # a new game was handed that number, in which case it stays at a parking
-    # number and its published number changes mid-recording. Hold those numbers
-    # back from new games too (review finding, #219).
-    reserved_numbers |= _numbers_held_for_recordings(
-        [ch for m, ch in existing_virtuals.items() if m not in games_by_marker_all],
-        archive_enabled,
-    )
+        virtual_base = _resolve_virtual_base(settings, highest_other)
+        reserved_numbers = _reserved_channel_numbers(
+            target_group, virtual_base, virtual_base + band_size - 1,
+        ) | held_for_recordings
     chnum_by_marker = _assign_channel_numbers(
         games, virtual_base, apply_tz,
         mode=numbering_mode,

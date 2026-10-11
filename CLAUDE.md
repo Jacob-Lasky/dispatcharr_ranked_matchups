@@ -129,7 +129,8 @@ A 2-phase renumber dance avoids the unique constraint on
 first, then assign target numbers.
 
 In BOTH modes apply collects `_reserved_channel_numbers` (compact: the band;
-kickoff: everything at or above the floor, no upper bound, #219):
+kickoff: everything at or above the lowest number the slate can take under any
+floor, no upper bound, collected BEFORE the floor so the inference sees it, #219):
 every number already published by a channel we do NOT own
 (effective numbers, so a `ChannelOverride` counts; the recordings-archive
 channel counts as somebody else's because it lives in another group). The DB
@@ -155,7 +156,11 @@ nothing and reaping the group.
 `_resolve_kickoff_base`: explicit `virtual_channel_base` > the floor in
 `numbering_state.json` > `_infer_kickoff_base` (the floor the published channels
 were numbered from, so upgrading or losing the file moves nothing) > highest
-other channel + 1 (fresh install, nothing published). DO NOT route kickoff mode
+other channel + 1 (fresh install, nothing published). The inference judges each
+candidate floor by RUNNING `_place_kickoff_numbers`, the one kickoff placement
+`_assign_channel_numbers` also uses, over the whole slate and every number apply
+will reserve (collected before the floor for that reason); counting channels inside their block instead let a same-minute
+nudge past the block's end pick a floor that moved a channel. DO NOT route kickoff mode
 through `_resolve_virtual_base` again: with the time term in the millions the
 floor buys no separation, and following the lineup renumbered every published
 game by the same delta whenever the top of the lineup changed (measured live
