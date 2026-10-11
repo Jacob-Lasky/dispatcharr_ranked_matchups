@@ -85,7 +85,7 @@ from .mls import (
     _team_canonical_name,
 )
 from .._util import http_get_json
-from ._espn import extract_espn_scoreboard_event, fetch_scoreboard_days
+from ._espn import extract_espn_scoreboard_event, fetch_scoreboard_days, sweep_upcoming_events
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_standings")
 
@@ -330,39 +330,35 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Emit upcoming games where the HOME team is in this conference.
         Cross-conf away games surface via the home team's source so the
-        UI emit doesn't double-count.
+        UI emit doesn't double-count. Swept through
+        `_espn.sweep_upcoming_events`, which owns the window (including the
+        US-Eastern lookback day, #256), the FINISHED and stale drops and the
+        dedupe.
         """
         own_conf = self._own_conf_teams()
         if not own_conf:
             return []
         closeness_map = self._fetch_closeness()
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: Set[Any] = set()
-        for event in _fetch_scoreboard_range(
-            today, today + timedelta(days=days_ahead),
-        ):
+
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
             rec = _extract_game_record(event)
             if rec is None:
-                continue
-            eid = rec.get("id")
-            if eid in seen_ids:
-                continue
+                return None
             home = rec["home"]
             if home not in own_conf:
-                continue
+                return None
             # Skip non-regular-season games for V1. MLS Cup playoff
             # bracket is filed under issue #30 part B; until it lands,
             # postseason MLS games should not be emitted here: they
             # would get importance computed against regular-season
             # bands, inflating their score.
             if rec.get("season_slug") != REGULAR_SEASON_SLUG:
-                continue
-            seen_ids.add(eid)
+                return None
             start = rec.get("start_time")
             if start is None:
-                continue
-            out.append(GameRow(
+                return None
+            eid = rec.get("id")
+            return GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
                 home=home,
@@ -390,8 +386,8 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
                     "fd_competition_code": self.league_context_code,
                     "season_slug": rec.get("season_slug"),
                 },
-            ))
-        return out
+            )
+        return sweep_upcoming_events(_http_get, ESPN_SCOREBOARD_URL, days_ahead, to_row)
 
     # ---------- _fetch_full_season_games (importance side) ----------
 
