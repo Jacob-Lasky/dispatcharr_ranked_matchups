@@ -531,7 +531,12 @@ own event id (for every source that publishes one), not by kickoff time, so a
 reschedule does not create a second channel. The cost is that the numbers are
 large, around 7 digits, and the **Starting channel number** setting is only a
 floor: the time-based term is in the millions, so setting it to 400 lands you
-near 5,548,000 rather than at 400.
+near 5,548,000 rather than at 400. Left at 0 (auto), the floor is picked once,
+just above your highest existing channel, and then remembered, so adding or
+removing your own channels never renumbers the games. Upgrading keeps the floor
+your channels already use. If one of your other channels ever sits on a number a
+game would get, the game takes the next free number instead, because the guide
+identifies a channel by its number alone.
 
 **Compact range** keeps every channel inside a band you name. Set **Starting
 channel number** to 400 and the group runs 400, 401, 402 and up. **Compact range

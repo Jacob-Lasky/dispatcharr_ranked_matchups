@@ -137,6 +137,18 @@ def _isolated_odds_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(odds, "CACHE_PATH", str(tmp_path / "odds_cache.json"))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_numbering_state(tmp_path, monkeypatch):
+    """Point plugin.NUMBERING_STATE_PATH at a per-test temp file (#219), for the
+    same reason as _isolated_last_run: apply remembers its kickoff floor there,
+    and a test driving apply must neither write into the checkout nor inherit a
+    floor an earlier test left behind."""
+    plugin = _load_plugin_module()
+    monkeypatch.setattr(
+        plugin, "NUMBERING_STATE_PATH", str(tmp_path / "numbering_state.json"),
+    )
+
+
 def pytest_configure(config):
     """Register custom markers so `-W error` / `--strict-markers` runs stay
     clean and a typo'd marker name fails loudly instead of silently doing

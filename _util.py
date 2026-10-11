@@ -4,11 +4,45 @@ and `sources/*.py` can import without circulars."""
 from __future__ import annotations
 
 import hashlib
+import json
 import math
+import os
 import re
 import random
+import threading
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
+
+
+def write_json_atomic(path: str, data: Any, **dump_kwargs: Any) -> None:
+    """Write `data` as JSON to `path` so a reader never sees a half-written file.
+
+    The ONE implementation of the plugin's state-file write; DO NOT hand-roll
+    another. Two rules, both learned the hard way:
+
+    - The temp name is unique PER WRITER (pid AND thread), never a fixed
+      ``path + ".tmp"``. A uwsgi worker, the scheduler's pipeline subprocess and
+      the reaper can all write the same file at once, and a shared temp path
+      lets one truncate the file another is still writing, so the atomic
+      ``os.replace`` would publish a half-written file. A pid alone is not
+      enough: two threads in one worker share it.
+    - The temp file is removed on ANY failure (a full disk, or a value json
+      cannot encode), or every failed write leaves litter beside the file.
+
+    Raises what the open, dump or replace raised; callers that must never fail
+    catch it themselves. `dump_kwargs` go to ``json.dump`` unchanged.
+    """
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, **dump_kwargs)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def parse_iso_utc(s: Optional[str]) -> Optional[datetime]:

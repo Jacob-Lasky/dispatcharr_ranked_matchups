@@ -61,6 +61,7 @@ from ._util import (
     series_result_lines,
     looks_seeded,
     stable_channel_number,
+    write_json_atomic,
     CHANNEL_NUMBER_TIEBREAK_SLOTS,
     trusted_impact_narratives,
     allocate_compact_numbers,
@@ -338,6 +339,12 @@ RECORDING_STATE_PATH = os.path.join(PLUGIN_DIR, "recordings_state.json")
 # under the scheduler lock, only ever READ by the live handoff timer, so the
 # timer never races apply's writes. A separate file from the state on purpose.
 RECORDING_STOPS_PATH = os.path.join(PLUGIN_DIR, "recording_stops.json")
+# The floor KICKOFF numbering last used (#219). Auto mode reads it back instead
+# of re-deriving the floor from the user's lineup on every apply, which moved
+# every published number whenever the top of that lineup changed. A file, not a
+# setting: writing it into PluginConfig.settings would replace the user's "0 =
+# auto" with a literal number in the settings form.
+NUMBERING_STATE_PATH = os.path.join(PLUGIN_DIR, "numbering_state.json")
 # Sidecar cache for LLM-rewritten descriptions. Separate from cache.json so the
 # main cache file stays purely deterministic (score, breakdown, score_notes
 # unchanged) and the LLM cache can be safely deleted to force regen without
@@ -2127,25 +2134,12 @@ def _read_cache() -> Dict[str, Any]:
 
 
 def _write_cache(data: Dict[str, Any]) -> None:
-    # The temp name is per-writer, NOT a fixed CACHE_PATH + ".tmp". Several
-    # processes can legitimately be writing here at once (a uwsgi worker, the
-    # scheduler's pipeline subprocess, the reaper's), and a shared temp path
-    # lets one truncate the file another is still writing, so os.replace can
-    # publish a half-written cache. os.replace itself is atomic, so distinct
-    # temp names make the whole publish atomic.
-    tmp = f"{CACHE_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, sort_keys=False, ensure_ascii=False, default=str)
-        os.replace(tmp, CACHE_PATH)
-    finally:
-        # A crash between open and replace would otherwise leave litter next
-        # to the cache forever, one file per crashed writer.
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    # Several processes write here at once (a uwsgi worker, the scheduler's
+    # pipeline subprocess, the reaper's); write_json_atomic is what keeps one
+    # from publishing another's half-written cache.
+    write_json_atomic(
+        CACHE_PATH, data, indent=2, sort_keys=False, ensure_ascii=False, default=str,
+    )
 
 
 # ---------- settings parsing ----------
@@ -4021,6 +4015,12 @@ def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) 
     ~5,548,720 and is invisible in practice. Any help text, log line or doc that
     calls this "the first channel number" without naming the mode is wrong.
 
+    This is the resolver for COMPACT mode, and KICKOFF mode's last resort on a
+    fresh install. DO NOT call it for kickoff mode directly: re-deriving the
+    floor from the lineup on every apply renumbers every published game whenever
+    the top of the lineup changes (#219). Kickoff goes through
+    _resolve_kickoff_base, which remembers the floor.
+
     `virtual_channel_base` setting:
       - Positive int → use that as the base.
       - 0 (sentinel) → auto: pick (highest existing non-virtual channel) + 1,
@@ -4034,15 +4034,130 @@ def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) 
     The auto path falls back to _AUTO_BASE_FALLBACK on a fresh install (no
     other channels exist) so we don't return 1 and squat on prime real estate.
     """
+    explicit = _explicit_virtual_base(settings)
+    if explicit is not None:
+        return explicit
+    candidate = int(highest_non_virtual) + 1
+    return candidate if candidate > 1 else _AUTO_BASE_FALLBACK
+
+
+def _explicit_virtual_base(settings: Dict[str, Any]) -> Optional[int]:
+    """The user's `virtual_channel_base` when it is a positive number, else None
+    (0, blank, negative or unparseable all mean auto). The one parse of the
+    setting, shared by _resolve_virtual_base and _resolve_kickoff_base."""
     raw = settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE)
     try:
         base = int(float(raw))
     except (TypeError, ValueError):
-        base = 0
-    if base > 0:
-        return base
-    candidate = int(highest_non_virtual) + 1
-    return candidate if candidate > 1 else _AUTO_BASE_FALLBACK
+        return None
+    return base if base > 0 else None
+
+
+def _infer_kickoff_base(
+    published: List[Tuple[Any, datetime, str]], tz,
+) -> Optional[int]:
+    """Recover the floor the published KICKOFF channels were numbered from.
+
+    `published` is (live channel number, the game's kickoff, its marker) for
+    every game that already has a channel. A kickoff number is
+    ``base + stable_channel_number(0, kickoff, marker)``, so each channel names
+    a candidate base exactly. Channels that were nudged off their hash slot, held
+    in-block across the #217 marker migration, or rescheduled since they were
+    numbered name a slightly or wildly wrong one, so the candidate that keeps the
+    MOST channels inside their own kickoff minute's block wins (then the one most
+    channels name exactly, then the lowest). Candidates below 1 are ignored:
+    those are COMPACT numbers, not a kickoff floor.
+
+    Only consulted when NUMBERING_STATE_PATH has no floor (the first apply after
+    upgrading, or a lost file), so that apply keeps every published number
+    instead of re-deriving the floor from the lineup (#219).
+    """
+    slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
+    rows: List[Tuple[int, int, int]] = []  # (number, offset from base, block start)
+    for number, start_dt, marker in published:
+        if number is None or start_dt is None:
+            continue
+        offset = stable_channel_number(0, start_dt, marker, tz)
+        rows.append((int(number), offset, offset - offset % slots))
+    candidates = {n - off for n, off, _ in rows if n - off >= 1}
+    if not candidates:
+        return None
+
+    def score(c: int) -> Tuple[int, int, int]:
+        in_block = sum(1 for n, _off, blk in rows if c + blk <= n < c + blk + slots)
+        exact = sum(1 for n, off, _blk in rows if n - off == c)
+        return (in_block, exact, -c)
+
+    return max(candidates, key=score)
+
+
+def _resolve_kickoff_base(
+    settings: Dict[str, Any],
+    highest_non_virtual: float,
+    remembered: Optional[int],
+    published: List[Tuple[Any, datetime, str]],
+    tz,
+) -> int:
+    """The floor for KICKOFF numbering, which must not follow the user's lineup.
+
+    In kickoff mode the floor sits under a time term in the millions, so it buys
+    no separation from the user's channels. Re-deriving it as "highest other
+    channel + 1" on every apply (what _resolve_virtual_base does, and what this
+    mode did before #219) therefore bought nothing and cost a uniform renumber of
+    every published game whenever the top of the lineup changed: measured live
+    2026-09-26, the highest non-matchups channel went 6891 -> 6838 and all seven
+    unchanged games moved by -53. Dispatcharr's M3U, XMLTV and Xtream Codes
+    outputs bind the guide by the bare channel number (#117), so a moved number
+    is exactly what kickoff mode exists to prevent.
+
+    Precedence:
+      1. A positive `virtual_channel_base`: used as given, as before.
+      2. `remembered`, the floor the last kickoff apply used (numbering_state.json).
+      3. The floor the published channels were numbered from (_infer_kickoff_base),
+         so upgrading, or losing the state file, moves nothing.
+      4. Highest other channel + 1 (_resolve_virtual_base's auto rule), for a
+         fresh install with nothing published, where no number can move.
+
+    Not re-deriving the floor drops the old side effect that kept every kickoff
+    number above the lineup. Collision-freedom with the user's channels comes
+    from apply reserving their effective numbers instead (_reserved_channel_numbers,
+    passed to _assign_channel_numbers in both modes).
+    """
+    explicit = _explicit_virtual_base(settings)
+    if explicit is not None:
+        return explicit
+    if remembered is not None and int(remembered) >= 1:
+        return int(remembered)
+    inferred = _infer_kickoff_base(published, tz)
+    if inferred is not None:
+        return inferred
+    return _resolve_virtual_base(settings, highest_non_virtual)
+
+
+def _load_kickoff_base(path: Optional[str] = None) -> Optional[int]:
+    """The floor the last kickoff apply used, or None when the file is missing,
+    unreadable or holds anything but a positive integer."""
+    path = path or NUMBERING_STATE_PATH
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    base = data.get("kickoff_base") if isinstance(data, dict) else None
+    if isinstance(base, bool) or not isinstance(base, int) or base < 1:
+        return None
+    return base
+
+
+def _save_kickoff_base(base: int, path: Optional[str] = None) -> None:
+    """Remember the kickoff floor. Only apply writes it, under the scheduler
+    lock. A failed write is logged and swallowed: the next apply infers the same
+    floor from the published channels, so nothing moves."""
+    path = path or NUMBERING_STATE_PATH
+    try:
+        write_json_atomic(path, {"kickoff_base": int(base)})
+    except OSError as e:
+        logger.warning("[ranked_matchups] could not save kickoff numbering floor to %s: %s", path, e)
 
 
 def _resolve_park_base(max_target_number: int) -> int:
@@ -4125,7 +4240,10 @@ def _assign_channel_numbers(
     we resolve it deterministically: walk the games in (number, marker) order and
     bump any exact duplicate to the next free integer. This perturbs ONLY a
     colliding same-minute game, never games at other minutes, and is reproducible
-    across applies.
+    across applies. `reserved_numbers` (every number some other channel already
+    publishes under) is skipped the same way and never kept by the in-block hold,
+    since a shared number binds the guide arbitrarily for both channels (#219:
+    the floor no longer tracks the lineup, so nothing else keeps them apart).
 
     COMPACT hands the ordering job to `allocate_compact_numbers`, which keeps
     every number inside a band the user names. Games are passed in kickoff order
@@ -4177,8 +4295,14 @@ def _assign_channel_numbers(
     # number vacated by one game could be handed to another: the #117
     # wrong-programme binding. A reschedule changes the minute, so the old
     # number falls outside the new block and is released, as it should be.
+    #
+    # `reserved_numbers` (numbers other channels publish under) are never handed
+    # out, held or fresh: the guide keys on the bare number, so sharing one with
+    # the user's channel binds the wrong programme to both (#202). The floor no
+    # longer tracks the lineup (#219), so this is what keeps the two apart.
     slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
     held = existing_numbers or {}
+    reserved = {int(n) for n in (reserved_numbers or ())}
     pairs: List[Tuple[str, int, int]] = []  # (marker, number, 0 if kept else 1)
     for g in games:
         start_dt = parse_iso_utc(g.get("start_time_utc"))
@@ -4188,7 +4312,11 @@ def _assign_channel_numbers(
         number = stable_channel_number(virtual_base, start_dt, marker, tz)
         block = number - (number - virtual_base) % slots
         prior = held.get(marker)
-        if prior is not None and block <= int(prior) < block + slots:
+        if (
+            prior is not None
+            and block <= int(prior) < block + slots
+            and int(prior) not in reserved
+        ):
             pairs.append((marker, int(prior), 0))
         else:
             pairs.append((marker, number, 1))
@@ -4200,14 +4328,23 @@ def _assign_channel_numbers(
     # numbers in one group), so placing them first never collides.
     pairs.sort(key=lambda p: (p[2], p[1], p[0]))
     assigned: Dict[str, int] = {}
-    used: set = set()
+    used: set = set(reserved)
     collisions = 0
+    blocked = 0
     for marker, number, _kept in pairs:
+        if number in reserved:
+            blocked += 1
         free = _first_free_number(used, number)
         collisions += free - number  # == number of +1 nudges taken
         used.add(free)
         assigned[marker] = free
-    if collisions:
+    if blocked:
+        logger.warning(
+            "[ranked_matchups] %d game(s) moved off a channel number another of your "
+            "channels already uses (the guide keys on the number alone)",
+            blocked,
+        )
+    elif collisions:
         logger.warning(
             "[ranked_matchups] resolved %d channel-number collision(s) by +1 nudge; "
             "raise CHANNEL_NUMBER_TIEBREAK_SLOTS in _util.py if this recurs",
@@ -5152,9 +5289,13 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _reserved_channel_numbers(target_group, band_start: int, band_end: int) -> set:
+def _reserved_channel_numbers(
+    target_group, band_start: int, band_end: Optional[int] = None,
+) -> set:
     """Every channel number in [band_start, band_end] that some OTHER channel
-    already publishes under, so compact allocation can route around it.
+    already publishes under, so numbering can route around it. `band_end=None`
+    means no upper bound: KICKOFF mode passes its floor alone, because a game
+    nudged off a reserved number can walk past any fixed top (#219).
 
     Two things this must get right, both found by review after the live test:
 
@@ -5188,13 +5329,16 @@ def _reserved_channel_numbers(target_group, band_start: int, band_end: int) -> s
         field = "effective_channel_number"
     except Exception:
         logger.warning(
-            "[ranked_matchups] with_effective_values unavailable; compact numbering "
+            "[ranked_matchups] with_effective_values unavailable; channel numbering "
             "is reading raw channel numbers and may miss a ChannelOverride",
             exc_info=True,
         )
+    bounds = {f"{field}__gte": band_start}
+    if band_end is not None:
+        bounds[f"{field}__lte"] = band_end
     rows = (
         qs.exclude(**{f"{field}__isnull": True})
-        .filter(**{f"{field}__gte": band_start, f"{field}__lte": band_end})
+        .filter(**bounds)
         .values_list(field, flat=True)
     )
     return {int(n) for n in rows}
@@ -5496,16 +5640,38 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # this game's channel. The DB write happens inside the transaction below.
     marker_renames = _rekey_legacy_virtuals(existing_virtuals, games)
 
-    # Resolve the virtual channel base. In auto mode we slot in just after
-    # the user's highest real channel (excluding our own virtuals) so we
-    # don't squat on prime numbers like 1-100.
+    # Resolve the virtual channel base. COMPACT auto slots in just after the
+    # user's highest real channel (excluding our own virtuals) so it doesn't
+    # squat on prime numbers like 1-100. KICKOFF must NOT re-derive it that way
+    # on every apply: its floor sits under a time term in the millions, so
+    # following the lineup bought nothing and renumbered every published game
+    # whenever the top of the lineup changed (#219). It reuses the floor it
+    # used last time, or the one its published channels were numbered from.
     from django.db.models import Max as _Max
     highest_other = (
         Channel.objects.exclude(_owned_tvg_id_q())
         .aggregate(m=_Max("channel_number"))["m"] or 0
     )
-    virtual_base = _resolve_virtual_base(settings, highest_other)
     numbering_mode = _resolve_numbering_mode(settings)
+    remembered_base = None
+    if numbering_mode == NUMBERING_MODE_KICKOFF:
+        games_by_marker = {_build_marker_key(g): g for g in games}
+        published = []
+        for marker, ch in existing_virtuals.items():
+            g = games_by_marker.get(marker)
+            if g is None or ch.channel_number is None:
+                continue
+            published.append(
+                (ch.channel_number, parse_iso_utc(g.get("start_time_utc")), marker)
+            )
+        remembered_base = _load_kickoff_base()
+        virtual_base = _resolve_kickoff_base(
+            settings, highest_other, remembered_base, published, apply_tz,
+        )
+        if not dry_run and virtual_base != remembered_base:
+            _save_kickoff_base(virtual_base)
+    else:
+        virtual_base = _resolve_virtual_base(settings, highest_other)
     band_size = _resolve_compact_band_size(settings, len(games))
     # Per-game channel numbers (marker -> number). Computed once up front so
     # collision resolution sees the whole slate and so park_base can be set above
@@ -5513,18 +5679,20 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # the slate reaches rather than by the game count; in COMPACT mode it is the
     # top of the band. Existing numbers are passed so COMPACT can hold a
     # published game on the slot it already has (see allocate_compact_numbers).
-    # COMPACT only: every number in use by a channel we do NOT own. The DB
+    # Every number in use by a channel we do NOT own, in BOTH modes. The DB
     # constraint is per-group, so nothing stops a collision, but the M3U, XMLTV
     # and Xtream Codes outputs all key the guide on the bare channel number, so
     # a shared number silently binds the wrong programme. Measured live on
-    # 2026-08-29 against a Peacock lineup occupying 400-499. Skipped entirely in
-    # kickoff mode, where numbers are ~7 digits and cannot collide with a real
-    # lineup, so the extra scan is not paid on the default path.
-    reserved_numbers = None
+    # 2026-08-29 against a Peacock lineup occupying 400-499. Kickoff mode used to
+    # skip this because its floor followed the lineup; since #219 the floor is
+    # fixed, so a channel the user later adds in the millions is routed around
+    # here instead. No upper bound in kickoff mode: a nudge can walk past any.
     if numbering_mode == NUMBERING_MODE_COMPACT:
         reserved_numbers = _reserved_channel_numbers(
             target_group, virtual_base, virtual_base + band_size - 1,
         )
+    else:
+        reserved_numbers = _reserved_channel_numbers(target_group, virtual_base)
     chnum_by_marker = _assign_channel_numbers(
         games, virtual_base, apply_tz,
         mode=numbering_mode,
@@ -5579,10 +5747,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     max_target = max(chnum_by_marker.values(), default=virtual_base)
     park_base = _resolve_park_base(max_target)
     logger.info(
-        "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r), "
-        "mode=%s, band_size=%d, max_target=%d, park_base=%d",
+        "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r, "
+        "remembered=%s), mode=%s, band_size=%d, max_target=%d, park_base=%d",
         virtual_base, highest_other,
         settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE),
+        remembered_base,
         numbering_mode, band_size, max_target, park_base,
     )
 

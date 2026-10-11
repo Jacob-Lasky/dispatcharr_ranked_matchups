@@ -33,13 +33,12 @@ import hashlib
 import json
 import logging
 import os
-import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
 
-from .._util import redact_secrets
+from .._util import redact_secrets, write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -93,19 +92,10 @@ def _load() -> Dict[str, Any]:
 
 
 def _save(data: Dict[str, Any]) -> None:
-    # Per-writer temp name, then an atomic replace: same contract as the
-    # plugin's _write_cache.
-    tmp = f"{CACHE_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, CACHE_PATH)
+        write_json_atomic(CACHE_PATH, data)
     except OSError as e:
         logger.warning("[odds] could not write %s: %s", CACHE_PATH, e)
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
 
 
 def _parse_time(raw: Any) -> Optional[datetime]:
