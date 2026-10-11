@@ -2567,27 +2567,26 @@ def _build_sources(settings: Dict[str, Any]):
     #     fetch_upcoming filters GROUP_STAGE out so it doesn't double
     #     up with the group-stage source.
     #   - GroupStageSoccerSource for the per-group "advance / eliminated"
-    #     importance signal (top 2 per group).
-    if settings.get("enable_world_cup", False) and fd_key:
-        wc_knockout = _make_soccer("world_cup")
-        wc_groups = GroupStageSoccerSource(
-            "world_cup", fd_api_key=fd_key, odds_api_key=odds_key,
+    #     importance signal (top 2 per group + best third-placers).
+    # The pair is wired into the cross-source chain (#53 WC, #78 EURO):
+    # while the group stage is in progress, group-game importance runs
+    # through monte_carlo_importance_batch_chain, which seeds the
+    # published knockout bracket (sources/soccer.py _CHAIN_BRACKETS) from
+    # each simulated group table so R16+ leverage reaches group games.
+    for setting, comp_key in (
+        ("enable_world_cup", "world_cup"),
+        ("enable_euros", "euros"),
+    ):
+        if not (settings.get(setting, False) and fd_key):
+            continue
+        knockout = _make_soccer(comp_key)
+        groups = GroupStageSoccerSource(
+            comp_key, fd_api_key=fd_key, odds_api_key=odds_key,
         )
-        # Wire the cross-source chain (#53): while wc_knockout's
-        # _fetch_bracket_games returns empty (pre-tournament FD.org
-        # state), group-game importance routes through
-        # monte_carlo_importance_batch_chain so R16+ leverage fires.
-        # Once FD publishes real LAST_32 teams, the chain toggles off
-        # automatically.
-        if isinstance(wc_knockout, KnockoutSoccerSource):
-            wc_groups.set_paired_knockout_source(wc_knockout)
-        sources.append(wc_knockout)
-        sources.append(wc_groups)
-    if settings.get("enable_euros", False) and fd_key:
-        sources.append(_make_soccer("euros"))
-        sources.append(GroupStageSoccerSource(
-            "euros", fd_api_key=fd_key, odds_api_key=odds_key,
-        ))
+        if isinstance(knockout, KnockoutSoccerSource):
+            groups.set_paired_knockout_source(knockout)
+        sources.append(knockout)
+        sources.append(groups)
 
     # International friendlies (ESPN, no API key). Exhibition games with no
     # standings, so these sources don't support importance simulation; a

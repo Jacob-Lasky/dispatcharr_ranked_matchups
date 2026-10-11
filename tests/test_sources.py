@@ -9110,6 +9110,33 @@ class TestKnockoutSoccerSourceSeedFromChain:
         assert len(all_ids) == len(set(all_ids)), "duplicate synthetic game_ids"
 
 
+def _wc2026_group_fixtures(status: str = "SCHEDULED") -> List[Dict[str, Any]]:
+    """Synthetic WC 2026 group stage in FD.org's match shape: 12 groups
+    (A-L) of 4 teams, 6 round-robin games each, every game `status`."""
+    fixtures: List[Dict[str, Any]] = []
+    fid = 0
+    for gi in range(12):
+        letter = chr(ord("A") + gi)
+        grp = f"GROUP_{letter}"
+        teams = [f"G{letter}{n}" for n in (1, 2, 3, 4)]
+        pairs = [(0, 1), (2, 3), (0, 2), (1, 3), (0, 3), (1, 2)]
+        for pi, (a, b) in enumerate(pairs):
+            fid += 1
+            fixtures.append({
+                "id": fid,
+                "stage": "GROUP_STAGE",
+                "group": grp,
+                "matchday": pi % 3 + 1,
+                "homeTeam": {"name": teams[a]},
+                "awayTeam": {"name": teams[b]},
+                "status": status,
+                "utcDate": "2026-06-11T19:00:00Z",
+                "score": ({"fullTime": {"home": 1, "away": 0}}
+                          if status == "FINISHED" else {}),
+            })
+    return fixtures
+
+
 class TestGroupStageSoccerSourceChainWiring:
     """`set_paired_knockout_source` + `cross_source_chain` together
     expose the toggle that scoring.py:compute_match_importance reads
@@ -9117,12 +9144,15 @@ class TestGroupStageSoccerSourceChainWiring:
     """
 
     @staticmethod
-    def _wc_pair():
+    def _wc_pair(fixtures=None):
         from dispatcharr_ranked_matchups.sources.soccer import (
             GroupStageSoccerSource, KnockoutSoccerSource,
         )
         groups = GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
         knockout = KnockoutSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+        if fixtures is not None:
+            groups._all_matches_cache = fixtures
+            knockout._all_matches_cache = fixtures
         return groups, knockout
 
     def test_unwired_returns_none(self):
@@ -9131,10 +9161,9 @@ class TestGroupStageSoccerSourceChainWiring:
         assert groups.cross_source_chain() is None
 
     def test_wired_with_empty_bracket_returns_chain(self):
-        # Pre-tournament state: knockout's _fetch_bracket_games returns
-        # empty (FD.org publishes placeholders with null team names).
-        # The chain should activate.
-        groups, knockout = self._wc_pair()
+        # Pre-tournament state: FD.org publishes knockout placeholders with
+        # null team names and every group game is still to play.
+        groups, knockout = self._wc_pair(_wc2026_group_fixtures())
         knockout._fetch_bracket_games = lambda: []  # type: ignore[method-assign]
         groups.set_paired_knockout_source(knockout)
         result = groups.cross_source_chain()
@@ -9144,17 +9173,23 @@ class TestGroupStageSoccerSourceChainWiring:
         # seed_fn is the bracket seed builder.
         assert callable(seed_fn)
 
-    def test_wired_with_populated_bracket_returns_none(self):
-        # Mid-tournament toggle: once FD.org has real teams in the
-        # knockout bracket, the chain steps aside and lets the
-        # existing single-source path take over.
-        groups, knockout = self._wc_pair()
+    def test_partly_filled_bracket_keeps_chain_while_groups_play(self):
+        # #78: FD.org fills a knockout fixture's teams once its feeder
+        # groups finish, while other groups still have games left. Those
+        # remaining group games must keep their knockout leverage.
+        groups, knockout = self._wc_pair(_wc2026_group_fixtures())
         knockout._fetch_bracket_games = lambda: [  # type: ignore[method-assign]
             {"game_id": 1, "stage": "LAST_32", "matchday": 1,
-             "home": "Mexico", "away": "Norway",
+             "home": "GA2", "away": "GB2",
              "home_goals": None, "away_goals": None,
              "status": "SCHEDULED", "start_time": None, "extra": {}},
         ]
+        groups.set_paired_knockout_source(knockout)
+        assert groups.cross_source_chain() is not None
+
+    def test_finished_group_stage_returns_none(self):
+        # No group game left to score: the knockout source owns importance.
+        groups, knockout = self._wc_pair(_wc2026_group_fixtures("FINISHED"))
         groups.set_paired_knockout_source(knockout)
         assert groups.cross_source_chain() is None
 
@@ -9162,8 +9197,8 @@ class TestGroupStageSoccerSourceChainWiring:
 class TestBuildBracketSeedWC2026:
     """`_build_bracket_seed` maps a 12-group primary_state to the WC 2026
     bracket structure per FIFA's published M73-M103 schedule. The
-    LAST_32 pairings are exact; best-3rd-place slot assignment is a
-    constraint-respecting greedy approximation of FIFA's Annex C.
+    LAST_32 pairings are exact; best-3rd-place slots come from FIFA's
+    Annex C table (test_annex_c_table.py checks the table itself).
     """
 
     @staticmethod
@@ -9358,27 +9393,7 @@ class TestWC2026ChainEndToEnd:
         groups_src = GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
         knockout_src = KnockoutSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
 
-        fixtures: List[Dict[str, Any]] = []
-        fid = 0
-        for gi in range(12):
-            letter = chr(ord("A") + gi)
-            grp = f"GROUP_{letter}"
-            teams = [f"G{letter}{n}" for n in (1, 2, 3, 4)]
-            # Round-robin 6 games per group.
-            pairs = [(0, 1), (2, 3), (0, 2), (1, 3), (0, 3), (1, 2)]
-            for pi, (a, b) in enumerate(pairs):
-                fid += 1
-                fixtures.append({
-                    "id": fid,
-                    "stage": "GROUP_STAGE",
-                    "group": grp,
-                    "matchday": pi % 3 + 1,
-                    "homeTeam": {"name": teams[a]},
-                    "awayTeam": {"name": teams[b]},
-                    "status": "SCHEDULED",
-                    "utcDate": "2026-06-11T19:00:00Z",
-                    "score": {},
-                })
+        fixtures = _wc2026_group_fixtures()
         groups_src._all_matches_cache = fixtures
         knockout_src._all_matches_cache = fixtures  # the knockout filters down
 
@@ -9397,8 +9412,9 @@ class TestWC2026ChainEndToEnd:
         groups_src.estimate_strengths = lambda: strengths  # type: ignore[method-assign]
         knockout_src.estimate_strengths = lambda: strengths  # type: ignore[method-assign]
 
-        # Knockout source's bracket fetcher returns empty (pre-tournament
-        # state). Without this the chain toggles off.
+        # Pre-tournament state: no knockout fixture carries real teams yet.
+        # Not what gates the chain (an unfinished group stage does), but it
+        # keeps the knockout source off the network.
         knockout_src._fetch_bracket_games = lambda: []  # type: ignore[method-assign]
 
         groups_src.set_paired_knockout_source(knockout_src)
@@ -10150,12 +10166,12 @@ class TestComputeGroupStandings:
         )
         assert standings.n_best_third_advance == 0
 
-    def test_fifa_tiebreaker_key_is_descending_on_all_three_axes(self):
+    def test_overall_record_key_is_descending_on_all_three_axes(self):
         # Pin the chain: higher points sort earlier; ties broken by GD,
         # then GF. Test directly on the static helper so changes to
         # caller code don't accidentally invert one axis (-pts vs +pts).
         from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
-        k = GroupStageSoccerSource._fifa_tiebreaker_key
+        k = GroupStageSoccerSource._overall_record_key
         a = {"points": 6, "gf": 5, "ga": 2}  # gd=+3
         b = {"points": 6, "gf": 4, "ga": 1}  # gd=+3, lower gf -> ranks below a
         c = {"points": 6, "gf": 5, "ga": 3}  # gd=+2, lower gd -> ranks below a

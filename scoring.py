@@ -286,6 +286,21 @@ _WC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
 ]
 
 
+# UEFA EURO knockout cascade thresholds, shared by EC (the knockout source's
+# own context) and EC_GS (the group stage, which inherits them so the #78
+# cross-source chain can attribute knockout leverage to group games). Same
+# reason as _WC_KNOCKOUT_THRESHOLDS above: one constant, so the two contexts
+# cannot drift apart. EURO's entry round is LAST_16, so `round_of_16` is held
+# by exactly the teams that `advance` (as WC's `last_32` is); its 1.0 weight
+# rides on top of the group stage's own `advance` band.
+_EC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
+    ("LAST_16",        "round_of_16",   1.0),
+    ("QUARTER_FINALS", "quarterfinal",  2.5),
+    ("SEMI_FINALS",    "semifinal",     4.0),
+    ("FINAL",          "final",         6.0),
+    ("WINNER",         "winner",       10.0),
+]
+
 # FIFA World Cup knockout importance premium (pre-weight importance_points),
 # keyed by the UPPER-cased tournament stage. A knockout game is win-or-go-home:
 # maximal stakes. But compute_match_importance returns 0 for it (there is no
@@ -493,13 +508,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     "EC": LeagueContext(
         code="EC", matchdays_total=0, format="knockout",
-        thresholds=[
-            ("LAST_16",        "round_of_16",   1.0),
-            ("QUARTER_FINALS", "quarterfinal",  2.5),
-            ("SEMI_FINALS",    "semifinal",     4.0),
-            ("FINAL",          "final",         6.0),
-            ("WINNER",         "winner",       10.0),
-        ],
+        thresholds=list(_EC_KNOCKOUT_THRESHOLDS),
         boundary_summary="R16 → QF → SF → Final → Champion (UEFA EURO)",
     ),
     # Group-stage advancement contexts for the two international
@@ -538,9 +547,15 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     "EC_GS": LeagueContext(
         code="EC_GS", matchdays_total=3, format="group_advance",
-        thresholds=[
-            (_GROUP_ADVANCE_SENTINEL, "advance", 3.0),
-        ],
+        # `advance` plus the EURO knockout cascade, mirroring WC_GS: the
+        # #78 cross-source chain attributes R16+ leverage to group games
+        # through these labels. DO NOT drop the cascade: importance sums
+        # only over this list, so a working chain with `advance` alone
+        # would change nothing user-visible.
+        thresholds=(
+            [(_GROUP_ADVANCE_SENTINEL, "advance", 3.0)]
+            + list(_EC_KNOCKOUT_THRESHOLDS)
+        ),
         # EURO 2016/2020/2024 format: 6 groups × 4 teams, top 2 + 4 best
         # 3rd-place = 16 advancing → LAST_16. EURO has used this format
         # since 2016; the older 16-team / 8-team formats had no 3rd-place
@@ -1350,8 +1365,8 @@ def compute_match_importance(
     queries = importance_queries(match, league_ctx, favorites_in_league)
 
     # Chain routing (#53): if the source declares a cross-source chain
-    # AND that chain is currently active (pre-tournament FD.org state
-    # for WC group games), route through the chain simulator so the
+    # AND that chain is currently active (a WC / EURO group stage still
+    # in progress), route through the chain simulator so the
     # downstream knockout-cascade labels in league_ctx.thresholds get
     # real leverage values. When the chain is inactive (or absent),
     # the single-source path returns 0 on those labels, which is the

@@ -1,0 +1,1139 @@
+{
+ "_source": "GET https://api.football-data.org/v4/competitions/EC/matches?season=2024, fetched 2026-10-11 (read-only), trimmed to the fields the soccer sources read",
+ "matches": [
+  {
+   "id": 428747,
+   "utcDate": "2024-06-14T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_A",
+   "homeTeam": {
+    "name": "Germany"
+   },
+   "awayTeam": {
+    "name": "Scotland"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 5,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428746,
+   "utcDate": "2024-06-15T13:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_A",
+   "homeTeam": {
+    "name": "Hungary"
+   },
+   "awayTeam": {
+    "name": "Switzerland"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 3
+    }
+   }
+  },
+  {
+   "id": 428753,
+   "utcDate": "2024-06-15T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_B",
+   "homeTeam": {
+    "name": "Spain"
+   },
+   "awayTeam": {
+    "name": "Croatia"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 3,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428752,
+   "utcDate": "2024-06-15T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_B",
+   "homeTeam": {
+    "name": "Italy"
+   },
+   "awayTeam": {
+    "name": "Albania"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428765,
+   "utcDate": "2024-06-16T13:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_D",
+   "homeTeam": {
+    "name": "Poland"
+   },
+   "awayTeam": {
+    "name": "Netherlands"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 2
+    }
+   }
+  },
+  {
+   "id": 428758,
+   "utcDate": "2024-06-16T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_C",
+   "homeTeam": {
+    "name": "Slovenia"
+   },
+   "awayTeam": {
+    "name": "Denmark"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428759,
+   "utcDate": "2024-06-16T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_C",
+   "homeTeam": {
+    "name": "Serbia"
+   },
+   "awayTeam": {
+    "name": "England"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428770,
+   "utcDate": "2024-06-17T13:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_E",
+   "homeTeam": {
+    "name": "Romania"
+   },
+   "awayTeam": {
+    "name": "Ukraine"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 3,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428771,
+   "utcDate": "2024-06-17T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_E",
+   "homeTeam": {
+    "name": "Belgium"
+   },
+   "awayTeam": {
+    "name": "Slovakia"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428764,
+   "utcDate": "2024-06-17T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_D",
+   "homeTeam": {
+    "name": "Austria"
+   },
+   "awayTeam": {
+    "name": "France"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428776,
+   "utcDate": "2024-06-18T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_F",
+   "homeTeam": {
+    "name": "Turkey"
+   },
+   "awayTeam": {
+    "name": "Georgia"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 3,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428777,
+   "utcDate": "2024-06-18T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 1,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_F",
+   "homeTeam": {
+    "name": "Portugal"
+   },
+   "awayTeam": {
+    "name": "Czechia"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428751,
+   "utcDate": "2024-06-19T13:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_B",
+   "homeTeam": {
+    "name": "Croatia"
+   },
+   "awayTeam": {
+    "name": "Albania"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 2
+    }
+   }
+  },
+  {
+   "id": 428744,
+   "utcDate": "2024-06-19T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_A",
+   "homeTeam": {
+    "name": "Germany"
+   },
+   "awayTeam": {
+    "name": "Hungary"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428745,
+   "utcDate": "2024-06-19T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_A",
+   "homeTeam": {
+    "name": "Scotland"
+   },
+   "awayTeam": {
+    "name": "Switzerland"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428756,
+   "utcDate": "2024-06-20T13:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_C",
+   "homeTeam": {
+    "name": "Slovenia"
+   },
+   "awayTeam": {
+    "name": "Serbia"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428757,
+   "utcDate": "2024-06-20T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_C",
+   "homeTeam": {
+    "name": "Denmark"
+   },
+   "awayTeam": {
+    "name": "England"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428750,
+   "utcDate": "2024-06-20T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_B",
+   "homeTeam": {
+    "name": "Spain"
+   },
+   "awayTeam": {
+    "name": "Italy"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428769,
+   "utcDate": "2024-06-21T13:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_E",
+   "homeTeam": {
+    "name": "Slovakia"
+   },
+   "awayTeam": {
+    "name": "Ukraine"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 2
+    }
+   }
+  },
+  {
+   "id": 428763,
+   "utcDate": "2024-06-21T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_D",
+   "homeTeam": {
+    "name": "Poland"
+   },
+   "awayTeam": {
+    "name": "Austria"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 3
+    }
+   }
+  },
+  {
+   "id": 428762,
+   "utcDate": "2024-06-21T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_D",
+   "homeTeam": {
+    "name": "Netherlands"
+   },
+   "awayTeam": {
+    "name": "France"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428775,
+   "utcDate": "2024-06-22T13:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_F",
+   "homeTeam": {
+    "name": "Georgia"
+   },
+   "awayTeam": {
+    "name": "Czechia"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428774,
+   "utcDate": "2024-06-22T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_F",
+   "homeTeam": {
+    "name": "Turkey"
+   },
+   "awayTeam": {
+    "name": "Portugal"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 3
+    }
+   }
+  },
+  {
+   "id": 428768,
+   "utcDate": "2024-06-22T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 2,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_E",
+   "homeTeam": {
+    "name": "Belgium"
+   },
+   "awayTeam": {
+    "name": "Romania"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428742,
+   "utcDate": "2024-06-23T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_A",
+   "homeTeam": {
+    "name": "Scotland"
+   },
+   "awayTeam": {
+    "name": "Hungary"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428743,
+   "utcDate": "2024-06-23T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_A",
+   "homeTeam": {
+    "name": "Switzerland"
+   },
+   "awayTeam": {
+    "name": "Germany"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428748,
+   "utcDate": "2024-06-24T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_B",
+   "homeTeam": {
+    "name": "Albania"
+   },
+   "awayTeam": {
+    "name": "Spain"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428749,
+   "utcDate": "2024-06-24T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_B",
+   "homeTeam": {
+    "name": "Croatia"
+   },
+   "awayTeam": {
+    "name": "Italy"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428760,
+   "utcDate": "2024-06-25T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_D",
+   "homeTeam": {
+    "name": "France"
+   },
+   "awayTeam": {
+    "name": "Poland"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428761,
+   "utcDate": "2024-06-25T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_D",
+   "homeTeam": {
+    "name": "Netherlands"
+   },
+   "awayTeam": {
+    "name": "Austria"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 3
+    }
+   }
+  },
+  {
+   "id": 428754,
+   "utcDate": "2024-06-25T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_C",
+   "homeTeam": {
+    "name": "Denmark"
+   },
+   "awayTeam": {
+    "name": "Serbia"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428755,
+   "utcDate": "2024-06-25T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_C",
+   "homeTeam": {
+    "name": "England"
+   },
+   "awayTeam": {
+    "name": "Slovenia"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428766,
+   "utcDate": "2024-06-26T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_E",
+   "homeTeam": {
+    "name": "Ukraine"
+   },
+   "awayTeam": {
+    "name": "Belgium"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428767,
+   "utcDate": "2024-06-26T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_E",
+   "homeTeam": {
+    "name": "Slovakia"
+   },
+   "awayTeam": {
+    "name": "Romania"
+   },
+   "score": {
+    "winner": "DRAW",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428772,
+   "utcDate": "2024-06-26T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_F",
+   "homeTeam": {
+    "name": "Czechia"
+   },
+   "awayTeam": {
+    "name": "Turkey"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 2
+    }
+   }
+  },
+  {
+   "id": 428773,
+   "utcDate": "2024-06-26T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 3,
+   "stage": "GROUP_STAGE",
+   "group": "GROUP_F",
+   "homeTeam": {
+    "name": "Georgia"
+   },
+   "awayTeam": {
+    "name": "Portugal"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428791,
+   "utcDate": "2024-06-29T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 4,
+   "stage": "LAST_16",
+   "group": null,
+   "homeTeam": {
+    "name": "Switzerland"
+   },
+   "awayTeam": {
+    "name": "Italy"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428792,
+   "utcDate": "2024-06-29T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 4,
+   "stage": "LAST_16",
+   "group": null,
+   "homeTeam": {
+    "name": "Germany"
+   },
+   "awayTeam": {
+    "name": "Denmark"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428789,
+   "utcDate": "2024-06-30T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 4,
+   "stage": "LAST_16",
+   "group": null,
+   "homeTeam": {
+    "name": "England"
+   },
+   "awayTeam": {
+    "name": "Slovakia"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "EXTRA_TIME",
+    "fullTime": {
+     "home": 2,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428790,
+   "utcDate": "2024-06-30T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 4,
+   "stage": "LAST_16",
+   "group": null,
+   "homeTeam": {
+    "name": "Spain"
+   },
+   "awayTeam": {
+    "name": "Georgia"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 4,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428787,
+   "utcDate": "2024-07-01T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 4,
+   "stage": "LAST_16",
+   "group": null,
+   "homeTeam": {
+    "name": "France"
+   },
+   "awayTeam": {
+    "name": "Belgium"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428788,
+   "utcDate": "2024-07-01T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 4,
+   "stage": "LAST_16",
+   "group": null,
+   "homeTeam": {
+    "name": "Portugal"
+   },
+   "awayTeam": {
+    "name": "Slovenia"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "PENALTY_SHOOTOUT",
+    "fullTime": {
+     "home": 3,
+     "away": 0
+    },
+    "penalties": {
+     "home": 3,
+     "away": 0
+    }
+   }
+  },
+  {
+   "id": 428786,
+   "utcDate": "2024-07-02T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 4,
+   "stage": "LAST_16",
+   "group": null,
+   "homeTeam": {
+    "name": "Romania"
+   },
+   "awayTeam": {
+    "name": "Netherlands"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 0,
+     "away": 3
+    }
+   }
+  },
+  {
+   "id": 428785,
+   "utcDate": "2024-07-02T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 4,
+   "stage": "LAST_16",
+   "group": null,
+   "homeTeam": {
+    "name": "Austria"
+   },
+   "awayTeam": {
+    "name": "Turkey"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 2
+    }
+   }
+  },
+  {
+   "id": 495401,
+   "utcDate": "2024-07-05T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 5,
+   "stage": "QUARTER_FINALS",
+   "group": null,
+   "homeTeam": {
+    "name": "Spain"
+   },
+   "awayTeam": {
+    "name": "Germany"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "EXTRA_TIME",
+    "fullTime": {
+     "home": 2,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 495402,
+   "utcDate": "2024-07-05T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 5,
+   "stage": "QUARTER_FINALS",
+   "group": null,
+   "homeTeam": {
+    "name": "Portugal"
+   },
+   "awayTeam": {
+    "name": "France"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "PENALTY_SHOOTOUT",
+    "fullTime": {
+     "home": 3,
+     "away": 5
+    },
+    "penalties": {
+     "home": 3,
+     "away": 5
+    }
+   }
+  },
+  {
+   "id": 495403,
+   "utcDate": "2024-07-06T16:00:00Z",
+   "status": "FINISHED",
+   "matchday": 5,
+   "stage": "QUARTER_FINALS",
+   "group": null,
+   "homeTeam": {
+    "name": "England"
+   },
+   "awayTeam": {
+    "name": "Switzerland"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "PENALTY_SHOOTOUT",
+    "fullTime": {
+     "home": 6,
+     "away": 4
+    },
+    "penalties": {
+     "home": 5,
+     "away": 3
+    }
+   }
+  },
+  {
+   "id": 495404,
+   "utcDate": "2024-07-06T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 5,
+   "stage": "QUARTER_FINALS",
+   "group": null,
+   "homeTeam": {
+    "name": "Netherlands"
+   },
+   "awayTeam": {
+    "name": "Turkey"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428780,
+   "utcDate": "2024-07-09T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 6,
+   "stage": "SEMI_FINALS",
+   "group": null,
+   "homeTeam": {
+    "name": "Spain"
+   },
+   "awayTeam": {
+    "name": "France"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 1
+    }
+   }
+  },
+  {
+   "id": 428779,
+   "utcDate": "2024-07-10T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 6,
+   "stage": "SEMI_FINALS",
+   "group": null,
+   "homeTeam": {
+    "name": "Netherlands"
+   },
+   "awayTeam": {
+    "name": "England"
+   },
+   "score": {
+    "winner": "AWAY_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 1,
+     "away": 2
+    }
+   }
+  },
+  {
+   "id": 428778,
+   "utcDate": "2024-07-14T19:00:00Z",
+   "status": "FINISHED",
+   "matchday": 7,
+   "stage": "FINAL",
+   "group": null,
+   "homeTeam": {
+    "name": "Spain"
+   },
+   "awayTeam": {
+    "name": "England"
+   },
+   "score": {
+    "winner": "HOME_TEAM",
+    "duration": "REGULAR",
+    "fullTime": {
+     "home": 2,
+     "away": 1
+    }
+   }
+  }
+ ]
+}

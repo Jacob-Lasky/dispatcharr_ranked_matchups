@@ -67,8 +67,14 @@ class GroupStageState(SoccerLeagueState):
     Subclassing SoccerLeagueState (rather than redeclaring the shared
     fields) means `GroupStageSoccerSource` can safely inherit
     `SoccerSource.apply_result` and `_mutate_apply` -- a GroupStageState
-    IS-A SoccerLeagueState at the type level."""
+    IS-A SoccerLeagueState at the type level.
+
+    `_results` lists every applied group result as (home, away, home_goals,
+    away_goals), finished and simulated alike: head-to-head tiebreakers
+    (`GroupStageSoccerSource._break_points_tie`) need who-beat-whom, which
+    the per-team rows do not keep."""
     _team_group: Dict[str, str]
+    _results: Tuple[Tuple[str, str, int, int], ...]
 from ..scoring import LEAGUE_CONTEXTS, TEAM_SUFFIX_TOKENS
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.soccer")
@@ -1703,7 +1709,8 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
                     "is_entry_tie": not feeds_from,
                 }
                 bracket[stage].append(tie_meta)
-                # Populate tie_results ONLY for entry ties (LAST_32 here).
+                # Populate tie_results ONLY for entry ties (LAST_32 for
+                # WC 2026, LAST_16 for EURO).
                 # Downstream ties carry placeholder team names; their
                 # tie_results entry is created lazily by remaining_matches
                 # / apply_result once feeds_from resolves to real names.
@@ -1818,11 +1825,16 @@ class KnockoutSoccerSource(AggregateLegSource, SoccerSource):
 # =====================================================================
 
 
-# Top-N advancement per group. EURO format and the OLD WC 32-team format
-# both advance the top 2. WC 2026's 48-team format technically advances
-# top 2 + 8-best-3rd-place across 12 groups; the 3rd-place tiebreaker is
-# a follow-up (see GroupStageSoccerSource docstring).
+# Top-N advancement per group: every supported format advances the top 2,
+# plus `LeagueContext.best_third_place_count` best third-placed teams across
+# groups (8 for WC 2026, 4 for EURO since 2016).
 _GROUP_ADVANCE_TOP_N = 2
+
+# Competitions whose best-third ranking counts wins after points, goal
+# difference and goals scored: UEFA EURO 2026-28 regulations, Paragraph
+# 19.04 d. The 2026 World Cup criteria, as reported (FIFA's own text not
+# read), go from goals scored straight to team conduct, so WC is absent.
+_THIRD_PLACE_RANKED_BY_WINS: FrozenSet[str] = frozenset({"EC"})
 
 
 class GroupStandings(NamedTuple):
@@ -2415,6 +2427,132 @@ _WC2026_THIRD_PLACER_SLOT_TABLE: Dict[FrozenSet[str], Tuple[Tuple[int, str, str]
 }
 
 
+# UEFA EURO 2028 round-of-16 bracket (#78). Source: Regulations of the UEFA
+# European Football Championship 2026-28, Article 21 "Match system - final
+# tournament knockout stage" (in force 29 July 2026):
+# https://documents.uefa.com/r/Regulations-of-the-UEFA-European-Football-Championship-2026-28/Article-21-Match-system-final-tournament-knockout-stage-Online
+# Paragraph 21.03 fixes the eight round-of-16 matches, 21.04 the third-placer
+# table, 21.05-21.07 the quarter-finals, semi-finals and final. The first-named
+# team is "Team A" (21.02), which is FD.org's homeTeam; EURO 2024 used the
+# same structure, and its eight R16 fixtures on FD.org (EC season 2024) match
+# these slots home-and-away exactly (backtest in tests/test_euro_chain.py).
+# Same slot notation as `_WC2026_LAST_32_PAIRINGS`; index 0 = Match 1.
+_EURO2028_LAST_16_PAIRINGS: List[Tuple[Tuple[str, Any], Tuple[str, Any]]] = [
+    (("group_winner", "B"),    ("best_third", frozenset("ADEF"))),   # Match 1
+    (("group_winner", "A"),    ("group_runner_up", "C")),            # Match 2
+    (("group_winner", "F"),    ("best_third", frozenset("ABC"))),    # Match 3
+    (("group_runner_up", "D"), ("group_runner_up", "E")),            # Match 4
+    (("group_winner", "E"),    ("best_third", frozenset("ABCD"))),   # Match 5
+    (("group_winner", "D"),    ("group_runner_up", "F")),            # Match 6
+    (("group_winner", "C"),    ("best_third", frozenset("DEF"))),    # Match 7
+    (("group_runner_up", "A"), ("group_runner_up", "B")),            # Match 8
+]
+_EURO2028_QUARTER_FINALS_PAIRINGS: List[Tuple[int, int]] = [
+    (0, 1),     # QF1 = W1 vs W2
+    (2, 3),     # QF2 = W3 vs W4
+    (4, 5),     # QF3 = W5 vs W6
+    (6, 7),     # QF4 = W7 vs W8
+]
+_EURO2028_SEMI_FINALS_PAIRINGS: List[Tuple[int, int]] = [
+    (0, 1),     # SF1 = W QF1 vs W QF2
+    (2, 3),     # SF2 = W QF3 vs W QF4
+]
+_EURO2028_FINAL_PAIRINGS: List[Tuple[int, int]] = [
+    (0, 1),     # Final = W SF1 vs W SF2
+]
+
+
+def _euro_third_placer_table(
+    rows: Dict[str, str],
+) -> Dict[FrozenSet[str], Tuple[Tuple[int, str, str], ...]]:
+    """Expand Article 21.04's table, kept in the regulation's own column
+    order so it can be proof-read against the PDF row by row, into the
+    `(r16_match_idx, side, source_letter)` shape `_build_bracket_seed`
+    consumes. Columns, as printed: Match 1 (WB), Match 7 (WC), Match 5 (WE),
+    Match 3 (WF), i.e. match indices 0, 6, 4, 2; every third-placer is the
+    AWAY (Team B) side."""
+    column_match_idx = (0, 6, 4, 2)
+    out: Dict[FrozenSet[str], Tuple[Tuple[int, str, str], ...]] = {}
+    for groups, opponents in rows.items():
+        out[frozenset(groups)] = tuple(sorted(
+            (idx, "away", letter) for idx, letter in zip(column_match_idx, opponents)
+        ))
+    return out
+
+
+# Article 21.04, all C(6,4) = 15 rows. Key: the groups whose third-placed
+# teams qualify. Value: the third-placed teams facing WB, WC, WE, WF, in
+# that (printed) column order. DO NOT reorder the value strings to match
+# match numbers: the column order IS the regulation's, which is what makes
+# a transcription error visible on a side-by-side read.
+_EURO2028_THIRD_PLACER_SLOT_TABLE = _euro_third_placer_table({
+    #        WB WC WE WF
+    "ABCD": "ADBC",
+    "ABCE": "AEBC",
+    "ABCF": "AFBC",
+    "ABDE": "DEAB",
+    "ABDF": "DFAB",
+    "ABEF": "EFBA",
+    "ACDE": "EDCA",
+    "ACDF": "FDCA",
+    "ACEF": "EFCA",
+    "ADEF": "EFDA",
+    "BCDE": "EDBC",
+    "BCDF": "FDCB",
+    "BCEF": "FECB",
+    "BDEF": "FEDB",
+    "CDEF": "FEDC",
+})
+
+
+class _TournamentBracket(NamedTuple):
+    """One tournament's group -> knockout bracket, as consumed by
+    `GroupStageSoccerSource._build_bracket_seed` (#53, #78).
+
+    `groups` is the exact set of group letters the format has. The chain
+    refuses to run against a season whose groups differ (a 32-team WC, an
+    older EURO, a fixture list whose groups are not drawn yet), because
+    seeding a bracket from the wrong format produces confidently wrong
+    leverage rather than an error.
+
+    `downstream` lists the later rounds in order; each round's feeder is
+    the round before it (the first one's feeder is `entry_stage`)."""
+    groups: FrozenSet[str]
+    entry_stage: str
+    entry_pairings: List[Tuple[Tuple[str, Any], Tuple[str, Any]]]
+    third_placer_table: Dict[FrozenSet[str], Tuple[Tuple[int, str, str], ...]]
+    downstream: Tuple[Tuple[str, List[Tuple[int, int]]], ...]
+
+
+# Keyed by the competition's FD.org code (`SoccerCompetitionConfig.fd_code`).
+# A competition absent here has no chain: `cross_source_chain` returns None.
+_CHAIN_BRACKETS: Dict[str, _TournamentBracket] = {
+    "WC": _TournamentBracket(
+        groups=frozenset("ABCDEFGHIJKL"),
+        entry_stage="LAST_32",
+        entry_pairings=_WC2026_LAST_32_PAIRINGS,
+        third_placer_table=_WC2026_THIRD_PLACER_SLOT_TABLE,
+        downstream=(
+            ("LAST_16", _WC2026_LAST_16_PAIRINGS),
+            ("QUARTER_FINALS", _WC2026_QUARTER_FINALS_PAIRINGS),
+            ("SEMI_FINALS", _WC2026_SEMI_FINALS_PAIRINGS),
+            ("FINAL", _WC2026_FINAL_PAIRINGS),
+        ),
+    ),
+    "EC": _TournamentBracket(
+        groups=frozenset("ABCDEF"),
+        entry_stage="LAST_16",
+        entry_pairings=_EURO2028_LAST_16_PAIRINGS,
+        third_placer_table=_EURO2028_THIRD_PLACER_SLOT_TABLE,
+        downstream=(
+            ("QUARTER_FINALS", _EURO2028_QUARTER_FINALS_PAIRINGS),
+            ("SEMI_FINALS", _EURO2028_SEMI_FINALS_PAIRINGS),
+            ("FINAL", _EURO2028_FINAL_PAIRINGS),
+        ),
+    ),
+}
+
+
 class GroupStageSoccerSource(SoccerSource):
     """Group-stage Monte Carlo importance for international tournaments
     (WC, EURO). Sibling to KnockoutSoccerSource for the same competition:
@@ -2423,19 +2561,20 @@ class GroupStageSoccerSource(SoccerSource):
 
     Each tournament has N parallel groups of 4 teams, each playing 6
     games (each team plays 3 games). `terminal_outcomes` classifies
-    each team as `"advance"` (top 2 in its group) or `"eliminated"`.
+    each team as `"advance"` (top 2 in its group, plus the format's best
+    third-placed teams) or `"eliminated"`.
     Outcome labels are intentionally hardcoded: the group-stage
     classification ("did I finish top-2 in MY group") doesn't fit the
     flat-position-threshold shape that league sources use, so we bypass
     LEAGUE_CONTEXTS.thresholds' cutoff field and provide our own
     advancement logic.
 
-    Cross-source `feeds_from` to KnockoutSoccerSource (a group winner
-    structurally faces a different LAST_16 opponent than a runner-up)
-    is NOT modeled: the simulator doesn't currently support cross-
-    source advancement chains. The two sources run independently, so
-    group-stage leverage covers the advance/eliminate decision only,
-    not the downstream knockout-path differential. Tracked in #53.
+    A group winner structurally faces a different knockout opponent than
+    a runner-up, so group games also carry knockout leverage. That is the
+    cross-source chain (#53 WC 2026, #78 EURO 2028): once paired with the
+    knockout source via `set_paired_knockout_source`, `cross_source_chain`
+    seeds the competition's published bracket (`_CHAIN_BRACKETS`) from
+    each simulated group table and the knockout source plays it out.
 
     Wiring expectation: the plugin instantiates GroupStageSoccerSource
     for the same `config_key` as KnockoutSoccerSource for tournaments
@@ -2659,6 +2798,7 @@ class GroupStageSoccerSource(SoccerSource):
             "_teams": teams,
         }
         applied: List[Any] = []
+        results: List[Tuple[str, str, int, int]] = []
         # Apply FINISHED group-stage matches.
         for m in matches:
             parsed = self._parse_finished_group_match(m)
@@ -2670,10 +2810,26 @@ class GroupStageSoccerSource(SoccerSource):
             if home not in state["_teams"] or away not in state["_teams"]:
                 continue  # defensive: team_group_map should have covered them
             applied.append(fd_id)
+            results.append((home, away, hg, ag))
             self._mutate_apply(state, home, away, hg, ag)
         state["_applied"] = frozenset(applied)
+        state["_results"] = tuple(results)
         self._initial_state_cache = state
         return state
+
+    def apply_result(
+        self,
+        state: Dict[str, Any],
+        match: GameRow,
+        result: MatchResult,
+    ) -> Dict[str, Any]:
+        """SoccerSource.apply_result, plus the result recorded in `_results`
+        for the head-to-head tiebreakers. Pure, like the parent."""
+        new_state = super().apply_result(state, match, result)
+        new_state["_results"] = state.get("_results", ()) + (
+            (match.home, match.away, result.home_goals, result.away_goals),
+        )
+        return new_state
 
     def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
         """Only emit GROUP_STAGE matches the simulator hasn't applied yet."""
@@ -2703,31 +2859,106 @@ class GroupStageSoccerSource(SoccerSource):
         return out
 
     @staticmethod
-    def _fifa_tiebreaker_key(row: SoccerTeamRow) -> Tuple[int, int, int]:
-        """FIFA's group-stage tiebreaker chain (points, goal diff, goals
-        for), negated for descending sort. The same chain governs the
-        within-group ranking AND the cross-group best-3rd-place ranking
-        (the latter appends alphabetical team name as last-resort). DO
-        NOT inline this tuple at call sites; the two rankings must agree
-        or terminal_outcomes' "advance" labels and the bracket-seed
-        slot assignments diverge.
+    def _overall_record_key(row: SoccerTeamRow) -> Tuple[int, int, int]:
+        """(points, goal difference, goals for) over ALL group matches,
+        negated for descending sort. Used three ways by
+        `_compute_group_standings`, which is the only caller: the first
+        cut of a group table, the overall-GD / overall-GF fallback once
+        head-to-head cannot separate teams (`_break_points_tie`), and the
+        cross-group third-placer ranking. DO NOT re-derive these ranks
+        anywhere else; terminal_outcomes' "advance" labels and the bracket
+        seed's slot assignments must come from one ranking or they diverge.
         """
         return (-row["points"], -(row["gf"] - row["ga"]), -row["gf"])
+
+    @classmethod
+    def _break_points_tie(
+        cls,
+        block: List[Tuple[str, SoccerTeamRow]],
+        results: Tuple[Tuple[str, str, int, int], ...],
+    ) -> List[Tuple[str, SoccerTeamRow]]:
+        """Order teams level on points, per UEFA EURO 2026-28 regulations
+        Article 20.01 (FIFA's 2026 World Cup regulations likewise rank
+        head-to-head first, as reported; FIFA's text was not read):
+          a-c) points, goal difference, goals scored in the matches played
+               AMONG the teams in question;
+          d)   if that leaves some of them equal, a-c again over only the
+               matches between those remaining teams;
+          e-f) if head-to-head cannot separate them at all, goal
+               difference, then goals scored, in all group matches.
+        g-h (disciplinary points, qualifiers ranking) are not in FD.org's
+        free data; teams still level after f keep their input order.
+        """
+        names = {team for team, _row in block}
+        mini: Dict[str, List[int]] = {team: [0, 0, 0] for team in names}
+        for home, away, hg, ag in results:
+            if home not in names or away not in names:
+                continue
+            h, a = mini[home], mini[away]
+            h[1] += hg - ag
+            h[2] += hg
+            a[1] += ag - hg
+            a[2] += ag
+            if hg > ag:
+                h[0] += 3
+            elif hg < ag:
+                a[0] += 3
+            else:
+                h[0] += 1
+                a[0] += 1
+
+        def h2h_key(kv: Tuple[str, SoccerTeamRow]) -> Tuple[int, int, int]:
+            pts, gd, gf = mini[kv[0]]
+            return (-pts, -gd, -gf)
+
+        ordered = sorted(block, key=h2h_key)
+        sub_blocks: List[List[Tuple[str, SoccerTeamRow]]] = []
+        for kv in ordered:
+            if sub_blocks and h2h_key(sub_blocks[-1][0]) == h2h_key(kv):
+                sub_blocks[-1].append(kv)
+            else:
+                sub_blocks.append([kv])
+        if len(sub_blocks) == 1:
+            # Head-to-head separated nobody: criteria e-f.
+            return sorted(block, key=lambda kv: cls._overall_record_key(kv[1])[1:])
+        out: List[Tuple[str, SoccerTeamRow]] = []
+        for sub in sub_blocks:
+            out.extend(cls._break_points_tie(sub, results) if len(sub) > 1 else sub)
+        return out
+
+    @classmethod
+    def _rank_group(
+        cls,
+        teams: List[Tuple[str, SoccerTeamRow]],
+        results: Tuple[Tuple[str, str, int, int], ...],
+    ) -> List[Tuple[str, SoccerTeamRow]]:
+        """A group's final table: points first, ties per `_break_points_tie`."""
+        ordered = sorted(teams, key=lambda kv: kv[1]["points"], reverse=True)
+        out: List[Tuple[str, SoccerTeamRow]] = []
+        i = 0
+        while i < len(ordered):
+            j = i + 1
+            while j < len(ordered) and ordered[j][1]["points"] == ordered[i][1]["points"]:
+                j += 1
+            block = ordered[i:j]
+            out.extend(cls._break_points_tie(block, results) if len(block) > 1 else block)
+            i = j
+        return out
 
     def _compute_group_standings(self, state: Dict[str, Any]) -> "GroupStandings":
         """Compute per-group standings + cross-group best-3rd ranking.
 
         Returns a `GroupStandings` with three fields:
-          - `by_group`: `{group_key: [(team, row), ...]}` sorted by
-            `_fifa_tiebreaker_key`. Position within the list IS the
-            team's finishing position (0 = 1st in group). The minus-
-            head-to-head and minus-fair-play caveats from
-            `terminal_outcomes` apply equally here.
+          - `by_group`: `{group_key: [(team, row), ...]}` ranked by
+            `_rank_group` (points, then head-to-head, then overall GD and
+            goals). Position within the list IS the team's finishing
+            position (0 = 1st in group).
           - `best_third_order`: every group's 3rd-placer, cross-group
-            sorted by `_fifa_tiebreaker_key` plus alphabetical-name as
-            the deterministic last-resort. Front of list is the
-            strongest 3rd-placer. Includes ALL groups; the caller
-            decides how many to promote.
+            ranked by points, goal difference, goals scored, then (EURO
+            only, Article 19.04 d) wins, then alphabetical name as the
+            deterministic last resort for the unmodelled disciplinary and
+            ranking criteria. Front of list is the strongest 3rd-placer.
+            Includes ALL groups; the caller decides how many to promote.
           - `n_best_third_advance`: how many of `best_third_order` get
             promoted to advance status per
             `LEAGUE_CONTEXTS[<gs_code>].best_third_place_count`,
@@ -2735,34 +2966,45 @@ class GroupStageSoccerSource(SoccerSource):
 
         Single source of truth for `terminal_outcomes` (collapses
         positions to advance/eliminated labels) and `_build_bracket_seed`
-        (positions to LAST_32 slot assignments per the tournament's
-        published bracket, #53).
+        (positions to entry-round slot assignments per the tournament's
+        published bracket, #53 / #78).
         """
         from collections import defaultdict
         from ..scoring import LEAGUE_CONTEXTS
 
         team_group: Dict[str, str] = state["_team_group"]
         teams_dict: Dict[str, SoccerTeamRow] = state["_teams"]
-        by_group: Dict[str, List[Tuple[str, SoccerTeamRow]]] = defaultdict(list)
+        results: Tuple[Tuple[str, str, int, int], ...] = state.get("_results", ())
+        grouped: Dict[str, List[Tuple[str, SoccerTeamRow]]] = defaultdict(list)
         for team, row in teams_dict.items():
             group = team_group.get(team)
             if group is None:
                 continue
-            by_group[group].append((team, row))
+            grouped[group].append((team, row))
 
+        by_group: Dict[str, List[Tuple[str, SoccerTeamRow]]] = {}
         third_placers: List[Tuple[str, SoccerTeamRow]] = []
-        for teams in by_group.values():
-            teams.sort(key=lambda kv: self._fifa_tiebreaker_key(kv[1]))
-            if len(teams) > _GROUP_ADVANCE_TOP_N:
-                third_placers.append(teams[_GROUP_ADVANCE_TOP_N])
+        for group, teams in grouped.items():
+            ranked = self._rank_group(teams, results)
+            by_group[group] = ranked
+            if len(ranked) > _GROUP_ADVANCE_TOP_N:
+                third_placers.append(ranked[_GROUP_ADVANCE_TOP_N])
 
-        third_placers.sort(key=lambda kv: (*self._fifa_tiebreaker_key(kv[1]), kv[0]))
+        wins: Dict[str, int] = {}
+        if self.config.fd_code in _THIRD_PLACE_RANKED_BY_WINS:
+            for home, away, hg, ag in results:
+                if hg != ag:
+                    winner = home if hg > ag else away
+                    wins[winner] = wins.get(winner, 0) + 1
+        third_placers.sort(key=lambda kv: (
+            *self._overall_record_key(kv[1]), -wins.get(kv[0], 0), kv[0],
+        ))
 
         ctx = LEAGUE_CONTEXTS.get(self._group_stage_context_code())
         n_best_third = ctx.best_third_place_count if ctx else 0
 
         return GroupStandings(
-            by_group=dict(by_group),
+            by_group=by_group,
             best_third_order=third_placers,
             n_best_third_advance=n_best_third,
         )
@@ -2776,8 +3018,8 @@ class GroupStageSoccerSource(SoccerSource):
         Standings + tiebreaker logic lives in `_compute_group_standings`;
         this method is the label translation layer (positions to
         "advance"/"eliminated"). See the helper's docstring for the
-        FIFA tiebreaker chain and the caveats around head-to-head and
-        fair-play (#52).
+        tiebreakers (head-to-head first) and the unmodelled fair-play and
+        ranking criteria.
         """
         standings = self._compute_group_standings(state)
         promoted_thirds = {
@@ -2806,6 +3048,28 @@ class GroupStageSoccerSource(SoccerSource):
         single-source path (#53)."""
         self._paired_knockout = knockout
 
+    def _chain_bracket(self) -> Optional[_TournamentBracket]:
+        """This competition's published bracket, or None when there is none
+        to seed from: no `_CHAIN_BRACKETS` entry for its FD.org code, or a
+        season whose group letters are not the format's (e.g. a 32-team WC
+        season under the 48-team bracket, or groups not drawn yet)."""
+        bracket = _CHAIN_BRACKETS.get(self.config.fd_code)
+        if bracket is None:
+            return None
+        letters = {
+            self._display_group_letter(g) for g in self._team_group_map().values()
+        }
+        if letters != bracket.groups:
+            return None
+        return bracket
+
+    def _group_stage_in_progress(self) -> bool:
+        """True while any group-stage fixture is not yet FINISHED."""
+        return any(
+            m.get("stage") == "GROUP_STAGE" and m.get("status") != "FINISHED"
+            for m in self._fetch_all_season_matches()
+        )
+
     def cross_source_chain(
         self,
     ) -> Optional[Tuple["KnockoutSoccerSource", Callable[[Dict[str, Any]], Dict[str, Any]]]]:
@@ -2813,26 +3077,28 @@ class GroupStageSoccerSource(SoccerSource):
         `monte_carlo_importance_batch_chain`, or None if the chain
         shouldn't run for this call.
 
-        Two cases where None is returned:
+        None when:
           1. No paired knockout source was registered (not a tournament
              with a follow-on bracket: most competitions).
-          2. The knockout source's `_fetch_bracket_games()` returned
-             non-empty, meaning FD.org has populated the bracket with
-             real team names (the group stage has ended and FIFA's
-             draw resolved). In that case the existing single-source
-             knockout path handles importance; the chain would be
-             redundant and potentially conflicting.
+          2. `_chain_bracket` has no bracket for this season (see there).
+          3. The group stage is over (every group fixture FINISHED). There
+             is then no group game left to score, and the season FD.org
+             serves between tournaments is the previous, completed one.
 
-        The toggle on `_fetch_bracket_games` is a one-line check that
-        works without time math: while every LAST_32 fixture has null
-        home/away (confirmed pre-tournament for WC 2026 via FD.org
-        probe), `_fetch_bracket_games` filters them out. As soon as
-        FIFA populates teams via FD, the toggle flips.
+        DO NOT gate on the knockout fixtures being blank (the pre-#78
+        toggle). FD.org fills a knockout fixture's teams as soon as its
+        feeder groups finish, so "2A v 2B" carries real names while other
+        groups still have a matchday to play. Gating on that switched the
+        chain off for exactly those final-matchday games, the ones with
+        the most knockout leverage. The chain is only ever consulted for
+        group-game importance; knockout games are scored by the knockout
+        source from FD.org's real bracket, so the two never conflict.
         """
         knockout = getattr(self, "_paired_knockout", None)
         if knockout is None:
             return None
-        if knockout._fetch_bracket_games():
+        bracket = self._chain_bracket()
+        if bracket is None or not self._group_stage_in_progress():
             return None
 
         # The chain simulator calls seed_fn(primary_state) and passes
@@ -2844,47 +3110,54 @@ class GroupStageSoccerSource(SoccerSource):
         # the simulator's contract is clean (state in, state out) and
         # each method retains a single responsibility.
         def chain_seed_fn(primary_state: Dict[str, Any]) -> Dict[str, Any]:
-            seed_dict = self._build_bracket_seed(primary_state)
+            seed_dict = self._build_bracket_seed(primary_state, bracket)
             return knockout.seed_from_chain(seed_dict)
 
         return (knockout, chain_seed_fn)
 
-    def _build_bracket_seed(self, primary_state: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_bracket_seed(
+        self,
+        primary_state: Dict[str, Any],
+        bracket: Optional[_TournamentBracket] = None,
+    ) -> Dict[str, Any]:
         """Map primary group-stage standings to a downstream bracket
         seed dict consumable by `KnockoutSoccerSource.seed_from_chain`.
 
-        For WC 2026 (the only competition currently wired):
-          - 1st and 2nd place in each group resolve to the matching
-            LAST_32 slot per `_WC2026_LAST_32_PAIRINGS`.
-          - The 8 best-3rd-place teams (per
-            `_compute_group_standings.best_third_order` top
-            `n_best_third_advance`) are assigned to the 8 reserved
-            `best_third` LAST_32 slots via constraint-respecting
-            greedy matching (each slot has an `allowed_groups` set
-            that prevents same-group LAST_32 rematches).
+        `bracket` defaults to this competition's `_CHAIN_BRACKETS` entry
+        (WC 2026: LAST_32 entry round; EURO 2028: LAST_16 entry round).
+          - 1st and 2nd place in each group resolve to their fixed entry
+            slot per `bracket.entry_pairings`.
+          - The best third-placed teams (per
+            `_compute_group_standings.best_third_order`, top
+            `n_best_third_advance`) fill the reserved `best_third`
+            slots per the competition's published lookup table
+            (`bracket.third_placer_table`: FIFA Annex C, 495 rows, for
+            WC 2026; UEFA Article 21.04, 15 rows, for EURO 2028), so the
+            simulated knockout opponent is the canonical one.
 
-        FIFA's official Annex C codifies a deterministic 495-scenario
-        lookup table that pins the exact 3rd-placer slot assignment
-        for every combination of 8-advancing-groups. We prefer that
-        table (`_WC2026_THIRD_PLACER_SLOT_TABLE`) so leverage signal
-        magnitudes for group games on R16+ outcomes match FIFA's
-        canonical bracket. The backtracking DFS below remains as a
-        fallback for keys missing from the table -- this should never
-        fire in practice but is defensive against transcription bugs
-        in the table itself.
+        The backtracking DFS below remains as a fallback for keys missing
+        from the table. It should never fire (both tables are tested for
+        full coverage) and yields a VALID but possibly non-canonical
+        assignment, so leverage keeps its direction if it ever does.
 
-        Downstream rounds (LAST_16 → FINAL) use placeholder names
-        wired via feeds_from per `_WC2026_LAST_16_PAIRINGS` and
-        siblings. Placeholder resolution is the bracket machinery's
-        job (see bracket.py:418 `_winner_of`); this method just
+        Downstream rounds use placeholder names wired via feeds_from per
+        `bracket.downstream`. Placeholder resolution is the bracket
+        machinery's job (see bracket.py `_winner_of`); this method just
         wires the references.
+
+        Raises ValueError when an entry slot cannot be filled. feeds_from
+        addresses entry ties by POSITION, so dropping one tie would rewire
+        every later round onto the wrong matches; failing loudly lets the
+        caller's importance catch log it instead.
         """
+        if bracket is None:
+            bracket = _CHAIN_BRACKETS[self.config.fd_code]
         standings = self._compute_group_standings(primary_state)
 
         # Group-key shape in standings.by_group: "GROUP_A" etc. (from
-        # FD.org's `group` field on group-stage matches). Convert
-        # WC2026 slot letters ("A") to group keys ("GROUP_A") for the
-        # winner / runner-up lookups.
+        # FD.org's `group` field on group-stage matches). Convert slot
+        # letters ("A") to group keys ("GROUP_A") for the winner /
+        # runner-up lookups.
         def _group_key(letter: str) -> str:
             return f"GROUP_{letter}"
 
@@ -2908,51 +3181,46 @@ class GroupStageSoccerSource(SoccerSource):
             return None
 
         # Constraint-respecting assignment of best-3rd-placers to
-        # reserved slots. PRIMARY path: lookup in
-        # _WC2026_THIRD_PLACER_SLOT_TABLE keyed by the frozenset of
-        # advancing group letters. The table encodes FIFA's published
-        # canonical mapping, so leverage magnitudes match the real
-        # bracket.
+        # reserved slots. PRIMARY path: lookup in the bracket's table
+        # keyed by the frozenset of advancing group letters. The table
+        # encodes the governing body's canonical mapping, so leverage
+        # magnitudes match the real bracket.
         #
         # FALLBACK path (table miss): backtracking DFS in canonical
         # slot order, attempting each unassigned 3rd-placer whose
-        # group is allowed (strongest-first to preserve the FIFA
+        # group is allowed (strongest-first to preserve the
         # tiebreaker bias when multiple valid solutions exist),
-        # recursing, and unwinding on dead ends. Bounded by
-        # n_slots = 8. This produces a VALID but possibly non-
-        # canonical assignment; it should not fire in production
-        # because the table is parametrized-test-verified to cover
-        # all C(12,8) = 495 keys.
+        # recursing, and unwinding on dead ends. Bounded by the
+        # number of third-place slots (8 WC, 4 EURO).
         qualifying_thirds = list(
             standings.best_third_order[:standings.n_best_third_advance]
         )
         third_slots: List[Tuple[int, str, FrozenSet[str]]] = []
-        for l32_idx, (home_slot, away_slot) in enumerate(_WC2026_LAST_32_PAIRINGS):
+        for entry_idx, (home_slot, away_slot) in enumerate(bracket.entry_pairings):
             for side, slot in (("home", home_slot), ("away", away_slot)):
                 if slot[0] == "best_third":
-                    third_slots.append((l32_idx, side, slot[1]))
+                    third_slots.append((entry_idx, side, slot[1]))
 
         third_assignments: Dict[Tuple[int, str], str] = {}
 
-        # Try the Annex C lookup first.
+        # Try the published lookup first.
         team_by_letter: Dict[str, str] = {}
         for team, _row in qualifying_thirds:
             letter = _letter_of(team)
             if letter is not None:
                 team_by_letter[letter] = team
         advancing_letters = frozenset(team_by_letter.keys())
-        canonical = _WC2026_THIRD_PLACER_SLOT_TABLE.get(advancing_letters)
-        if canonical is not None and len(team_by_letter) == 8:
-            for l32_idx, side, source_letter in canonical:
+        canonical = bracket.third_placer_table.get(advancing_letters)
+        if canonical is not None and len(team_by_letter) == len(third_slots):
+            for entry_idx, side, source_letter in canonical:
                 team = team_by_letter.get(source_letter)
                 if team is None:
                     # Table key matched but a letter isn't in
                     # team_by_letter -- treat as table miss and fall
                     # through to backtracking. Shouldn't be reachable.
                     third_assignments.clear()
-                    canonical = None
                     break
-                third_assignments[(l32_idx, side)] = team
+                third_assignments[(entry_idx, side)] = team
 
         if not third_assignments:
             used: set = set()
@@ -2960,58 +3228,55 @@ class GroupStageSoccerSource(SoccerSource):
             def _assign(slot_idx: int) -> bool:
                 if slot_idx == len(third_slots):
                     return True
-                l32_idx, side, allowed = third_slots[slot_idx]
+                entry_idx, side, allowed = third_slots[slot_idx]
                 for team, _row in qualifying_thirds:
                     if team in used:
                         continue
                     letter = _letter_of(team)
                     if letter is None or letter not in allowed:
                         continue
-                    third_assignments[(l32_idx, side)] = team
+                    third_assignments[(entry_idx, side)] = team
                     used.add(team)
                     if _assign(slot_idx + 1):
                         return True
-                    del third_assignments[(l32_idx, side)]
+                    del third_assignments[(entry_idx, side)]
                     used.remove(team)
                 return False
 
             _assign(0)
 
-        # Construct LAST_32 entry ties.
-        l32_ties: List[Dict[str, Any]] = []
-        for l32_idx, (home_slot, away_slot) in enumerate(_WC2026_LAST_32_PAIRINGS):
-            if home_slot[0] == "best_third":
-                home = third_assignments.get((l32_idx, "home"))
-            else:
-                home = _resolve_fixed_slot(home_slot)
-            if away_slot[0] == "best_third":
-                away = third_assignments.get((l32_idx, "away"))
-            else:
-                away = _resolve_fixed_slot(away_slot)
+        def _resolve(entry_idx: int, side: str, slot: Tuple[str, Any]) -> Optional[str]:
+            if slot[0] == "best_third":
+                return third_assignments.get((entry_idx, side))
+            return _resolve_fixed_slot(slot)
+
+        # Construct the entry-round ties. Every slot must resolve: see the
+        # Raises note in the docstring for why a tie is never skipped.
+        entry_ties: List[Dict[str, Any]] = []
+        for entry_idx, (home_slot, away_slot) in enumerate(bracket.entry_pairings):
+            home = _resolve(entry_idx, "home", home_slot)
+            away = _resolve(entry_idx, "away", away_slot)
             if home is None or away is None:
-                # Defensive: incomplete primary_state (e.g., a group
-                # missing from the seed). Skip this tie so the rest of
-                # the bracket still resolves. With a full real
-                # primary_state from FD.org, this should never fire.
-                continue
-            l32_ties.append({
+                raise ValueError(
+                    f"[soccer:{self.config.fd_code}] cannot seed {bracket.entry_stage} "
+                    f"tie {entry_idx + 1} ({home_slot} vs {away_slot}) from the "
+                    "simulated group standings"
+                )
+            entry_ties.append({
                 "home": home, "away": away,
                 "matchday": 1,
                 "feeds_from": {},
             })
 
         # Construct downstream stages with placeholder names + feeds_from.
-        def _placeholder_pair(stage: str, idx: int) -> Tuple[str, str]:
-            return f"{stage}_W{idx*2+1}", f"{stage}_W{idx*2+2}"
-
-        def _downstream_ties(
-            stage: str,
-            pairings: List[Tuple[int, int]],
-            feeder_stage: str,
-        ) -> List[Dict[str, Any]]:
+        stages: List[Dict[str, Any]] = [
+            {"stage": bracket.entry_stage, "ties": entry_ties},
+        ]
+        feeder_stage = bracket.entry_stage
+        for stage, pairings in bracket.downstream:
             ties: List[Dict[str, Any]] = []
             for tie_idx, (feeder_a, feeder_b) in enumerate(pairings):
-                home, away = _placeholder_pair(stage, tie_idx)
+                home, away = f"{stage}_W{tie_idx*2+1}", f"{stage}_W{tie_idx*2+2}"
                 ties.append({
                     "home": home, "away": away,
                     "matchday": 1,
@@ -3020,24 +3285,6 @@ class GroupStageSoccerSource(SoccerSource):
                         away: (feeder_stage, feeder_b),
                     },
                 })
-            return ties
-
-        return {
-            "stages": [
-                {"stage": "LAST_32", "ties": l32_ties},
-                {"stage": "LAST_16",
-                 "ties": _downstream_ties("LAST_16", _WC2026_LAST_16_PAIRINGS, "LAST_32")},
-                {"stage": "QUARTER_FINALS",
-                 "ties": _downstream_ties("QUARTER_FINALS",
-                                          _WC2026_QUARTER_FINALS_PAIRINGS,
-                                          "LAST_16")},
-                {"stage": "SEMI_FINALS",
-                 "ties": _downstream_ties("SEMI_FINALS",
-                                          _WC2026_SEMI_FINALS_PAIRINGS,
-                                          "QUARTER_FINALS")},
-                {"stage": "FINAL",
-                 "ties": _downstream_ties("FINAL",
-                                          _WC2026_FINAL_PAIRINGS,
-                                          "SEMI_FINALS")},
-            ],
-        }
+            stages.append({"stage": stage, "ties": ties})
+            feeder_stage = stage
+        return {"stages": stages}
