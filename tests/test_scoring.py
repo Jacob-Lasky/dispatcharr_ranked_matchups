@@ -551,6 +551,37 @@ class TestPollSourcesDeclareTheirField:
         }
         assert documented == expected
 
+    def test_extension_contract_tells_a_new_source_to_declare_its_field(self):
+        """CLAUDE.md's sport-adapter contract is where a new source's author
+        learns to declare rank_field_size. The auto-docs workflow once deleted
+        that step while rewriting the header to "Five steps" and pointing
+        base.py's row at "step 5", so the contract named a step it no longer
+        had. Pin both: the stated count equals the numbered steps, and one of
+        them names the field and the test that enforces it."""
+        import os
+        import re
+        path = os.path.join(os.path.dirname(__file__), "..", "CLAUDE.md")
+        with open(path) as fh:
+            text = fh.read()
+        head = "\n## Sport adapter extension contract\n"
+        # Fail on the instrument first: the section must have been found.
+        assert head in text, "extension contract section not found in CLAUDE.md"
+        rest = text.split(head, 1)[1]
+        # Drop fenced code (indented or not) before looking for steps or the
+        # section's end: a "1. " or "### " line inside an example is neither.
+        rest = re.sub(r"^[ \t]*```.*?^[ \t]*```[^\n]*\n", "", rest, flags=re.M | re.S)
+        section = re.split(r"^#{2,3} ", rest, maxsplit=1, flags=re.M)[0]
+        words = {"Three": 3, "Four": 4, "Five": 5, "Six": 6, "Seven": 7, "Eight": 8}
+        stated = re.search(r"^(\w+) steps,", section, re.M)
+        assert stated and stated.group(1) in words, section[:200]
+        steps = re.findall(r"^(\d+)\. (.*?)(?=^\d+\. |^\S|\Z)", section, re.M | re.S)
+        assert [int(n) for n, _ in steps] == list(range(1, len(steps) + 1)), steps
+        assert len(steps) == words[stated.group(1)], (stated.group(1), len(steps))
+        field_steps = [body for _n, body in steps
+                       if "declare `rank_field_size`" in body
+                       and "TestPollSourcesDeclareTheirField" in body]
+        assert field_steps, "no contract step tells a poll source to declare rank_field_size"
+
     def test_league_sources_leave_the_field_undeclared(self):
         from dispatcharr_ranked_matchups.sources.base import SportSource
         from dispatcharr_ranked_matchups.sources.soccer import SoccerSource
