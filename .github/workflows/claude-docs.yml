@@ -114,6 +114,7 @@ jobs:
 
       - name: Validate markdown-only changes, then commit and push
         env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
           START_SHA: ${{ steps.prep.outputs.start_sha }}
           PR_NUM: ${{ github.event.pull_request.number }}
@@ -141,7 +142,7 @@ jobs:
             echo "Documentation already accurate; nothing to commit."
             exit 0
           fi
-          bash .github/scripts/keep-pr-docs.sh "$RUNNER_TEMP/pr.diff"
+          bash .github/scripts/keep-pr-docs.sh "origin/$BASE_REF"
           git add -A
           git diff --cached --name-only -z | validate
           git config user.name "claude-docs"
