@@ -112,7 +112,7 @@ the **Test naming convention** action to preview a template before applying it.
 | Soccer friendlies — international (men's + women's) and club pre-season | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Field events — Formula 1 / NASCAR / PGA Golf / ATP + WTA Tennis / UFC | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Boxing | [Boxing Data API](https://rapidapi.com/bengroves1993/api/boxing-data-api) (RapidAPI — ESPN has no boxing feed) | Yes (free RapidAPI tier; ~7-day lookahead) |
-| Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (500 req/mo) |
+| Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (free plan: 500 credits/mo; the plugin asks one region per league at most once a day, about 300 a month) |
 
 ### NCAA Football divisions
 

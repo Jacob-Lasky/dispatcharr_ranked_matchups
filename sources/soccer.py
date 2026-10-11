@@ -31,6 +31,7 @@ import requests
 
 from .base import GameRow, MatchResult, SoccerTeamRow, SportSource
 from .bracket import AggregateLegSource
+from ._odds import fetch_odds_events
 from .._util import (
     SEED_PLAYED_THRESHOLD,
     is_bottom_outcome,
@@ -73,7 +74,6 @@ from ..scoring import LEAGUE_CONTEXTS, TEAM_SUFFIX_TOKENS
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.soccer")
 
 FD_BASE = "https://api.football-data.org/v4"
-ODDS_BASE = "https://api.the-odds-api.com/v4"
 
 
 # ---------- FD.org request pacing ----------
@@ -1075,25 +1075,13 @@ class SoccerSource(SportSource):
         """
         if not self.odds_api_key or not self.config.odds_sport_key:
             return {}
-        try:
-            r = requests.get(
-                f"{ODDS_BASE}/sports/{self.config.odds_sport_key}/odds/",
-                params={
-                    "regions": "uk,us,eu",
-                    "markets": "h2h",
-                    "apiKey": self.odds_api_key,
-                    "oddsFormat": "decimal",
-                },
-                timeout=15,
-            )
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            # redact_secrets, NOT e: the Odds API takes apiKey as a QUERY PARAM
-            # and requests embeds the full URL in its exception text, so a bare
-            # %s here logs the user's key at WARNING. See #156.
-            logger.warning("[soccer:%s] odds fetch failed: %s",
-                           self.config.fd_code, redact_secrets(e))
+        # One region, cached a day: see sources/_odds.py for the credit budget.
+        # "eu" is the region whose books list every competition configured here.
+        data = fetch_odds_events(
+            self.config.odds_sport_key, self.odds_api_key, "eu",
+            log_tag=f"soccer:{self.config.fd_code}",
+        )
+        if not data:
             return {}
 
         out: Dict[Tuple[str, str], float] = {}

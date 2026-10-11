@@ -31,8 +31,8 @@ their own importance follow-ups land.
 Closeness via The Odds API is preserved (the V1 MlsSource computed
 it and we don't regress that signal): each conference source pulls
 the league-wide odds feed and attaches devigged h2h closeness to the
-games it emits. Helpers `_h2h_to_closeness` and `ODDS_BASE` are
-imported from mls.py to keep the calibration line consistent: the
+games it emits. `_h2h_to_closeness` is imported from mls.py, and the
+request goes through sources/_odds.py, to keep the calibration line consistent: the
 two sources MUST produce the same closeness for any given matchup as
 the legacy MlsSource would have.
 
@@ -76,14 +76,14 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
+from ._odds import fetch_odds_events
 from .base import GameRow
 from .points_based import PointsBasedSportSource
 from .mls import (
-    ODDS_BASE as _ODDS_BASE,
     _h2h_to_closeness,
     _team_canonical_name,
 )
-from .._util import parse_iso_utc, redact_secrets
+from .._util import redact_secrets
 from ._espn import extract_espn_scoreboard_event
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_standings")
@@ -312,12 +312,9 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
             return {}
         if self._closeness_cache is not None:
             return self._closeness_cache
-        data = _http_get(
-            f"{_ODDS_BASE}/sports/soccer_usa_mls/odds/",
-            regions="us,uk,eu",
-            markets="h2h",
-            apiKey=self.odds_api_key,
-            oddsFormat="decimal",
+        # One region, cached a day: see sources/_odds.py for the credit budget.
+        data = fetch_odds_events(
+            "soccer_usa_mls", self.odds_api_key, "us", log_tag="mls_standings",
         )
         out: Dict[Tuple[str, str], float] = {}
         if isinstance(data, list):

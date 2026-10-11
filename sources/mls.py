@@ -30,13 +30,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from ._odds import fetch_odds_events
 from .base import GameRow, SportSource
 from .._util import TEAM_SUFFIX_TOKENS, parse_iso_utc, redact_secrets
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls")
 
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1"
-ODDS_BASE = "https://api.the-odds-api.com/v4"
 ODDS_SPORT_KEY = "soccer_usa_mls"
 
 # Reuse the canonical TEAM_SUFFIX_TOKENS from _util.py: ("afc","fc","cf","sc").
@@ -268,12 +268,9 @@ class MlsSource(SportSource):
         """
         if not self.odds_api_key:
             return {}
-        data = _http_get(
-            f"{ODDS_BASE}/sports/{self._ODDS_SPORT_KEY}/odds/",
-            regions="us,uk,eu",
-            markets="h2h",
-            apiKey=self.odds_api_key,
-            oddsFormat="decimal",
+        # One region, cached a day: see sources/_odds.py for the credit budget.
+        data = fetch_odds_events(
+            self._ODDS_SPORT_KEY, self.odds_api_key, "us", log_tag=f"odds:{self._ODDS_SPORT_KEY}",
         )
         if not isinstance(data, list):
             return {}
