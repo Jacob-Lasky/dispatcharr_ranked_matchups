@@ -47,6 +47,14 @@ COMPETITIONS["la_liga"] = SoccerCompetitionConfig(
 )
 ```
 
+`odds_sport_key` is optional and it is not free: each competition with one
+spends an Odds API credit per day (one region, cached 24h — see
+`sources/_odds.py` for the budget, #200), against a free plan of 500 a month.
+Leave it blank for a competition the closeness signal does not need. Never
+call The Odds API directly from a source; `sources/_odds.py` is the only
+caller, and `tests/test_odds_budget.py` fails if another file mentions the
+host.
+
 ### Step 2: register the importance thresholds (`scoring.py`)
 
 Add a `LEAGUE_CONTEXTS` entry. This is what powers the Monte Carlo
