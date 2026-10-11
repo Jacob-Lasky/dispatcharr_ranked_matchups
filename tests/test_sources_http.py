@@ -259,3 +259,15 @@ class TestHeaderValuesNeverReachTheLog:
         assert BoxingSource(api_key="  abc123\n").api_key == "abc123"
         assert BoxingSource(api_key=None).api_key == ""
 
+
+
+def test_claude_md_documents_the_shared_getter_and_its_patch_point():
+    """The wrapper-must-stay rule lives in `http_get_json`'s docstring and in
+    CLAUDE.md's `_util.py` row. PR #266's docs-bot commit deleted that row;
+    without it the next reader "simplifies" the wrappers into the shared
+    getter. Text-only on purpose."""
+    text = (UTIL.parent / "CLAUDE.md").read_text()
+    row = [line for line in text.splitlines() if line.startswith("| `_util.py`")]
+    assert len(row) == 1, "CLAUDE.md has no _util.py row"
+    for name in ("http_get_json", "_http_get", "requests", "test_sources_http.py"):
+        assert name in row[0], f"CLAUDE.md's _util.py row no longer mentions {name}"

@@ -123,9 +123,10 @@ def _fetch_scoreboard_range(start: date, end: date) -> List[Dict[str, Any]]:
     an empty simulated season) with nothing but a WARNING to show for it.
     Measured and explained at `_espn.SCOREBOARD_EVENT_LIMIT` (#182).
 
-    A day that fails contributes nothing and the rest still arrive, which
-    callers treat as "fewer games" rather than an error, the same as every
-    other ESPN source's per-day walk.
+    A day that fails is retried once when it is a blip (see
+    `_espn.SCOREBOARD_WALK_CHUNK_DAYS`); one still failing contributes
+    nothing and the rest still arrive, which callers treat as "fewer games"
+    rather than an error, the same as every other ESPN source's walk.
     """
     if end < start:
         return []

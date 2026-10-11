@@ -417,6 +417,20 @@ def fetch_days(
 #
 # The cost is that a walk which meets a hang loses the rest of its window for
 # this refresh (a WARNING says so); the next refresh retries it.
+#
+# A walk re-requests its failed days ONCE, but only when they are a blip: at
+# least one day answered, no more than one day in SCOREBOARD_WALK_CHUNK_DAYS
+# failed (at least one allowed), no more than one batch of
+# _SEASON_WALK_WORKERS days, walk budget left, and the last chunk did not hang
+# (all failed, slow), which is an outage starting mid-walk.
+# A single read timeout is not hypothetical: one 303-day MLS walk measured
+# 2026-10-11 lost 20261006 to it, and every finished game in a lost day drops
+# out of the standings the importance simulator starts from, silently. The
+# share cap is what keeps the retry off a degraded endpoint: a partial hang
+# fails most days, retrying those is the cost the hang rules exist to avoid,
+# so it gets no retry; a blip costs at most ONE more batch, one timeout.
+# An abandoned walk never qualifies: the hang rule leaves a hung chunk, and
+# the budget rule leaves no budget.
 SCOREBOARD_WALK_CHUNK_DAYS = 2 * _SEASON_WALK_WORKERS
 SCOREBOARD_SLOW_CHUNK_SECONDS = 10.0
 SCOREBOARD_WALK_BUDGET_SECONDS = 120.0
@@ -440,20 +454,24 @@ def fetch_scoreboard_days(
     Stops early, with a WARNING, at the first chunk that is entirely None AND
     slow, or once the walk has used SCOREBOARD_WALK_BUDGET_SECONDS (see
     SCOREBOARD_WALK_CHUNK_DAYS), so the result can be SHORTER than the
-    window. Callers already treat a missing day as "no games that day".
+    window. A walk that ran to its end retries a blip of failed days once
+    (`_retry_failed_days`). A day still None after that reads as "no games
+    that day" to every caller.
     """
     fetch = lambda day: fetch_scoreboard_day(http_get, scoreboard_url, day)  # noqa: E731
     pages: List[Tuple[date, Optional[Dict[str, Any]]]] = []
     walk_began = time.monotonic()
     chunk_start = start
+    hung = False
     while chunk_start <= end:
         chunk_end = min(end, chunk_start + timedelta(days=SCOREBOARD_WALK_CHUNK_DAYS - 1))
         began = time.monotonic()
         chunk = fetch_days(chunk_start, chunk_end, fetch)
         pages.extend(chunk)
         took = time.monotonic() - began
-        if (chunk_end < end and all(page is None for _day, page in chunk)
-                and took >= SCOREBOARD_SLOW_CHUNK_SECONDS):
+        hung = (all(page is None for _day, page in chunk)
+                and took >= SCOREBOARD_SLOW_CHUNK_SECONDS)
+        if chunk_end < end and hung:
             logger.warning(
                 "[espn] %s: every day %s-%s failed and took %.0f s; not "
                 "requesting the remaining days through %s",
@@ -471,4 +489,44 @@ def fetch_scoreboard_days(
             )
             break
         chunk_start = chunk_end + timedelta(days=1)
+    if not hung:  # a hung LAST chunk is an outage too, not a blip to retry
+        _retry_failed_days(fetch, pages, scoreboard_url, walk_began)
     return pages
+
+
+def _retry_failed_days(
+    fetch: Callable[[date], Optional[Dict[str, Any]]],
+    pages: List[Tuple[date, Optional[Dict[str, Any]]]],
+    scoreboard_url: str,
+    walk_began: float,
+) -> None:
+    """Re-request a walk's failed days once, in place, when they are a blip.
+
+    A blip: at least one day answered, and at most max(1, len // CHUNK) days
+    failed, capped at one batch of _SEASON_WALK_WORKERS so the retry costs at
+    most one request timeout. Skipped once the walk budget is spent. See
+    SCOREBOARD_WALK_CHUNK_DAYS for why the caps exist; DO NOT raise the batch
+    cap to a chunk, or a walk abandoned for a hang would retry the hung chunk.
+    A retried day that now answers takes its own date slot, so a caller's
+    first-occurrence dedupe sees exactly what a walk with no failure would. Pages stay in
+    date order because each retried day replaces its own slot.
+    """
+    failed = [i for i, (_day, page) in enumerate(pages) if page is None]
+    allowed = min(_SEASON_WALK_WORKERS,
+                  max(1, len(pages) // SCOREBOARD_WALK_CHUNK_DAYS))
+    if not failed or len(failed) == len(pages) or len(failed) > allowed:
+        return
+    if time.monotonic() - walk_began >= SCOREBOARD_WALK_BUDGET_SECONDS:
+        return
+    days = [pages[i][0] for i in failed]
+    with ThreadPoolExecutor(max_workers=len(days)) as pool:
+        retried = list(pool.map(fetch, days))
+    recovered = 0
+    for i, page in zip(failed, retried):
+        if page is not None:
+            pages[i] = (pages[i][0], page)
+            recovered += 1
+    logger.info(
+        "[espn] %s: retried %d failed day(s), recovered %d",
+        scoreboard_url, len(failed), recovered,
+    )

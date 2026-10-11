@@ -327,6 +327,119 @@ class TestWalkGivesUpOnAHangingEndpoint:
         assert not any("not requesting" in r.getMessage() for r in caplog.records)
 
 
+class TestWalkRetriesABlip:
+    """A walk that ran to its end re-requests a FEW failed days once. Measured
+    2026-10-11: one read timeout on 20261006 in a live 303-day MLS walk, and a
+    lost day silently drops its finished games from the standings the
+    simulator starts from. Literals (303, 8, 16) on purpose."""
+
+    @staticmethod
+    def _walk(flaky, dead=(), start=date(2025, 2, 1), end=date(2025, 11, 30)):
+        """`flaky` day offsets fail on their FIRST request only; `dead` ones
+        fail every time. Returns (requests per offset, pages)."""
+        from dispatcharr_ranked_matchups.sources import _espn
+        asked = {}
+        lock = threading.Lock()
+
+        def http_get(url):
+            day = datetime.strptime(url.split("dates=")[1][:8], "%Y%m%d").date()
+            off = (day - start).days
+            with lock:
+                asked[off] = asked.get(off, 0) + 1
+                n = asked[off]
+            if off in dead or (off in flaky and n == 1):
+                return None
+            return {"events": [{"id": str(off)}]}
+        pages = _espn.fetch_scoreboard_days(http_get, "https://x.test/scoreboard", start, end)
+        return asked, pages
+
+    def test_one_timed_out_day_of_a_season_is_recovered(self):
+        """WITNESS: without the retry the day stays None."""
+        asked, pages = self._walk(flaky={247})
+        assert len(pages) == 303
+        assert pages[247] == (date(2025, 10, 6), {"events": [{"id": "247"}]})
+        assert asked[247] == 2 and sum(asked.values()) == 304
+
+    def test_one_failed_day_of_an_upcoming_week_is_recovered(self):
+        """WITNESS on the emit side: an 8-day sweep, one blip."""
+        asked, pages = self._walk(flaky={3}, end=date(2025, 2, 8))
+        assert [p is not None for _d, p in pages] == [True] * 8
+        assert sum(asked.values()) == 9
+
+    def test_retry_is_once(self):
+        asked, pages = self._walk(flaky=set(), dead={100})
+        assert asked[100] == 2 and pages[100][1] is None
+
+    def test_many_failures_are_an_outage_not_a_blip(self):
+        """19 of 303 is past one in 16: no retry, so a degraded endpoint is
+        not asked twice for most of a season."""
+        dead = set(range(0, 303, 16))
+        assert len(dead) == 19
+        asked, _pages = self._walk(flaky=set(), dead=dead)
+        assert sum(asked.values()) == 303
+
+    def test_a_hung_final_stretch_is_not_retried(self):
+        """15 failed days of 303 is inside the one-in-16 share but past one
+        batch (8): retrying them would cost two more timeouts after a final
+        chunk the hang rule never checks."""
+        asked, _pages = self._walk(flaky=set(), dead=set(range(288, 303)))
+        assert sum(asked.values()) == 303
+
+    def test_a_hung_last_chunk_is_not_retried(self, monkeypatch):
+        """136 days, the last 8 (the final chunk) all failing slowly: an
+        outage that began mid-walk, inside every count cap, so only the
+        last-chunk hang check keeps it from costing another timeout."""
+        from dispatcharr_ranked_matchups.sources import _espn
+        monkeypatch.setattr(_espn, "SCOREBOARD_SLOW_CHUNK_SECONDS", 0.0)
+        asked, _pages = self._walk(flaky=set(), dead=set(range(128, 136)),
+                                   end=date(2025, 2, 1) + timedelta(days=135))
+        assert sum(asked.values()) == 136
+
+    def test_a_fast_failing_last_chunk_is_retried(self):
+        """Same 8 days failing FAST: a 503 costs nothing to ask again."""
+        asked, _pages = self._walk(flaky=set(), dead=set(range(128, 136)),
+                                   end=date(2025, 2, 1) + timedelta(days=135))
+        assert sum(asked.values()) == 144
+
+    def test_up_to_one_batch_of_blips_is_retried(self):
+        flaky = set(range(0, 303, 40))
+        assert len(flaky) == 8
+        asked, pages = self._walk(flaky=flaky)
+        assert all(p is not None for _d, p in pages) and sum(asked.values()) == 311
+
+    def test_two_failures_in_a_week_are_not_retried(self):
+        asked, _pages = self._walk(flaky=set(), dead={1, 5}, end=date(2025, 2, 8))
+        assert sum(asked.values()) == 8
+
+    def test_every_day_failed_is_not_retried(self):
+        asked, _pages = self._walk(flaky=set(), dead={0}, end=date(2025, 2, 1))
+        assert sum(asked.values()) == 1
+
+    def test_an_abandoned_walk_is_not_retried(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import _espn
+        monkeypatch.setattr(_espn, "SCOREBOARD_WALK_BUDGET_SECONDS", 0.0)
+        asked, pages = self._walk(flaky={3})
+        assert len(pages) == 16 and sum(asked.values()) == 16
+
+    def test_a_walk_abandoned_for_a_hang_is_not_retried(self, monkeypatch):
+        """The hang rule stops the walk at its 16th chunk (days 240-255, all
+        failed, "slow" by a zero threshold). 16 failed of 256 is inside the
+        one-in-16 share, so only the 8-day batch cap keeps those 16 hung days
+        from being asked again."""
+        from dispatcharr_ranked_matchups.sources import _espn
+        monkeypatch.setattr(_espn, "SCOREBOARD_SLOW_CHUNK_SECONDS", 0.0)
+        asked, pages = self._walk(flaky=set(), dead=set(range(240, 256)))
+        assert len(pages) == 256 and sum(asked.values()) == 256
+
+    def test_no_retry_once_the_budget_is_spent(self, monkeypatch):
+        """A one-chunk walk is never abandoned, so this isolates the retry's
+        own budget check."""
+        from dispatcharr_ranked_matchups.sources import _espn
+        monkeypatch.setattr(_espn, "SCOREBOARD_WALK_BUDGET_SECONDS", 0.0)
+        asked, pages = self._walk(flaky={3}, end=date(2025, 2, 8))
+        assert sum(asked.values()) == 8 and pages[3][1] is None
+
+
 def test_concurrent_walk_returns_days_in_date_order():
     """Earlier days answer LAST here, so completion order is the reverse of
     date order; the walk must still hand back date order, which is what the
@@ -437,3 +550,18 @@ def test_mls_season_keeps_date_order_and_first_occurrence(monkeypatch):
     games = mls_standings.MlsEastSource(season_year=2025)._fetch_full_season_games()
     by_id = {g["id"]: g for g in games}
     assert by_id["5"]["status"] == "FINISHED"
+
+
+def test_claude_md_describes_the_per_day_scoreboard_helpers():
+    """The repo's agent guide is how the next source author finds the rule.
+    PR #266's docs-bot commit restored main's `_espn.py` row, which names
+    neither helper and calls `fetch_days` "the" season-walk helper, so a
+    reader would hand-build `?dates=` URLs again. Text-only on purpose."""
+    root = SOURCES.parent
+    row = [line for line in (root / "CLAUDE.md").read_text().splitlines()
+           if line.startswith("| `sources/_espn.py`")]
+    assert len(row) == 1, "CLAUDE.md lost its sources/_espn.py row"
+    for pattern in (r"\bfetch_scoreboard_day\b", r"\bfetch_scoreboard_days\b", r"limit=1000"):
+        assert re.search(pattern, row[0]), (
+            f"CLAUDE.md's _espn.py row no longer mentions {pattern}")
+    assert re.search(r"\bfetch_scoreboard_day\b", (root / "CONTRIBUTING.md").read_text())
