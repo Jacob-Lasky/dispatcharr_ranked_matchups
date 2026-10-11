@@ -2148,9 +2148,10 @@ def _cache_has_slate(cache: Dict[str, Any]) -> bool:
     """True when `cache` is a slate apply may publish, EVEN AN EMPTY ONE (#241).
 
     A non-empty `games` list is a slate, as it always was. An EMPTY one is a
-    slate only when its writer set `_EMPTY_SLATE_KNOWN_KEY`: the reaper (it
-    edits a slate it read) and a refresh that either read the previous slate or
-    heard back from every source (`_slate_known`). Publishing an empty slate
+    slate only when its writer set `_EMPTY_SLATE_KNOWN_KEY`: a refresh that
+    either read the previous slate or heard back from every source
+    (`_slate_known`), and the reaper, which carries that answer forward from
+    the refresh whose slate it is emptying. Publishing an empty slate
     deletes every channel the plugin owns, and the only defence against doing
     that during a source outage is _rows_to_hold carrying the previous games
     forward, which needs the previous slate. Everything else is refused:
@@ -5176,9 +5177,15 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     cache["games"] = live + promoted
     cache["bench"] = bench
     cache["reaped_at"] = now.isoformat()
-    # The reaper edits a slate it read, so it can vouch for an empty result:
-    # this is what lets apply take the LAST game's channel down (#241).
-    cache[_EMPTY_SLATE_KNOWN_KEY] = True
+    # Whether apply may publish the slate if this leaves it EMPTY (#241). The
+    # reaper only removes finished games from it, so the answer is whatever
+    # the refresh that wrote it could vouch for. DO NOT set True outright: a
+    # refresh that lost the previous cache during an outage writes False on a
+    # non-empty slate, the DB can still hold a live channel that slate omits,
+    # and emptying it would have apply delete that channel. Absent (a cache
+    # from before the key existed, always applied by its own refresh) keeps
+    # the reaper able to take the last game off, which is the #241 fix.
+    cache[_EMPTY_SLATE_KNOWN_KEY] = cache.get(_EMPTY_SLATE_KNOWN_KEY, True) is True
     _write_cache(cache)
 
     logger.info(

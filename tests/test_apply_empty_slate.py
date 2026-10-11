@@ -176,22 +176,40 @@ def scenario_reaping_the_last_game_removes_its_channel(env):
     assert list(m.ChannelStream.objects.filter(channel=user_ch).values_list("stream_id", flat=True)) == [stream.id]
 
 
-def scenario_reaper_vouches_for_the_slate_it_empties(env):
-    """A refresh that could not vouch for an empty result still writes a
-    NON-empty slate as usual (it is published either way), marked
-    `empty_slate_known: false`. The reaper emptying that slate knows exactly
-    what it removed, finished games, so its empty result must be published."""
+def scenario_reaping_a_cache_from_before_the_marker(env):
+    """The first reap after the upgrade reads a cache the previous release
+    wrote, with no `empty_slate_known` key. Its refresh applied it, so taking
+    the last game off must still delete that game's channel."""
     user_ch, _ = _seed_source_channel(env)
-    _write_cache(env, [_row(401, _now() - timedelta(hours=10), user_ch.id)],
-                 empty_slate_known=False)
-    assert env.plugin._action_apply(_settings())["status"] == "ok"
-    assert set(_owned(env)) == {"ranked_matchups:CFB:401"}
+    _publish(env, [_row(401, _now() - timedelta(hours=10), user_ch.id)])
+    cache = _read_cache(env)
+    del cache["empty_slate_known"]
+    with open(env.plugin.CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(cache, f)
 
     result = env.plugin._action_reap(_settings())
 
     assert result["status"] == "ok" and result["reaped"] == 1, result
     assert _owned(env) == {}
-    assert _read_cache(env)["empty_slate_known"] is True
+
+
+def scenario_reaper_does_not_vouch_for_an_unvouched_slate(env):
+    """cache.json was lost and the next refresh ran during a CFB outage: it
+    could not carry the live CFB game, listed one other game, and wrote that
+    non-empty slate with `empty_slate_known: false`. Reaping the other game
+    empties the slate, and publishing THAT would delete the CFB channel the
+    slate never knew about."""
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() + timedelta(hours=1), user_ch.id),
+                   _row(402, _now() - timedelta(hours=10), user_ch.id, home="Texas", away="Oklahoma")])
+    _write_cache(env, [_row(402, _now() - timedelta(hours=10), user_ch.id, home="Texas", away="Oklahoma")],
+                 empty_slate_known=False)
+
+    result = env.plugin._action_reap(_settings())
+
+    assert result["reaped"] == 1, result
+    assert _read_cache(env)["empty_slate_known"] is False
+    assert "ranked_matchups:CFB:401" in _owned(env), "a live channel was deleted"
 
 
 def scenario_a_second_reap_after_the_last_game_is_a_no_op(env):
