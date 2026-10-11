@@ -2149,9 +2149,9 @@ def _cache_has_slate(cache: Dict[str, Any]) -> bool:
 
     A non-empty `games` list is a slate, as it always was. An EMPTY one is a
     slate only when its writer set `_EMPTY_SLATE_KNOWN_KEY`: a refresh that
-    either read the previous slate or heard back from every source
-    (`_slate_known`), and the reaper, which carries that answer forward from
-    the refresh whose slate it is emptying. Publishing an empty slate
+    either built on a vouched cache or heard back from every source
+    (`_slate_known`), and the reaper, which carries forward the answer of the
+    slate it is emptying (`_cache_vouched`). Publishing an empty slate
     deletes every channel the plugin owns, and the only defence against doing
     that during a source outage is _rows_to_hold carrying the previous games
     forward, which needs the previous slate. Everything else is refused:
@@ -5369,12 +5369,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # refresh that produced games.
     if not _cache_has_slate(cache):
         if cache.get("refreshed_at") and isinstance(cache.get("games"), list):
-            # An empty refresh that cannot vouch for itself: say so, rather
-            # than "run refresh", which is what just happened.
+            # An empty slate nobody could vouch for: say so, rather than
+            # "run refresh", which is what produced it.
             return {"status": "ok", "message": (
-                "The last refresh found no games but could not rule out a "
-                "source outage, so no channels were removed. They are "
-                "rechecked on the next refresh that finds games."
+                "The cache lists no games but cannot rule out a source "
+                "outage, so no channels were removed. They are rechecked on "
+                "the next refresh that finds games."
             )}
         return {"status": "ok", "message": "Cache empty; run refresh first."}
     games, dup_dropped = _unique_by_marker(cache.get("games", []))

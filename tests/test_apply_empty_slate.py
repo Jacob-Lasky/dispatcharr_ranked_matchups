@@ -30,7 +30,7 @@ import pytest
 HERE = os.path.dirname(os.path.abspath(__file__))
 RUNNER = os.path.join(HERE, "orm_harness", "run_scenarios.py")
 NO_CACHE_MESSAGE = "Cache empty; run refresh first."
-OUTAGE_MESSAGE_PART = "could not rule out a source outage, so no channels were removed"
+OUTAGE_MESSAGE_PART = "cannot rule out a source outage, so no channels were removed"
 
 
 # --------------------------------------------------------------- helpers ---
@@ -207,7 +207,7 @@ def scenario_reaper_does_not_vouch_for_an_unvouched_slate(env):
 
     result = env.plugin._action_reap(_settings())
 
-    assert result["reaped"] == 1, result
+    assert result["reaped"] == 1 and OUTAGE_MESSAGE_PART in result["message"], result
     assert _read_cache(env)["empty_slate_known"] is False
     assert "ranked_matchups:CFB:401" in _owned(env), "a live channel was deleted"
 
