@@ -1004,6 +1004,70 @@ def scenario_a_lost_cache_reads_nothing_from_the_archive_channel(env):
     assert rows == [] and unaccounted == 0
 
 
+def scenario_a_dry_run_does_not_count_a_channel_kept_by_its_guide_as_deleted(env):
+    """WITNESS (#170's rule on #264's keep): a rehearsal reports what a real
+    run would do. After an upgrade lost cache.json, a real apply keeps an
+    unstamped live channel by its guide; the dry run used to report it in
+    `stale_deleted`, so the rehearsal said the live game would be removed."""
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    _strip_stamps(env)
+    os.remove(env.plugin.CACHE_PATH)
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525")),
+                  _nfl_source(_now() + timedelta(days=1))):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+
+    result = env.plugin._action_apply(_settings(dry_run=True))
+
+    assert result["status"] == "ok", result
+    assert "stale_deleted=0" in result["message"], result
+    assert "Kept until their guide ends (not in the cache): 1" in result["message"], result
+    assert set(_owned(env)) == set(owned)
+
+
+def scenario_a_dry_run_does_not_count_a_recording_channel_as_deleted(env):
+    """WITNESS: the same for a channel the reap keeps for its active
+    recording (#146). It left the slate, a real apply keeps it, and the dry
+    run must not report it deleted."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() - timedelta(minutes=30), user_ch.id)])
+    m.Recording.objects.create(
+        channel=owned["ranked_matchups:CFB:401"], start_time=_now() - timedelta(minutes=30),
+        end_time=_now() + timedelta(hours=3), custom_properties={"status": "recording"},
+    )
+    _write_cache(env, [_row(402, _now() + timedelta(days=1), user_ch.id, home="Texas", away="Oklahoma")])
+
+    result = env.plugin._action_apply(_settings(dry_run=True))
+
+    assert result["status"] == "ok", result
+    assert "stale_deleted=0" in result["message"], result
+    assert "1 channel(s) kept (active recording)" in result["message"], result
+    assert set(_owned(env)) == set(owned)
+
+
+def scenario_a_dry_run_counts_a_channel_whose_recording_auto_record_cancels(env):
+    """Guard (codex review of the dry-run count): auto-record cancels its own
+    scheduled recording BEFORE the reap, so a real apply then reaps the
+    channel. The dry run cancels nothing, and must still not count that
+    recording as a reason to keep the channel."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() + timedelta(hours=6), user_ch.id)],
+                     _settings(recorded_teams="Georgia"))
+    rec = m.Recording.objects.get(channel=owned["ranked_matchups:CFB:401"])
+    _write_cache(env, [_row(402, _now() + timedelta(days=1), user_ch.id, home="Texas", away="Oklahoma")])
+
+    dry = env.plugin._action_apply(_settings(dry_run=True))
+    assert "stale_deleted=1" in dry["message"], dry
+    assert m.Recording.objects.filter(pk=rec.pk).exists()
+
+    real = env.plugin._action_apply(_settings())
+    assert "stale_deleted=1" in real["message"], real
+    assert not m.Recording.objects.filter(pk=rec.pk).exists()
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
 def _assert_no_cache_touches_nothing(env, write_bad_cache, message=NO_CACHE_MESSAGE):
     m = env.m
     user_ch, _ = _seed_source_channel(env)

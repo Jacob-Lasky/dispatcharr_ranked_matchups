@@ -606,7 +606,10 @@ slate it cannot vouch for, a stale channel is kept by its own guide
 (`_kept_by_guide`: a current Live or Past entry for any channel, any entry
 not yet ended for an UNSTAMPED one), like one kept for a recording
 (`keep_ids` in `_partition_stale_for_recordings`, number reserved and
-restored), and the slate stays unvouched until it goes. The set
+restored), and the slate stays unvouched until it goes. A dry run counts
+`stale_deleted` with the same keep policy (recordings and `guide_kept_ids`,
+leaving out recordings auto-record would cancel), so a rehearsal never
+reports deleting a channel a real apply keeps. The set
 (`guide_kept_ids`) is read BEFORE apply's group-rename cleanup, which leaves
 a kept channel's old guide entries for a later apply. `_published_rows`
 counts the channels that fallback would keep, and `_slate_known` vouches an

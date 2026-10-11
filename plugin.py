@@ -800,6 +800,10 @@ class _AutoRecord:
         self.state: Dict[str, Dict[str, Any]] = {"created": {}, "tombstones": {}}
         self.new_tombstones: List[str] = []
         self.created = self.updated = self.cancelled = 0
+        # Recordings _autorecord_cancel removes (or, on a dry run, would), so
+        # the dry-run reap can leave them out of its keep check as the real
+        # reap does by running after the delete.
+        self.cancelled_ids: set = set()
         self.failed: List[str] = []
         self.names: Dict[str, str] = {}
         self.slate: Optional[set] = None        # every marker in the cache (#224)
@@ -952,6 +956,7 @@ def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool) -> None:
             if rec is None or recording_policy.is_in_progress(rec) or recording_policy.is_terminal(rec):
                 continue
         ar.cancelled += 1
+        ar.cancelled_ids.add(rec.pk)
         if dry_run:
             continue
         rec.delete()
@@ -7286,7 +7291,25 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     "vouch for the slate (#264)", kept_by_guide_n,
                 )
         elif stale and dry_run:
-            deleted_stale = len(stale)
+            # The same keep policy as the real reap above, read-only, so a
+            # rehearsal reports what a real run would delete (#170: a dry run
+            # that overstates its deletions is as misleading as a silent one).
+            # DO NOT count every stale channel: after an upgrade lost
+            # cache.json, that reported deleting the live channels a real run
+            # keeps by their guide (#264), and channels kept for a recording
+            # (#146) were overcounted the same way. A recording auto-record
+            # would cancel above is left out, as the real reap never sees it.
+            dry_recs: Dict[int, list] = {}
+            for r in Recording.objects.filter(channel_id__in=[c.id for c in stale]).exclude(
+                    id__in=autorec.cancelled_ids):
+                dry_recs.setdefault(r.channel_id, []).append(r)
+            dry_reapable, dry_kept, dry_rehome = _partition_stale_for_recordings(
+                stale, dry_recs, datetime.now(timezone.utc), archive_enabled, guide_kept_ids,
+            )
+            deleted_stale = len(dry_reapable)
+            rehomed_recordings = len(dry_rehome)
+            kept_stale_n = len(dry_kept)
+            kept_by_guide_n = sum(1 for c in dry_kept if c.id in guide_kept_ids)
 
         # 6. Defensive: clean up orphan EPGData entries on our source whose
         # tvg_id has no corresponding virtual channel (left over from earlier
