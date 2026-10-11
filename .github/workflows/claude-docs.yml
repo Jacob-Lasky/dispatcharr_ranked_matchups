@@ -9,7 +9,9 @@ name: Auto-Document PR
 # and only then commits and pushes. A non-markdown change aborts the job
 # before anything is pushed. Claude never holds push credentials, so the
 # forgeable-author / force-push / --output=file escape hatches a git-capable
-# agent would have are structurally absent.
+# agent would have are structurally absent. The same step refuses a pass that
+# removes markdown the PR itself added (.github/scripts/keep-pr-docs.sh, #247):
+# the prompt asks for that, and on PR #246 the model deleted it anyway.
 #
 # The push uses the job's GITHUB_TOKEN. That prevents a self-retrigger LOOP,
 # and it does not prevent a run being CREATED. Measured on PR #48, 2026-09-03:
@@ -139,6 +141,7 @@ jobs:
             echo "Documentation already accurate; nothing to commit."
             exit 0
           fi
+          bash .github/scripts/keep-pr-docs.sh "$RUNNER_TEMP/pr.diff"
           git add -A
           git diff --cached --name-only -z | validate
           git config user.name "claude-docs"
