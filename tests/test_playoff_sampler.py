@@ -23,12 +23,20 @@ UTC = timezone.utc
 
 
 def _importance_classes():
+    """{qualname: class} for every concrete importance source reachable from
+    the package, the package module itself included. A re-export is the same
+    class and is one entry; two DIFFERENT classes sharing a name fail here
+    rather than one silently hiding the other."""
+    modules = [sources_pkg] + [
+        importlib.import_module(f"{sources_pkg.__name__}.{mod.name}")
+        for mod in pkgutil.iter_modules(sources_pkg.__path__)
+    ]
     seen = {}
-    for mod in pkgutil.iter_modules(sources_pkg.__path__):
-        module = importlib.import_module(f"{sources_pkg.__name__}.{mod.name}")
+    for module in modules:
         for _name, cls in inspect.getmembers(module, inspect.isclass):
             if (issubclass(cls, SportSource) and not inspect.isabstract(cls)
                     and getattr(cls, "supports_importance", False)):
+                assert seen.get(cls.__qualname__, cls) is cls, f"two classes named {cls.__qualname__}"
                 seen[cls.__qualname__] = cls
     return seen
 
@@ -42,6 +50,58 @@ def test_every_importance_source_overrides_sample_result():
     missing = sorted(name for name, cls in classes.items()
                      if cls.sample_result is SportSource.sample_result)
     assert missing == []
+
+
+# sources/base.py: "Sources that flip `supports_importance = True` MUST
+# override all of them" (the 7 methods of the importance interface). Literal
+# on purpose, so a method dropped from the interface shows here.
+_IMPORTANCE_INTERFACE = (
+    "outcome_labels", "estimate_strengths", "initial_state", "remaining_matches",
+    "sample_result", "apply_result", "terminal_outcomes",
+)
+
+
+def _impl(owner, name):
+    """The function behind `name`: a property's getter, a classmethod's or
+    staticmethod's function, so the base implementation rewrapped still reads
+    as not overridden."""
+    attr = inspect.getattr_static(owner, name)
+    if isinstance(attr, property):
+        return attr.fget
+    return getattr(attr, "__func__", attr)
+
+
+def _not_overridden(cls):
+    return [m for m in _IMPORTANCE_INTERFACE if _impl(cls, m) is _impl(SportSource, m)]
+
+
+def test_every_importance_source_overrides_the_whole_interface():
+    """The rest of the contract #249 asked for: a source missing ANY of the
+    seven raises NotImplementedError per simulated game, the same failure as
+    the missing sampler, so the guard covers all of them."""
+    class _Incomplete(SportSource):  # the instrument must catch a gap
+        supports_importance = True
+        sport_prefix = sport_label = "X"
+
+        def fetch_upcoming(self, days_ahead=7):
+            return []
+
+        def sample_result(self, state, match, strengths, rng):
+            return None
+        # The base implementation rewrapped is still the base's
+        # NotImplementedError, so neither counts as an override.
+        outcome_labels = property(SportSource.outcome_labels.fget)
+        estimate_strengths = staticmethod(SportSource.estimate_strengths)
+    assert _not_overridden(_Incomplete) == [m for m in _IMPORTANCE_INTERFACE if m != "sample_result"]
+
+    classes = _importance_classes()
+    # Discovery's own instrument: one class per shape the scan exists for (a
+    # bracket series, a double-elim mixin, a points-based league, soccer).
+    assert {"NbaPlayoffSource", "NcaaBaseballPlayoffBracketSource", "NcaafSource",
+            "SoccerSource"} <= set(classes)
+    assert len(classes) >= 25
+    gaps = {name: _not_overridden(cls) for name, cls in sorted(classes.items())}
+    assert {name: g for name, g in gaps.items() if g} == {}
 
 
 def _row(src, home, away):
