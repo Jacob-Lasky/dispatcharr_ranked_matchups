@@ -393,22 +393,49 @@ def fetch_days(
         return list(zip(days, pool.map(fetch_day, days)))
 
 
+# How many days a walk tries before giving up on a scoreboard that answers
+# NOTHING. A day with no games is a 200 with an empty `events` list, so a run
+# of None pages means the endpoint itself is failing (down, hung, or rejecting
+# the request), not a quiet stretch of calendar. Two concurrent batches: when
+# every request hangs to its 15 s timeout, a whole-season walk stops after
+# ~30 s instead of ~38 batches (~570 s for MLS's 303 days), and a refresh that
+# walks several such seasons in a row stays inside the pipeline's 25-minute
+# ceiling (#182 review). The cost is a walk that loses its first 16 days to a
+# brief outage also skips the rest; it is retried on the next refresh.
+SCOREBOARD_GIVE_UP_AFTER_DAYS = 2 * _SEASON_WALK_WORKERS
+
+
 def fetch_scoreboard_days(
     http_get: Callable[[str], Optional[Dict[str, Any]]],
     scoreboard_url: str,
     start: date,
     end: date,
 ) -> List[Tuple[date, Optional[Dict[str, Any]]]]:
-    """`[(day, page), ...]` for every scoreboard day from `start` to `end`
+    """`[(day, page), ...]` for the scoreboard days from `start` to `end`
     inclusive, IN DATE ORDER, each fetched through `fetch_scoreboard_day`
     and run concurrently by `fetch_days`.
 
     The one per-day walk every ESPN source uses: upcoming sweeps, full-season
-    walks and bracket walks alike. Concurrency is what keeps a long window
-    affordable when ESPN is slow: a hung endpoint costs one timeout per
-    `_SEASON_WALK_WORKERS` days instead of one per day, and a refresh runs
-    every source inside the pipeline's 25-minute ceiling.
+    walks and bracket walks alike. Concurrency keeps a long window
+    affordable: a slow endpoint costs one timeout per `_SEASON_WALK_WORKERS`
+    days instead of one per day.
+
+    If every one of the first `SCOREBOARD_GIVE_UP_AFTER_DAYS` days comes back
+    None, the walk stops there, logs a WARNING and returns just those days,
+    so the result can be SHORTER than the window. Callers already treat a
+    missing day as "no games that day".
     """
-    return fetch_days(
-        start, end, lambda day: fetch_scoreboard_day(http_get, scoreboard_url, day),
-    )
+    fetch = lambda day: fetch_scoreboard_day(http_get, scoreboard_url, day)  # noqa: E731
+    probe_end = min(end, start + timedelta(days=SCOREBOARD_GIVE_UP_AFTER_DAYS - 1))
+    pages = fetch_days(start, probe_end, fetch)
+    if probe_end >= end:
+        return pages
+    if all(page is None for _day, page in pages):
+        logger.warning(
+            "[espn] %s: the first %d days (%s-%s) all failed; not requesting "
+            "the remaining days through %s",
+            scoreboard_url, len(pages), start.strftime("%Y%m%d"),
+            probe_end.strftime("%Y%m%d"), end.strftime("%Y%m%d"),
+        )
+        return pages
+    return pages + fetch_days(probe_end + timedelta(days=1), end, fetch)

@@ -4,6 +4,7 @@ doesn't ship silently."""
 
 from typing import Any, Dict, List, Tuple
 
+import itertools
 import random
 from datetime import date, datetime, timedelta, timezone
 
@@ -5752,10 +5753,11 @@ class TestNcaaSoccerCupSource:
         )
         # Two events: one tournament (third-round) and one regular-season.
         # Only the tournament event should be emitted.
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 {"id": "tournament-event", "date": "2030-11-30T19:00:00Z",
@@ -6466,10 +6468,11 @@ class TestMlsStandingsConferenceFilter:
             mod, "_fetch_conference_map",
             lambda: {"A": "East", "B": "East", "C": "West", "D": "West"},
         )
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_, **__):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 # (1) A vs B: intra-East, should appear
@@ -6812,10 +6815,11 @@ class TestMlsStandingsConferenceFilter:
             mod, "_fetch_conference_map",
             lambda: {"A": "East", "B": "East"},
         )
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_, **__):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 {"id": 100, "date": "2025-04-01T19:00:00Z",
@@ -7375,10 +7379,11 @@ class TestMlsCupFetchUpcoming:
     def test_fetch_upcoming_emits_only_bracket_games(self, monkeypatch):
         from dispatcharr_ranked_matchups.sources import mls_cup as mod
         from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 # Scheduled bracket game: should emit.
@@ -7418,10 +7423,11 @@ class TestMlsCupFetchUpcoming:
         don't appear in the user's Top Matchups guide either."""
         from dispatcharr_ranked_matchups.sources import mls_cup as mod
         from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 # Phantom game-3: state=post, completed=False, 0-0.
@@ -11136,17 +11142,24 @@ def _cup_event(eid, home, away, season_slug, *, hours_from_now=2.0,
 
 
 def _patch_cup_http_per_bucket(monkeypatch, buckets):
-    """Stub english_cup's requests.get so each successive `dates=` bucket gets
-    its OWN payload, rather than every bucket receiving the same events.
+    """Stub english_cup's requests.get so each `dates=` bucket gets its OWN
+    payload, rather than every bucket receiving the same events.
 
     Needed because the interesting dedupe defects are about DISAGREEMENT
     between two buckets carrying the same event, which a stub that serves one
     identical response to every date cannot express. `buckets` is a list of
-    event-lists, applied in sweep order; requests past the end get [].
+    event-lists, one per day in sweep order starting at the lookback day;
+    days past the end get [].
+
+    Keyed by the requested DATE, not by arrival order: the sweep fetches its
+    days concurrently, so arrival order is not date order, and a stub that
+    handed out payloads by arrival could give the stale copy to the later
+    bucket and pass without testing the premise.
     """
     from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
+    from dispatcharr_ranked_matchups.sources._espn import SCOREBOARD_LOOKBACK_DAYS
 
-    calls = {"n": 0}
+    first = datetime.now(timezone.utc).date() - timedelta(days=SCOREBOARD_LOOKBACK_DAYS)
 
     class FakeResp:
         def __init__(self, events): self._events = events
@@ -11154,12 +11167,11 @@ def _patch_cup_http_per_bucket(monkeypatch, buckets):
         def json(self): return {"events": self._events}
 
     def _get(url, *a, **kw):
-        i = calls["n"]
-        calls["n"] += 1
-        return FakeResp(buckets[i] if i < len(buckets) else [])
+        day = datetime.strptime(url.split("dates=")[1][:8], "%Y%m%d").date()
+        i = (day - first).days
+        return FakeResp(buckets[i] if 0 <= i < len(buckets) else [])
 
     monkeypatch.setattr(cup_mod.requests, "get", _get)
-    return calls
 
 
 def _patch_cup_http(monkeypatch, events):
@@ -11382,7 +11394,8 @@ class TestEnglishCupFetch:
         yesterday = (datetime.now(timezone.utc).date()
                      - timedelta(days=1)).strftime("%Y%m%d")
         today = datetime.now(timezone.utc).date().strftime("%Y%m%d")
-        assert dates == [yesterday, today]
+        # sorted: the days are fetched concurrently, so arrival order is not date order.
+        assert sorted(dates) == [yesterday, today]
 
     def test_dedupes_an_event_seen_in_two_buckets(self, monkeypatch):
         """The lookback bucket overlaps the first forward bucket, and the stub

@@ -254,6 +254,42 @@ def test_every_espn_sweep_fetches_its_days_concurrently(sweep, monkeypatch):
     assert emu.max_inflight > 1, f"{_id} walked its scoreboard days one at a time"
 
 
+class TestWalkGivesUpOnADeadEndpoint:
+    """A hung ESPN costs a 15 s timeout per request even concurrently; a
+    303-day MLS walk is ~38 batches. Several such walks in a row overran the
+    pipeline's 1500 s ceiling (#182 review), so a walk whose first 16 days ALL
+    fail stops there. Literals (16, 303) on purpose."""
+
+    @staticmethod
+    def _walk(fail_until, start=date(2025, 2, 1), end=date(2025, 11, 30)):
+        from dispatcharr_ranked_matchups.sources._espn import fetch_scoreboard_days
+        asked = []
+        lock = threading.Lock()
+
+        def http_get(url):
+            day = datetime.strptime(url.split("dates=")[1][:8], "%Y%m%d").date()
+            with lock:
+                asked.append(day)
+            return None if (day - start).days < fail_until else {"events": []}
+        pages = fetch_scoreboard_days(http_get, "https://x.test/scoreboard", start, end)
+        return asked, pages
+
+    def test_dead_endpoint_stops_after_sixteen_days(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            asked, pages = self._walk(fail_until=10_000)
+        assert len(asked) == 16 and len(pages) == 16
+        assert max(asked) == date(2025, 2, 16)
+        assert any("all failed" in r.getMessage() for r in caplog.records)
+
+    def test_one_good_day_in_the_probe_keeps_the_whole_walk(self):
+        asked, pages = self._walk(fail_until=15)
+        assert len(asked) == 303 and len(pages) == 303
+
+    def test_a_window_no_longer_than_the_probe_is_never_cut(self):
+        asked, pages = self._walk(fail_until=10_000, end=date(2025, 2, 10))
+        assert len(asked) == 10 and len(pages) == 10
+
+
 def test_concurrent_walk_returns_days_in_date_order():
     """Earlier days answer LAST here, so completion order is the reverse of
     date order; the walk must still hand back date order, which is what the
