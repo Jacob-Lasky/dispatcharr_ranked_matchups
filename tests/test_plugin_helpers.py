@@ -485,6 +485,109 @@ class TestRankPoolSizeWiring:
         assert undeclared == 3.8
 
 
+class TestRankFieldSizeWiring:
+    """#198: a poll's field size only changes a score if plugin.py carries it
+    from the source to the scorer, onto the cache row and back. Every
+    scoring-level test passes with that wiring missing, in which case every
+    poll rank silently scores against its 25-entry list again."""
+
+    def test_refresh_forwards_the_sources_field_for_a_poll_only(self, plugin):
+        import inspect
+        src = inspect.getsource(plugin._action_refresh)
+        assert '"rank_field_size", None' in src, (
+            "refresh no longer reads the source's rank_field_size"
+        )
+        assert "rank_field = None if rank_pool_exhaustive else" in src, (
+            "a league table must never be scored against a field"
+        )
+        assert "rank_field_size=rank_field" in src, (
+            "the field is not being passed into GameSignals"
+        )
+
+    def test_field_is_persisted_to_the_cache_row(self, plugin):
+        import inspect
+        src = inspect.getsource(plugin._action_refresh)
+        assert '"rank_field_size": signals.rank_field_size' in src
+
+    def test_cache_replay_reads_the_field_back(self, plugin):
+        """The row a refresh wrote comes back carrying its field, and a
+        pre-#198 row (no key) comes back as None. Replay does NOT re-score
+        (it returns the cached score and breakdown), so this pins only the
+        reconstructed signals, which feed the tagline; a pre-#198 row keeps
+        its old rank points until the next refresh rewrites it."""
+        row = {"home": "SMU", "away": "Virginia", "rank_home": 24,
+               "rank_away": None, "rank_pool_size": None,
+               "rank_pool_exhaustive": False, "rank_field_size": 138}
+        signals, _score = plugin._build_signals_score_from_payload(row)
+        assert signals.rank_field_size == 138
+        del row["rank_field_size"]
+        signals, _score = plugin._build_signals_score_from_payload(row)
+        assert signals.rank_field_size is None
+
+    def test_a_real_refresh_scores_a_poll_against_its_field(self, refresh_env, monkeypatch):
+        """End to end through _action_refresh (scoring, cache write) with
+        REAL source instances, so the chain is proven by behaviour rather
+        than by the source text the three pins above read. Only each
+        source's fetch_upcoming is stubbed, to one row: this pins the field's
+        path from source to cache row, not which sources a setting enables.
+        NcaaSoccerSource matters on purpose: it sets its field in __init__ (it
+        depends on gender), so a class-level read would miss it while every
+        text pin stayed green (mutation-checked).
+
+        The league row carries an exhaustive standings table AND a source
+        that (wrongly) declares a field: the table must win.
+          poll:   #25 vs unranked of 215 -> (190 / 214) / 2 * 10 = 4.44
+                  (pre-#198: (25 + 1 - 25) / 25 / 2 * 10 = 0.20)
+          league: 15th of 20 vs unranked -> (5 / 19) / 2 * 10 = 1.32
+        """
+        from datetime import datetime, timedelta
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer import NcaaSoccerSource
+        from dispatcharr_ranked_matchups.sources.soccer import SoccerSource
+        start = datetime.now(timezone.utc) + timedelta(hours=3)
+        poll_src = NcaaSoccerSource(gender="m")
+        poll_game = GameRow(
+            sport_prefix="NCAAMSOC", sport_label="NCAA Men's Soccer",
+            home="Syracuse", away="Wake Forest", rank_home=25, rank_away=None,
+            start_time=start, extra={"game_id": 9001},
+        )
+        league_src = SoccerSource("epl", fd_api_key="x")
+        league_src.rank_field_size = 138  # wrong on purpose: must be ignored
+        # The shape soccer._serialize_table puts on the row.
+        table = [
+            {"name": f"Club {i}", "position": i, "points": 40 - i, "played": 10,
+             "goal_difference": 10 - i}
+            for i in range(1, 21)
+        ]
+        league_game = GameRow(
+            sport_prefix="EPL", sport_label="English Premier League",
+            home="Club 15", away="Visitor", rank_home=15, rank_away=None,
+            start_time=start, extra={"game_id": 9002, "standings_table": table},
+        )
+        monkeypatch.setattr(poll_src, "fetch_upcoming", lambda days_ahead=7: [poll_game])
+        monkeypatch.setattr(league_src, "fetch_upcoming", lambda days_ahead=7: [league_game])
+
+        _write_prior, run, read = refresh_env
+        result = run([poll_src, league_src])
+        assert result["status"] == "ok", result
+        cache = read()
+        rows = {r["sport_prefix"]: r for r in cache["games"] + cache.get("bench", [])}
+
+        poll = rows["NCAAMSOC"]
+        assert poll["rank_field_size"] == 215
+        assert poll["rank_pool_exhaustive"] is False
+        assert poll["score_breakdown"]["one_ranked"] == 4.44
+        assert poll["score_notes"][0] == (
+            "one ranked: #25 in a 25-deep poll of 215 (strength 0.89) vs unranked"
+        )
+
+        league = rows["EPL"]
+        assert league["rank_field_size"] is None
+        assert league["rank_pool_size"] == 20
+        assert league["rank_pool_exhaustive"] is True
+        assert league["score_breakdown"]["one_ranked"] == 1.32
+
+
 class TestManifestNcaafDivisionsMatchesCode:
     """plugin.json's `ncaaf` select (#208: the enable toggle and the divisions
     select merged) must offer Off plus exactly the source's DIVISION_SETS

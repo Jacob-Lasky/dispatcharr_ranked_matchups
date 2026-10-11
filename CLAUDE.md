@@ -56,7 +56,7 @@ downstream is sport-agnostic.
 | `naming.py` | Channel-name templating (Sonarr/Radarr `{group}`-collapse convention). `render_name`, `validate_template`, `build_context`, `preview_lines`, `DEFAULT_NAME_TEMPLATE`, `TOKENS`. Pure: no Django, no `scoring` import — which is why `_RECORDING_DOT` is a literal here rather than an import of `recording.DOT`; the two must stay the same glyph (`tests/test_autorecord.py` pins it). `{recording_dot}` is deliberately absent from `DEFAULT_NAME_TEMPLATE`. |
 | `simulation.py` | Sport-agnostic Monte Carlo importance per Lahvička (2012). `monte_carlo_importance()` for single (team, outcome); `monte_carlo_importance_batch()` shares one set of N season simulations across K queries for ONE game; `monte_carlo_importance_shared()` shares one set across EVERY game of a source (#230), the production path for sources with `shared_season_importance = True` (state-free result models; knockouts opt out). `kendall_tau_c()` is the ordinal-association measure. |
 | `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` to Dispatcharr channels and streams. `_build_epg_lookup` (plugin.py) supplies three candidate paths: A, EPG `ProgramData` title, sub-title or description (whole-channel); B, channel name (whole-channel); C, stream name (stream-granular, so a stream need not be on a channel at all). Three tiers: `regex_strict` (channel or stream name names both teams, merging Tier-2 programme matches behind it), `regex_unique` (exactly one non-preview programme match), then Claude batched fallback or first candidate. `_partition_attach_targets` splits the result into `channel_ids` and `stream_ids`. |
-| `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Monte Carlo importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. A second, independent flag `shared_season_importance` (default False, #230) says the source's `sample_result` ignores `state`, so one set of simulated seasons can serve every one of its games — see the cost section below. |
+| `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Monte Carlo importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. A second, independent flag `shared_season_importance` (default False, #230) says the source's `sample_result` ignores `state`, so one set of simulated seasons can serve every one of its games — see the cost section below. `rank_field_size` (default None, #198) is how many teams a POLL source's ranks are drawn from; league sources leave it None (see step 5 of the extension contract). |
 | `sources/bracket.py` | `BracketSportSource` shared state machine for all knockout/playoff sports (bracket inference, `_round_reached`, `terminal_outcomes` cascade). Three concrete tie shapes: `AggregateLegSource` (two-leg, used by `KnockoutSoccerSource`), `BestOfNSeriesSource` (best-of-N series, used by `NhlPlayoffSource`, `MlbPlayoffSource`, `NcaaBaseballPlayoffSource`, `NcaaSoftballPlayoffSource` for their Super Regional + Finals stages), and `DoubleEliminationSource` (4-team double-elim base class for NCAA Baseball / Softball Regional + 8-team MCWS/WCWS bracket; plumbing into the sport sources is tracked in #43). `BestOfNSeriesSource._series_length_for_stage(stage)` hook lets each sport map stages to series lengths — NHL uses uniform 7; MLB uses 3/5/7/7 (WC/LDS/LCS/WS). `place_upcoming` stamps each fetched upcoming row with its bracket identity via `_sim_extra` (each tie shape's ONE builder of a simulated row's `extra`), and `ALL_ROWS_POSTSEASON` marks the playoff-only shapes — see the #243 gotcha below. `ForcedWinnerPoissonSampler` is the ONE playoff `sample_result` (Poisson from `_strength_for`, a tie broken by a coin-flipped +1; `LAMBDA_FLOOR` 0.05 for soccer), mixed in FIRST by every series/double-elim source: a source claiming `supports_importance` without a sampler raised `NotImplementedError` per game (#249; `tests/test_playoff_sampler.py` scans for it, and checks every tie winner's `round_reached` is the next round's `KNOCKOUT_ROUND_DEPTH`, which WNBA's SF->FINALS jump from 1 to 3 broke). The bracket-fetch failure accounting (`_sweep_bracket_days`, `_cache_bracket_games`, `BRACKET_FETCH_MAX_ATTEMPTS`, `allow_bracket_scoring_retry`, `bracket_fetch_failure`) also lives here — see the #245 part of the #243 gotcha. |
 | `sources/points_based.py` | Shared Monte Carlo for round-robin point-scoring sports (NCAAF, NCAAM, NHL regular, MLB regular). Subclasses set `_count_field` to choose between `"wins"` (CFB/CBB/MLB) and `"standings_points"` (NHL) for terminal_outcomes bucketing. Sets `shared_season_importance = True` for the whole family: the result model is Poisson on fixed strengths and never reads `state`. |
 | `sources/ncaaf.py` | CFBD `/rankings`, `/games`, `/lines` calls. CFBD uses **camelCase** (homeTeam, awayTeam) — easy gotcha. |
@@ -202,7 +202,7 @@ enable narrative without explicit user buy-in.
 
 ## Sport adapter extension contract
 
-Four steps, using NCAAM (College Basketball) as the worked example.
+Five steps, using NCAAM (College Basketball) as the worked example.
 NOTE: NCAAM already ships as `sources/ncaam.py`, so read that file as the
 reference implementation rather than writing it; the shape below is what
 a NEW sport needs.
@@ -237,6 +237,17 @@ a NEW sport needs.
    rescheduled. Append at the END; the order is part of every live channel's
    tvg_id. `tests/test_marker_identity.py` fails if a source stamps an `*_id`
    key that is neither listed there nor exempted in the test.
+
+5. If your ranks come from a POLL (a top-N list drawn from a larger
+   field), declare `rank_field_size` on the source: the number of teams
+   the poll picks from (138 FBS programmes for the AP football poll).
+   Without it every rank scores against the 25-entry list, so AP #25 reads
+   as 0.04 instead of 0.82 (#198). A league source leaves it None: its
+   standings table is exhaustive and already is the field.
+   `tests/test_scoring.py::TestPollSourcesDeclareTheirField` fails for any
+   source class that defines or inherits `_fetch_rankings`, calls a
+   `/rankings` endpoint, or emits a non-None `rank_home` / `rank_away`
+   without a `standings_table`, and is not listed there.
 
 Shared CFBD key already covers basketball (same Bearer token).
 

@@ -73,55 +73,100 @@ For sports with a ranking (top-25 polls in NCAAF / NCAAM / NCAA
 Baseball; standings position in soccer leagues; etc.) this signal
 rewards games featuring ranked teams.
 
-**A rank only means something relative to how many teams carry one.** A
-league table ranks every club, so every fixture has two ranks; a poll
-ranks the top 25 of a much larger field, so most games have one rank or
-none. Scoring is therefore done on each team's PERCENTILE within its own
-ranked pool:
-
-**Exhaustive and selective pools normalize differently**, and the
-difference matters at the bottom of the pool:
+**A rank only means something relative to the field it was drawn from.**
+A league table ranks every club, so every fixture has two ranks; a poll
+ranks the top 25 of a much larger field (138 FBS programmes, 365 Division
+I men's basketball programmes), so most games have one rank or none.
+Scoring is therefore done on each team's PERCENTILE within its field:
 
 ```python
-# EXHAUSTIVE (a league table ranks every club):
-strength = (pool - rank) / (pool - 1)      # 1st → 1.0, last → 0.0
+# EXHAUSTIVE (a league table ranks every club, so the table IS the field):
+strength = (pool - rank) / (pool - 1)      # 1st -> 1.0, last -> 0.0
 
-# SELECTIVE (a poll ranks the top N of a larger field):
-strength = (pool + 1 - rank) / pool        # 1st → 1.0, last → 1/pool
+# SELECTIVE with a declared field (#198; every college poll source):
+strength = (field - rank) / (field - 1)    # #1 -> 1.0, #25 of 138 -> 0.82
 
-# either way:
+# SELECTIVE with no declared field (the published list stands in):
+strength = (pool + 1 - rank) / pool        # 1st -> 1.0, last -> 1/pool
+
+# in every case:
 unranked = 0.0
 rank_pts = mean(strength_home, strength_away) * 10 * weights.rank
 ```
 
-Last place in a league really is the worst team available, so it bottoms
-out at zero. The last entry in a 25-deep poll is still a top-20% team, so
-it must stay strictly above an unranked opponent — otherwise `#25 vs
-unranked` scores the same as `unranked vs unranked`.
-
 `pool` is the number of teams carrying a rank: the length of the
-standings table for a league source, or 25 for a poll source. The
-breakdown key is `rank_pair` when both sides are ranked and `one_ranked`
-when only one is; the arithmetic is identical either way.
+standings table for a league source, or 25 for a poll source. `field` is
+`SportSource.rank_field_size`, declared on each poll source:
 
-| Example | pool | kind | pts |
-|---|---|---|---|
-| #1 vs #2 | 25 | poll | 9.80 |
-| #4 vs #7 | 25 | poll | 8.20 |
-| #1 vs unranked | 25 | poll | 5.00 |
-| #7 vs unranked | 25 | poll | 3.80 |
-| #25 vs unranked | 25 | poll | 0.20 |
-| 1st vs 2nd | 20 | table | 9.74 |
-| 14th vs 16th | 20 | table | 2.63 |
-| 19th vs 20th | 20 | table | 0.26 |
+| Source | Poll | Field |
+|---|---|---|
+| NCAA Football | AP Top 25 | 138 (FBS, 2026) |
+| NCAA Men's Basketball | AP Top 25 | 365 |
+| NCAA Women's Basketball | AP Top 25 | 362 |
+| NCAA Baseball | D1Baseball Top 25 | 304 |
+| NCAA Softball | Top 25 | 309 |
+| NCAA Men's / Women's Soccer | United Soccer Coaches Top 25 | 215 / 351 |
+
+A field drifts by a programme or two a year as schools reclassify, and
+that barely matters: 136 vs 138 moves AP #25 from 0.822 to 0.825. Getting
+the order of magnitude right is what counts.
+
+The breakdown key is `rank_pair` when both sides are ranked and
+`one_ranked` when only one is; the arithmetic is identical either way.
+A game whose rank points come to 0 (last vs last of a league table, or
+last vs unranked) emits no key and no note.
+
+| Example | pool | field | kind | pts |
+|---|---|---|---|---|
+| #1 vs #2 | 25 | 138 | poll | 9.96 |
+| #10 vs #10 | 25 | 138 | poll | 9.34 |
+| #12 vs #6 | 25 | 215 | poll | 9.63 |
+| #1 vs unranked | 25 | any | poll | 5.00 |
+| #4 vs unranked | 25 | 215 | poll | 4.93 |
+| #25 vs unranked | 25 | 138 | poll | 4.12 |
+| #7 vs unranked | 25 | none | poll | 3.80 |
+| 1st vs 2nd | 20 | (table) | table | 9.74 |
+| 14th vs 16th | 20 | (table) | table | 2.63 |
+| 19th vs 20th | 20 | (table) | table | 0.26 |
 
 Unranked vs unranked: signal contributes 0 and no key is emitted.
 
-**Known limitation.** This is a percentile within the PUBLISHED pool, not
-within the sport's full eligible population, so a poll's #1 and a league's
-#1 both read as 1.0 even though being #1 of 136 FBS teams is a stronger
-claim than being 1st of 20. Modelling the unranked tail properly needs a
-per-sport field size; tracked as a follow-up issue.
+#### Why the unranked tail scores 0, not its midpoint (#198)
+
+An unranked FBS team's expected position is the middle of the 113-team
+tail (about 82nd of 138, strength 0.41), and #198 floated that as the
+honest default. It was measured on the live slate of 2026-10-11 and
+rejected: it hands every unranked-vs-unranked college game 4.1 to 4.4 raw
+points that no NFL, NHL, NBA or MLB game can earn, because those sources
+carry no ranks at all. On that slate it put Jacksonville State v FIU (no
+ranked team) above Cagliari v Juventus, and moved NCAA men's soccer from
+6 to 11 of the 25 slots on a weekend without college football. `0.0`
+means "no evidence of quality", which is what a team in an unranked sport
+also gets, so the signal stays comparable across sports. Crediting the
+tail needs the unranked sports to carry a rank first.
+
+#### What #198 changed on a real slate
+
+Replayed over the live slate of 2026-10-11 (the cached list plus a fresh
+capture of 62 FBS and 181 NCAA men's soccer games, importance from 2000
+shared seasons):
+
+| Game | rank pts before | after | raw before | after |
+|---|---|---|---|---|
+| CFB #15 Tennessee v #6 Alabama | 6.20 | 9.31 | 24.56 | 27.67 |
+| CFB #22 Houston v #18 Oklahoma State | 2.40 | 8.61 | 15.04 | 21.25 |
+| CFB #24 SMU v Virginia | 0.40 | 4.16 | 8.77 | 12.53 |
+| NCAAMSOC #20 Wisconsin v #21 UCLA | 2.20 | 9.09 | 6.60 | 13.49 |
+| NCAAMSOC #12 Akron v #6 Creighton | 6.80 | 9.63 | 10.33 | 13.16 |
+| NCAAMSOC NC State v #4 Kansas City | 4.40 | 4.93 | 11.71 | 12.24 |
+| any league fixture, any unranked sport | unchanged | | | |
+
+Top 25 with college football on the slate: 4 games in (SMU v Virginia
+and three ranked-vs-ranked NCAA men's soccer games), 4 out (Bahia v
+Mirassol, Wrexham v Preston, Army v FAU, and NC State v Kansas City,
+whose own score rose but less than the cut line did). Without college
+football: 2 in (Wisconsin v UCLA, #1 SMU v #13 Stanford), 2 out (Atlanta v
+Baltimore, Rutgers v #2 Indiana).
 
 #### Why this replaced the two-branch formula (#194)
 
@@ -142,15 +187,17 @@ entire NCAAF slate was capped at 4.17. It was also backwards on the
 merits: being ranked #1 of 136 is a stronger claim than 1st of 20.
 
 The second hard-coded assumption was just as wrong in the other
-direction: with a 20-club table the rank sum can never exceed 40, so
-`(50 - 40) / 4.8` gave a **last-vs-second-last fixture 2.08 points** for
-being in a small league.
+direction: with a 20-club table two different clubs' ranks sum to at most
+39, so `(50 - 39) / 4.8` gave a **last-vs-second-last fixture 2.29
+points** for being in a small league.
 
-The replacement is deliberately surgical. For a 25-deep pool it lands
-within a rounding step of the old numbers, so poll sports keep their
-magnitude; what changes is league tables (no longer scored as if 25 deep)
-and the unranked side (now costs a team its own share instead of
-collapsing the game into a lower-capped branch).
+The #194 replacement was deliberately surgical. For a 25-deep pool it
+landed within a rounding step of the old numbers, so poll sports kept
+their magnitude; what changed was league tables (no longer scored as if
+25 deep) and the unranked side (now costs a team its own share instead of
+collapsing the game into a lower-capped branch). #198 then deliberately
+DID move poll magnitudes, by reading a poll rank against its sport's field
+(AP #25 vs unranked: 0.20 before, 4.12 after); see the field table above.
 
 ### Signal: close_game
 
@@ -560,9 +607,9 @@ A typical description for a high-stakes game:
 Kickoff: Today 2:00 PM CDT 🔴 TODAY
 Matchup: Brentford FC @ Manchester United FC
 Sport: English Premier League
-Score: 8.4/10  (raw 21.8)
+Score: 8.7/10  (raw 21.2)
 Score breakdown:
-  rank_pair: +7.92
+  rank_pair: +7.37
   close_game: +2.16        (devigged coinflip-ness 0.72)
   importance: +11.7
 Importance notes (top 3):
@@ -572,8 +619,8 @@ Importance notes (top 3):
 Source: Manchester United
 ```
 
-- **Score: 8.4/10**: the final ★ rating after compression.
-- **(raw 21.8)**: pre-compression raw points, useful for debugging.
+- **Score: 8.7/10**: the final ★ rating after compression.
+- **(raw 21.2)**: pre-compression raw points, useful for debugging.
 - **Score breakdown**: each signal's contribution. Sum equals raw.
 - **Importance notes (top 3)**: the three (team, outcome) tuples with
   the highest leverage. Each line is `team outcome: leverage × weight
@@ -594,8 +641,10 @@ patterns:
   Carlo importance, or `weights.importance = 0`.
 - `importance` very small → both teams' outcomes are locked in (early
   September: nothing yet decided; late May: lots locked in).
-- `rank_pair` missing → at least one team is unranked or the sport
-  doesn't use rankings.
+- `rank_pair` missing → at least one team is unranked, the sport
+  doesn't use rankings, or the rank points came to 0 (last vs last of a
+  league table). `one_ranked` present instead means exactly one side is
+  ranked.
 - `close_game` missing → no spread / closeness data from the source.
 
 

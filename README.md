@@ -63,18 +63,18 @@ implementation and testing are done by AI.
 ## Example output
 
 ```
-#5548720  EPL ★10.0 · Brentford at Manchester United · title / UCL race
+#5548720  EPL ★9.4 · Brentford at Manchester United · title / UCL race
           — both top-10 (#3 vs #9), title / UCL race, toss-up (line +0.5)
 
           Description (what TiviMate/Plex/Jellyfin show):
             Kickoff: Today 2:00 PM CDT 🔴 TODAY
             Matchup: Brentford FC @ Manchester United FC
             Sport: English Premier League
-            Score: 10.0/10  (raw 28.3)
+            Score: 9.4/10  (raw 28.23)
             Score breakdown:
-              rank_pair: +7.92
-              close_game: +3.38
-              importance: +17.0
+              rank_pair: +7.37
+              close_game: +2.89
+              importance: +17.97
             Source: Manchester United
 
 #5550642  EFL ⭐★10.0 · Middlesbrough at Wrexham · playoff / auto-promotion race
@@ -731,15 +731,15 @@ Every game's per-signal breakdown is in `cache.json`:
 {
   "home": "Manchester United FC",
   "away": "Brentford FC",
-  "score": 10.0,
-  "score_raw": 28.3,
+  "score": 9.43,
+  "score_raw": 28.23,
   "score_breakdown": {
-    "rank_pair": 7.92,
+    "rank_pair": 7.37,
     "close_game": 2.89,
-    "importance": 17.0
+    "importance": 17.97
   },
   "score_notes": [
-    "both ranked: #3 vs #9 (sum=12)",
+    "both ranked: #3 of 20 (strength 0.89) vs #9 of 20 (strength 0.58)",
     "implied coinflip-ness: 0.96",
     "importance: Manchester United UCL: 0.65 leverage × 4.0 = 2.60",
     "importance: Brentford Europa/Conference: 0.42 leverage × 2.0 = 0.84",

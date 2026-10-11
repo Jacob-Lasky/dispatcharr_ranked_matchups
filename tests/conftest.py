@@ -145,8 +145,9 @@ def refresh_env(plugin, tmp_path, monkeypatch):
 
     Lives here, not in one test module, because more than one module drives a
     real refresh end to end (test_keep_on_air for #240, test_sources for the
-    cup rivalry bonus, #192), and a per-module copy of this stubbing is one
-    fact in two places that would drift."""
+    cup rivalry bonus, #192, test_plugin_helpers for the #198 rank-field
+    wiring), and a per-module copy of this stubbing is one fact in several
+    places that would drift."""
     import importlib
     matcher = importlib.import_module("dispatcharr_ranked_matchups.matcher")
 

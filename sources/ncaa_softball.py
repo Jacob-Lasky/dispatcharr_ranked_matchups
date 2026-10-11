@@ -175,6 +175,10 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
     """
 
     league_context_code = "SBL"
+    # The softball Top 25 is drawn from Division I (#198): 309 teams in the
+    # 2025 season (Wikipedia, "2025 NCAA Division I softball season",
+    # checked 2026-10-11). See SportSource.rank_field_size.
+    rank_field_size = 309
     _DEFAULT_POINTS_FOR = _DEFAULT_RUNS_FOR
     _DEFAULT_POINTS_AGAINST = _DEFAULT_RUNS_AGAINST
 

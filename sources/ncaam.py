@@ -41,6 +41,11 @@ CBB_BASE = "https://api.collegebasketballdata.com"
 class NcaamSource(PointsBasedSportSource):
     league_context_code = "CBB"
 
+    # The AP Top 25 is drawn from Division I (#198): 365 programmes for the
+    # 2025-26 season, measured 2026-10-11 from CBBD `/teams?season=2026`.
+    # See SportSource.rank_field_size.
+    rank_field_size = 365
+
     # NCAA men's basketball averages ~75 points/game per team. Cold-start
     # fallback for teams without any FINISHED games yet (early November).
     _DEFAULT_POINTS_FOR = 75.0

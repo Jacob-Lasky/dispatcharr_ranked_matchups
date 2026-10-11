@@ -3523,12 +3523,19 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # larger field, so its last entry is still elite. See
         # scoring._rank_strength.
         rank_pool_exhaustive = bool(scoring_table)
+        # A poll's ranks are positions in the sport's whole eligible field
+        # (#198: AP #25 is 25th of 138 FBS teams, not last of 25). A league
+        # table is its own field, so it never forwards one.
+        rank_field = None if rank_pool_exhaustive else getattr(
+            src, "rank_field_size", None,
+        )
 
         signals = GameSignals(
             rank_a=g.rank_home,
             rank_b=g.rank_away,
             rank_pool_size=rank_pool,
             rank_pool_exhaustive=rank_pool_exhaustive,
+            rank_field_size=rank_field,
             team_a=g.home,
             team_b=g.away,
             favorite_match=match_favorites(g.home, g.away, favorites),
@@ -3662,6 +3669,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             # defaulting a league game to a 25-team pool.
             "rank_pool_size": signals.rank_pool_size,
             "rank_pool_exhaustive": signals.rank_pool_exhaustive,
+            "rank_field_size": signals.rank_field_size,
             "start_time_utc": game.start_time.isoformat(),
             "kickoff_local": _format_kickoff(game.start_time, tz_local),
             "is_today": _is_today_local(game.start_time, tz_local),
@@ -4709,6 +4717,9 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         # dominate a pre-upgrade cache, and self-corrects on the next refresh.
         rank_pool_size=g.get("rank_pool_size"),
         rank_pool_exhaustive=bool(g.get("rank_pool_exhaustive")),
+        # A cache row predating #198 yields None, which scores a poll rank
+        # against its published pool exactly as that refresh did.
+        rank_field_size=g.get("rank_field_size"),
         team_a=g.get("home", ""),
         team_b=g.get("away", ""),
         favorite_match=g.get("favorites_matched", []),

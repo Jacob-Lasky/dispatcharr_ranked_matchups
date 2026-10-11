@@ -113,6 +113,14 @@ class NcaaSoccerSource(PointsBasedSportSource):
         # pyright flags as an incompatible-variable-override against the
         # base's class-level `str` declaration).
         self.league_context_code = "NCAA_MSOC" if g == "m" else "NCAA_WSOC"
+        # The United Soccer Coaches Top 25 is drawn from Division I (#198):
+        # 215 men's and 351 women's programmes in the 2025 season (Wikipedia,
+        # "List of NCAA Division I men's / women's soccer programs", checked
+        # 2026-10-11). Instance attribute for the same reason as
+        # league_context_code: it depends on gender. ESPN's team list for the
+        # D1 league is longer (274 / 421) because it carries non-D1
+        # opponents, so it is NOT the field. See SportSource.rank_field_size.
+        self.rank_field_size = 215 if g == "m" else 351
         # NCAA soccer seasons are named by their calendar year (the 2025
         # season runs Aug-Dec 2025). Default to the current year; pre-August
         # treat as the prior season's postseason (Tournament wraps in mid-Dec).
