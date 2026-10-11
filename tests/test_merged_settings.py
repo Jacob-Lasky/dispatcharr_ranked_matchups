@@ -91,7 +91,7 @@ def no_network(monkeypatch):
 
     def _refuse(*a, **kw):
         raise AssertionError("constructing a source must not touch the network")
-    monkeypatch.setattr(requests, "get", _refuse)
+    # Session.get is the transport every plugin GET goes through (#271).
     monkeypatch.setattr(requests.Session, "get", _refuse)
 
 

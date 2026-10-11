@@ -567,7 +567,15 @@ def test_the_guard_fires_on_an_injected_stale_key(built_sources, monkeypatch, mo
 
 def _concrete_source_classes():
     """Every non-abstract SportSource subclass defined in the sources package.
-    Imports each module first so `__subclasses__` sees all of them."""
+    Imports each module first so `__subclasses__` sees all of them.
+
+    A class counts only if its module really holds it, under ANY name (an
+    exported alias still counts, so a real source cannot slip out). The
+    probe classes other tests here build (NotSoccer, NewSoccerSource) set
+    `__module__` to a fake `sources.` module and stay in `__subclasses__`
+    until the garbage collector frees them, which on Python 3.13 (the live
+    container's) is after this test runs: it failed on the base branch, 2 of 2
+    runs, naming NotSoccer."""
     sources_pkg = importlib.import_module(f"{PKG_NAME}.sources")
     for info in pkgutil.iter_modules(sources_pkg.__path__):
         importlib.import_module(f"{PKG_NAME}.sources.{info.name}")
@@ -583,6 +591,7 @@ def _concrete_source_classes():
     return {
         c for c in seen
         if c.__module__.startswith(f"{PKG_NAME}.sources.") and not inspect.isabstract(c)
+        and any(v is c for v in vars(sys.modules.get(c.__module__, types)).values())
     }
 
 

@@ -29,7 +29,8 @@ import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from ._util import is_field_event, redact_secrets, urlopen_read, write_json_atomic
+from ._http import urlopen_read
+from ._util import is_field_event, redact_secrets, write_json_atomic
 
 logger = logging.getLogger(__name__)
 

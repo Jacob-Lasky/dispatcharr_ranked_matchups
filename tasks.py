@@ -57,11 +57,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from functools import partial
@@ -90,6 +92,16 @@ _INFLIGHT_TTL_SECONDS = 30 * 60
 # runs django.setup(), which discovers plugins and builds a Plugin; with this
 # set, Plugin.__init__ starts no scheduler or reaper thread in the child.
 PIPELINE_CHILD_ENV = "RANKED_MATCHUPS_PIPELINE_CHILD"
+
+# Also set in the child's environment: the time.monotonic() reading at which
+# run_pipeline_subprocess kills it. Monotonic, NOT wall clock: subprocess.run
+# times its timeout on the monotonic clock, so a wall-clock step (NTP, a manual
+# change) would put the two out of step. On Linux time.monotonic() is
+# CLOCK_MONOTONIC, one clock for every process on the host: measured in the
+# Dispatcharr container 2026-10-11, a child read 0.013s past its parent. Read
+# through pipeline_child_seconds_left(), which apply uses to keep its network
+# pre-pass inside the child's life (#271).
+PIPELINE_DEADLINE_ENV = "RANKED_MATCHUPS_PIPELINE_DEADLINE"
 
 # Sentinel prefixing the single stdout line the subprocess emits with its
 # JSON result. Reserving a marker (rather than parsing all of stdout) means a
@@ -460,6 +472,22 @@ def _last_child_step(lines: List[str]) -> Optional[str]:
     return None
 
 
+def pipeline_child_seconds_left() -> Optional[float]:
+    """Seconds until this pipeline child is killed, or None outside a child
+    (or if the variable is unreadable or not a finite number, which then
+    imposes no limit: `min(x, nan)` would silently be x)."""
+    raw = os.environ.get(PIPELINE_DEADLINE_ENV)
+    if not raw:
+        return None
+    try:
+        deadline = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(deadline):
+        return None
+    return deadline - time.monotonic()
+
+
 def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, Any]:
     """Run a heavy pipeline action ('refresh' / 'apply' / 'auto_pipeline') in
     a SEPARATE PROCESS and return its result dict.
@@ -489,6 +517,7 @@ def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, 
     # django.setup() in the child runs plugin discovery, which used to start a
     # second scheduler and reaper inside every pipeline subprocess.
     env[PIPELINE_CHILD_ENV] = "1"
+    env[PIPELINE_DEADLINE_ENV] = repr(time.monotonic() + _SUBPROCESS_TIMEOUT_SECONDS)
     forwarded = os.pathsep.join(p for p in sys.path if p)
     env["PYTHONPATH"] = (
         forwarded + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")

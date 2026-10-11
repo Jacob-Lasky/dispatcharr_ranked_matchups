@@ -31,7 +31,8 @@ import requests
 
 from .base import GameRow
 from .points_based import PointsBasedSportSource
-from .._util import get_within_deadline, parse_iso_utc
+from .._http import get_within_deadline
+from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaam")
 

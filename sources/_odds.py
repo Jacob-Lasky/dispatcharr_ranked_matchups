@@ -38,7 +38,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from .._util import get_within_deadline, redact_secrets, write_json_atomic
+from .._http import get_within_deadline
+from .._util import redact_secrets, write_json_atomic
 
 logger = logging.getLogger(__name__)
 

@@ -23,7 +23,7 @@ import os
 
 import pytest
 
-from dispatcharr_ranked_matchups import _util
+from dispatcharr_ranked_matchups import _http
 from dispatcharr_ranked_matchups import llm_descriptions as llm
 
 
@@ -367,7 +367,7 @@ class TestLlmDescribeOrFallback:
         assert out == "FALLBACK"
 
     @pytest.mark.parametrize("exc", [
-        _util.ResponseDeadlineExceeded("response not complete within 30s"),
+        _http.ResponseDeadlineExceeded("response not complete within 30s"),
         # A body cut short of its Content-Length. An HTTPException, NOT an
         # OSError, so it escaped this fallback and failed the whole apply.
         http.client.IncompleteRead(b'{"content": [', 200),
@@ -382,6 +382,37 @@ class TestLlmDescribeOrFallback:
             marker="m", caller=caller,
         )
         assert out == "FALLBACK"
+
+    def test_no_network_allowance_falls_back_without_calling(self):
+        """#271: apply's spent network budget. No call, nothing cached."""
+        def caller(context, api_key, model):
+            raise AssertionError("called with no allowance left")
+
+        cache = {}
+        out = llm.llm_describe_or_fallback(
+            g=_sample_game(), tagline="", fallback_description="FALLBACK",
+            api_key="k", model="claude-haiku-4-5", cache=cache,
+            marker="m", caller=caller, allow_network=lambda: False,
+        )
+        assert out == "FALLBACK" and cache == {}
+
+    def test_a_cached_description_needs_no_allowance(self):
+        """A cache hit costs no network, so a spent budget must still serve it."""
+        g = _sample_game()
+        cache = {}
+        prose = llm.llm_describe_or_fallback(
+            g=g, tagline="", fallback_description="FALLBACK",
+            api_key="k", model="claude-haiku-4-5", cache=cache, marker="m",
+            caller=lambda *a: "Arsenal host Chelsea in a London derby at the Emirates.",
+        )
+        assert prose != "FALLBACK" and cache, "the seed call did not cache"
+        asked = []
+        again = llm.llm_describe_or_fallback(
+            g=g, tagline="", fallback_description="FALLBACK",
+            api_key="k", model="claude-haiku-4-5", cache=cache, marker="m",
+            allow_network=lambda: asked.append(1) or False,
+        )
+        assert again == prose and asked == []
 
     def test_empty_response_falls_back(self):
         g = _sample_game()

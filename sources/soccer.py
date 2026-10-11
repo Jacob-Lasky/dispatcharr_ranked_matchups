@@ -32,9 +32,9 @@ import requests
 from .base import GameRow, MatchResult, SoccerTeamRow, SportSource
 from .bracket import AggregateLegSource
 from ._odds import fetch_odds_events
+from .._http import get_within_deadline
 from .._util import (
     SEED_PLAYED_THRESHOLD,
-    get_within_deadline,
     is_bottom_outcome,
     parse_iso_utc,
     poisson_sample as _poisson,

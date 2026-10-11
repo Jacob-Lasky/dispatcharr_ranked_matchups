@@ -204,6 +204,85 @@ def _isolated_numbering_state(tmp_path, monkeypatch):
     )
 
 
+# ---------------------------------------------------------------------------
+# The HTTP transport seam (#271).
+#
+# Every outbound call goes through _http.get_within_deadline (requests, as
+# `requests_mod.Session().get`) or _http.urlopen_read (urllib, as
+# `OpenerDirector.open`). A stub on `requests.get` or `urllib.request.urlopen`
+# is no longer reached, so tests stub the transport here. Both helpers keep the
+# old stubs' signatures: `fake(url, **kwargs)` and `fake(request, timeout=...)`.
+# ---------------------------------------------------------------------------
+
+def stub_requests_get(monkeypatch, fake):
+    """Answer every requests GET in the plugin with `fake(url, **kwargs)`."""
+    import requests
+    monkeypatch.setattr(requests.Session, "get", lambda self, url, **kw: fake(url, **kw))
+
+
+def stub_urlopen(monkeypatch, fake):
+    """Answer every urllib open in the plugin with `fake(request, timeout=...)`."""
+    import urllib.request
+    monkeypatch.setattr(
+        urllib.request.OpenerDirector, "open",
+        lambda self, fullurl, data=None, timeout=None: fake(fullurl, timeout=timeout),
+    )
+
+
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                  "http_proxy", "https_proxy", "all_proxy", "no_proxy")
+
+
+def clear_proxy_env(monkeypatch):
+    """A proxy in the environment would make a live call look local (the
+    socket goes to 127.0.0.1:3128 and the proxy fetches the internet), so every
+    call in a test goes direct and the guard checks the real target."""
+    for name in PROXY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_network(monkeypatch):
+    """Fail any test that reaches past this machine.
+
+    Moving the HTTP seam (#271) turned every stub on the OLD one into a live
+    call, and a live call that fails comes back as "no data from this feed",
+    which plenty of assertions accept. Refusing here would be just as quiet,
+    for the same reason, so the attempt is RECORDED and the test fails at
+    teardown instead. Loopback stays open for the real-server tests."""
+    import socket
+
+    clear_proxy_env(monkeypatch)
+    attempts = []
+    real_getaddrinfo = socket.getaddrinfo
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+
+    def _host(address):
+        return address[0] if isinstance(address, tuple) else address
+
+    def getaddrinfo(host, *args, **kwargs):
+        if host is not None and str(host) not in _LOOPBACK_HOSTS:
+            attempts.append(f"getaddrinfo({host!r})")
+            raise socket.gaierror(socket.EAI_NONAME, "live network refused in tests")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def _guard(real):
+        def connect(self, address):
+            if self.family in (socket.AF_INET, socket.AF_INET6) and _host(address) not in _LOOPBACK_HOSTS:
+                attempts.append(f"connect({address!r})")
+                raise OSError("live network refused in tests")
+            return real(self, address)
+        return connect
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket.socket, "connect", _guard(real_connect))
+    monkeypatch.setattr(socket.socket, "connect_ex", _guard(real_connect_ex))
+    yield
+    assert not attempts, f"test reached the live network: {attempts}"
+
+
 def pytest_configure(config):
     """Register custom markers so `-W error` / `--strict-markers` runs stay
     clean and a typo'd marker name fails loudly instead of silently doing

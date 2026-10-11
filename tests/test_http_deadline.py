@@ -10,19 +10,24 @@ Witnesses (fail on the pre-#271 code, as assertions, because each call runs on
 a thread the test joins with its own bound): a trickled body and trickled
 headers both give up within deadline + slack, and a body cut at the deadline is
 never parsed. Guards (pass on old and new code, and pin what must not regress):
-fast and large responses come back whole, the response is closed, and no module
-makes an HTTP call outside the shared helper.
+fast and large responses come back whole, the connection is hung up in every
+phase (TLS handshake, headers, body, redirect), no module makes an HTTP call
+outside `_http.py`, and no module installs an audit hook.
 
-Module attributes are looked up inside each test, so the witnesses still run
-(and fail as assertions) against a `_util` that predates the helpers.
+`_http` is imported inside each test (`_h()`), so the witnesses still run, and
+fail as assertions, against a tree that predates it.
 """
 from __future__ import annotations
 
 import ast
 import http.server
+import importlib
 import json
 import logging
+import os
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -35,6 +40,10 @@ import requests
 from dispatcharr_ranked_matchups import _util
 
 REPO = Path(__file__).resolve().parent.parent
+
+
+def _h():
+    return importlib.import_module("dispatcharr_ranked_matchups._http")
 
 # The trickle cadence, and how long past the deadline a call may run before it
 # counts as not bounded. The slack covers thread start-up and a loaded CI box;
@@ -106,6 +115,11 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self._trickle(body, route)
+        elif route == "redirect-ftp":
+            self.send_response(302)
+            self.send_header("Location", "ftp://127.0.0.1:1/slow.bin")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         elif route == "missing":
             self.send_error(404)
         else:
@@ -131,6 +145,57 @@ def server():
     yield f"http://127.0.0.1:{srv.server_address[1]}"
     srv.shutdown()
     srv.server_close()
+
+
+@pytest.fixture(scope="module")
+def stalled_tls():
+    """A server that answers a TLS ClientHello with a record header promising
+    16 KiB and then trickles it a byte at a time, so the client sits in its
+    handshake. A silent server would not do: the per-read timeout ends that on
+    its own, and the test would pass with no deadline at all. Records when
+    each client hangs up (its socket reads EOF or a write fails)."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    hung_up = []
+
+    def serve():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            event = threading.Event()
+            hung_up.append(event)
+
+            def drain(c=conn, done=event):
+                try:
+                    while c.recv(4096):
+                        pass
+                except OSError:
+                    pass
+                done.set()
+
+            def trickle(c=conn, done=event):
+                try:
+                    c.sendall(b"\x16\x03\x03\x40\x00")  # handshake record, 0x4000 bytes
+                    for _ in range(TRICKLE_BYTES):
+                        if done.is_set():
+                            break
+                        c.sendall(b"\x00")
+                        time.sleep(TRICKLE_INTERVAL_S)
+                except OSError:
+                    done.set()
+                finally:
+                    done.wait(TRICKLE_BYTES * TRICKLE_INTERVAL_S)
+                    c.close()
+
+            threading.Thread(target=drain, daemon=True).start()
+            threading.Thread(target=trickle, daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    yield f"https://127.0.0.1:{srv.getsockname()[1]}", hung_up
+    srv.close()
 
 
 def _bounded(fn, bound_s):
@@ -235,49 +300,128 @@ class TestGuards:
         else:
             def fn():
                 with pytest.raises(TimeoutError):
-                    _util.urlopen_read(urllib.request.Request(f"{server}/{route}"), timeout=DEADLINE_S)
+                    _h().urlopen_read(urllib.request.Request(f"{server}/{route}"), timeout=DEADLINE_S)
         finished, _e, _r, err = _bounded(fn, DEADLINE_S + SLACK_S)
         assert finished and err is None, err
         assert _Handler.disconnects[route].wait(SLACK_S + TRICKLE_INTERVAL_S * 5), (
             f"the server is still trickling into a connection the client gave up on ({route})"
         )
 
+    @pytest.mark.parametrize("via", ["requests", "urllib"])
+    def test_a_stalled_tls_handshake_is_hung_up(self, stalled_tls, via):
+        """The handshake happens after the TCP connect and before any request
+        is sent; the socket must already be tracked by then. The handshake is
+        TRICKLED, so only the deadline can end it."""
+        url, hung_up = stalled_tls
+        before = len(hung_up)
+        if via == "requests":
+            def fn():
+                with pytest.raises(requests.Timeout):
+                    _h().get_within_deadline(requests, url, timeout=DEADLINE_S)
+        else:
+            def fn():
+                with pytest.raises(TimeoutError):
+                    _h().urlopen_read(urllib.request.Request(url), timeout=DEADLINE_S)
+        finished, _e, _r, err = _bounded(fn, DEADLINE_S + SLACK_S)
+        assert finished and err is None, err
+        deadline = time.monotonic() + SLACK_S
+        while len(hung_up) <= before and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert len(hung_up) > before, "the client never connected"
+        assert hung_up[before].wait(SLACK_S), "the stalled handshake was never hung up"
+
+    @pytest.mark.parametrize("url", [
+        "ftp://127.0.0.1:1/slow.bin", "file:///etc/hostname", "data:,hello",
+    ])
+    def test_urlopen_read_refuses_non_http_schemes(self, url):
+        """No tracked class sees an FTP socket, and a file:// URL reads disk."""
+        with pytest.raises(urllib.error.URLError, match="unknown url type"):
+            _h().urlopen_read(url, timeout=5.0)
+
+    def test_a_redirect_to_ftp_is_refused(self, server):
+        """urllib follows 3xx to ftp:// by default; that hop would escape the
+        deadline's hang-up."""
+        with pytest.raises(urllib.error.URLError, match="unknown url type"):
+            _h().urlopen_read(urllib.request.Request(f"{server}/redirect-ftp"), timeout=5.0)
+
+    def test_a_socks_proxied_connection_is_hung_up(self, server, monkeypatch):
+        """requests takes a SOCKS proxy from the environment, and urllib3's
+        SOCKS pools are separate classes. The proxy is a stand-in `socks`
+        module that connects straight to the target (no PySocks or SOCKS
+        server needed); the code under test is urllib3's real SOCKS pool and
+        connection, with the plugin's tracking on top."""
+        import types
+        fake = types.ModuleType("socks")
+        fake.PROXY_TYPE_SOCKS4, fake.PROXY_TYPE_SOCKS5 = 1, 2
+        fake.socksocket = socket.socket
+
+        class ProxyError(Exception):
+            socket_err = None
+
+        fake.ProxyError = ProxyError
+        fake.create_connection = lambda dest, timeout=None, **kw: socket.create_connection(dest, timeout)
+        had_contrib = "urllib3.contrib.socks" in sys.modules
+        monkeypatch.setitem(sys.modules, "socks", fake)
+        import requests.adapters
+        import urllib3.contrib.socks as urllib3_socks
+        monkeypatch.setattr(urllib3_socks, "socks", fake)
+        monkeypatch.setattr(requests.adapters, "SOCKSProxyManager", urllib3_socks.SOCKSProxyManager)
+        _h()._tracked_socks_pools.cache_clear()
+        route = "trickle-body-socks"
+        _Handler.disconnects[route] = threading.Event()
+        try:
+            def fn():
+                with pytest.raises(requests.Timeout):
+                    _h().get_within_deadline(
+                        requests, f"{server}/{route}", timeout=DEADLINE_S,
+                        proxies={"http": "socks5h://127.0.0.1:1"},
+                    )
+            finished, _e, _r, err = _bounded(fn, DEADLINE_S + SLACK_S)
+            assert finished and err is None, err
+            assert _Handler.disconnects[route].wait(SLACK_S + TRICKLE_INTERVAL_S * 5), (
+                "the SOCKS-proxied connection was never hung up"
+            )
+        finally:
+            _h()._tracked_socks_pools.cache_clear()
+            if not had_contrib:
+                sys.modules.pop("urllib3.contrib.socks", None)
+
     def test_get_within_deadline_raises_the_callers_timeout(self, server):
         """Direct callers (odds, CFBD, CBB, Football-Data) catch
         RequestException; the deadline must arrive as one."""
         t0 = time.monotonic()
         with pytest.raises(requests.Timeout):
-            _util.get_within_deadline(requests, f"{server}/trickle-body-b", timeout=DEADLINE_S)
+            _h().get_within_deadline(requests, f"{server}/trickle-body-b", timeout=DEADLINE_S)
         assert time.monotonic() - t0 < DEADLINE_S + SLACK_S
 
     def test_get_within_deadline_returns_a_full_response(self, server):
-        r = _util.get_within_deadline(requests, f"{server}/fast", timeout=5.0)
+        r = _h().get_within_deadline(requests, f"{server}/fast", timeout=5.0)
         r.raise_for_status()
         assert r.status_code == 200 and r.json() == {"events": [1, 2, 3]}
 
     def test_urlopen_read_is_bounded(self, server):
         t0 = time.monotonic()
         with pytest.raises(TimeoutError):
-            _util.urlopen_read(
+            _h().urlopen_read(
                 urllib.request.Request(f"{server}/trickle-body-c"), timeout=DEADLINE_S,
             )
         assert time.monotonic() - t0 < DEADLINE_S + SLACK_S
 
     def test_urlopen_read_returns_status_and_body(self, server):
-        status, body = _util.urlopen_read(urllib.request.Request(f"{server}/fast"), timeout=5.0)
+        status, body = _h().urlopen_read(urllib.request.Request(f"{server}/fast"), timeout=5.0)
         assert status == 200 and json.loads(body) == {"events": [1, 2, 3]}
 
     def test_urlopen_read_passes_http_errors_through(self, server):
         """gamethumbs reads Retry-After off the HTTPError, so it must arrive
         as itself, not wrapped."""
         with pytest.raises(urllib.error.HTTPError) as info:
-            _util.urlopen_read(urllib.request.Request(f"{server}/missing"), timeout=5.0)
+            _h().urlopen_read(urllib.request.Request(f"{server}/missing"), timeout=5.0)
         assert info.value.code == 404
 
     def test_urlopen_read_refuses_an_oversized_body(self, server):
         with pytest.raises(ValueError):
-            _util.urlopen_read(urllib.request.Request(f"{server}/large"), timeout=5.0, max_bytes=1024)
-        status, body = _util.urlopen_read(
+            _h().urlopen_read(urllib.request.Request(f"{server}/large"), timeout=5.0, max_bytes=1024)
+        status, body = _h().urlopen_read(
             urllib.request.Request(f"{server}/fast"), timeout=5.0, max_bytes=1024)
         assert status == 200 and body
 
@@ -286,10 +430,10 @@ class TestGuards:
         slow redirect hop) is refused and hung up on the spot, or nothing ever
         would hang it up."""
         pairs = [socket.socketpair() for _ in range(2)]
-        tracked = _util._WorkerConnections()
+        tracked = _h()._WorkerConnections()
         tracked.track(pairs[0][0])
         tracked.expire()
-        with pytest.raises(_util.ResponseDeadlineExceeded):
+        with pytest.raises(_h().ResponseDeadlineExceeded):
             tracked.track(pairs[1][0])  # refused (aborts its connect) AND hung up
         for ours, peer in pairs:
             peer.settimeout(2.0)
@@ -301,7 +445,7 @@ class TestGuards:
         """A finished call must not shut down a socket the library still owns
         (requests may hand it back to a pool), and must not leak the dup."""
         ours, peer = socket.socketpair()
-        tracked = _util._WorkerConnections()
+        tracked = _h()._WorkerConnections()
         tracked.track(ours)
         dup = tracked._open[0]
         tracked.release()
@@ -312,33 +456,27 @@ class TestGuards:
         ours.close()
         peer.close()
 
-    def test_only_deadline_workers_are_tracked(self, server):
-        """The audit hook is process-wide; a connect on any other thread (the
-        caller, Dispatcharr's own code) must pass through untouched."""
-        _util._install_connect_hook()
-        seen = []
+    @staticmethod
+    def _tracked_get(url):
+        """A GET through the tracked transport, exactly as get_within_deadline
+        builds it, without the deadline worker around it."""
+        with requests.Session() as session:
+            adapter = _h()._TrackedAdapter()
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            return session.get(url, timeout=5)
 
-        class Spy:
-            def track(self, sock):
-                seen.append(sock)
+    @staticmethod
+    def _tracked_open(url):
+        with _h()._opener().open(url, timeout=5) as resp:
+            return resp.read()
 
-        _util._deadline_worker.connections = None
-        requests.get(f"{server}/fast", timeout=5)
-        assert seen == []
-        _util._deadline_worker.connections = Spy()
-        try:
-            requests.get(f"{server}/fast", timeout=5)
-        finally:
-            _util._deadline_worker.connections = None
-        assert len(seen) == 1
-
-    def _connect_as_worker(self, connections, fn):
-        """Run fn on a thread that the audit hook treats as a deadline worker."""
-        _util._install_connect_hook()
+    def _as_worker(self, connections, fn):
+        """Run fn on a thread the tracked classes treat as a deadline worker."""
         box = {}
 
         def run():
-            _util._deadline_worker.connections = connections
+            _h()._deadline_worker.connections = connections
             try:
                 box["result"] = fn()
             except BaseException as exc:  # noqa: BLE001
@@ -349,57 +487,55 @@ class TestGuards:
         t.join(10)
         return box
 
-    def test_a_connection_that_cannot_be_tracked_is_not_made(self, server):
+    class _Spy:
+        def __init__(self):
+            self.seen = []
+
+        def track(self, sock):
+            self.seen.append(sock.getpeername())
+
+    @pytest.mark.parametrize("via", ["requests", "urllib"])
+    def test_a_workers_connection_is_tracked_and_no_other(self, server, via):
+        """Only a deadline worker's connections are handed over; the same
+        classes on any other thread leave the socket alone."""
+        fetch = self._tracked_get if via == "requests" else self._tracked_open
+        spy = self._Spy()
+        box = self._as_worker(spy, lambda: fetch(f"{server}/fast"))
+        assert "error" not in box, box
+        assert len(spy.seen) == 1 and spy.seen[0][0] == "127.0.0.1"
+        _h()._deadline_worker.connections = None  # this (non-worker) thread
+        fetch(f"{server}/fast")  # must not raise or track anything
+
+    @pytest.mark.parametrize("via", ["requests", "urllib"])
+    def test_a_connection_that_cannot_be_tracked_is_not_made(self, server, via):
         """dup() failing (EMFILE) must not let an unbounded connection through."""
         class Broken:
             def track(self, sock):
                 raise OSError("EMFILE")
 
-        box = self._connect_as_worker(Broken(), lambda: requests.get(f"{server}/fast", timeout=5))
-        assert isinstance(box.get("error"), requests.ConnectionError), box
+        fetch = self._tracked_get if via == "requests" else self._tracked_open
+        box = self._as_worker(Broken(), lambda: fetch(f"{server}/fast"))
+        assert isinstance(box.get("error"), (requests.ConnectionError, OSError)), box
 
-    def test_a_connect_after_expiry_is_refused(self, server):
-        """A late redirect hop must not open a connection nobody will hang up."""
-        connections = _util._WorkerConnections()
+    @pytest.mark.parametrize("via", ["requests", "urllib"])
+    def test_a_connect_after_expiry_is_refused(self, server, via):
+        """A connect that finishes late, or a late redirect hop, must not open
+        a connection nobody will hang up."""
+        connections = _h()._WorkerConnections()
         connections.expire()
-        box = self._connect_as_worker(connections, lambda: requests.get(f"{server}/fast", timeout=5))
-        assert isinstance(box.get("error"), requests.ConnectionError), box
-
-    def test_a_socket_shut_down_before_it_connects_cannot_read(self, server):
-        """Expiry can land between the audit event and the connect syscall.
-        Pins the Linux behaviour that covers it: shutdown() on a not-yet-
-        connected TCP socket returns ENOTCONN but still poisons it."""
-        host, port = server.rsplit("/", 1)[-1].split(":")
-        sock = socket.socket()
-        sock.settimeout(5)
-        connections = _util._WorkerConnections()
-        connections.track(sock)
-        connections.expire()
-        sock.connect((host, int(port)))
-        try:
-            sock.sendall(b"GET /fast HTTP/1.1\r\nHost: x\r\n\r\n")
-        except OSError:
-            pass  # EPIPE is the other half of the same poisoning
-        assert sock.recv(1) == b""
-        sock.close()
-
-    def test_the_hook_is_installed_once(self, monkeypatch):
-        added = []
-        monkeypatch.setattr(_util.sys, "addaudithook", added.append)
-        monkeypatch.setattr(_util, "_connect_hook_installed", False)
-        _util._install_connect_hook()
-        _util._install_connect_hook()
-        assert added == [_util._track_worker_connect]
+        fetch = self._tracked_get if via == "requests" else self._tracked_open
+        box = self._as_worker(connections, lambda: fetch(f"{server}/fast"))
+        assert isinstance(box.get("error"), (requests.ConnectionError, OSError)), box
 
     def test_no_descriptor_leaks_across_calls(self, server):
         fd_dir = Path("/proc/self/fd")
         if not fd_dir.is_dir():
             pytest.skip("needs /proc")
-        _get_json(f"{server}/fast", 5.0)  # warm up: hook installed, imports done
+        _get_json(f"{server}/fast", 5.0)  # warm up: imports done
         before = len(list(fd_dir.iterdir()))
         for _ in range(20):
             _get_json(f"{server}/fast", 5.0)
-            _util.urlopen_read(urllib.request.Request(f"{server}/fast"), timeout=5.0)
+            _h().urlopen_read(urllib.request.Request(f"{server}/fast"), timeout=5.0)
         assert len(list(fd_dir.iterdir())) <= before + 2
 
     def test_worker_errors_reach_the_caller(self):
@@ -407,12 +543,39 @@ class TestGuards:
             raise KeyError("boom")
 
         with pytest.raises(KeyError):
-            _util.run_with_deadline(work, 5.0)
+            _h().run_with_deadline(work, 5.0)
 
     @pytest.mark.parametrize("bad", [None, 0, -1])
     def test_a_missing_deadline_is_refused(self, bad):
         with pytest.raises(ValueError):
-            _util.run_with_deadline(lambda: None, bad)
+            _h().run_with_deadline(lambda: None, bad)
+
+
+class TestNetworkBudget:
+    """#271: the one allowance apply's cosmetic fetches share."""
+
+    class _Clock:
+        def __init__(self):
+            self.now = 100.0
+
+        def monotonic(self):
+            return self.now
+
+    def test_allows_until_spent_then_counts_refusals(self, monkeypatch):
+        clock = self._Clock()
+        monkeypatch.setattr(_h(), "time", clock)
+        budget = _h().NetworkBudget(10)
+        assert budget.allow() and budget.skipped == 0
+        clock.now += 9.9
+        assert budget.allow()
+        clock.now += 0.1
+        assert not budget.allow() and not budget.allow()
+        assert budget.skipped == 2
+
+    def test_a_zero_budget_allows_nothing(self, monkeypatch):
+        monkeypatch.setattr(_h(), "time", self._Clock())
+        budget = _h().NetworkBudget(0)
+        assert not budget.allow() and budget.skipped == 1
 
 
 # ---------- class guard: no HTTP call outside the shared helper ----------
@@ -424,12 +587,12 @@ _REQUESTS_NAMES = {"get", "post", "put", "patch", "delete", "head", "options", "
                    "Session", "session", "api", "sessions"}
 # Names in the stdlib that open a connection, wherever they are referenced.
 _STDLIB_NAMES = {"urlopen", "build_opener", "OpenerDirector", "HTTPConnection", "HTTPSConnection"}
-# Files allowed to make the raw call, each with its reason.
+# Files allowed to touch an HTTP client directly, each with its reason.
 _ALLOWED = {
-    # The helper itself: run_with_deadline is what bounds these calls, and its
-    # requests calls go through the CALLER'S module (`requests_mod`), never a
-    # `requests` import, so only the urlopen reference needs the exemption.
-    "_util.py",
+    # The deadline transport itself: its tracked urllib3 / http.client
+    # connection classes and its opener ARE the bounded path every other module
+    # goes through. Its requests session comes from the caller's `requests_mod`.
+    "_http.py",
 }
 
 
@@ -454,7 +617,12 @@ def _raw_http_calls(source: str, filename: str = "<src>") -> list:
                 hits.append(node.lineno)
             if names & _STDLIB_NAMES:
                 hits.append(node.lineno)
+            if mod == "urllib3" or mod.startswith("urllib3."):
+                hits.append(node.lineno)
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(a.name == "urllib3" or a.name.startswith("urllib3.") for a in node.names):
+                hits.append(node.lineno)  # a PoolManager of its own bypasses the tracked pools
         if isinstance(node, ast.Attribute):
             base = node.value
             if isinstance(base, ast.Name) and base.id in requests_names and node.attr in _REQUESTS_NAMES:
@@ -485,8 +653,8 @@ class TestNoHttpCallBypassesTheDeadline:
                 offenders[str(rel)] = hits
         assert not offenders, (
             f"raw HTTP calls with no response deadline: {offenders}. Use "
-            "_util.get_within_deadline / http_get_json (requests) or "
-            "_util.urlopen_read (urllib); see #271"
+            "_util.http_get_json / _http.get_within_deadline (requests) or "
+            "_http.urlopen_read (urllib); see #271"
         )
 
     def test_the_scan_covers_the_sources(self):
@@ -511,6 +679,8 @@ class TestNoHttpCallBypassesTheDeadline:
         "import requests.sessions",
         "import urllib.request\nurllib.request.build_opener().open(req)",
         "import urllib.request\nf = urllib.request.urlopen",
+        "import urllib3\nurllib3.PoolManager().request('GET', u)",
+        "from urllib3 import PoolManager",
     ])
     def test_the_scan_flags_a_raw_call(self, snippet):
         """Instrument check: a scan that cannot see the pattern would pass
@@ -519,7 +689,7 @@ class TestNoHttpCallBypassesTheDeadline:
 
     def test_the_scan_passes_the_helpers(self):
         ok = (
-            "from .._util import get_within_deadline, urlopen_read\n"
+            "from .._http import get_within_deadline, urlopen_read\n"
             "import requests\n"
             "r = get_within_deadline(requests, u, timeout=15)\n"
             "status, body = urlopen_read(req, timeout=10)\n"
@@ -528,3 +698,104 @@ class TestNoHttpCallBypassesTheDeadline:
             "import http.client\nhttp.client.HTTPException\n"
         )
         assert _raw_http_calls(ok) == []
+
+
+# ---------- no audit hook: the plugin lives in someone else's process ----------
+
+def _audit_hook_references(source: str, filename: str = "<src>") -> list:
+    tree = ast.parse(source, filename=filename)
+    hits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "addaudithook":
+            hits.append(node.lineno)
+        elif isinstance(node, ast.Name) and node.id == "addaudithook":
+            hits.append(node.lineno)
+        elif isinstance(node, ast.ImportFrom) and any(a.name == "addaudithook" for a in node.names):
+            hits.append(node.lineno)
+    return sorted(set(hits))
+
+
+# Runs in a fresh interpreter: a hook already installed in the pytest process
+# could never be removed, and would make the count meaningless. The package is
+# registered the way tests/conftest.py does it, then every module that makes an
+# HTTP call is imported and used against a local server. Each `sys.addaudithook`
+# call raises the "sys.addaudithook" audit event, which the probe's own hook
+# (installed first) counts.
+_AUDIT_PROBE = r"""
+import http.server, importlib, logging, sys, threading, types, urllib.request
+added = []
+sys.addaudithook(lambda event, args: added.append(1) if event == "sys.addaudithook" else None)
+repo = sys.argv[1]
+pkg = types.ModuleType("dispatcharr_ranked_matchups")
+pkg.__path__ = [repo]
+sys.modules["dispatcharr_ranked_matchups"] = pkg
+import requests
+util = importlib.import_module("dispatcharr_ranked_matchups._util")
+logos = importlib.import_module("dispatcharr_ranked_matchups.logos")
+for name in ("sources", "matcher", "llm_descriptions", "gamethumbs", "sources._odds"):
+    importlib.import_module("dispatcharr_ranked_matchups." + name)
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def do_GET(self):
+        body = b'{"ok": true}'
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+url = "http://127.0.0.1:%d/x" % srv.server_address[1]
+assert util.http_get_json(requests, url, log=logging.getLogger("p"), tag="p", timeout=5.0) == {"ok": True}
+assert logos._http_get_json(url, "probe") == {"ok": True}
+print("ADDAUDITHOOK_CALLS=%d" % len(added))
+"""
+
+
+class TestNoAuditHook:
+    def test_no_module_references_addaudithook(self):
+        offenders = {
+            str(rel): hits for rel, path in _plugin_modules()
+            if (hits := _audit_hook_references(path.read_text(), filename=str(rel)))
+        }
+        assert not offenders, (
+            f"sys.addaudithook in plugin code: {offenders}. A hook can never be "
+            "removed and runs for every audit event in Dispatcharr's own "
+            "processes; capture at the transport instead (see _http.py)"
+        )
+
+    @pytest.mark.parametrize("snippet", [
+        "import sys\nsys.addaudithook(f)",
+        "from sys import addaudithook\naddaudithook(f)",
+        "import sys\nhook = sys.addaudithook",
+    ])
+    def test_the_scan_flags_a_hook(self, snippet):
+        assert _audit_hook_references(snippet), f"scan missed: {snippet!r}"
+
+    def test_using_the_plugins_http_installs_no_hook(self, tmp_path):
+        """Behavioural, so a hook installed some way the AST scan cannot see
+        (a helper, an eval, a dependency) is still caught."""
+        script = tmp_path / "probe.py"
+        script.write_text(_AUDIT_PROBE)
+        proc = subprocess.run(
+            [sys.executable, str(script), str(REPO)],
+            capture_output=True, text=True, timeout=120,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        assert proc.returncode == 0, proc.stderr[-3000:]
+        assert "ADDAUDITHOOK_CALLS=0" in proc.stdout, (
+            f"the plugin installed an audit hook: {proc.stdout.strip()}"
+        )
+
+
+def test_the_network_guard_removes_ambient_proxies(monkeypatch):
+    """tests/conftest.py::_no_live_network clears the proxy variables, or an
+    unstubbed call would reach the internet through a loopback proxy."""
+    from tests.conftest import PROXY_ENV_VARS, clear_proxy_env
+    for name in PROXY_ENV_VARS:
+        monkeypatch.setenv(name, "http://127.0.0.1:3128")
+    clear_proxy_env(monkeypatch)
+    assert not [n for n in PROXY_ENV_VARS if n in os.environ]
+    assert requests.utils.get_environ_proxies("https://site.api.espn.com/x") == {}

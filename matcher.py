@@ -36,7 +36,8 @@ from datetime import date, datetime
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS, is_field_event, urlopen_read
+from ._http import urlopen_read
+from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS, is_field_event
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.matcher")
 

@@ -39,9 +39,9 @@ from ._util import (
     series_record_text,
     series_result_lines,
     trusted_impact_narratives,
-    urlopen_read,
     write_json_atomic,
 )
+from ._http import urlopen_read
 from .honours import honours_lines
 
 logger = logging.getLogger(__name__)
@@ -1376,6 +1376,7 @@ def llm_describe_or_fallback(
     marker: str = "",
     caller: Optional[Caller] = None,
     league_context: Any = None,
+    allow_network: Optional[Callable[[], bool]] = None,
 ) -> str:
     """Return LLM-rewritten prose, or `fallback_description` on any failure.
 
@@ -1383,6 +1384,11 @@ def llm_describe_or_fallback(
     persisting the cache dict to disk). The enable-flag, the API-key existence
     check, and the placeholder skip are the caller's job: this function
     assumes it should attempt the call.
+
+    `allow_network`, when given, is asked only on a cache miss, right before
+    the call; False returns the fallback silently, as a failed call would but
+    without the per-game warning (apply's network budget, #271, reports its
+    skips once).
     """
     context = build_llm_context(g, tagline, boundary_summary, league_context)
     # Use `|` separator: markers contain ':' (`ranked_matchups:EPL:538161`),
@@ -1404,6 +1410,8 @@ def llm_describe_or_fallback(
             "re-requesting", marker or "?", reason,
         )
         cache.pop(cache_key, None)
+    if allow_network is not None and not allow_network():
+        return fallback_description
     fn = caller or _call_anthropic
     try:
         prose = fn(context, api_key, model)

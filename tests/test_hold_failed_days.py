@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from tests.conftest import stub_requests_get
 
 UTC = timezone.utc
 SOURCES = Path(__file__).resolve().parent.parent / "sources"
@@ -403,7 +404,7 @@ def test_every_built_source_reports_the_days_it_could_not_fetch(plugin, monkeypa
                     date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
         raise requests.ConnectionError("every request fails in this test")
 
-    monkeypatch.setattr(requests, "get", failing_get)
+    stub_requests_get(monkeypatch, failing_get)
     unreported = {}
     for src in sources:
         name = type(src).__name__

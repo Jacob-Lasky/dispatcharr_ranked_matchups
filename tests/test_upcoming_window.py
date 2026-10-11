@@ -39,6 +39,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from dispatcharr_ranked_matchups.sources import _espn
+from tests.conftest import stub_requests_get
 
 SOURCES_DIR = os.path.join(os.path.dirname(__file__), "..", "sources")
 
@@ -697,7 +698,6 @@ def every_source_under_a_pinned_clock(plugin, monkeypatch):
     Returns {class name: EARLIEST date requested}. Earliest, not first:
     the days are fetched concurrently, and the sweep's dedupe runs in date
     order whatever order the requests went out in."""
-    import requests
     from tests.test_mapped_prefixes import _all_on_settings
 
     def _offline(*_a, **_kw):
@@ -729,7 +729,7 @@ def every_source_under_a_pinned_clock(plugin, monkeypatch):
                 current["earliest"][name] = min(day, current["earliest"].get(name, day))
         return _Resp()
 
-    monkeypatch.setattr(requests, "get", fake_get)
+    stub_requests_get(monkeypatch, fake_get)
     current["earliest"] = {}
     for src in sources:
         current["name"] = type(src).__name__
