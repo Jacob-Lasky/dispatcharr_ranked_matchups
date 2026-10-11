@@ -8190,8 +8190,10 @@ def _read_settings_migrating() -> Optional[Dict[str, Any]]:
     The write is a compare-and-swap on the whole settings JSON
     (`.filter(settings=<what we read>).update(...)`): a user saving the form
     between our read and our write makes the filter match nothing, so their
-    save is never overwritten. The lost race is retried on the next read,
-    which sees their saved dict. `.update()` skips signals, which is fine:
+    save is never overwritten; we then re-read and return their dict, and it
+    is migrated on the next read. Anything but a successful write returns
+    what is STORED, never an in-memory migration, so this path and run()
+    always resolve the same row. `.update()` skips signals, which is fine:
     nothing listens to PluginConfig saves for settings.
     """
     try:
@@ -8214,11 +8216,12 @@ def _read_settings_migrating() -> Optional[Dict[str, Any]]:
                 pk=pc.pk, settings=stored,
             ).update(settings=migrated)
     except Exception as e:  # noqa: BLE001
-        # The migrated dict behaves identically to the stored one (that is
-        # the migration's contract), so a failed write only delays the modal
-        # catching up; the next read retries.
+        # Return what is STORED, not the in-memory migration: run() reads the
+        # stored dict too, and the two paths must resolve the same settings
+        # (a saved new key at its default reads differently before and after
+        # migration). The next read retries the write.
         logger.warning("[ranked_matchups] could not save migrated settings: %s", e)
-        return migrated
+        return dict(stored)
     if written:
         logger.info(
             "[ranked_matchups] migrated saved settings to the merged layout "
@@ -8226,9 +8229,13 @@ def _read_settings_migrating() -> Optional[Dict[str, Any]]:
             ", ".join(sorted(k for k in migrated if migrated.get(k) != stored.get(k))),
         )
         return migrated
-    # Lost the race: somebody saved in between. Their dict is the truth; it
-    # is migrated on the next read.
-    return dict(stored)
+    # Lost the race: somebody saved in between. Their dict is the truth, so
+    # re-read it rather than hand back the snapshot they just replaced; it is
+    # migrated on the next read.
+    fresh = PluginConfig.objects.filter(pk=pc.pk).first()
+    if fresh is None or not isinstance(fresh.settings, dict):
+        return {}
+    return dict(fresh.settings)
 
 
 def _migrate_stored_settings() -> None:

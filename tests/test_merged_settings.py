@@ -315,13 +315,19 @@ class TestMigrateStoredSettings:
         assert ms.migrate_stored_settings({}) is None
         assert ms.migrate_stored_settings({"max_games": 10, "tennis": "atp"}) is None
 
-    def test_typed_text_kept_and_legacy_appended(self):
-        out = ms.migrate_stored_settings({"scoring_weights": "favorite=9,", "weight_spread": 1})
-        assert out["scoring_weights"] == "favorite=9, spread=1"
+    @pytest.mark.parametrize("typed", ["favorite=9,", "spread=4", ""])
+    def test_saved_weights_text_kept_verbatim(self, plugin, typed):
+        """Scoring weights in the raw dict was saved from a modal that showed
+        it blank, not the legacy weights, so what was typed (blank included)
+        is what was meant; the legacy weight_spread is not appended back
+        (codex review round 2, #208)."""
+        out = ms.migrate_stored_settings({"scoring_weights": typed, "weight_spread": 1})
+        assert out["scoring_weights"] == typed
+        assert plugin._build_weights(out).spread == (4.0 if typed == "spread=4" else 3.0)
 
-    def test_typed_value_wins_over_legacy_for_the_same_weight(self):
-        out = ms.migrate_stored_settings({"scoring_weights": "spread=4", "weight_spread": 1})
-        assert out["scoring_weights"] == "spread=4"
+    def test_unsaved_weights_text_carries_legacy(self):
+        out = ms.migrate_stored_settings({"weight_spread": 1, "weight_rank": 0})
+        assert out["scoring_weights"] == "rank=0, spread=1"
 
     def test_a_saved_select_is_kept_even_at_off(self):
         """A modal holding pre-migration settings saved Tennis = Off over a
@@ -462,20 +468,25 @@ class TestRawSettingsReadMigrates:
         assert ms.league_enabled(got, "enable_atp") is False
 
     def test_lost_race_returns_what_the_user_saved(self, plugin, fake_plugin_config):
-        users_save = {"tennis": "wta", "settings_schema": 2}
+        """The snapshot read before the user's save is stale the moment the
+        CAS misses; handing it to the scheduler would run with settings the
+        user just replaced (codex review round 2, #208)."""
+        users_save = {"tennis": "wta", "auto_refresh_enabled": False}
+        reads = []
 
         def user_saves_the_form(store):
-            store.settings = dict(users_save)
-        fake_plugin_config(_FakePluginConfigStore({"enable_atp": True},
-                                                  on_read=user_saves_the_form))
-        # The read itself saw the pre-save dict, so it returns that dict
-        # unmigrated; the resolvers' legacy fallback gives the same answer,
-        # and the user's save is untouched for the next read.
+            if not reads:
+                store.settings = dict(users_save)
+            reads.append(1)
+        store = fake_plugin_config(_FakePluginConfigStore(
+            {"enable_atp": True, "auto_refresh_enabled": True},
+            on_read=user_saves_the_form))
         got = plugin.Plugin.get_current_settings(None)
-        assert got == {"enable_atp": True}
-        assert ms.league_enabled(got, "enable_atp") is True
+        assert got == users_save
+        assert store.settings == users_save and store.writes == []
+        assert ms.league_enabled(got, "enable_atp") is False
 
-    def test_failed_write_still_returns_the_migrated_dict(self, plugin, fake_plugin_config, caplog):
+    def test_failed_write_returns_the_stored_dict(self, plugin, fake_plugin_config, caplog):
         import logging
 
         class _ReadOnly(_FakePluginConfigStore):
@@ -486,11 +497,16 @@ class TestRawSettingsReadMigrates:
                         raise RuntimeError("read-only replica")
                     qs.update = _boom
                 return qs
-        fake_plugin_config(_ReadOnly({"enable_atp": True}))
+        stored = {"enable_atp": True, "tennis": "off"}
+        fake_plugin_config(_ReadOnly(stored))
         with caplog.at_level(logging.WARNING):
             got = plugin.Plugin.get_current_settings(None)
-        assert got["tennis"] == "atp"
         assert "could not save migrated settings" in caplog.text
+        # What is STORED comes back, so the scheduler resolves exactly what
+        # run() resolves from the same row (codex review round 2, #208).
+        assert got == stored
+        assert ms.league_enabled(got, "enable_atp") is ms.league_enabled(
+            _loader_merge(stored), "enable_atp")
 
     def test_no_row_is_empty(self, plugin, fake_plugin_config):
         class _Empty:

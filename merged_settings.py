@@ -40,8 +40,8 @@ default ("Off") and have it stick.
 
 The migration reads the RAW stored dict, which carries one fact the resolvers
 cannot see: a new key PRESENT there was put there by a save (the UI sends only
-keys it loaded or the user touched), so the migration keeps it even at its
-default. That covers a save that reached the DB before any migration did (a
+keys it loaded or the user touched), so the migration keeps it as saved, even
+at its default (a select at "off", Scoring weights blank). That covers a save that reached the DB before any migration did (a
 modal still holding pre-migration settings) with "Off" picked: the run() path
 honours the legacy toggle until the next discovery or scheduler read migrates,
 and from then on the user's "Off" stands.
@@ -306,15 +306,13 @@ def migrate_stored_settings(stored: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             # Write a value the select offers; NcaafSource would have mapped an
             # unrecognised one to the default anyway, so behaviour is unchanged.
             out[NCAAF_SETTING] = divisions if divisions in DIVISION_SETS else DEFAULT_DIVISIONS
-    if any(k in stored for k in _LEGACY_WEIGHT_KEYS):
-        typed, _ = parse_weight_overrides(stored.get(SCORING_WEIGHTS_SETTING))
-        merged, _ = weight_overrides(stored)
-        carried = {n: v for n, v in merged.items() if n not in typed}
+    # Same raw-presence rule as the selects: Scoring weights already in the
+    # raw dict was saved by the user, from a modal that showed it blank (the
+    # default) rather than their legacy weights, so what they typed, blank
+    # included, is what they meant and is kept verbatim.
+    if SCORING_WEIGHTS_SETTING not in stored and any(k in stored for k in _LEGACY_WEIGHT_KEYS):
+        carried, _ = weight_overrides(stored)
         if carried:
-            # Keep whatever the user typed verbatim and append the carried
-            # legacy values, rather than re-rendering their text.
-            existing = str(stored.get(SCORING_WEIGHTS_SETTING) or "").strip().rstrip(",")
-            addition = format_weight_overrides(carried)
-            out[SCORING_WEIGHTS_SETTING] = f"{existing}, {addition}" if existing else addition
+            out[SCORING_WEIGHTS_SETTING] = format_weight_overrides(carried)
     out[SETTINGS_SCHEMA_KEY] = SETTINGS_SCHEMA_VERSION
     return out
