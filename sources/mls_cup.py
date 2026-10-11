@@ -337,29 +337,29 @@ class MlsCupSource(BestOfNSeriesSource):
             self.season_year, PLAYOFF_END_MONTH, PLAYOFF_END_DAY,
             tzinfo=timezone.utc,
         ).date()
-        day = start
-        while day <= end:
-            data = _http_get(
-                f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}"
-            )
-            if isinstance(data, dict):
-                for event in data.get("events") or []:
-                    # Pass matchday=None: the inference loop below
-                    # assigns it per (stage, participants) tuple.
-                    rec = self._extract_bracket_record(event, matchday=None)
-                    if rec is None or rec["game_id"] is None:
-                        continue
-                    if rec["game_id"] in seen_ids:
-                        continue
-                    seen_ids.add(rec["game_id"])
-                    candidates.append(rec)
-            day += timedelta(days=1)
+        payloads = self._sweep_bracket_days(
+            start, end,
+            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+        for data in payloads:
+            for event in data.get("events") or []:
+                # Pass matchday=None: the inference loop below
+                # assigns it per (stage, participants) tuple.
+                rec = self._extract_bracket_record(event, matchday=None)
+                if rec is None or rec["game_id"] is None:
+                    continue
+                if rec["game_id"] in seen_ids:
+                    continue
+                seen_ids.add(rec["game_id"])
+                candidates.append(rec)
 
         # Second pass: matchday inference for best-of-3 series + PK
         # dedup for single-leg stages.
         out = _assign_matchdays_and_dedupe(candidates, _MLS_SERIES_LENGTHS)
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     @staticmethod
     def _extract_bracket_record(
@@ -450,7 +450,6 @@ class MlsCupSource(BestOfNSeriesSource):
 # `_dedupe_pk_shootout_pairs` in this module still find it.
 from ._soccer_bracket_helpers import (
     dedupe_pk_shootout_pairs as _dedupe_pk_shootout_pairs,
-    pick_decisive_event as _pick_decisive_event,
 )
 
 

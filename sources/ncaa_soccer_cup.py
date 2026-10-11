@@ -120,7 +120,6 @@ def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
 # module still find it.
 from ._soccer_bracket_helpers import (
     dedupe_pk_shootout_pairs as _dedupe_pk_shootout_pairs,
-    pick_decisive_event as _pick_decisive_event,
 )
 
 
@@ -354,25 +353,27 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
             datetime(self.season_year + 1, 1, 1, tzinfo=timezone.utc).date()
             - timedelta(days=1)
         )
-        day = start
-        while day <= end:
-            data = _http_get(
+        payloads = self._sweep_bracket_days(
+            start, end,
+            lambda d: _http_get(
                 f"{ESPN_BASE}/{self._espn_slug}/scoreboard?"
-                f"dates={day.strftime('%Y%m%d')}"
-            )
-            if isinstance(data, dict):
-                for event in data.get("events") or []:
-                    rec = self._extract_bracket_record(event)
-                    if rec is None or rec["game_id"] is None:
-                        continue
-                    if rec["game_id"] in seen_ids:
-                        continue
-                    seen_ids.add(rec["game_id"])
-                    candidates.append(rec)
-            day += timedelta(days=1)
+                f"dates={d.strftime('%Y%m%d')}"
+            ),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+        for data in payloads:
+            for event in data.get("events") or []:
+                rec = self._extract_bracket_record(event)
+                if rec is None or rec["game_id"] is None:
+                    continue
+                if rec["game_id"] in seen_ids:
+                    continue
+                seen_ids.add(rec["game_id"])
+                candidates.append(rec)
 
-        self._bracket_games_cache = _dedupe_pk_shootout_pairs(candidates)
-        return self._bracket_games_cache
+        return self._cache_bracket_games(_dedupe_pk_shootout_pairs(candidates))
 
     @staticmethod
     def _extract_bracket_record(

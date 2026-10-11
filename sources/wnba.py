@@ -433,38 +433,40 @@ class WnbaPlayoffSource(BestOfNSeriesSource):
         start = datetime(self.season_year, 9, 1, tzinfo=timezone.utc).date()
         # WNBA Finals can stretch to Nov 1 in the new best-of-7 format.
         end = datetime(self.season_year, 11, 15, tzinfo=timezone.utc).date()
-        day = start
-        while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if data:
-                for event in data.get("events") or []:
-                    rec = _extract_game_record(event)
-                    if rec is None or rec["id"] is None:
-                        continue
-                    if rec.get("season_type") != 3:
-                        continue
-                    if rec["id"] in seen_ids:
-                        continue
-                    headline = None
-                    notes = rec.get("notes") or []
-                    if notes:
-                        headline = (notes[0] or {}).get("headline")
-                    parsed = _parse_stage_from_headline(headline)
-                    if parsed is None:
-                        continue
-                    seen_ids.add(rec["id"])
-                    out.append({
-                        "game_id": rec["id"],
-                        "stage": parsed["stage"],
-                        "matchday": parsed["matchday"],
-                        "home": rec["home"],
-                        "away": rec["away"],
-                        "home_goals": rec["home_points"],
-                        "away_goals": rec["away_points"],
-                        "status": rec["status"],
-                        "start_time": rec["start_time"],
-                        "extra": {"headline": headline},
-                    })
-            day += timedelta(days=1)
-        self._bracket_games_cache = out
-        return out
+        payloads = self._sweep_bracket_days(
+            start, end,
+            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+        for data in payloads:
+            for event in data.get("events") or []:
+                rec = _extract_game_record(event)
+                if rec is None or rec["id"] is None:
+                    continue
+                if rec.get("season_type") != 3:
+                    continue
+                if rec["id"] in seen_ids:
+                    continue
+                headline = None
+                notes = rec.get("notes") or []
+                if notes:
+                    headline = (notes[0] or {}).get("headline")
+                parsed = _parse_stage_from_headline(headline)
+                if parsed is None:
+                    continue
+                seen_ids.add(rec["id"])
+                out.append({
+                    "game_id": rec["id"],
+                    "stage": parsed["stage"],
+                    "matchday": parsed["matchday"],
+                    "home": rec["home"],
+                    "away": rec["away"],
+                    "home_goals": rec["home_points"],
+                    "away_goals": rec["away_points"],
+                    "status": rec["status"],
+                    "start_time": rec["start_time"],
+                    "extra": {"headline": headline},
+                })
+        return self._cache_bracket_games(out)

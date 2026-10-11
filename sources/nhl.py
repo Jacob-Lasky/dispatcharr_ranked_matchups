@@ -413,6 +413,9 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         # the per-series schedule endpoint once. Populated lazily, only for
         # series that are already underway (see _series_from_status).
         self._series_results_cache: Dict[str, List[Dict[str, Any]]] = {}
+        # Series of no games played whose schedule did not answer on an
+        # earlier bracket fetch this refresh (#245); see _fetch_bracket_games.
+        self._unanswered_unplayed_series: set = set()
 
     @property
     def sport_prefix(self) -> str:
@@ -661,6 +664,8 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         """
         if self._bracket_games_cache is not None:
             return self._bracket_games_cache
+        if self._bracket_fetch_given_up():
+            return []
 
         bracket_data = _http_get(
             f"{NHL_API_BASE}/playoff-bracket/{self._season_end_year}"
@@ -668,9 +673,10 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         if not bracket_data:
             # NOT cached: a failed request is not an empty postseason (see
             # MlbPlayoffSource._fetch_bracket_games).
-            return []
+            return self._bracket_fetch_failed("playoff bracket did not answer")
 
         out: List[Dict[str, Any]] = []
+        failed_series: List[Tuple[str, bool]] = []
         for series in bracket_data.get("series", []) or []:
             playoff_round = series.get("playoffRound")
             stage = _NHL_ROUND_TO_STAGE.get(playoff_round or 0)
@@ -688,6 +694,23 @@ class NhlPlayoffSource(BestOfNSeriesSource):
             # full-8-digit-season vs end-year season-convention gotcha lives in
             # _series_schedule_url (the single source of truth for this URL).
             sched = _http_get(self._series_schedule_url(series_letter))
+            if not isinstance(sched, dict):
+                # A failed schedule is not cached (#245). With games played
+                # (the bracket counts the wins) their records are missing and
+                # the series score is wrong. With none played the schedule
+                # may simply not be published yet: the endpoint answers 404
+                # for a series it does not know, and _http_get cannot tell
+                # that from a 503. Such a series is let through with no games,
+                # as before, only once it has failed on an EARLIER fetch too,
+                # so a transient failure still gets its retry and an
+                # unpublished one does not void the bracket. The loop goes on
+                # past a failure so every series gets that first look.
+                played = (series.get("topSeedWins") or 0) + (series.get("bottomSeedWins") or 0)
+                if played or series_letter not in self._unanswered_unplayed_series:
+                    failed_series.append((series_letter, bool(played)))
+                continue
+            # It answered: a later failure is a fresh one, owed its own retry.
+            self._unanswered_unplayed_series.discard(series_letter)
             games = (sched or {}).get("games", []) or []
 
             for g in games:
@@ -747,8 +770,13 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         if cf_series_with_teams == 2 and cup_emitted == 0:
             out.extend(self._synth_cup_final_placeholder_games())
 
-        self._bracket_games_cache = out
-        return out
+        if failed_series:
+            self._unanswered_unplayed_series.update(
+                letter for letter, played in failed_series if not played
+            )
+            letters = ", ".join(letter or "?" for letter, _ in failed_series)
+            return self._bracket_fetch_failed(f"schedule for series {letters} did not answer")
+        return self._cache_bracket_games(out)
 
     # ---------- CUP_FINAL placeholder synthesis (#17) ----------
 

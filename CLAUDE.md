@@ -723,9 +723,19 @@ stay in agreement with that one.
   defeat scoring's retry), and again after `_soccer_allow_scoring_retry()`
   with `for_scoring=True`, on `initial_state()`'s bracket, the one importance
   uses, so the two never disagree. Both passes warn, naming which. For the
-  same reason a `_fetch_bracket_games` must NOT cache a failed request as `[]`
-  (MLB and NHL did); the ESPN day-sweep sources still cache partial sweeps,
-  #245. Playoff-only shapes (`ALL_ROWS_POSTSEASON`) flag every row
+  same reason a `_fetch_bracket_games` must NOT cache a fetch in which any
+  request failed, as `[]` (MLB and NHL did) or as a partial ESPN day sweep
+  (a missing day is a wrong series score, #245). `BracketSportSource` owns
+  the accounting, the soccer season-fetch rule applied to brackets:
+  `_sweep_bracket_days` (stops at the first failed day, keeps the days that
+  answered for the retry), `_bracket_fetch_failed` / `_cache_bracket_games`
+  (the only writer of the cache), `BRACKET_FETCH_MAX_ATTEMPTS` per refresh,
+  `allow_bracket_scoring_retry()` called before the scoring placement, and
+  `bracket_fetch_failure()` reported as "<label> bracket (stakes not
+  simulated)" in the summary. Given up, the fetch returns `[]`, not the
+  partial sweep. NHL's per-series schedule can 404 for a series not yet
+  published, which `_http_get` cannot tell from a 503, so a 0-0 series is
+  accepted as empty only after failing on an earlier fetch too. Playoff-only shapes (`ALL_ROWS_POSTSEASON`) flag every row
   `postseason` first, so a failed bracket fetch cannot demote them.
 
   A new bracket source needs an id on its upcoming rows equal to its bracket

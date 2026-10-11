@@ -579,20 +579,22 @@ class NcaaBaseballPlayoffSource(_BaseballPlayoffStrengthsMixin, BestOfNSeriesSou
         out: List[Dict[str, Any]] = []
         season_start = datetime(self.season_year, 5, 25, tzinfo=timezone.utc).date()
         season_end = datetime(self.season_year, 7, 1, tzinfo=timezone.utc).date()
-        day = season_start
-        while day <= season_end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if data:
-                for event in data.get("events") or []:
-                    if not _is_postseason_event(event):
-                        continue
-                    rec = self._event_to_bracket_record(event)
-                    if rec is not None:
-                        out.append(rec)
-            day += timedelta(days=1)
+        payloads = self._sweep_bracket_days(
+            season_start, season_end,
+            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+        for data in payloads:
+            for event in data.get("events") or []:
+                if not _is_postseason_event(event):
+                    continue
+                rec = self._event_to_bracket_record(event)
+                if rec is not None:
+                    out.append(rec)
 
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     def _event_to_bracket_record(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Convert one ESPN postseason event into the bracket per-game
@@ -1008,31 +1010,34 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
         raw: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
         season_start = datetime(self.season_year, 5, 25, tzinfo=timezone.utc).date()
         season_end = datetime(self.season_year, 7, 1, tzinfo=timezone.utc).date()
-        day = season_start
         seen_ids: set = set()
-        while day <= season_end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if data:
-                for event in data.get("events") or []:
-                    if not _is_postseason_event(event):
-                        continue
-                    eid = event.get("id")
-                    if eid in seen_ids:
-                        continue
-                    comps = event.get("competitions") or []
-                    if not comps:
-                        continue
-                    headline = ""
-                    for note in (comps[0].get("notes") or []):
-                        if note.get("type") == "event":
-                            headline = note.get("headline") or ""
-                            break
-                    stage, partial_key = _parse_baseball_bracket_headline(headline)
-                    if stage is None:
-                        continue
-                    seen_ids.add(eid)
-                    raw.append((event, stage, partial_key))
-            day += timedelta(days=1)
+        payloads = self._sweep_bracket_days(
+            season_start, season_end,
+            lambda d: _http_get(f"{ESPN_BASE}/scoreboard?dates={d.strftime('%Y%m%d')}"),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+        for data in payloads:
+            for event in data.get("events") or []:
+                if not _is_postseason_event(event):
+                    continue
+                eid = event.get("id")
+                if eid in seen_ids:
+                    continue
+                comps = event.get("competitions") or []
+                if not comps:
+                    continue
+                headline = ""
+                for note in (comps[0].get("notes") or []):
+                    if note.get("type") == "event":
+                        headline = note.get("headline") or ""
+                        break
+                stage, partial_key = _parse_baseball_bracket_headline(headline)
+                if stage is None:
+                    continue
+                seen_ids.add(eid)
+                raw.append((event, stage, partial_key))
 
         mcws_sub_by_team = _classify_mcws_sub_brackets(
             _mcws_meta_from_raw_events(raw)
@@ -1043,8 +1048,7 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
             rec = self._event_to_bracket_record(event, stage, partial_key, mcws_sub_by_team)
             if rec is not None:
                 out.append(rec)
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     def _event_to_bracket_record(
         self,

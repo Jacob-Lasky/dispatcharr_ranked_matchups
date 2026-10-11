@@ -431,13 +431,16 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         """
         if self._bracket_games_cache is not None:
             return self._bracket_games_cache
+        if self._bracket_fetch_given_up():
+            return []
 
         data = _http_get(f"{MLB_API_BASE}/schedule/postseason?season={self.season}")
         if not data:
             # NOT cached: a failed request is not an empty postseason, and
             # caching it would keep the scoring-time retry (#243) from ever
-            # seeing the bracket.
-            return []
+            # seeing the bracket. Counted, so a refresh that gives up says so
+            # (#245; see BracketSportSource).
+            return self._bracket_fetch_failed("postseason schedule did not answer")
 
         out: List[Dict[str, Any]] = []
         for date_entry in data.get("dates", []) or []:
@@ -499,8 +502,7 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         if len(lcs_pair_set) == 2 and ws_emitted == 0:
             out.extend(self._synth_ws_placeholder_games())
 
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     # ---------- WS placeholder synthesis (#27) ----------
 
