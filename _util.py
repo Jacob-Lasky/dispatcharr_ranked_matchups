@@ -86,7 +86,12 @@ CHANNEL_NUMBER_ORIGIN = date(2026, 1, 1)
 # minute get distinct, stable numbers as long as their hashes differ mod this.
 # 16 keeps numbers compact while making same-minute hash collisions uncommon
 # (~6% per simultaneous pair); the rare residual is resolved by the deterministic
-# nudge in plugin._assign_channel_numbers. Because the value is < the per-minute
+# +1 nudge in plugin._place_kickoff_numbers, which also holds a nudged channel on
+# its number on later applies, even past its minute's block (#267), as long as
+# every number the nudge walked over is still taken by a channel kept this apply
+# or a reserved number, and its own number is not reserved (a game below it
+# leaving can release a channel past its block, see the DO NOT there). Raising this
+# renumbers every published channel once. Because the value is < the per-minute
 # stride, it never reorders games across minute boundaries.
 CHANNEL_NUMBER_TIEBREAK_SLOTS = 16
 
@@ -99,8 +104,9 @@ def stable_channel_number(
     PURE FUNCTION of the game's kickoff time and its `marker`: the SAME game
     maps to the SAME integer for as long as its kickoff holds, regardless of how
     the slate is ranked or which other games are present. (A rescheduled game
-    gets its new minute's number; `_assign_channel_numbers` also keeps a slot a
-    channel already holds within its minute, see #217.) That stability is
+    gets its new minute's number; `_place_kickoff_numbers` also keeps a slot a
+    channel already holds within its minute, see #217, and one an upward nudge
+    from this number still reaches, see #267.) That stability is
     the whole point. Both Dispatcharr's default M3U/XMLTV output AND the Xtream
     Codes API bind the EPG to a channel BY its (integer) channel number, so a
     number that MOVES pairs the wrong programme with a channel after the slate
@@ -112,7 +118,9 @@ def stable_channel_number(
              + (stable hash of marker) % TIEBREAK_SLOTS
 
     The number increases monotonically with kickoff time, so the channel list
-    sorts strictly by day then start time (today's/soonest games first) — which
+    sorts by day then start time (today's/soonest games first; the same-minute
+    collision nudge in plugin._place_kickoff_numbers can lift a crowded
+    minute's last game a few numbers past the next minute's first) — which
     is exactly the "renumber every refresh, by start time" behaviour, achieved
     WITHOUT any game's number ever changing: finished games drop off and new
     games slot into their time-position on their own. The per-minute tiebreak

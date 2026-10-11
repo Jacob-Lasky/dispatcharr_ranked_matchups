@@ -4283,6 +4283,13 @@ def _explicit_virtual_base(settings: Dict[str, Any]) -> Optional[int]:
     return base if base > 0 else None
 
 
+# How many reserved numbers, in total, _infer_kickoff_base walks over when it
+# works out how far a nudge can have pushed a published channel (see
+# longest_nudge there). Measured with it: a 60-game slate (the max_games cap)
+# infers in about 10 ms.
+_INFER_RESERVED_RUN = 64
+
+
 def _infer_kickoff_base(
     published: List[Tuple[Any, datetime, str]],
     tz,
@@ -4333,19 +4340,6 @@ def _infer_kickoff_base(
             continue
         offset = stable_channel_number(0, start_dt, marker, tz)
         rows.append((marker, int(number), offset, offset - offset % slots))
-    # Each channel names the SLOTS floors that put it inside its own block, and
-    # the SLOTS - 1 floors from which an upward nudge of 1..SLOTS-1 reaches it:
-    # a channel nudged past its block's end names its true floor only that way,
-    # and without it the hint cannot pick the true floor among floors that keep
-    # every channel. Candidates below 1 are COMPACT numbers, not a floor.
-    candidates = {
-        c
-        for _m, n, off, blk in rows
-        for c in [n - blk - s for s in range(slots)] + [n - off - k for k in range(1, slots)]
-        if c >= 1
-    }
-    if not candidates:
-        return None
     entries = [(m, off) for m, _n, off, _blk in rows] + [
         (marker, stable_channel_number(0, start_dt, marker, tz))
         for start_dt, marker in unpublished if start_dt is not None
@@ -4353,9 +4347,52 @@ def _infer_kickoff_base(
     held = {m: n for m, n, _off, _blk in rows}
     blocked = {int(n) for n in (reserved or ())}
 
+    def longest_nudge(n: int) -> int:
+        # The longest upward nudge that can end on `n`. Every number a nudge
+        # walks over is taken, by another game of this slate or by a reserved
+        # number, so walk down from n - 1 spending one number per other game.
+        # At most _INFER_RESERVED_RUN reserved numbers IN TOTAL are walked over
+        # per channel (not per run: a per-run cap lets a chain of short runs
+        # restore the blow-up): each number walked adds a candidate, and every
+        # candidate scored runs two placements that each scan the run (second
+        # opinion, round 2: 12.7 s for 10,000 consecutive reserved numbers,
+        # 208 s for 20,000). More than that means scores of the user's
+        # channels inside the 7-digit kickoff range; a channel nudged across
+        # them names no floor this way, the inference falls back to the
+        # candidates other channels name or the hint, as before #267.
+        others, run, k = len(entries) - 1, 0, 0
+        while True:
+            if n - 1 - k in blocked and run < _INFER_RESERVED_RUN:
+                run, k = run + 1, k + 1
+            elif n - 1 - k not in blocked and others > 0:
+                others, k = others - 1, k + 1
+            else:
+                return k
+
+    # Each channel names the SLOTS floors that put it inside its own block, and
+    # the floors from which an upward nudge reaches it (at least 1..SLOTS-1, and
+    # as far as the slate and the reserved numbers could have pushed it): a
+    # channel nudged past its block's end names its true floor only that way,
+    # and without it the hint cannot pick the true floor among floors that keep
+    # every channel. The placement holds a nudge of any length (#267), so a
+    # crowded minute that pushed a channel 16 or more past its computed number
+    # must still name the floor that keeps it. Candidates below 1 are COMPACT
+    # numbers, not a floor.
+    candidates = {
+        c
+        for _m, n, off, blk in rows
+        for c in [n - blk - s for s in range(slots)] + [
+            n - off - k for k in range(1, max(slots - 1, longest_nudge(n)) + 1)
+        ]
+        if c >= 1
+    }
+    if not candidates:
+        return None
+
     def bound(c: int) -> int:
         # Most channels candidate `c` could keep: one is kept only by the
-        # in-block hold, or by an upward nudge from below its own number.
+        # in-block hold, or by an upward nudge from below its own number (a
+        # fresh one, or the hold on a channel nudged past its block, #267).
         return sum(
             1 for _m, n, off, blk in rows
             if (c + blk <= n < c + blk + slots and n not in blocked) or n > c + off
@@ -4538,7 +4575,8 @@ def _place_kickoff_numbers(
     # marker migration would shuffle same-minute games between slots, and a
     # number vacated by one game could be handed to another: the #117
     # wrong-programme binding. A reschedule changes the minute, so the old
-    # number falls outside the new block and is released, as it should be.
+    # number falls outside the new block and is released, as it should be
+    # (unless it is exactly where the new minute's nudge would land, below).
     #
     # `reserved_numbers` (numbers other channels publish under) are never handed
     # out, held or fresh: the guide keys on the bare number, so sharing one with
@@ -4547,16 +4585,47 @@ def _place_kickoff_numbers(
     slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
     reserved = {int(n) for n in (reserved_numbers or ())}
     pairs: List[Tuple[str, int, int]] = []  # (marker, number, 0 if kept else 1)
+    beyond: List[Tuple[int, str, int]] = []  # (prior, marker, number) above the block
     for marker, offset in entries:
         number = virtual_base + offset
         block = number - offset % slots
         prior = held.get(marker)
-        if (
-            prior is not None
-            and block <= int(prior) < block + slots
-            and int(prior) not in reserved
-        ):
+        if prior is None or int(prior) in reserved:
+            pairs.append((marker, number, 1))
+        elif block <= int(prior) < block + slots:
             pairs.append((marker, int(prior), 0))
+        elif int(prior) >= block + slots:
+            beyond.append((int(prior), marker, number))
+        else:
+            pairs.append((marker, number, 1))
+
+    # A channel ABOVE its own block is held when its number is exactly where an
+    # upward nudge from its computed number lands today: every number from the
+    # computed one up to (not including) its own is taken by a channel kept this
+    # apply or by a reserved number (#267). A same-minute collision near the
+    # block's last slot nudges a game past the block's end, and without this a
+    # NEW game in that minute, placed first, took the nudged channel's number
+    # and moved a live channel (the guide binds by the bare number, #117).
+    # Ascending order, because a chain can run through another channel held
+    # this way (the lower one is decided first).
+    #
+    # DO NOT widen this to "any number within SLOTS above the computed one".
+    # Apply has no record of the kickoff a channel was numbered for, so that
+    # rule cannot tell a nudged channel from a game rescheduled one minute
+    # EARLIER that sat below its hash slot in its old minute (both sit a few
+    # numbers above the new computed number), and it would hold the
+    # rescheduled game in the next minute's block, which the release above
+    # exists to prevent. The chain is what tells them apart: a rescheduled game
+    # passes it only when a fresh nudge from its new number would land on that
+    # same number anyway, so the hold changes nothing but who wins it against a
+    # game with no channel yet. A gap in the chain (a game in it left the slate
+    # or was released) still releases the channel, as before #267.
+    taken = set(reserved)
+    taken.update(n for _m, n, kept in pairs if kept == 0)
+    for prior, marker, number in sorted(beyond):
+        if _first_free_number(taken, number) == prior:
+            pairs.append((marker, prior, 0))
+            taken.add(prior)
         else:
             pairs.append((marker, number, 1))
 
@@ -4598,7 +4667,9 @@ def _assign_channel_numbers(
     kickoff holds, regardless of how the slate is ranked or which other games are
     present. `existing_numbers` is honoured within the kickoff minute: a game
     whose channel already holds a slot in its own minute's block keeps that slot
-    even if the marker hash now points elsewhere (#217).
+    even if the marker hash now points elsewhere (#217), and a channel nudged
+    past its block keeps its number while that nudge is still what reaches it
+    (#267, see _place_kickoff_numbers).
     That stability is what lets both the default M3U/XMLTV output and the Xtream
     Codes API bind the EPG correctly with no client setting (#121), while the
     numbers still increase with kickoff time so the list sorts soonest-first.

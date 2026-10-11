@@ -104,7 +104,12 @@ to sort to the top of group lists):
 - `channel_number` — TWO schemes, `channel_numbering_mode`. Default `kickoff`:
   `base + minutes-since-CHANNEL_NUMBER_ORIGIN × SLOTS + hash%SLOTS`, so a game's
   number does not move while its kickoff holds (#121; a slot already held in the
-  kickoff minute is kept, #217) and the list sorts by start time. `compact`:
+  kickoff minute is kept, #217; a channel a same-minute collision nudged PAST its
+  minute's block is kept too, but only while every number from its computed one
+  up to its own is still taken by a channel that stays or a reserved number,
+  #267: apply cannot see the kickoff a channel was numbered for, so a looser
+  "within 16 above" rule would also hold a game rescheduled one minute earlier,
+  see the DO NOT in `_place_kickoff_numbers`) and the list sorts by start time. `compact`:
   `allocate_compact_numbers` keeps every number inside
   `[base, base+compact_band_size)`, holds a published game on its slot, and
   allocates new games ABOVE the highest in use. Handing a freed number to the
@@ -150,7 +155,7 @@ is on raw numbers, so a hand-added channel overridden elsewhere would otherwise
 fail the write; integral raw numbers only). A ChannelOverride on one of OUR
 game channels is deliberately NOT reserved (it would refuse that channel its own
 slot). Reserved numbers are skipped
-(kickoff: never kept by the in-block hold, a fresh game nudges +1 past them); if
+(kickoff: never kept by either hold, a fresh game nudges +1 past them); if
 the whole compact band is taken, apply returns an error rather than publishing
 nothing and reaping the group.
 
@@ -162,7 +167,12 @@ other channel + 1 (fresh install, nothing published). The inference judges each
 candidate floor by RUNNING `_place_kickoff_numbers`, the one kickoff placement
 `_assign_channel_numbers` also uses, over the whole slate and every number apply
 will reserve (collected before the floor for that reason); counting channels inside their block instead let a same-minute
-nudge past the block's end pick a floor that moved a channel. DO NOT route kickoff mode
+nudge past the block's end pick a floor that moved a channel. Each channel's
+candidates include every floor an upward nudge could have reached it from, as
+far as the slate and the reserved numbers could push it (`longest_nudge`, #267:
+the hold keeps a nudge of any length), with at most `_INFER_RESERVED_RUN` (64)
+reserved numbers walked per channel in total, since every number walked is a candidate scored by
+two placements that each scan the run. DO NOT route kickoff mode
 through `_resolve_virtual_base` again: with the time term in the millions the
 floor buys no separation, and following the lineup renumbered every published
 game by the same delta whenever the top of the lineup changed (measured live
