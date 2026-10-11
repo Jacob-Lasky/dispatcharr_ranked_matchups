@@ -37,8 +37,6 @@ from .._util import TEAM_SUFFIX_TOKENS, http_get_json, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls")
 
-ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1"
-ODDS_SPORT_KEY = "soccer_usa_mls"
 
 # Reuse the canonical TEAM_SUFFIX_TOKENS from _util.py: ("afc","fc","cf","sc").
 # DO NOT add "united" here: it's a substantive body word for several MLS

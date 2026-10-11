@@ -226,6 +226,10 @@ def test_the_maps_are_populated():
 # count, so a non-soccer module explaining soccer cannot be classified as one.
 _SOCCER_API_URL = re.compile(
     r"https://[^\s\"']*(/sports/soccer|football-data\.org)")
+# An ESPN "sport/league" slug a class appends to the generic site API base
+# (mls.py's `_ESPN_SLUG = "soccer/usa.1"`, overridden per league by NWSL and
+# Liga MX).
+_SOCCER_ESPN_SLUG = re.compile(r"^soccer/[\w.-]+$")
 
 
 def _code_strings(code):
@@ -242,18 +246,22 @@ def _soccer_api_evidence(src):
     """Where a built source's own code names a soccer API endpoint, or None.
 
     Read off the classes in the source's MRO that live in the sources
-    package: their attribute strings and method constants, and their
-    modules' globals, including the string defaults of helpers they import
+    package: their string attributes (a full URL or an ESPN "soccer/..."
+    slug), their method constants, and their modules' globals, including the
+    string defaults of helpers they import
     (friendlies.py and english_cup.py reach ESPN soccer only through
     `_espn.sweep_upcoming_scoreboard`'s default `base`). This is the sport
     the source FETCHES, which is what makes it soccer, so it needs no list of
     soccer sources that a new one could be missing from."""
-    for cls in type(src).__mro__:
-        if not cls.__module__.startswith(f"{PKG_NAME}.sources."):
-            continue
+    own = [c for c in type(src).__mro__ if c.__module__.startswith(f"{PKG_NAME}.sources.")]
+    # String attributes are read RESOLVED, so a subclass that overrides its
+    # base's slug is judged by the slug it actually fetches.
+    for name in sorted({n for c in own for n, v in vars(c).items() if isinstance(v, str)}):
+        val = getattr(type(src), name)
+        if isinstance(val, str) and (_SOCCER_API_URL.search(val) or _SOCCER_ESPN_SLUG.match(val)):
+            return f"{type(src).__name__}.{name}"
+    for cls in own:
         for name, attr in vars(cls).items():
-            if isinstance(attr, str) and _SOCCER_API_URL.search(attr):
-                return f"{cls.__name__}.{name}"
             fn = getattr(attr, "fget", None) or getattr(attr, "__func__", None) or attr
             code = getattr(fn, "__code__", None)
             if code is not None and any(_SOCCER_API_URL.search(c) for c in _code_strings(code)):
@@ -288,8 +296,12 @@ def test_every_soccer_prefix_a_source_emits_gets_the_soccer_window(built_sources
         f"missing from plugin._SOCCER_PREFIXES: {sorted(soccer - plugin._SOCCER_PREFIXES)}; "
         f"in it but not soccer: {sorted(plugin._SOCCER_PREFIXES - soccer)}"
     )
+    # Literal windows, so a prefix dropped from the post-hours table (or
+    # given the wrong one) fails here too. NCAA soccer is 3 h for every game:
+    # see _SOCCER_EVERY_GAME_LONG_WINDOW.
     for prefix in soccer:
-        assert plugin._epg_match_window(prefix)[0] == 5, prefix
+        want = (5, 3.0) if prefix in ("NCAAMSOC", "NCAAWSOC") else (5, 2.5)
+        assert plugin._epg_match_window(prefix, {}) == want, prefix
 
 
 def test_the_soccer_derivation_sorts_the_known_leagues(built_sources):
@@ -324,6 +336,23 @@ def test_the_soccer_derivation_finds_a_new_soccer_source(built_sources, monkeypa
     src = NewSoccerSource()
     assert _soccer_api_evidence(src) == "NewSoccerSource.fetch_upcoming"
     assert "SPL" in _soccer_prefixes_emitted(list(built_sources) + [src])
+
+
+def test_the_soccer_derivation_follows_an_overridden_slug(monkeypatch):
+    """Mutation (codex round 2): a subclass of the MLS family that fetches
+    another sport must not be called soccer because its base class's module
+    or default slug is. The resolved `_ESPN_SLUG` decides."""
+    from dispatcharr_ranked_matchups.sources.nwsl import NwslSource
+
+    mod = types.ModuleType(f"{PKG_NAME}.sources._probe_not_soccer")
+
+    class NotSoccer(NwslSource):
+        _ESPN_SLUG = "basketball/nba"
+
+    NotSoccer.__module__ = mod.__name__
+    monkeypatch.setitem(sys.modules, mod.__name__, mod)
+    assert _soccer_api_evidence(object.__new__(NotSoccer)) is None
+    assert _soccer_api_evidence(object.__new__(NwslSource)) == "NwslSource._ESPN_SLUG"
 
 
 def _prefix_like_tables(emitted):
