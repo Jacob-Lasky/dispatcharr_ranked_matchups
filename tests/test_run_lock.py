@@ -134,6 +134,15 @@ class TestRefreshFailsClosed:
         assert "Redis is unreachable" in _status(plugin_mod).splitlines()[-1]
 
 
+    def test_a_redis_helper_that_fails_to_load_counts_as_unreachable(self, plugin_mod, monkeypatch):
+        class Broken:
+            def __getattr__(self, name):
+                raise RuntimeError("apps not ready")
+        monkeypatch.setitem(sys.modules, "core", MagicMock())
+        monkeypatch.setitem(sys.modules, "core.utils", Broken())
+        assert plugin_mod._read_run_lock()[0] == "unreachable"
+
+
 class TestHolderRecord:
     def test_lock_value_names_the_holder(self, plugin_mod, redis, monkeypatch):
         monkeypatch.setattr(plugin_mod.os, "getpid", lambda: 411)
@@ -193,6 +202,12 @@ class TestHolderRecord:
     def test_contention_with_a_malformed_holder_still_returns_none(self, plugin_mod, redis):
         redis.store[plugin_mod._SCHEDULER_LOCK_KEY] = '{"acquired_at": 7}'
         assert plugin_mod._try_acquire_scheduler_lock("auto_pipeline", "t") is None
+        assert plugin_mod._run_lock_unavailable_reason().startswith("the run lock is held by")
+
+    def test_an_empty_held_value_is_not_reported_free(self, plugin_mod, redis):
+        redis.store[plugin_mod._SCHEDULER_LOCK_KEY] = ""
+        assert plugin_mod._try_acquire_scheduler_lock("refresh") is None
+        assert plugin_mod._read_run_lock()[0] == "held"
         assert plugin_mod._run_lock_unavailable_reason().startswith("the run lock is held by")
 
     def test_a_bare_token_is_named_as_old_code(self, plugin_mod):
@@ -299,23 +314,29 @@ class TestProcessLabel:
         monkeypatch.setitem(sys.modules, "uwsgi", MagicMock(worker_id=lambda: 3))
         assert plugin_mod._process_label() == "uwsgi worker 3"
 
-    def test_other_processes_are_named_by_argv_without_long_arguments(self, plugin_mod, monkeypatch):
+    def test_other_processes_are_named_from_an_allowlist(self, plugin_mod, monkeypatch):
         monkeypatch.setitem(sys.modules, "uwsgi", None)  # import uwsgi -> ImportError
         script = "from apps.x import y; TOKEN='" + "s" * 60 + "'"
         monkeypatch.setattr(plugin_mod.sys, "argv",
                             ["/dispatcharrpy/bin/python", "manage.py", "shell", "-c", script])
-        assert plugin_mod._process_label() == "python manage.py shell -c"
+        assert plugin_mod._process_label() == "python manage.py shell"
         monkeypatch.setattr(plugin_mod.sys, "argv",
                             ["/dispatcharrpy/bin/celery", "--quiet", "-A", "dispatcharr", "worker",
                              "-Q", "dvr", "-n", "dvr@%h", "--pool=threads"])
-        assert plugin_mod._process_label() == "celery --quiet -A dispatcharr worker -Q dvr -n dvr@%h"
-
-    def test_short_secrets_are_not_copied(self, plugin_mod, monkeypatch):
-        monkeypatch.setitem(sys.modules, "uwsgi", None)
+        assert plugin_mod._process_label() == "celery worker -Q dvr"
         monkeypatch.setattr(plugin_mod.sys, "argv",
-                            ["/x/bin/python", "probe.py", "--token=abc123", "--password", "hunter2",
-                             "--api-key", "k1", "run"])
+                            ["/dispatcharrpy/bin/daphne", "-b", "0.0.0.0", "-p", "8001",
+                             "dispatcharr.asgi:application"])
+        assert plugin_mod._process_label() == "daphne"
+
+    @pytest.mark.parametrize("argv", [
+        ["/x/bin/python", "probe.py", "--token=abc123", "--password", "hunter2", "--api-key", "k1"],
+        ["/x/bin/python", "worker.py", "-p", "hunter2", "-t", "abc123", "k1"],
+        ["/x/bin/celery", "worker", "-Q", "hunter2=x", "--broker", "redis://u:abc123@h/0", "k1"],
+    ])
+    def test_no_argument_value_is_copied(self, plugin_mod, monkeypatch, argv):
+        monkeypatch.setitem(sys.modules, "uwsgi", None)
+        monkeypatch.setattr(plugin_mod.sys, "argv", argv)
         label = plugin_mod._process_label()
-        assert label == "python probe.py run"
         for secret in ("abc123", "hunter2", "k1"):
-            assert secret not in label
+            assert secret not in label, label

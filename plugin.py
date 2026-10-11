@@ -8094,11 +8094,12 @@ def _process_label() -> str:
     of them holds the lock.
 
     The label is copied into Redis, the log, toasts and last_run.json, so it
-    keeps only arguments that cannot carry a value: plain words and bare flags
-    of up to 24 characters (`worker`, `-Q`, `dvr`, `--quiet`). DO NOT loosen
-    this to a length filter: `--token=abc123` is short, and a
-    `manage.py shell -c "<script>"` exec can carry anything. The argument
-    after a flag that names a secret is dropped too (`--password hunter2`)."""
+    is built from an ALLOWLIST, never from arbitrary argv: the program name,
+    any script name (`manage.py`), the Celery and Django subcommands that say
+    which process this is, and a Celery `-Q` queue list. DO NOT loosen this to
+    "short arguments" or "arguments that look like flags": `-p hunter2` and
+    `--token=abc` are both short, and a `manage.py shell -c "<script>"` exec
+    can carry anything."""
     try:
         import uwsgi  # type: ignore[import-not-found]  # only importable under uwsgi
         return f"uwsgi worker {uwsgi.worker_id()}"
@@ -8108,23 +8109,19 @@ def _process_label() -> str:
     if not argv:
         return "?"
     parts = [os.path.basename(argv[0])]
-    skip_next = False
-    for arg in argv[1:9]:
-        if skip_next:
-            skip_next = False
-            continue
-        if _SECRET_FLAG_RE.search(arg):
-            # `--token=x` carries its own value; a bare `--token` takes the next.
-            skip_next = "=" not in arg
-            continue
-        if _SAFE_ARG_RE.fullmatch(arg):
-            parts.append(arg)
+    for prev, arg in zip(argv[1:], argv[2:] + [""]):
+        if prev.endswith(".py"):
+            parts.append(os.path.basename(prev))
+        elif prev in _PROCESS_LABEL_WORDS:
+            parts.append(prev)
+            if prev == "-Q" and _QUEUE_LIST_RE.fullmatch(arg):
+                parts.append(arg)
     return " ".join(parts)[:120] or "?"
 
 
-# What _process_label keeps and what makes it drop the following argument.
-_SAFE_ARG_RE = re.compile(r"-{0,2}[A-Za-z0-9][A-Za-z0-9_.@%:-]{0,23}")
-_SECRET_FLAG_RE = re.compile(r"(?i)^-.*(pass|secret|token|key|auth|cred)")
+# What _process_label may copy out of argv. See its docstring.
+_PROCESS_LABEL_WORDS = frozenset({"worker", "beat", "shell", "-Q"})
+_QUEUE_LIST_RE = re.compile(r"[A-Za-z0-9_,]{1,40}")
 
 
 def _new_lock_value(kind: str, task_id: str) -> str:
@@ -8225,6 +8222,8 @@ def _read_run_lock() -> Tuple[str, Optional[str]]:
         from core.utils import RedisClient
     except ImportError:
         return _LOCK_UNKNOWN, None
+    except Exception as e:  # noqa: BLE001 - the helper exists but cannot load
+        return _LOCK_UNREACHABLE, str(e)
     try:
         r = RedisClient.get_client()
         if r is None:
@@ -8232,7 +8231,10 @@ def _read_run_lock() -> Tuple[str, Optional[str]]:
         raw = r.get(_SCHEDULER_LOCK_KEY)
     except Exception as e:
         return _LOCK_UNREACHABLE, str(e)
-    if not raw:
+    # `is None`, not falsiness: an EMPTY value is still a held key (SET NX
+    # refuses against it), and reporting it as free would contradict the
+    # refusal the caller just got.
+    if raw is None:
         return _LOCK_FREE, None
     return _LOCK_HELD, _describe_lock_holder(raw)
 
@@ -8310,7 +8312,7 @@ def _try_acquire_scheduler_lock(kind: str, task_id: str = "") -> Optional[str]:
     logger.info(
         "[ranked_matchups] run lock wanted by %s (task %s, pid %s) is held by %s",
         kind, task_id or "-", os.getpid(),
-        _describe_lock_holder(holder) if holder else "a run that has just released it",
+        _describe_lock_holder(holder) if holder is not None else "a run that has just released it",
     )
     return None
 
