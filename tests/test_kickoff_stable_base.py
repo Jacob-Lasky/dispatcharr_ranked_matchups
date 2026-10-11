@@ -551,6 +551,41 @@ def _saturday_slate(first_id=500000):
     ]
 
 
+def _newcomer_trial(plugin, trial, floor=None):
+    """One slate of the #219 / #267 generator: 3 to 14 Premier League games,
+    mostly in one minute, published from floor 6892 with 0 to 2 of them held
+    back as newcomers and 0 to 3 numbers reserved (channels kept for a
+    recording). Returns (published numbers, the next apply's numbers, the floor
+    it used). `floor=None` runs the inference, as the upgrade apply does; an
+    int pins the floor, as a remembered one does."""
+    import random
+    tz = timezone.utc
+    t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+    rng = random.Random(trial)
+    n = rng.randint(3, 14)
+    games = [
+        _epl_row(800000 + trial * 20 + i, t0 + timedelta(minutes=rng.choice([0, 0, 0, 1])))
+        for i in range(n)
+    ]
+    plain = plugin._assign_channel_numbers(games, 6892, tz)
+    k = rng.randint(0, 2)
+    newcomers, rest = games[:k], games[k:]
+    held = set(rng.sample(sorted(plain.values()), rng.randint(0, 3)))
+    old = plugin._assign_channel_numbers(rest, 6892, tz, reserved_numbers=held)
+    unpublished = [
+        (plugin.parse_iso_utc(g["start_time_utc"]), plugin._build_marker_key(g))
+        for g in newcomers
+    ]
+    base = floor if floor is not None else plugin._resolve_kickoff_base(
+        {}, 6838, None, _published(plugin, rest, old), tz,
+        unpublished=unpublished, reserved=held,
+    )
+    again = plugin._assign_channel_numbers(
+        games, base, tz, existing_numbers=old, reserved_numbers=held,
+    )
+    return old, again, base
+
+
 class TestInferenceRunsTheRealPlacement:
     """Review finding (verifier, #219): the inference scored candidates by how
     many channels sat inside their block. A same-minute collision nudges a
@@ -607,31 +642,7 @@ class TestInferenceRunsTheRealPlacement:
         PUBLISHED numbers are pinned: the newcomer has none yet, and on 84 the
         floor that keeps every published channel puts it elsewhere than the
         seeding floor would, which is the point."""
-        import random
-        tz = timezone.utc
-        t0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
-        rng = random.Random(trial)
-        n = rng.randint(3, 14)
-        games = [
-            _epl_row(800000 + trial * 20 + i, t0 + timedelta(minutes=rng.choice([0, 0, 0, 1])))
-            for i in range(n)
-        ]
-        plain = plugin._assign_channel_numbers(games, 6892, tz)
-        k = rng.randint(0, 2)
-        newcomers, rest = games[:k], games[k:]
-        held = set(rng.sample(sorted(plain.values()), rng.randint(0, 3)))
-        old = plugin._assign_channel_numbers(rest, 6892, tz, reserved_numbers=held)
-        unpublished = [
-            (plugin.parse_iso_utc(g["start_time_utc"]), plugin._build_marker_key(g))
-            for g in newcomers
-        ]
-        base = plugin._resolve_kickoff_base(
-            {}, 6838, None, _published(plugin, rest, old), tz,
-            unpublished=unpublished, reserved=held,
-        )
-        again = plugin._assign_channel_numbers(
-            games, base, tz, existing_numbers=old, reserved_numbers=held,
-        )
+        old, again, _base = _newcomer_trial(plugin, trial)
         assert {m: again[m] for m in old} == old
 
     def test_a_strangers_number_is_part_of_the_placement(self, plugin):
@@ -689,3 +700,219 @@ class TestInferenceRunsTheRealPlacement:
         for name in ("_assign_channel_numbers", "_infer_kickoff_base"):
             assert _calls(fns[name], "_place_kickoff_numbers"), name
             assert not _calls(fns[name], "_first_free_number"), name
+
+
+# Hash slots of the Premier League rows below (marker ranked_matchups:EPL:fd_N)
+# at the 14:00 kickoff, from floor 100, whose block is 6672100-6672115 (the
+# next minute's block starts at 6672116): fd_29, fd_61, fd_11 -> slot 14
+# (6672114); fd_8, fd_16, fd_105 -> slot 15 (6672115); fd_26 -> 0, fd_2 -> 1,
+# fd_74 -> 2 (6672116-6672118 at 14:01).
+_T0 = datetime(2026, 10, 17, 14, 0, tzinfo=timezone.utc)
+_T1 = _T0 + timedelta(minutes=1)
+
+
+def _rows(plugin, spec):
+    """{gid: kickoff} -> (games, {gid: marker})."""
+    games = [_epl_row(gid, start) for gid, start in spec.items()]
+    return games, {gid: plugin._build_marker_key(g) for gid, g in zip(spec, games)}
+
+
+def _numbers(got, markers):
+    return {gid: got[m] for gid, m in markers.items()}
+
+
+class TestANudgedChannelPastItsBlockIsHeld:
+    """#267: a same-minute collision near the last slot nudges a game past the
+    end of its minute's 16-number block. The hold only kept numbers inside the
+    block, so on the next apply that channel was placed as a fresh game, and a
+    NEW game in the same minute placed before it took its number: a published
+    channel moved, and the guide binds by the bare number (#117). It is now held
+    when its number is exactly where an upward nudge from its computed number
+    lands over the numbers that stay. A game rescheduled one minute EARLIER
+    must still be released, since apply cannot see the kickoff a channel was
+    numbered for."""
+
+    def test_the_fixture_slots_are_what_the_literals_assume(self, plugin):
+        tz = timezone.utc
+        for gid, start, slot_number in (
+            (29, _T0, 6672114), (61, _T0, 6672114), (11, _T0, 6672114),
+            (8, _T0, 6672115), (16, _T0, 6672115), (105, _T0, 6672115),
+            (26, _T1, 6672116), (2, _T1, 6672117), (74, _T1, 6672118),
+        ):
+            m = plugin._build_marker_key(_epl_row(gid, start))
+            assert plugin.stable_channel_number(100, start, m, tz) == slot_number, gid
+
+    def test_witness_a_newcomer_with_a_lower_number_does_not_take_it(self, plugin):
+        """The issue's shape: fd_8 was nudged off 6672115 (fd_61, itself nudged
+        off fd_29) to 6672116, past its block. Newcomer fd_11 computes 6672114,
+        so it was placed first and nudged onto 6672116, moving fd_8 to 6672117."""
+        games, mk = _rows(plugin, {29: _T0, 61: _T0, 8: _T0, 11: _T0})
+        live = {mk[29]: 6672114, mk[61]: 6672115, mk[8]: 6672116}
+        got = plugin._assign_channel_numbers(games, 100, timezone.utc, existing_numbers=live)
+        assert _numbers(got, mk) == {29: 6672114, 61: 6672115, 8: 6672116, 11: 6672117}
+
+    def test_witness_a_chain_through_another_held_channel(self, plugin):
+        """fd_16 sits two past its computed 6672115, over fd_61 and fd_8, and
+        fd_8 is itself held past its block. The lower one has to be decided
+        first: decided the other way round, fd_16 saw a gap at 6672116 and was
+        released to 6672118 behind the newcomer."""
+        games, mk = _rows(plugin, {29: _T0, 61: _T0, 8: _T0, 16: _T0, 11: _T0})
+        live = {mk[29]: 6672114, mk[61]: 6672115, mk[8]: 6672116, mk[16]: 6672117}
+        got = plugin._assign_channel_numbers(games, 100, timezone.utc, existing_numbers=live)
+        assert _numbers(got, mk) == {
+            29: 6672114, 61: 6672115, 8: 6672116, 16: 6672117, 11: 6672118,
+        }
+
+    def test_witness_a_reserved_number_explains_the_nudge(self, plugin):
+        """fd_8 was nudged off a stranger's 6672115. Newcomer fd_105 computes
+        the same number and its marker sorts first, so it took 6672116."""
+        games, mk = _rows(plugin, {8: _T0, 105: _T0})
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers={mk[8]: 6672116},
+            reserved_numbers={6672115},
+        )
+        assert _numbers(got, mk) == {8: 6672116, 105: 6672117}
+
+    @pytest.mark.parametrize("trial", [686, 782, 1360, 1455, 1955, 2075, 2197, 2887])
+    def test_witness_the_issues_slates_keep_every_published_number(self, plugin, trial):
+        """The 8 slates the issue names, where no floor kept every published
+        channel: a newcomer always displaced a nudged one. Pinned at the true
+        floor and at the floor the upgrade apply infers."""
+        for floor in (6892, None):
+            old, again, _base = _newcomer_trial(plugin, trial, floor=floor)
+            assert {m: again[m] for m in old} == old, floor
+
+    def test_witness_no_slate_of_the_generator_moves_a_published_number(self, plugin):
+        """All 3000 slates of the issue's search (about 3 s). On the base this
+        moved a published channel on 11 at the inferred floor and on 58 at the
+        true floor."""
+        moved = []
+        for trial in range(3000):
+            for floor in (6892, None):
+                old, again, _base = _newcomer_trial(plugin, trial, floor=floor)
+                if {m: again[m] for m in old} != old:
+                    moved.append((trial, floor))
+        assert moved == []
+
+    def test_a_game_rescheduled_one_minute_earlier_is_released(self, plugin):
+        """fd_8 was numbered for 14:01 and sat on 6672119 (slot 3 of that
+        minute, below its hash slot 15, as a #217 re-key leaves it). It now
+        kicks off at 14:00 and computes 6672115, four below its old number: a
+        rule holding anything within 16 above would keep it in 14:01's block.
+        Nothing between is taken, so it is released to its new number."""
+        games, mk = _rows(plugin, {8: _T0, 26: _T1})
+        live = {mk[8]: 6672119, mk[26]: 6672116}
+        got = plugin._assign_channel_numbers(games, 100, timezone.utc, existing_numbers=live)
+        assert _numbers(got, mk) == {8: 6672115, 26: 6672116}
+
+    def test_witness_a_held_rescheduled_game_keeps_its_number_from_a_newcomer(self, plugin):
+        """fd_8 rescheduled from 14:01 to 14:00 as above, but every number from
+        its new 6672115 up to its old 6672119 is taken (fd_16 on its slot,
+        14:01's first three on theirs), so a nudge from its new number walks to
+        6672119 anyway and the hold puts it exactly where a release would. The
+        one difference is fd_105, new at 14:00 on the same slot: released, fd_8
+        lost 6672119 to it and moved to 6672120 (both in 14:01's block, so
+        second-opinion round 1's "held in the wrong minute" is true of the
+        release too)."""
+        spec = {16: _T0, 26: _T1, 2: _T1, 74: _T1, 8: _T0, 105: _T0}
+        games, mk = _rows(plugin, spec)
+        live = {mk[16]: 6672115, mk[26]: 6672116, mk[2]: 6672117, mk[74]: 6672118,
+                mk[8]: 6672119}
+        got = plugin._assign_channel_numbers(games, 100, timezone.utc, existing_numbers=live)
+        assert _numbers(got, mk) == {16: 6672115, 26: 6672116, 2: 6672117, 74: 6672118,
+                                     8: 6672119, 105: 6672120}
+
+    def test_a_gap_below_it_still_releases_it(self, plugin):
+        """fd_61 left the slate, so 6672115 is free and fd_8's nudge is no longer
+        explained: it is placed afresh, as before #267 (it cannot be told from a
+        game rescheduled earlier, see the DO NOT in _place_kickoff_numbers)."""
+        games, mk = _rows(plugin, {29: _T0, 8: _T0})
+        live = {mk[29]: 6672114, mk[8]: 6672116}
+        got = plugin._assign_channel_numbers(games, 100, timezone.utc, existing_numbers=live)
+        assert _numbers(got, mk) == {29: 6672114, 8: 6672115}
+
+    def test_a_held_number_that_is_now_reserved_is_released(self, plugin):
+        """The reservation still wins over this hold, as over the in-block one."""
+        games, mk = _rows(plugin, {29: _T0, 61: _T0, 8: _T0})
+        live = {mk[29]: 6672114, mk[61]: 6672115, mk[8]: 6672116}
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers=live, reserved_numbers={6672116},
+        )
+        assert _numbers(got, mk) == {29: 6672114, 61: 6672115, 8: 6672117}
+
+    def test_a_reserved_held_number_does_not_push_a_held_neighbour(self, plugin):
+        """fd_29's 6672114 is now reserved, so it is released and placed from its
+        computed number AFTER the held channels. Treated as held instead, it was
+        placed first, walked off its reserved number onto fd_8's 6672115 and
+        pushed fd_8 out."""
+        games, mk = _rows(plugin, {29: _T0, 8: _T0})
+        live = {mk[29]: 6672114, mk[8]: 6672115}
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers=live, reserved_numbers={6672114},
+        )
+        assert _numbers(got, mk) == {29: 6672116, 8: 6672115}
+
+    def test_witness_a_nudge_of_a_whole_block_still_names_its_floor(self, plugin):
+        """Second-opinion round 1: sixteen reserved numbers pushed fd_8 from
+        6672115 to 6672131. The hold keeps it there, but the inference only
+        tried nudges of 1..15, never named floor 100, and settled on 101, which
+        would have been remembered and put every later game one higher."""
+        tz = timezone.utc
+        games, mk = _rows(plugin, {8: _T0, 29: _T0})
+        reserved = set(range(6672115, 6672131))
+        base = plugin._resolve_kickoff_base(
+            {}, 99, None, [(6672131, _T0, mk[8])], tz,
+            unpublished=[(_T0, mk[29])], reserved=reserved,
+        )
+        assert base == 100
+        got = plugin._assign_channel_numbers(
+            games, base, tz, existing_numbers={mk[8]: 6672131}, reserved_numbers=reserved,
+        )
+        assert _numbers(got, mk) == {8: 6672131, 29: 6672114}
+
+    def test_witness_a_crowded_minute_keeps_every_number_on_the_upgrade_apply(self, plugin):
+        """Twenty-one games in one minute (a Saturday 3pm with the Championship
+        on top of the Premier League), all on the block's last four slots (ids
+        picked for that), so the last one sits 16 or more past its computed
+        number. A newcomer joins on the upgrade apply, with no floor
+        remembered; every published channel keeps its number."""
+        tz = timezone.utc
+        crowd = (4, 25, 50, 66, 75, 88, 1, 82, 84, 87, 122, 123,  # slots 12, 13
+                 11, 29, 61, 90, 99, 107, 8, 16, 23)              # slots 14, 15
+        games, mk = _rows(plugin, {gid: _T0 for gid in crowd})
+        old = plugin._assign_channel_numbers(games, 100, tz)
+        nudges = [
+            old[m] - plugin.stable_channel_number(100, _T0, m, tz) for m in old
+        ]
+        assert max(nudges) >= 16, "precondition: a nudge of a whole block"
+        newcomer, nmk = _rows(plugin, {105: _T0})
+        base = plugin._resolve_kickoff_base(
+            {}, 99, None, [(n, _T0, m) for m, n in old.items()], tz,
+            unpublished=[(_T0, nmk[105])],
+        )
+        again = plugin._assign_channel_numbers(games + newcomer, base, tz, existing_numbers=old)
+        assert {m: again[m] for m in old} == old
+        assert base == 100
+
+    def test_a_long_reserved_run_does_not_stall_the_inference(self, plugin, monkeypatch):
+        """Second opinion, round 2: 20,000 consecutive reserved numbers under a
+        published channel made one candidate floor per number, each scored with
+        two placements that scan the run (208 s). The walk stops after
+        _INFER_RESERVED_RUN of them, so the placements run a bounded number of
+        times."""
+        calls = []
+        real = plugin._place_kickoff_numbers
+
+        def counted(*a, **kw):
+            calls.append(1)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(plugin, "_place_kickoff_numbers", counted)
+        m = plugin._build_marker_key(_epl_row(8, _T0))
+        plugin._infer_kickoff_base(
+            [(6692115, _T0, m)], timezone.utc, hint=100,
+            reserved=set(range(6672115, 6692115)),
+        )
+        assert plugin._INFER_RESERVED_RUN == 64
+        assert 0 < len(calls) <= 2 * (16 + 64 + 1)
+
