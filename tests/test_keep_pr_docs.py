@@ -46,8 +46,8 @@ def repo(tmp_path):
     def write(name, text):
         (r / name).write_bytes(text.encode() if isinstance(text, str) else text)
 
-    def guard():
-        return subprocess.run(["bash", SCRIPT, "base"], cwd=r, capture_output=True, text=True)
+    def guard(base="base"):
+        return subprocess.run(["bash", SCRIPT, base], cwd=r, capture_output=True, text=True)
 
     return commit, write, guard
 
@@ -143,4 +143,34 @@ def test_punctuation_only_lines_do_not_pin_each_other(repo):
     commit({"a.md": OLD}, tag="base")
     commit({"a.md": OLD + "\n```\nnew code\n```\n"})
     write("a.md", OLD.replace("```\ncode\n```\n", "code\n") + "\n```\nnew code\n```\n")
+    assert guard().returncode == 0
+
+
+def test_a_nul_in_the_prs_lines_does_not_hide_them(repo):
+    commit, write, guard = repo
+    commit({"a.md": OLD}, tag="base")
+    commit({"a.md": OLD + "Preserve me.\nOther\x00data\n"})
+    write("a.md", OLD + "Other\x00data\n")
+    assert guard().returncode == 1
+
+
+def test_an_unavailable_base_fails_closed(repo):
+    """A git error must stop the guard nonzero, never let it pass for want of
+    a diff to compare."""
+    commit, write, guard = repo
+    commit({"a.md": OLD}, tag="base")
+    commit({"a.md": OLD + "Preserve me.\n"})
+    write("a.md", OLD)
+    res = guard("no-such-ref")
+    assert res.returncode != 0
+    assert "not available" in res.stdout
+
+
+def test_removing_the_older_copy_of_a_line_the_pr_repeated_is_allowed(repo):
+    """The PR adds a second "Keep me."; the pass removes the first. The PR's
+    line is still there, so nothing the PR wrote was lost."""
+    commit, write, guard = repo
+    commit({"a.md": "Keep me.\n" + OLD}, tag="base")
+    commit({"a.md": "Keep me.\n" + OLD + "Keep me.\n"})
+    write("a.md", OLD + "Keep me.\n")
     assert guard().returncode == 0
