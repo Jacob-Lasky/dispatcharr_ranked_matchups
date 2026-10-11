@@ -695,6 +695,44 @@ stay in agreement with that one.
   days" and is neither: it drops `tzinfo`, so comparing the result against an
   aware `start_time` raised `TypeError` and MLB Postseason reported an error on
   every refresh for the whole postseason. Use `now + timedelta(days=N)`.
+- **The simulator's TARGET is the row `fetch_upcoming` built, not the one the
+  bracket emits, and a bracket needs more on it than a source supplies**
+  (#243). Nothing fails when it is missing; the importance is just wrong:
+  - no `extra["stage"]` (the NFL/NBA/NHL/MLB/WNBA/NCAAW playoff rows): the
+    sampled result is dropped, live MLB LCS ~0.15 importance instead of ~3,
+    and `_is_postseason_game` reads the row as regular season;
+  - a `matchday` that is not the leg number: Football-Data gives a UCL final
+    0 or None, 2026 World Cup knockouts None, EURO 2024 knockouts 4-7, and
+    anything but 1 was filed as leg 2, so the tie never completed (0.0);
+  - no `is_decisive_leg`: a final or second leg sampled with no extra time
+    or penalties, so it can end level.
+
+  `BracketSportSource.place_upcoming` fixes the row. It matches each row to
+  its bracket game by `game_id` (else `fd_id`), exactly, and only when the
+  team pair agrees and the id is unique. It then applies `_sim_extra`, the ONE
+  builder of a simulated row's extra, shared with
+  `_emit_remaining_games_for_tie`: the bracket overrides the simulator's keys
+  (a fetched stage can be None or stale, a fetched double-elim `grouping_key`
+  can name the wrong sub-bracket), the source keeps its pass-through keys and
+  its `matchday` (the EPG text shows it), and the bracket's game number goes
+  in `bracket_game_index`, which `apply_result` prefers.
+
+  The refresh calls it twice through `_place_in_bracket`: at fetch, for the
+  favorites filter, on a throwaway bracket (reading `initial_state()` there
+  would cache an empty bracket if the season fetch failed that early and
+  defeat scoring's retry), and again after `_soccer_allow_scoring_retry()`
+  with `for_scoring=True`, on `initial_state()`'s bracket, the one importance
+  uses, so the two never disagree. Both passes warn, naming which. For the
+  same reason a `_fetch_bracket_games` must NOT cache a failed request as `[]`
+  (MLB and NHL did); the ESPN day-sweep sources still cache partial sweeps,
+  #245. Playoff-only shapes (`ALL_ROWS_POSTSEASON`) flag every row
+  `postseason` first, so a failed bracket fetch cannot demote them.
+
+  A new bracket source needs an id on its upcoming rows equal to its bracket
+  games' (`tests/test_match_identity_contract.py` checks `game_id`, including
+  `extra = {...}` built as a variable). Tests that take the target from
+  `remaining_matches` cannot see any of this: build it the way
+  `fetch_upcoming` does.
 - **The child log's LEADING LEVEL NAME is a contract.** `_pipeline_runner.py`
   sets `format="%(levelname)s %(name)s: %(message)s"`, and
   `tasks._child_line_level` parses that first token so a subprocess WARNING is
