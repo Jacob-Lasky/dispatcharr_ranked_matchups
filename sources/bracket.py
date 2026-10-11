@@ -254,9 +254,9 @@ class BracketSportSource(SportSource):
         costs one batch, one request timeout, the same as a sequential walk
         that stops at its first failure. Stops after the FIRST batch with a
         failed day: the sweep is discarded either way, and against an ESPN
-        outage every further batch is another timeout. Days that did answer
-        are kept on the instance until the sweep completes, so the retry asks
-        only for the days still missing, not the whole window again.
+        outage every further batch is another timeout. Days BEFORE the first
+        failure are kept on the instance until the sweep completes, so the
+        retry asks only from the failed day on, not the whole window again.
         Injected `fetch_day` keeps each source's own patchable `_http_get`."""
         if self._bracket_fetch_given_up():
             return None
@@ -272,11 +272,15 @@ class BracketSportSource(SportSource):
                 lambda d: memo[d] if d in memo else fetch_day(d),
             )
             failed = None
-            for day, data in batch:  # date order: `failed` is the earliest
-                if isinstance(data, dict):
-                    memo[day] = data
-                elif failed is None:
+            for day, data in batch:  # date order
+                if not isinstance(data, dict):
                     failed = day
+                    break
+                memo[day] = data
+            # Days AFTER the first failure are NOT memoised even when they
+            # answered: the retry re-asks them, exactly as a sequential walk
+            # that stopped at the failure would, so a game ESPN adds to one of
+            # those days between the attempts is not lost to a stale page.
             if failed is not None:
                 self._bracket_fetch_failed(
                     f"scoreboard for {failed.isoformat()} did not answer, "

@@ -180,6 +180,25 @@ def test_a_sweep_stops_after_the_batch_with_the_first_failed_day(nba_sweep):
     assert max(board.calls) == "20260526"
 
 
+def test_the_retry_re_asks_the_days_after_the_failure(monkeypatch):
+    """A day after the failed one, in the same concurrent batch, answered on
+    the first attempt; it is asked again on the retry rather than served from
+    the first attempt's page, as a sequential walk that stopped at the
+    failure would. Here a game appears on it between the two attempts and
+    must reach the bracket. Literal dates on purpose: Apr 2 fails once, Apr 3
+    is in the same batch (Apr 1-8)."""
+    g = _nba_event("501", "Boston Celtics", "Miami Heat",
+                   datetime(2026, 4, 3, 23, 0, tzinfo=UTC), "East 1st Round - Game 1")
+    board = Scoreboard(failing=["20260402"])
+    monkeypatch.setattr(nba, "_http_get", board)
+    src = nba.NbaPlayoffSource(season_end_year=2026)
+    assert src._fetch_bracket_games() == []
+    board.by_day["20260403"] = [g]
+    games = src._fetch_bracket_games()
+    assert board.calls.count("20260403") == 2
+    assert [x["game_id"] for x in games] == ["501"]
+
+
 def test_a_day_that_keeps_failing_stops_hitting_the_network(monkeypatch):
     board = Scoreboard(failing=["20260520"], fail_times=99)
     monkeypatch.setattr(nba, "_http_get", board)
