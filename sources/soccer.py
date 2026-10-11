@@ -3062,14 +3062,18 @@ class GroupStageSoccerSource(SoccerSource):
         runner-up, which would make `_build_bracket_seed` raise in every
         simulated season and cost each group game its importance outright.
 
-        Memoised per instance, like `_team_group_map` it rests on: the
-        scorer asks once per group game, and the warning should not repeat."""
-        if hasattr(self, "_chain_bracket_memo"):
-            return self._chain_bracket_memo
+        Memoised against the `_team_group_map` it is computed from (the
+        scorer asks once per group game, and the warning should not repeat),
+        so a rebuilt map is re-checked rather than answered from a stale
+        verdict."""
+        team_group = self._team_group_map()
+        memo = getattr(self, "_chain_bracket_memo", None)
+        if memo is not None and memo[0] is team_group:
+            return memo[1]
         bracket = _CHAIN_BRACKETS.get(self.config.fd_code)
         if bracket is not None:
             sizes: Dict[str, int] = {}
-            for group in self._team_group_map().values():
+            for group in team_group.values():
                 letter = self._display_group_letter(group)
                 sizes[letter] = sizes.get(letter, 0) + 1
             if set(sizes) != bracket.groups:
@@ -3082,7 +3086,9 @@ class GroupStageSoccerSource(SoccerSource):
                     bracket.teams_per_group,
                 )
                 bracket = None
-        self._chain_bracket_memo: Optional[_TournamentBracket] = bracket
+        self._chain_bracket_memo: Tuple[Dict[str, str], Optional[_TournamentBracket]] = (
+            team_group, bracket,
+        )
         return bracket
 
     def _group_stage_in_progress(self) -> bool:
@@ -3176,20 +3182,21 @@ class GroupStageSoccerSource(SoccerSource):
             bracket = _CHAIN_BRACKETS[self.config.fd_code]
         standings = self._compute_group_standings(primary_state)
 
-        # Group-key shape in standings.by_group: "GROUP_A" etc. (from
-        # FD.org's `group` field on group-stage matches). Convert slot
-        # letters ("A") to group keys ("GROUP_A") for the winner /
-        # runner-up lookups.
-        def _group_key(letter: str) -> str:
-            return f"GROUP_{letter}"
+        # standings.by_group is keyed by FD.org's raw `group` value
+        # ("GROUP_A"); slots name the letter ("A"). Translate through
+        # `_display_group_letter`, the same helper `_chain_bracket` uses to
+        # check the season's shape, so the two can never disagree on what
+        # a group is called.
+        table_by_letter = {
+            self._display_group_letter(g): teams for g, teams in standings.by_group.items()
+        }
 
         def _resolve_fixed_slot(slot: Tuple[str, Any]) -> Optional[str]:
             kind, payload = slot
+            teams = table_by_letter.get(payload, [])
             if kind == "group_winner":
-                teams = standings.by_group.get(_group_key(payload), [])
                 return teams[0][0] if teams else None
             if kind == "group_runner_up":
-                teams = standings.by_group.get(_group_key(payload), [])
                 return teams[1][0] if len(teams) >= 2 else None
             return None
 
@@ -3198,9 +3205,7 @@ class GroupStageSoccerSource(SoccerSource):
 
         def _letter_of(team: str) -> Optional[str]:
             grp = team_group_map.get(team)
-            if isinstance(grp, str) and grp.startswith("GROUP_"):
-                return grp[len("GROUP_"):]
-            return None
+            return self._display_group_letter(grp) if isinstance(grp, str) else None
 
         # Constraint-respecting assignment of best-3rd-placers to
         # reserved slots. PRIMARY path: lookup in the bracket's table

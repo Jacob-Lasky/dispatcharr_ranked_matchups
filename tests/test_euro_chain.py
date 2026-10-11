@@ -634,3 +634,36 @@ class TestSeededBracketPlaysToTheFinal:
         played, _end = _play_out(knockout, seeded, winner_is_home=False)
         assert played == {"LAST_32": 16, "LAST_16": 8, "QUARTER_FINALS": 4,
                           "SEMI_FINALS": 2, "FINAL": 1}
+
+
+class TestShapeCheckStaysInStepWithTheSeed:
+    def test_rebuilt_group_map_is_rechecked(self):
+        # The shape verdict must follow the group map it was computed from:
+        # a source whose map is rebuilt (new fixtures) is checked again.
+        full = _reopen_matchday_3(
+            _ec_2024_matches(), datetime(2024, 6, 25, 16, tzinfo=timezone.utc),
+        )
+        groups, knockout = _euro_pair(full)
+        groups.set_paired_knockout_source(knockout)
+        assert groups.cross_source_chain() is not None
+        partial = copy.deepcopy(full)
+        for m in partial:
+            for side in ("homeTeam", "awayTeam"):
+                if m[side]["name"] == "Scotland":
+                    m[side] = {"name": None}
+        groups._all_matches_cache = partial
+        groups._team_group_cache = None
+        groups._initial_state_cache = None
+        assert groups.cross_source_chain() is None
+
+    def test_bare_group_letters_seed_like_prefixed_ones(self):
+        # `_display_group_letter` accepts "A" as well as "GROUP_A"; the seed
+        # must resolve slots for whichever shape passed the shape check.
+        matches = _ec_2024_matches()
+        for m in matches:
+            if m.get("group"):
+                m["group"] = m["group"].rsplit("_", 1)[-1]
+        groups, _ = _euro_pair(matches)
+        seed = groups._build_bracket_seed(_uefa_final_state(groups))
+        assert [(t["home"], t["away"]) for t in seed["stages"][0]["ties"]] \
+            == TestEuro2024Backtest.REAL_R16
