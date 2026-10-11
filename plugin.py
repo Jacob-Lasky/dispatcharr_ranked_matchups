@@ -2169,14 +2169,32 @@ def _cache_has_slate(cache: Dict[str, Any]) -> bool:
     return bool(games) or cache.get(_EMPTY_SLATE_KNOWN_KEY) is True
 
 
+def _cache_vouched(cache: Dict[str, Any]) -> bool:
+    """Whether `cache` lists everything the plugin may have on air, so a later
+    writer that starts from it can vouch for an empty result too.
+
+    Stricter than _cache_has_slate: a NON-empty slate is published whatever
+    its key says, but one written `empty_slate_known: false` (cache lost during
+    an outage) may omit a live channel, and that doubt must travel with it to
+    the reaper and to the next refresh. DO NOT use _cache_has_slate here: it
+    launders the doubt away, and an empty slate built on such a cache would
+    delete the channel it omitted. A cache from before the key existed is
+    vouched when non-empty (its own refresh read the cache before it) and not
+    when empty (nothing says how it was written)."""
+    games = cache.get("games")
+    if not isinstance(games, list):
+        return False
+    return cache.get(_EMPTY_SLATE_KNOWN_KEY, bool(games)) is True
+
+
 def _slate_known(prior_cache: Dict[str, Any], outage_labels: set) -> bool:
     """Whether a refresh can vouch for an empty result (`_EMPTY_SLATE_KNOWN_KEY`).
 
-    Yes when it read the previous slate (so _rows_to_hold could carry anything
-    a failed source dropped), or when no source failed or came back empty (so
-    there is nothing an outage could have dropped). `outage_labels` is the set
-    _rows_to_hold treats as an outage."""
-    return _cache_has_slate(prior_cache) or not outage_labels
+    Yes when the previous cache was vouched (so _rows_to_hold could carry
+    anything a failed source dropped), or when no source failed or came back
+    empty (so there is nothing an outage could have dropped). `outage_labels`
+    is the set _rows_to_hold treats as an outage."""
+    return _cache_vouched(prior_cache) or not outage_labels
 
 
 def _write_cache(data: Dict[str, Any]) -> None:
@@ -5174,18 +5192,18 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
         promoted_ids = {id(g) for g in promoted}
         bench = [g for g in bench if id(g) not in promoted_ids]
 
+    # Whether apply may publish the slate if this leaves it EMPTY (#241). The
+    # reaper only removes finished games, so the answer is whatever the slate
+    # it started from could vouch for (_cache_vouched), read BEFORE the games
+    # are replaced. DO NOT set True outright: a refresh that lost the previous
+    # cache during an outage writes False on a non-empty slate, the DB can
+    # still hold a live channel that slate omits, and emptying it would have
+    # apply delete that channel.
+    vouched = _cache_vouched(cache)
     cache["games"] = live + promoted
     cache["bench"] = bench
     cache["reaped_at"] = now.isoformat()
-    # Whether apply may publish the slate if this leaves it EMPTY (#241). The
-    # reaper only removes finished games from it, so the answer is whatever
-    # the refresh that wrote it could vouch for. DO NOT set True outright: a
-    # refresh that lost the previous cache during an outage writes False on a
-    # non-empty slate, the DB can still hold a live channel that slate omits,
-    # and emptying it would have apply delete that channel. Absent (a cache
-    # from before the key existed, always applied by its own refresh) keeps
-    # the reaper able to take the last game off, which is the #241 fix.
-    cache[_EMPTY_SLATE_KNOWN_KEY] = cache.get(_EMPTY_SLATE_KNOWN_KEY, True) is True
+    cache[_EMPTY_SLATE_KNOWN_KEY] = vouched
     _write_cache(cache)
 
     logger.info(

@@ -453,9 +453,11 @@ slate deletes every channel the plugin owns, and the only defence against
 doing that during a source outage is `_rows_to_hold` carrying the previous
 games forward, which needs the previous cache. So an empty list counts only
 when its writer set `empty_slate_known: true` (`_cache_has_slate`): a refresh
-does when it read the previous slate or every source answered with games
-(`_slate_known`), and the reaper carries forward what the refresh said (a
-cache from before the key counts as true). Refused: a missing, unreadable or
+does when the previous cache was vouched or every source answered with games
+(`_slate_known`), and the reaper carries the answer of the slate it empties.
+"Vouched" (`_cache_vouched`) is stricter than "publishable": a non-empty
+slate written `false` is still published, but its doubt travels to whatever
+is built on it, or an empty slate on top would delete the channel it omitted. Refused: a missing, unreadable or
 non-object file, `games` not a list, a pre-#241 empty cache, and an empty
 refresh after cache.json was lost (the plugin folder is replaced on upgrade)
 with a source failing. Apply's toast says which.

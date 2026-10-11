@@ -555,6 +555,15 @@ class TestSlateKnown:
     def test_lost_cache_and_a_source_failed(self, plugin):
         assert plugin._slate_known({"games": [], "refreshed_at": None}, {"NCAA Football"}) is False
 
+    def test_doubt_travels_with_a_non_empty_unvouched_slate(self, plugin):
+        prior = {**self.PRIOR, "empty_slate_known": False}
+        assert plugin._cache_has_slate(prior) is True
+        assert plugin._slate_known(prior, {"NCAA Football"}) is False
+
+    def test_pre_marker_caches(self, plugin):
+        assert plugin._cache_vouched(self.PRIOR) is True
+        assert plugin._cache_vouched({"games": [], "refreshed_at": "2026-10-11T12:00:00+00:00"}) is False
+
 
 class TestBuildMarkerKey:
     """The fallback path MUST be process-stable (issue: Python's hash() is

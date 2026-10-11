@@ -212,6 +212,25 @@ def scenario_reaper_does_not_vouch_for_an_unvouched_slate(env):
     assert "ranked_matchups:CFB:401" in _owned(env), "a live channel was deleted"
 
 
+def scenario_refresh_does_not_vouch_on_top_of_an_unvouched_slate(env):
+    """Same lost-cache outage, one step further: the unvouched slate's only game
+    finishes and the next refresh, CFB still failing, finds nothing. It read a
+    previous cache, but that cache could not vouch for itself, so neither can
+    this empty result, and the live CFB channel must stay."""
+    user_ch, _ = _seed_source_channel(env)
+    _publish(env, [_row(401, _now() + timedelta(hours=1), user_ch.id)])
+    _write_cache(env, [_row(402, _now() - timedelta(hours=10), user_ch.id, home="Texas", away="Oklahoma")],
+                 empty_slate_known=False)
+
+    with _sources(env, _StubSource(error=RuntimeError("CFBD 525"))):
+        assert env.plugin._action_refresh(_settings())["status"] == "ok"
+    cache = _read_cache(env)
+    assert cache["games"] == [] and cache["empty_slate_known"] is False, cache
+
+    assert env.plugin._action_apply(_settings())["status"] == "ok"
+    assert "ranked_matchups:CFB:401" in _owned(env), "a live channel was deleted"
+
+
 def scenario_a_second_reap_after_the_last_game_is_a_no_op(env):
     """After the slate empties, later reaps must stay quiet and harmless."""
     user_ch, _ = _seed_source_channel(env)
