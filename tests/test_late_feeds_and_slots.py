@@ -259,6 +259,60 @@ class TestScheduledSlot:
         assert attempts == []
         assert skips == ["scheduled_auto_pipeline"]
 
+    @pytest.mark.parametrize("redis_state", ["store", "redis_down"])
+    def test_a_late_wake_says_so_instead_of_blaming_the_lock(self, plugin, redis_state,
+                                                             request, monkeypatch):
+        """Waking past the deadline means NO attempt was made, so the recorded
+        reason must not describe the lock: with the lock free it used to read
+        "the run lock could not be taken, and is free now"."""
+        request.getfixturevalue(redis_state)
+        attempts = _pipeline(monkeypatch, plugin, [True])
+        reasons = []
+        monkeypatch.setattr(plugin.tasks, "record_skipped_run",
+                            lambda kind, reason=None: reasons.append(reason))
+        slot = datetime.now(UTC) - timedelta(minutes=31)
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert attempts == []
+        assert len(reasons) == 1
+        assert "run lock" not in reasons[0]
+        assert "woke" in reasons[0] and "too late to start" in reasons[0]
+
+    def test_a_slow_claim_is_not_reported_as_a_late_wake(self, plugin, monkeypatch):
+        """The scheduler woke in time, but the slot claim (Redis connect
+        retries, then failure) took until past the deadline. Blaming the wake
+        would send a reader after the wrong thing."""
+        import time
+        mark = {}
+
+        def slow_claim(slot):
+            mark["deadline"] = datetime.now(UTC)
+            time.sleep(0.02)
+            return plugin._SLOT_UNKNOWN
+
+        monkeypatch.setattr(plugin, "_claim_scheduled_slot", slow_claim)
+        monkeypatch.setattr(plugin, "_scheduled_retry_deadline",
+                            lambda slot, times, tz: mark["deadline"])
+        attempts = _pipeline(monkeypatch, plugin, [True])
+        reasons = []
+        monkeypatch.setattr(plugin.tasks, "record_skipped_run",
+                            lambda kind, reason=None: reasons.append(reason))
+        slot = _now_slot()
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert attempts == []
+        assert len(reasons) == 1
+        assert "woke after" not in reasons[0]
+        assert "already past" in reasons[0]
+
+    def test_giving_up_after_attempts_still_names_the_lock(self, plugin, store, monkeypatch):
+        _pipeline(monkeypatch, plugin, [False])
+        _sleeps(monkeypatch, plugin)
+        reasons = []
+        monkeypatch.setattr(plugin.tasks, "record_skipped_run",
+                            lambda kind, reason=None: reasons.append(reason))
+        slot = datetime.now(UTC) - timedelta(minutes=29, seconds=30)
+        plugin._run_scheduled_slot(_Plugin(SETTINGS), _Stop(), SETTINGS, slot, _only(slot), UTC)
+        assert len(reasons) == 1 and "run lock" in reasons[0]
+
     def test_a_late_wake_does_not_start_past_the_deadline(self, plugin, store, monkeypatch):
         attempts = _pipeline(monkeypatch, plugin, [True])
         skips = _skips(monkeypatch, plugin)

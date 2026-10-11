@@ -298,7 +298,8 @@ Its last line is always the verdict:
   Every run needs the run lock, a plain Refresh included, so nothing changes in
   the guide (or the curated list) until Redis is back.
 - `NOTE: ... requested <time> did not run: <why>.` The why names the run that
-  held the lock (or says Redis was unreachable). A *scheduled* run no longer gives up at the first busy
+  held the lock, says Redis was unreachable, or, for a scheduled run, says it
+  was already too late to start when the scheduler got to it. A *scheduled* run no longer gives up at the first busy
   moment: one worker takes ownership of that scheduled time and keeps waiting
   for the lock for up to half an hour (never into the next scheduled time), so
   this line means the lock stayed held the whole while, not that something else

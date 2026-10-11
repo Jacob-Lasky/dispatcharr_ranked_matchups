@@ -76,7 +76,7 @@ State (gitignored, lives in `<plugin_dir>/`):
 - `recording_stops.json` — planned stops of RUNNING recordings (#216 phase C): written whole by apply under the scheduler lock, only READ by the live handoff timer in `_reaper_loop` (`_run_due_stops`), so the timer never races apply
 - `recordings_state.json` — auto-record bookkeeping (#216): what the plugin last wrote for each recording it created (so a user edit is recognised and left alone), and tombstones for ones the user deleted so they are not re-created
 - `odds_cache.json` — The Odds API responses (#200), one entry per `sport_key|region` with its `fetched_at`, plus `exhausted_until` / `exhausted_key` for the out-of-credits backoff and the last `credits_remaining` header. Written by `sources/_odds.py` with the same per-writer temp + atomic replace as the cache. Holds no API key, and a hand-edited or wrong-shaped file is started over rather than failing every league's fetch
-- `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict AND by `_slot_already_covered` to decide a waiting scheduled slot has already been done for it (see the scheduler section) — so `kind`, `status` and `started_at` steer behaviour, not just display. `kind` is one of `RUN_KIND_LABELS` (`auto_pipeline`, `scheduled_auto_pipeline`, `m3u_rematch`, `refresh`) — the label is what names WHY a run happened, so a new background trigger needs an entry there or Show current state cannot explain itself, plus a decision about whether it belongs in `_PIPELINE_RUN_KINDS`. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
+- `last_run.json` — outcome of the most recent background run (#227): kind, status, message, start/finish, duration, `consecutive_failures`, `last_ok_at`, plus a `skipped_kind`/`skipped_at` note when a request never got the lock, with `skipped_reason` (naming the holder, #239) stamped by `skipped_reason_at`. Written by `tasks._record_last_run` in `_run_under_lock`'s `finally`, read by `tasks.read_last_run` for the Show-current-state verdict AND by `_slot_already_covered` to decide a waiting scheduled slot has already been done for it (see the scheduler section) — so `kind`, `status` and `started_at` steer behaviour, not just display. `kind` is one of the `_run_under_lock` kinds in `RUN_KIND_LABELS` (`auto_pipeline`, `scheduled_auto_pipeline`, `m3u_rematch`, `refresh`; its `apply` and `reap` entries only describe lock holders) — the label is what names WHY a run happened, so a new background trigger needs an entry there or Show current state cannot explain itself, plus a decision about whether it belongs in `_PIPELINE_RUN_KINDS`. A FILE, not Redis: it must survive a restart and be readable by every uwsgi worker
 - `cfbd_api_key`, `football_data_api_key`, `odds_api_key`, `anthropic_api_key` — file fallback when settings field is blank.
 
 ## How channels are produced
@@ -422,24 +422,34 @@ rematch). Two properties are load-bearing:
   current state says "Redis is unreachable" (`_read_run_lock`, which must not
   go through `tasks._redis()`: that folds a `None` client into "no client" and
   hides the outage) so the refusal is never silent. The guarantee holds only
-  once EVERY process runs this code: a process still on an older version keeps
-  the fail-open refresh, so shipping this needs a container restart, not just a
-  plugin reload (see the process paragraph below).
+  once EVERY process runs this code: a process whose plugin module was never
+  reloaded keeps the fail-open refresh, so shipping this needs a container
+  restart, not just a plugin reload (see the process paragraph below). A
+  process that DID reload but kept a running thread is covered: that thread's
+  old `_run_under_lock` imports the lock function lazily, gets the new one, and
+  calls it as `_try_acquire_scheduler_lock(destructive=...)`. DO NOT drop that
+  legacy keyword while an in-place upgrade from a pre-#199 release is
+  possible: the TypeError lands after the old thread has claimed the scheduled
+  slot, so the slot runs nowhere (`TestOlderCallers` pins it).
 - **The lock VALUE is a JSON holder record** (#239): `kind`, `task_id`, `pid`,
   `process` (`uwsgi worker N`, or an allowlisted summary of a Celery/daphne
   process's argv), `thread`, plugin `version`, `acquired_at`, plus a unique
-  `token`. `_process_label` copies out of argv only the program name, script
-  names (`_SCRIPT_NAME_RE`), the words in `_PROCESS_LABEL_WORDS` and a `-Q`
-  queue list (`_QUEUE_LIST_RE`), because the label is copied into Redis, logs,
-  toasts and `last_run.json`; do not loosen it to a length or looks-like-a-flag
-  filter, `--token=abc` is short. Release compares the WHOLE string, so
-  ownership works as before. A contended acquire logs the holder at INFO, take
-  and release are logged at INFO, the busy apply toast and the skipped-run note
-  (`skipped_reason` in `last_run.json`) name the holder
-  (`_run_lock_unavailable_reason`), and Show current state prints a
-  `Run lock: held by ...` line. A value that is not JSON is a holder running
-  code from before #239. `apply` and `reap` have `RUN_KIND_LABELS` entries for
-  this description only; they never reach `last_run.json`'s `kind`.
+  `token`. `_process_label` copies out of argv only the program name, plain
+  script file names (`_SCRIPT_NAME_RE`), the words in `_PROCESS_LABEL_WORDS`
+  and a `-Q` queue list (`_QUEUE_LIST_RE`), because the label is copied into
+  Redis, logs, toasts and `last_run.json`; do not loosen it to a length or
+  looks-like-a-flag filter, `-p hunter2` and `--token=abc` are both short.
+  Release compares the WHOLE string, so ownership works as before. A contended
+  acquire logs the holder at INFO, take and release are logged at INFO, the
+  busy apply toast and the skipped-run note (`skipped_reason` in
+  `last_run.json`) name the holder (`_run_lock_unavailable_reason`), and Show
+  current state prints a `Run lock: held by ...` line. A skip reason is stamped
+  with its skip (`skipped_reason_at`), because older code records a skip
+  without touching the reason, and a scheduled run given up without an attempt
+  (it was already past its deadline) says so instead of describing a lock
+  nobody tried. A value that is not JSON is a holder running code from before
+  #239. `apply` and `reap` have `RUN_KIND_LABELS` entries for this description
+  only; they never reach `last_run.json`'s `kind`.
 
 **The plugin runs in more processes than the uwsgi workers.** Measured on
 Tower 2026-10-10/11 (Dispatcharr's `celery.py` runs plugin discovery in

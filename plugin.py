@@ -6817,7 +6817,11 @@ def _run_health_lines(
         skipped_at = last_run.get("skipped_at")
         if skipped_at and str(skipped_at) > str(last_run.get("finished_at") or "") and not inflight:
             skipped = labels.get(last_run.get("skipped_kind"), last_run.get("skipped_kind") or "A run")
-            why = last_run.get("skipped_reason") or "another run held the lock, or Redis was unreachable"
+            # Only a reason stamped with THIS skip: an older-code skip leaves
+            # the previous skip's reason behind (see tasks.record_skipped_run).
+            why = (last_run.get("skipped_reason")
+                   if last_run.get("skipped_reason_at") == skipped_at else None)
+            why = why or _LOCK_REASON_UNRECORDED
             verdict.append(
                 f"NOTE: {skipped} requested {_fmt_run_time(skipped_at, tz)} did not run: {why}."
             )
@@ -7661,28 +7665,40 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
     wait for the same reason the loop re-reads them after its long sleep
     (#223): a user can turn auto-refresh off while the run is waiting.
     """
+    woke = datetime.now(timezone.utc)  # before the claim, which can stall on Redis
     claim = _claim_scheduled_slot(slot)
     if claim == _SLOT_ELSEWHERE:
         logger.info("[ranked_matchups] scheduled slot %s is owned by another worker",
                     slot.isoformat())
         return False
     deadline = _scheduled_retry_deadline(slot, times, tz)
+    # Said when the run is given up WITHOUT an attempt because it is already
+    # past the deadline. DO NOT use _run_lock_unavailable_reason for that case:
+    # nothing tried the lock, and with it free that read "the run lock could
+    # not be taken, and is free now". Blame the wake only if the wake WAS late:
+    # the slot claim can itself stall past a short deadline (Dispatcharr's
+    # RedisClient retries its connect before giving up).
+    late = (f"the scheduler woke after {deadline.isoformat()}, too late to start it"
+            if woke > deadline else
+            f"it was already past {deadline.isoformat()} when it could have started")
     if claim == _SLOT_UNKNOWN:
         if datetime.now(timezone.utc) <= deadline:
             tasks.run_scheduled_pipeline(settings)
         else:
-            tasks.record_skipped_run("scheduled_auto_pipeline", _run_lock_unavailable_reason())
+            tasks.record_skipped_run("scheduled_auto_pipeline", late)
         return False
+    attempted = False
     while True:
         # Checked BEFORE each attempt too, so a late wake never starts this
         # slot's run past its deadline (into the next slot's time).
-        if datetime.now(timezone.utc) <= deadline and \
-                tasks.run_scheduled_pipeline(settings, record_skip=False):
-            return False
+        if datetime.now(timezone.utc) <= deadline:
+            attempted = True
+            if tasks.run_scheduled_pipeline(settings, record_skip=False):
+                return False
         if datetime.now(timezone.utc) + timedelta(seconds=_SCHEDULED_RETRY_SECONDS) > deadline:
-            reason = _run_lock_unavailable_reason()
+            reason = _run_lock_unavailable_reason() if attempted else late
             logger.warning(
-                "[ranked_matchups] scheduled run for %s did NOT run: by %s %s. "
+                "[ranked_matchups] scheduled run for %s did NOT run (deadline %s): %s. "
                 "The next scheduled time picks it up.",
                 slot.isoformat(), deadline.isoformat(), reason)
             tasks.record_skipped_run("scheduled_auto_pipeline", reason)
@@ -8128,7 +8144,7 @@ _QUEUE_LIST_RE = re.compile(r"[A-Za-z0-9_,]{1,40}")
 _SCRIPT_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,40}\.py")
 
 
-def _new_lock_value(kind: str, task_id: str) -> str:
+def _new_lock_value(kind: str, task_id: str, version: Optional[str] = None) -> str:
     """The VALUE stored under the run lock: who holds it, as JSON (#239).
 
     It used to be a bare uuid, so a run that found the lock held could only
@@ -8144,7 +8160,7 @@ def _new_lock_value(kind: str, task_id: str) -> str:
         "pid": os.getpid(),
         "process": _process_label(),
         "thread": threading.current_thread().name,
-        "version": Plugin.version,
+        "version": version or Plugin.version,
         "acquired_at": datetime.now(timezone.utc).isoformat(),
     }, sort_keys=True)
 
@@ -8206,6 +8222,11 @@ def _describe_lock_record(raw: Any, now: Optional[datetime]) -> str:
     return ", ".join(bits)
 
 
+# The skip reason when nothing better is known: the Redis helper could not be
+# imported, or the skip was recorded by code from before #239. One copy, shared
+# by _run_lock_unavailable_reason and the Show current state skip note.
+_LOCK_REASON_UNRECORDED = "another run held the lock, or Redis was unreachable"
+
 # What _read_run_lock reports.
 _LOCK_FREE = "free"
 _LOCK_HELD = "held"
@@ -8256,10 +8277,11 @@ def _run_lock_unavailable_reason() -> str:
         # Not "someone released it": a Redis blip during the attempt reads
         # the same way, and nothing here saw a holder.
         return "the run lock could not be taken, and is free now"
-    return "another run held the lock, or Redis was unreachable"
+    return _LOCK_REASON_UNRECORDED
 
 
-def _try_acquire_scheduler_lock(kind: str, task_id: str = "") -> Optional[str]:
+def _try_acquire_scheduler_lock(kind: str = "", task_id: str = "", *,
+                                destructive: Optional[bool] = None) -> Optional[str]:
     """Cross-worker mutex via Redis. Returns the caller's TOKEN on success (a
     truthy string), or None if the lock is held elsewhere / we refuse to run.
 
@@ -8292,8 +8314,23 @@ def _try_acquire_scheduler_lock(kind: str, task_id: str = "") -> Optional[str]:
     cache could not reach the guide anyway, and Dispatcharr itself (streams,
     Celery) does not work without Redis. The refusal is logged at ERROR and
     Show current state says Redis is unreachable, so it is never silent.
+
+    `destructive` is accepted ONLY for callers running OLDER code, and it
+    changes nothing (they fail closed too). DO NOT remove it while a release
+    from before #199 can be upgraded in place: a plugin reload replaces this
+    module in sys.modules, but a thread that was already running is kept and
+    runs the tasks.py it loaded, whose _run_under_lock imports this function
+    lazily and calls it as `_try_acquire_scheduler_lock(destructive=...)`. A
+    TypeError there lands after that thread has claimed the scheduled slot, so
+    the slot then runs nowhere. Such a caller passes no kind: destructive=False
+    was a bare refresh, True one of the refresh + apply kinds.
     """
-    value = _new_lock_value(kind, task_id)
+    version = None
+    if destructive is not None:
+        kind = kind or ("refresh" if destructive is False else "auto_pipeline")
+        task_id = task_id or "older plugin code"
+        version = f"older than {Plugin.version}"
+    value = _new_lock_value(kind, task_id, version)
     try:
         from core.utils import RedisClient
         r = RedisClient.get_client()

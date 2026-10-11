@@ -272,10 +272,33 @@ class TestHolderSurfaces:
 
     def test_skip_note_carries_the_recorded_reason(self, plugin_mod):
         rec = {"skipped_kind": "refresh", "skipped_at": "2026-10-10T20:01:00+00:00",
-               "skipped_reason": "the run lock is held by Reap finished games, pid 403"}
+               "skipped_reason": "the run lock is held by Reap finished games, pid 403",
+               "skipped_reason_at": "2026-10-10T20:01:00+00:00"}
         last = _status(plugin_mod, rec).splitlines()[-1]
         assert last.startswith("NOTE: Refresh requested")
         assert last.endswith("did not run: the run lock is held by Reap finished games, pid 403.")
+
+    def test_a_reason_left_by_an_earlier_skip_is_not_shown_for_a_later_one(self, plugin_mod):
+        """A process still on older code records a skip by updating
+        skipped_kind and skipped_at only, so the reason a newer process wrote
+        for an EARLIER skip is still in the file. Showing it would name a
+        holder that had nothing to do with this skip."""
+        rec = {"skipped_kind": "scheduled_auto_pipeline",
+               "skipped_at": "2026-10-10T21:30:00+00:00",
+               "skipped_reason": "the run lock is held by Reap finished games, pid 403",
+               "skipped_reason_at": "2026-10-10T20:01:00+00:00"}
+        last = _status(plugin_mod, rec).splitlines()[-1]
+        assert "Reap finished games" not in last
+        assert last.endswith("did not run: another run held the lock, or Redis was unreachable.")
+
+    def test_a_recorded_reason_is_stamped_with_its_skip(self, tasks_mod, plugin_mod, redis):
+        redis.store[plugin_mod._SCHEDULER_LOCK_KEY] = self.HOLDER
+        assert tasks_mod._run_under_lock("auto_pipeline", "t-4", MagicMock(), {}) is False
+        rec = tasks_mod.read_last_run()
+        assert rec.get("skipped_reason_at") == rec["skipped_at"]
+        tasks_mod.record_skipped_run("refresh")
+        rec = tasks_mod.read_last_run()
+        assert "skipped_reason" not in rec and "skipped_reason_at" not in rec
 
     def test_skipped_run_records_the_holder(self, tasks_mod, plugin_mod, redis):
         redis.store[plugin_mod._SCHEDULER_LOCK_KEY] = self.HOLDER
@@ -357,3 +380,45 @@ class TestProcessLabel:
         label = plugin_mod._process_label()
         for secret in ("abc123", "hunter2", "k1"):
             assert secret not in label, label
+
+
+class TestOlderCallers:
+    """A plugin reload replaces this module in sys.modules in every process
+    that re-discovers, but a thread that was already running is KEPT and runs
+    the code it loaded. Its tasks._run_under_lock (1.33.x and earlier) imports
+    the lock functions lazily, so it gets THESE ones and calls them the old
+    way: _try_acquire_scheduler_lock(destructive=<bool>), no kind. That call
+    used to raise TypeError after the thread had already claimed the
+    scheduled slot, so the slot ran nowhere."""
+
+    @staticmethod
+    def _old_call(plugin_mod, destructive):
+        try:
+            return plugin_mod._try_acquire_scheduler_lock(destructive=destructive), None
+        except TypeError as e:
+            return None, e
+
+    def test_an_older_caller_still_takes_and_releases_the_lock(self, plugin_mod, redis):
+        token, err = self._old_call(plugin_mod, True)
+        assert err is None, f"older tasks.py cannot call the lock any more: {err}"
+        assert token and redis.store[plugin_mod._SCHEDULER_LOCK_KEY] == token
+        rec = _record(token)
+        assert rec["kind"] == "auto_pipeline"
+        assert rec["task_id"] == "older plugin code"
+        assert rec["version"].startswith("older than ")
+        plugin_mod._release_scheduler_lock(token)
+        assert plugin_mod._SCHEDULER_LOCK_KEY not in redis.store
+
+    def test_an_older_refresh_fails_closed_too(self, plugin_mod, redis):
+        redis.down = True
+        token, err = self._old_call(plugin_mod, False)
+        assert err is None, f"older tasks.py cannot call the lock any more: {err}"
+        assert token is None
+
+    def test_an_older_refresh_is_named_as_a_refresh(self, plugin_mod, redis):
+        token, err = self._old_call(plugin_mod, False)
+        assert err is None, f"older tasks.py cannot call the lock any more: {err}"
+        assert _record(token)["kind"] == "refresh"
+        assert plugin_mod._read_run_lock() == (
+            "held", plugin_mod._describe_lock_holder(token))
+        assert "Refresh, task older plugin code" in plugin_mod._read_run_lock()[1]

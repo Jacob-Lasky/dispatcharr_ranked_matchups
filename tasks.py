@@ -333,10 +333,16 @@ def record_skipped_run(kind: str, reason: Optional[str] = None) -> None:
         record = read_last_run() or {}
         record["skipped_kind"] = kind
         record["skipped_at"] = datetime.now(timezone.utc).isoformat()
+        # The reason carries the skip it belongs to. Code from before #239
+        # updates skipped_kind/skipped_at and leaves any older reason in place,
+        # so a reason whose stamp does not match skipped_at is not this skip's
+        # (plugin._run_health_lines checks the stamp).
         if reason:
             record["skipped_reason"] = reason
+            record["skipped_reason_at"] = record["skipped_at"]
         else:
             record.pop("skipped_reason", None)
+            record.pop("skipped_reason_at", None)
         _write_last_run(record)
     except Exception as e:  # noqa: BLE001 - caller is a daemon thread
         logger.warning("[ranked_matchups.tasks] could not record skipped run: %s", e)
