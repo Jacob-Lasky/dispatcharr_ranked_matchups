@@ -174,3 +174,13 @@ def test_removing_the_older_copy_of_a_line_the_pr_repeated_is_allowed(repo):
     commit({"a.md": "Keep me.\n" + OLD + "Keep me.\n"})
     write("a.md", OLD + "Keep me.\n")
     assert guard().returncode == 0
+
+
+def test_a_crlf_checkout_compares_equal_to_the_lf_diff(repo):
+    """With eol=crlf the working tree has CRs the committed diff does not."""
+    commit, write, guard = repo
+    commit({".gitattributes": "*.md text eol=crlf\n", "a.md": OLD}, tag="base")
+    commit({"a.md": OLD + "New paragraph.\n"})
+    edited = OLD.replace("Old line one.", "Old line one, edited.") + "New paragraph.\n"
+    write("a.md", edited.replace("\n", "\r\n"))
+    assert guard().returncode == 0

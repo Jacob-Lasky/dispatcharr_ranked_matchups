@@ -14,8 +14,13 @@
 # or rewriting a PR-added line fails the job (strict on purpose: the PR's own
 # docs are the author's to edit), and removing an older copy of a line the PR
 # also added does not. Lines made only of ASCII punctuation and whitespace
-# (fences, table rules, blank lines) are ignored. Fails CLOSED: any git error
-# stops the script nonzero, and the workflow does not push.
+# (fences, table rules, blank lines) are ignored, and so is a trailing CR (a
+# CRLF checkout must compare equal to the LF diff). Fails CLOSED: any git
+# error stops the script nonzero, and the workflow does not push.
+#
+# Known false failure, accepted because it fails closed and is rare here: if
+# the PR RENAMES a .md file, the diff scoped to the new path counts the
+# inherited lines as added, so the pass may not edit those either.
 set -euo pipefail
 export LC_ALL=C
 base="$1"
@@ -33,7 +38,7 @@ hunk_lines() {
   awk -v sign="$1" '
     /^diff --git / { in_hunk = 0; next }
     /^@@ /         { in_hunk = 1; next }
-    in_hunk && substr($0, 1, 1) == sign { print substr($0, 2) }
+    in_hunk && substr($0, 1, 1) == sign { line = substr($0, 2); sub(/\r$/, "", line); print line }
   ' "$2" | { grep -a -v '^[][[:space:]!"#$%&()*+,./:;<=>?@\\^_`{|}~'"'"'-]*$' || true; }
 }
 
@@ -47,7 +52,7 @@ while IFS= read -r -d '' f; do
   hunk_lines + "$work/pr.diff" > "$work/added"
   [ -s "$work/added" ] || continue
   if [ -f "$f" ]; then cp "$f" "$work/now"; else : > "$work/now"; fi
-  awk 'NR == FNR { need[$0]++; next } { have[$0]++ }
+  awk '{ sub(/\r$/, "") } NR == FNR { need[$0]++; next } { have[$0]++ }
        END { for (l in need) if (have[l] < need[l]) print l }' \
     "$work/added" "$work/now" > "$work/missing"
   if [ -s "$work/missing" ]; then
