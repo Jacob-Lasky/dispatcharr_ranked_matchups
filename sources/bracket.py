@@ -61,6 +61,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .base import GameRow, MatchResult, SportSource
+from ._espn import _SEASON_WALK_WORKERS, fetch_days
 from .._util import poisson_sample
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.bracket")
@@ -247,32 +248,43 @@ class BracketSportSource(SportSource):
         a dict (the sources' `_http_get` gives None) for a failed request. A
         dict, even an empty one, is an answer: a day with no games.
 
-        Stops at the FIRST failed day: the sweep is discarded either way, and
-        against an ESPN outage every further day is another request timeout.
-        Days that did answer are kept on the instance until the sweep
-        completes, so the retry asks only from the failed day on, not the
-        whole window again. Injected `fetch_day` keeps each source's own
-        patchable `_http_get`."""
+        Fetched in date-ordered batches of `_SEASON_WALK_WORKERS` days, each
+        batch concurrently (`_espn.fetch_days`): a healthy 92-day playoff
+        window costs ~12 round trips instead of 92, and a hanging endpoint
+        costs one batch, one request timeout, the same as a sequential walk
+        that stops at its first failure. Stops after the FIRST batch with a
+        failed day: the sweep is discarded either way, and against an ESPN
+        outage every further batch is another timeout. Days that did answer
+        are kept on the instance until the sweep completes, so the retry asks
+        only for the days still missing, not the whole window again.
+        Injected `fetch_day` keeps each source's own patchable `_http_get`."""
         if self._bracket_fetch_given_up():
             return None
         if self._bracket_sweep_memo is None:
             self._bracket_sweep_memo = {}
         memo = self._bracket_sweep_memo
         total = (end - start).days + 1
-        days: List[date] = []
-        day = start
-        while day <= end:
-            if day not in memo:
-                data = fetch_day(day)
-                if not isinstance(data, dict):
-                    self._bracket_fetch_failed(
-                        f"scoreboard for {day.isoformat()} did not answer, "
-                        f"day {len(days) + 1} of {total}"
-                    )
-                    return None
-                memo[day] = data
-            days.append(day)
-            day += timedelta(days=1)
+        batch_start = start
+        while batch_start <= end:
+            batch_end = min(end, batch_start + timedelta(days=_SEASON_WALK_WORKERS - 1))
+            batch = fetch_days(
+                batch_start, batch_end,
+                lambda d: memo[d] if d in memo else fetch_day(d),
+            )
+            failed = None
+            for day, data in batch:  # date order: `failed` is the earliest
+                if isinstance(data, dict):
+                    memo[day] = data
+                elif failed is None:
+                    failed = day
+            if failed is not None:
+                self._bracket_fetch_failed(
+                    f"scoreboard for {failed.isoformat()} did not answer, "
+                    f"day {(failed - start).days + 1} of {total}"
+                )
+                return None
+            batch_start = batch_end + timedelta(days=1)
+        days = [start + timedelta(days=i) for i in range(total)]
         self._bracket_sweep_memo = None  # complete: the caller caches the result
         return [memo[d] for d in days]
 

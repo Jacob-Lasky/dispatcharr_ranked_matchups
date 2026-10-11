@@ -74,7 +74,7 @@ class FakeEspn:
             return {"types": {"items": copy.deepcopy(DATA[self.key]["season_types"])}}
         prefix = f"{cup_mod.ESPN_BASE}/usa.ncaa.{g}.1/scoreboard?dates="
         assert url.startswith(prefix), f"unexpected URL {url}"
-        day = url[len(prefix):]
+        day = url[len(prefix):][:8]  # YYYYMMDD, before "&limit="
         rows = DATA[self.key]["scoreboard"].get(day, [])
         events = [_event(r) for r in rows]
         if self.not_yet_played or self.live_ids:
@@ -397,7 +397,7 @@ class TestRegularSeasonCutoff:
         def fake(url, *a, **k):
             if "/seasons/" in url:
                 return FakeEspn("m2024")(url)
-            return {"events": boards.get(url.rsplit("dates=", 1)[1], [])}
+            return {"events": boards.get(url.rsplit("dates=", 1)[1][:8], [])}
         rows = _upcoming(reg, reg_mod, fake, datetime(2025, 7, 30, 12, 0, tzinfo=timezone.utc), 7)
         assert [r.extra["espn_event_id"] for r in rows] == ["aug-1"]
         rows = _upcoming(reg, reg_mod, fake, datetime(2024, 12, 14, 12, 0, tzinfo=timezone.utc), 0)
@@ -410,9 +410,9 @@ class TestRegularSeasonCutoff:
 
         def tracking(url, *a, **k):
             if "dates=" in url:
-                days.append(url.rsplit("dates=", 1)[1])
+                days.append(url.rsplit("dates=", 1)[1][:8])
                 # Days before Nov 1 are outside the fixture: an empty board.
-                if url.rsplit("dates=", 1)[1] < "20251101":
+                if url.rsplit("dates=", 1)[1][:8] < "20251101":
                     return {"events": []}
             return fake(url)
         with patch.object(reg_mod, "_http_get", side_effect=tracking):

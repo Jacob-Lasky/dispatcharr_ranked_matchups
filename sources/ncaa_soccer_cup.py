@@ -74,7 +74,6 @@ from ._espn import (
     SeasonTypeWindow,
     extract_espn_scoreboard_event,
     fetch_scoreboard_day,
-    fetch_scoreboard_days,
     fetch_season_type_windows,
     season_type_at,
     sweep_upcoming_scoreboard,

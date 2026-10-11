@@ -141,7 +141,8 @@ def _isolated_odds_cache(tmp_path, monkeypatch):
 @pytest.fixture
 def refresh_env(plugin, tmp_path, monkeypatch):
     """_action_refresh with no network, no DB and a matcher that matches every
-    game to channel 777. Returns (write_prior_cache, run, read_cache).
+    game to channel 777. Returns (write_prior_cache, run, read_cache); `run`
+    takes the source objects to refresh and any settings to override.
 
     Lives here, not in one test module, because more than one module drives a
     real refresh end to end (test_keep_on_air for #240, test_sources for the
@@ -207,46 +208,3 @@ def pytest_configure(config):
         "orm_state(profiles=..., channels=..., rows=...): seed the fake "
         "ChannelProfile ORM used by tests/test_channel_profiles.py",
     )
-
-
-@pytest.fixture
-def refresh_env(plugin, tmp_path, monkeypatch):
-    """_action_refresh with no network, no DB and a matcher that matches every
-    game to channel 777. Returns (write_prior_cache, run, read_cache); `run`
-    takes the source objects to refresh and any settings to override."""
-    import importlib
-    matcher = importlib.import_module("dispatcharr_ranked_matchups.matcher")
-
-    cache_path = tmp_path / "cache.json"
-    monkeypatch.setattr(plugin, "CACHE_PATH", str(cache_path))
-    monkeypatch.setattr(plugin, "_streams_in_groups", lambda _ids: set())
-    def build_lookup(**_kw):
-        def lookup(_game):
-            return []
-        lookup.stats = {}
-        return lookup
-    monkeypatch.setattr(plugin, "_build_epg_lookup", build_lookup)
-    monkeypatch.setattr(plugin, "_resolve_key", lambda *_a, **_kw: "")
-
-    def fake_match(scored, _lookup, _key, _model, widen=False):
-        return [
-            matcher.MatchResult(game_index=i, channel_id=777, channel_ids=[777],
-                                stream_ids=[], channel_name="NCAAF 080",
-                                method="regex_strict")
-            for i in range(len(scored))
-        ]
-    monkeypatch.setattr(matcher, "match_games_to_channels", fake_match)
-
-    def write_prior(games):
-        cache_path.write_text(json.dumps({"games": games, "refreshed_at": None}))
-
-    def run(sources, **settings):
-        monkeypatch.setattr(plugin, "_build_sources", lambda _s: sources)
-        base = {"lookahead_days": 7, "weight_importance": 0, "max_games": 10}
-        base.update(settings)
-        return plugin._action_refresh(base)
-
-    def read():
-        return json.loads(cache_path.read_text())
-
-    return write_prior, run, read

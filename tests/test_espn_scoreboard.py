@@ -37,8 +37,10 @@ class EspnEmulator:
     `by_day` maps "YYYYMMDD" to that bucket's events. A one-day request
     returns at most `limit` events (default page 100, and an over-1000 limit
     falls back to 25). A `dates=A-B` range request returns None, which is what
-    a source's `_http_get` hands back for ESPN's HTTP 400 on that form. Any
-    other URL (rankings, standings) gets an empty dict.
+    a source's `_http_get` hands back for ESPN's HTTP 400 on that form. A
+    core-API season calendar (`/seasons/YYYY`, which the College Cup needs
+    before it sweeps, #235) gets one phase covering the year. Any other URL
+    (rankings, standings) gets an empty dict.
     """
 
     def __init__(self, by_day=None):
@@ -47,6 +49,12 @@ class EspnEmulator:
 
     def __call__(self, url, *_a, **params):
         self.urls.append(url)
+        if "/seasons/" in url:
+            year = url.rstrip("/").rsplit("/", 1)[1]
+            return {"types": {"count": 1, "items": [{
+                "slug": "regular", "type": 1,
+                "startDate": f"{year}-01-01T00:00Z", "endDate": f"{year}-12-31T23:59Z",
+            }]}}
         if "/scoreboard" not in url:
             return {}
         q = {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}

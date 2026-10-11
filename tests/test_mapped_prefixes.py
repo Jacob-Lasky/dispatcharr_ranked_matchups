@@ -68,6 +68,9 @@ NOT_PREFIX_KEYED = {
     ("honours", "_HONOURS"),
     # Keyed on the FD.org competition code ("WC", "EC", "CL").
     ("honours", "_COMPETITION_MAP"),
+    # Keyed on the FD.org competition code of a chained group stage ("WC",
+    # "EC"), read by GroupStageSoccerSource.cross_source_chain (#53, #78).
+    ("sources.soccer", "_CHAIN_BRACKETS"),
     # Keyed on a LEAGUE_CONTEXTS outcome-band label; "UCL" is the
     # Champions-League-places band, not the UCL prefix.
     ("plugin", "_BAND_DISPLAY"),
@@ -119,8 +122,15 @@ def _logos():
 
 
 def _all_on_settings():
-    """Every source toggle the manifest declares, on, with every API key
-    present, so no source is skipped for want of a key."""
+    """Every source the manifest can switch on, on, with every API key
+    present, so no source is skipped for want of a key.
+
+    A league is switched on by its own `enable_*` toggle, or (since #208) by a
+    pair select or the NCAAF select in `merged_settings`. Both are read off
+    the modules that define them, not listed here, so a league moved into a
+    select stays covered without anyone editing this test."""
+    merged = _module("merged_settings")
+    ncaaf = _module("sources.ncaaf")
     with open(os.path.join(REPO_ROOT, "plugin.json"), encoding="utf-8") as f:
         fields = json.load(f)["fields"]
     settings = {}
@@ -130,6 +140,13 @@ def _all_on_settings():
             settings[fid] = True
         elif fid.endswith("_api_key"):
             settings[fid] = "test-key-not-real"
+    for select_id in merged.LEAGUE_PAIRS:
+        settings[select_id] = merged.PAIR_BOTH
+    # The widest division set, so every division's games are built.
+    settings[merged.NCAAF_SETTING] = max(
+        ncaaf.DIVISION_SETS, key=lambda k: len(ncaaf.DIVISION_SETS[k]),
+    )
+    settings[merged.SETTINGS_SCHEMA_KEY] = merged.SETTINGS_SCHEMA_VERSION
     return settings
 
 

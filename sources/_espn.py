@@ -455,10 +455,10 @@ def fetch_scoreboard_days(
     and run concurrently by `fetch_days`.
 
     The per-day walk for every ESPN upcoming sweep and full-season walk.
-    ESPN bracket sweeps do NOT use it: they go day by day through
+    ESPN bracket sweeps do NOT use it: they fetch through
     `fetch_scoreboard_day` inside `BracketSportSource._sweep_bracket_days`,
-    which gives up the whole sweep at the first failed day (#245), where
-    this walk reads a failed day as an empty one. Concurrency keeps a long window
+    which gives up the whole sweep at the first batch with a failed day
+    (#245), where this walk reads a failed day as an empty one. Concurrency keeps a long window
     affordable: a slow endpoint costs one timeout per `_SEASON_WALK_WORKERS`
     days instead of one per day.
 

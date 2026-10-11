@@ -58,6 +58,15 @@ class Scoreboard:
         self.calls = []
 
     def __call__(self, url, *a, **kw):
+        if "/seasons/" in url:
+            # ESPN's season calendar, which the College Cup needs before it
+            # sweeps at all (#235): one phase covering the whole year is
+            # enough here, since these tests are about the day sweep.
+            year = url.rstrip("/").rsplit("/", 1)[1]
+            return {"types": {"count": 1, "items": [{
+                "slug": "regular", "type": 1,
+                "startDate": f"{year}-01-01T00:00Z", "endDate": f"{year}-12-31T23:59Z",
+            }]}}
         day = _day_of(url)
         self.calls.append(day)
         if self.failures_left.get(day, 0) > 0:
@@ -160,13 +169,15 @@ def test_the_retry_asks_only_from_the_failed_day(nba_sweep):
     assert board.calls.count("20260401") == 1
 
 
-def test_a_sweep_stops_at_the_first_failed_day(nba_sweep):
-    """The sweep is discarded either way; against an outage every further day
-    would be another 15 s request timeout."""
+def test_a_sweep_stops_after_the_batch_with_the_first_failed_day(nba_sweep):
+    """The sweep is discarded either way; against an outage every further
+    batch would be another 15 s request timeout. Days are fetched in
+    concurrent batches of 8 from Apr 1, so the failed May 20 (day 50) sits in
+    the batch May 19-26 and nothing after it is asked. Literals on purpose."""
     board, src = nba_sweep
     src._fetch_bracket_games()
-    assert board.calls[-1] == "20260520"
-    assert "20260521" not in board.calls
+    assert "20260520" in board.calls
+    assert max(board.calls) == "20260526"
 
 
 def test_a_day_that_keeps_failing_stops_hitting_the_network(monkeypatch):
