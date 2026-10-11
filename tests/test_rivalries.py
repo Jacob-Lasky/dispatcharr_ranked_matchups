@@ -294,9 +294,6 @@ class TestEveryEntryResolvesToARealTeam:
     # Names the fixture cannot confirm, each for a stated reason. A name here
     # is a deliberate exemption; anything else that fails is a typo.
     KNOWN_ABSENT = {
-        # Below the Championship in the Football-Data.org snapshot. The ESPN
-        # cup rosters DO confirm it, and those are checked with no exemptions.
-        "Sheffield Wednesday",
         "Saint-Etienne",        # Ligue 2
         # SportsDB's spelling of Paris Saint-Germain, kept as a second entry
         # because that source and Football-Data.org disagree. The fixture
@@ -330,18 +327,52 @@ class TestEveryEntryResolvesToARealTeam:
     SOCCER = ("EPL", "EFL", "BL1", "LaLiga", "SerieA", "Ligue1",
               "BSA", "Eredivisie", "PrimeiraLiga", "MLS", "LigaMX")
 
-    # Rosters that hold EVERY team their source can emit, so a name missing
-    # from one is a misspelling, never a club that dropped out of view.
-    # KNOWN_ABSENT does not apply to them. These are the ESPN English cup
-    # rosters, and they are not pooled with SOCCER: a cup row carries ESPN's
-    # spelling, so an entry that resolves only against Football-Data.org's
-    # spelling would fire in the league and never in the cup (#192).
+    # The ESPN English cup rosters: between them, EVERY club either cup can
+    # draw, so a name in neither is a misspelling, never a club that dropped
+    # out of view, and KNOWN_ABSENT does not apply to a cup prefix.
+    #
+    # A cup prefix is checked against BOTH cup rosters, not only its own,
+    # because the cups share the ENGLISH_CLUBS pool: a non-league derby
+    # (Chester FC is in the FA Cup and never in the EFL Cup) is a valid pool
+    # entry that simply never meets in the EFL Cup. It is NOT checked against
+    # Football-Data.org's rosters: a cup row carries ESPN's spelling, so an
+    # entry resolving only against FD.org's would fire in the league and
+    # never in the cup (#192).
+    #
+    # The league prefixes DO also accept the cup rosters, for the same reason
+    # SOCCER pools: a club outside the two FD.org divisions is still spelled
+    # right if ESPN confirms it, and can be promoted into view.
     COMPLETE = ("EFLCUP", "FACUP")
 
     def _candidates(self, prefix, rosters):
+        if prefix in self.COMPLETE:
+            return [n for p in self.COMPLETE for n in rosters.get(p, [])]
         if prefix in self.SOCCER:
-            return [n for p in self.SOCCER for n in rosters.get(p, [])]
+            return [n for p in self.SOCCER + self.COMPLETE
+                    for n in rosters.get(p, [])]
         return rosters.get(prefix, [])
+
+    def _resolves(self, name, candidates):
+        return any(
+            rivalries._name_matches(rivalries._normalize(t), rivalries._normalize(name))
+            for t in candidates
+        )
+
+    def test_a_non_league_cup_club_can_join_the_shared_pool(self):
+        """The codex finding on this change: checking each cup only against
+        its own roster rejected a valid FA-Cup-only derby for EFLCUP."""
+        rosters = self._fixture()
+        assert "Chester FC" in rosters["FACUP"]
+        assert "Chester FC" not in rosters["EFLCUP"], \
+            "instrument check: needs a club only the FA Cup draws"
+        for prefix in ("EFLCUP", "FACUP", "EPL", "EFL"):
+            assert self._resolves("Chester FC", self._candidates(prefix, rosters)), prefix
+
+    def test_a_cup_prefix_still_rejects_a_misspelling(self):
+        """Pooling the two cup rosters must not loosen the spelling check."""
+        cup = self._candidates("EFLCUP", self._fixture())
+        assert not self._resolves("Sheffield Weds", cup)
+        assert self._resolves("Sheffield Wednesday", cup)
 
     def test_every_entry_resolves_somewhere(self):
         rosters = self._fixture()

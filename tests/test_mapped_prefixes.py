@@ -205,46 +205,92 @@ def test_every_source_class_is_in_the_build(built_sources):
 _ALLOWED_ROW_PREFIX = {"self.sport_prefix", "self.config.sport_prefix"}
 
 
-def _odd_row_prefixes(src_dir):
-    """(file, line, source text) for every `sport_prefix=` passed to a
-    GameRow(...) call under `src_dir` that does NOT take the source's own
-    prefix, plus the total number of such keywords seen."""
+def _odd_row_prefixes(paths):
+    """Every place under `paths` (files) that could give a row a prefix other
+    than its source's own, plus how many GameRow prefixes were seen.
+
+    Three shapes are reported:
+      - `GameRow(sport_prefix=...)` whose value is not the source's own
+        prefix (`self.sport_prefix` / `self.config.sport_prefix`);
+      - `replace(row, sport_prefix=...)`, the dataclasses re-stamp;
+      - any assignment to an attribute named `sport_prefix`, including
+        `setattr(row, "sport_prefix", ...)`, which re-stamps a row AFTER it
+        was built correctly and so slips past the constructor check.
+    """
     odd, seen = [], 0
-    for fname in sorted(os.listdir(src_dir)):
-        if not fname.endswith(".py"):
-            continue
-        with open(os.path.join(src_dir, fname), encoding="utf-8") as f:
+    for path in paths:
+        fname = os.path.basename(path)
+        with open(path, encoding="utf-8") as f:
             tree = ast.parse(f.read())
         for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == "GameRow"):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.id if isinstance(func, ast.Name) else (
+                    func.attr if isinstance(func, ast.Attribute) else "")
                 for kw in node.keywords:
-                    if kw.arg == "sport_prefix":
+                    if kw.arg != "sport_prefix":
+                        continue
+                    if name == "GameRow":
                         seen += 1
                         text = ast.unparse(kw.value)
                         if text not in _ALLOWED_ROW_PREFIX:
                             odd.append((fname, node.lineno, text))
+                    elif name == "replace":
+                        odd.append((fname, node.lineno, ast.unparse(node)))
+                if (name == "setattr" and len(node.args) >= 2
+                        and isinstance(node.args[1], ast.Constant)
+                        and node.args[1].value == "sport_prefix"):
+                    odd.append((fname, node.lineno, ast.unparse(node)))
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets = [node.target]
+            for t in targets:
+                for sub in ast.walk(t):
+                    if isinstance(sub, ast.Attribute) and sub.attr == "sport_prefix":
+                        odd.append((fname, node.lineno, ast.unparse(node)))
     return odd, seen
+
+
+def _source_files():
+    src_dir = os.path.join(REPO_ROOT, "sources")
+    return [os.path.join(src_dir, f) for f in sorted(os.listdir(src_dir))
+            if f.endswith(".py")]
 
 
 def test_a_row_carries_its_sources_own_prefix():
     """What makes "the instance's `sport_prefix`" equal "the prefix it emits":
-    every GameRow a source builds takes its prefix from the source itself. A
-    row stamped with some other literal would emit a prefix the registry
-    build above cannot see."""
-    odd, seen = _odd_row_prefixes(os.path.join(REPO_ROOT, "sources"))
+    every GameRow a source builds takes its prefix from the source itself, and
+    nothing re-stamps a row afterwards. A row carrying some other prefix
+    would emit one the registry build above cannot see."""
+    odd, seen = _odd_row_prefixes(_source_files())
     assert seen >= 15, "instrument check: found too few GameRow calls"
-    assert not odd, f"GameRow built with a prefix not taken from the source: {odd}"
+    assert not odd, f"a row's prefix is not taken from its source: {odd}"
 
 
-def test_the_row_prefix_scan_flags_a_literal(tmp_path):
-    """Mutation for the scan: a literal prefix must be reported, and the
-    allowed forms must not be."""
-    (tmp_path / "fake.py").write_text(
+def test_plugin_never_restamps_a_rows_prefix():
+    """plugin.py builds exactly one GameRow, `_gamerow_from_row`, which
+    re-hydrates a cache row a SOURCE wrote, so its prefix is one this file
+    already accounts for and its constructor is not checked. What plugin.py
+    must never do is overwrite a row's prefix between fetch and lookup."""
+    odd, _seen = _odd_row_prefixes([os.path.join(REPO_ROOT, "plugin.py")])
+    odd = [o for o in odd if o[2] != "row.get('sport_prefix') or ''"]
+    assert not odd, f"plugin.py re-stamps a row's prefix: {odd}"
+
+
+def test_the_row_prefix_scan_flags_every_restamp_shape(tmp_path):
+    """Mutation for the scan: each way of giving a row a foreign prefix is
+    reported, and the two allowed forms are not."""
+    fake = tmp_path / "fake.py"
+    fake.write_text(
         'GameRow(sport_prefix=self.sport_prefix)\n'
         'GameRow(sport_prefix=self.config.sport_prefix)\n'
         'GameRow(sport_prefix="NCAAB")\n'
+        'row.sport_prefix = "NCAAB"\n'
+        'setattr(row, "sport_prefix", "NCAAB")\n'
+        'dataclasses.replace(row, sport_prefix="NCAAB")\n'
     )
-    odd, seen = _odd_row_prefixes(str(tmp_path))
+    odd, seen = _odd_row_prefixes([str(fake)])
     assert seen == 3
-    assert odd == [("fake.py", 3, "'NCAAB'")]
+    assert sorted(line for _f, line, _t in odd) == [3, 4, 5, 6]
