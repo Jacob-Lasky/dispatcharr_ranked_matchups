@@ -8172,49 +8172,72 @@ _ACTION_HANDLERS = {
 }
 
 
-def _migrate_stored_settings() -> None:
-    """Write the settings #208 merged into this install's stored settings, once.
+def _read_settings_migrating() -> Optional[Dict[str, Any]]:
+    """The stored settings, with the merge #208 made written into them once.
 
-    The runtime does not need this: every reader resolves a merged setting
-    through merged_settings, which falls back to the legacy keys. The MODAL
-    does: it shows `value ?? field.default`, so without a stored value for the
-    new field it would show "Off" for a league a legacy toggle still runs, and
-    blank weights while the old tuned ones are in force.
+    Returns the (migrated) stored dict, or None when there is no config row or
+    Dispatcharr is not importable. Raises on a DB error; callers decide.
+
+    The runtime does not NEED the write: every reader resolves a merged
+    setting through merged_settings, which falls back to the legacy keys. The
+    MODAL does: it shows `value ?? field.default`, so without a stored value
+    for the new field it would show "Off" for a league a legacy toggle still
+    runs, and blank weights while the old tuned ones are in force. Doing it on
+    every raw read too means the scheduler and reaper always see the migrated
+    dict, which matters once a save has stored a new field at its default
+    (only the raw dict can tell that was saved; see merged_settings).
 
     The write is a compare-and-swap on the whole settings JSON
     (`.filter(settings=<what we read>).update(...)`): a user saving the form
     between our read and our write makes the filter match nothing, so their
-    save is never overwritten. A lost race is retried on the next discovery,
-    which reads their saved dict. `.update()` also skips signals, which is
-    fine here: nothing listens to PluginConfig saves for settings.
-
-    Never raises: a failed migration leaves the legacy fallback in charge,
-    which behaves identically, so it is logged and left for the next try.
+    save is never overwritten. The lost race is retried on the next read,
+    which sees their saved dict. `.update()` skips signals, which is fine:
+    nothing listens to PluginConfig saves for settings.
     """
     try:
         from apps.plugins.models import PluginConfig
         from django.db import transaction
     except ImportError:
-        return  # not inside Dispatcharr (tests, offline tools)
+        return None  # not inside Dispatcharr (tests, offline tools)
+    pc = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
+    if pc is None:
+        return None
+    stored = pc.settings if isinstance(pc.settings, dict) else {}
+    migrated = merged_settings.migrate_stored_settings(stored)
+    if migrated is None:
+        return dict(stored)
     try:
-        pc = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
-        if pc is None or not isinstance(pc.settings, dict):
-            return
-        migrated = merged_settings.migrate_stored_settings(pc.settings)
-        if migrated is None:
-            return
         # A savepoint, so a failed write cannot poison a transaction the
         # loader might be running discovery inside.
         with transaction.atomic():
             written = PluginConfig.objects.filter(
-                pk=pc.pk, settings=pc.settings,
+                pk=pc.pk, settings=stored,
             ).update(settings=migrated)
-        if written:
-            logger.info(
-                "[ranked_matchups] migrated saved settings to the merged layout "
-                "(#208): %s",
-                ", ".join(sorted(k for k in migrated if migrated.get(k) != pc.settings.get(k))),
-            )
+    except Exception as e:  # noqa: BLE001
+        # The migrated dict behaves identically to the stored one (that is
+        # the migration's contract), so a failed write only delays the modal
+        # catching up; the next read retries.
+        logger.warning("[ranked_matchups] could not save migrated settings: %s", e)
+        return migrated
+    if written:
+        logger.info(
+            "[ranked_matchups] migrated saved settings to the merged layout "
+            "(#208): %s",
+            ", ".join(sorted(k for k in migrated if migrated.get(k) != stored.get(k))),
+        )
+        return migrated
+    # Lost the race: somebody saved in between. Their dict is the truth; it
+    # is migrated on the next read.
+    return dict(stored)
+
+
+def _migrate_stored_settings() -> None:
+    """Discovery hook (Plugin.__init__): migrate before the plugins list is
+    served, so the modal opens on migrated settings. Never raises: a failed
+    migration leaves the legacy fallback in charge, which behaves identically,
+    so it is logged and retried on the next discovery."""
+    try:
+        _read_settings_migrating()
     except Exception as e:  # noqa: BLE001
         logger.warning("[ranked_matchups] could not migrate saved settings: %s", e)
 
@@ -8302,11 +8325,10 @@ class Plugin:
         logger.info("[ranked_matchups] reaper thread started (pid=%s)", os.getpid())
 
     def get_current_settings(self) -> Dict[str, Any]:
+        """The raw stored settings (no manifest defaults merged in), migrated
+        to the #208 layout on the way through; see _read_settings_migrating."""
         try:
-            from apps.plugins.models import PluginConfig
-            pc = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
-            if pc and pc.settings:
-                return dict(pc.settings)
+            return _read_settings_migrating() or {}
         except Exception as e:
             logger.warning("[ranked_matchups] could not read settings from DB: %s", e)
         return {}

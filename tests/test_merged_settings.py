@@ -261,6 +261,27 @@ class TestWeightText:
         assert text == "rank=1, spread=0.1, narrative=1"
         assert ms.parse_weight_overrides(text)[0] == d
 
+    def test_format_is_lossless_past_six_digits(self):
+        """:g alone keeps 6 significant digits, so a saved 1.244995 migrated
+        as 1.245 and moved every close-game score (codex review, #208)."""
+        text = ms.format_weight_overrides({"spread": 1.244995, "rank": 0.30000000000000004})
+        assert text == "rank=0.30000000000000004, spread=1.244995"
+        got = ms.parse_weight_overrides(text)[0]
+        assert got == {"spread": 1.244995, "rank": 0.30000000000000004}
+
+    @pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "NaN", "1e999"])
+    def test_non_finite_weight_rejected(self, plugin, bad):
+        """float() accepts these, and a NaN weight makes every affected game's
+        score NaN, which sorts arbitrarily and lands in the cache."""
+        got, problems = ms.parse_weight_overrides(f"favorite={bad}")
+        assert got == {} and len(problems) == 1
+        w = plugin._build_weights({"scoring_weights": f"favorite={bad}"})
+        assert w.favorite == 6.0
+
+    def test_non_finite_legacy_weight_rejected(self, plugin):
+        w = plugin._build_weights({"weight_favorite": float("nan")})
+        assert w.favorite == 6.0
+
 
 # ---------------------------------------------------------------------------
 # The one-time write that makes the modal show what the runtime does.
@@ -283,7 +304,7 @@ class TestMigrateStoredSettings:
         }
         # Nothing stored for tennis, so nothing is written for it.
         assert "tennis" not in out
-        # Legacy keys are kept, so a downgrade still finds them.
+        # Legacy keys are kept, so a downgrade restores the pre-upgrade setup.
         assert {k: out[k] for k in PRE_208_STORED} == PRE_208_STORED
 
     def test_idempotent(self):
@@ -301,6 +322,21 @@ class TestMigrateStoredSettings:
     def test_typed_value_wins_over_legacy_for_the_same_weight(self):
         out = ms.migrate_stored_settings({"scoring_weights": "spread=4", "weight_spread": 1})
         assert out["scoring_weights"] == "spread=4"
+
+    def test_a_saved_select_is_kept_even_at_off(self):
+        """A modal holding pre-migration settings saved Tennis = Off over a
+        stored enable_atp. The raw dict proves "off" was saved (the UI sends
+        only keys it loaded or the user touched), so migration keeps it, and
+        from then on ATP is off on both paths (codex review, #208)."""
+        out = ms.migrate_stored_settings({"enable_atp": True, "tennis": "off"})
+        assert out["tennis"] == "off"
+        for view in (out, _loader_merge(out)):
+            assert ms.league_enabled(view, "enable_atp") is False
+
+    def test_a_saved_ncaaf_is_kept_even_at_off(self):
+        out = ms.migrate_stored_settings({"enable_ncaaf": True, "ncaaf": "off"})
+        assert out["ncaaf"] == "off"
+        assert ms.ncaaf_divisions(out) is None
 
     def test_ncaaf_values(self):
         assert ms.migrate_stored_settings({"enable_ncaaf": False, "ncaaf_divisions": "fbs_fcs"})["ncaaf"] == "off"
@@ -411,6 +447,57 @@ class TestPersistedMigration:
     def test_outside_dispatcharr_is_a_no_op(self, plugin, monkeypatch):
         monkeypatch.setitem(sys.modules, "apps.plugins.models", None)
         plugin._migrate_stored_settings()  # ImportError path: must not raise
+
+
+class TestRawSettingsReadMigrates:
+    """get_current_settings (scheduler + reaper) reads the raw dict, so it
+    migrates on the way through: one read, at most one CAS write."""
+
+    def test_returns_and_saves_the_migrated_dict(self, plugin, fake_plugin_config):
+        store = fake_plugin_config(_FakePluginConfigStore(
+            {"enable_atp": True, "tennis": "off"}))
+        got = plugin.Plugin.get_current_settings(None)
+        assert got["tennis"] == "off" and got["settings_schema"] == 2
+        assert store.settings == got
+        assert ms.league_enabled(got, "enable_atp") is False
+
+    def test_lost_race_returns_what_the_user_saved(self, plugin, fake_plugin_config):
+        users_save = {"tennis": "wta", "settings_schema": 2}
+
+        def user_saves_the_form(store):
+            store.settings = dict(users_save)
+        fake_plugin_config(_FakePluginConfigStore({"enable_atp": True},
+                                                  on_read=user_saves_the_form))
+        # The read itself saw the pre-save dict, so it returns that dict
+        # unmigrated; the resolvers' legacy fallback gives the same answer,
+        # and the user's save is untouched for the next read.
+        got = plugin.Plugin.get_current_settings(None)
+        assert got == {"enable_atp": True}
+        assert ms.league_enabled(got, "enable_atp") is True
+
+    def test_failed_write_still_returns_the_migrated_dict(self, plugin, fake_plugin_config, caplog):
+        import logging
+
+        class _ReadOnly(_FakePluginConfigStore):
+            def filter(self, **kw):
+                qs = super().filter(**kw)
+                if "pk" in kw:
+                    def _boom(settings):
+                        raise RuntimeError("read-only replica")
+                    qs.update = _boom
+                return qs
+        fake_plugin_config(_ReadOnly({"enable_atp": True}))
+        with caplog.at_level(logging.WARNING):
+            got = plugin.Plugin.get_current_settings(None)
+        assert got["tennis"] == "atp"
+        assert "could not save migrated settings" in caplog.text
+
+    def test_no_row_is_empty(self, plugin, fake_plugin_config):
+        class _Empty:
+            def filter(self, **kw):
+                return types.SimpleNamespace(first=lambda: None)
+        fake_plugin_config(_Empty())
+        assert plugin.Plugin.get_current_settings(None) == {}
 
 
 class TestInitRunsTheMigration:

@@ -32,15 +32,31 @@ So every resolver here follows one rule: a new key wins when it holds a
 non-default value; when it is absent OR at its default and the legacy keys are
 present, the legacy keys decide. That reproduces the pre-#208 behaviour on both
 paths. Fact 3 is why `migrate_stored_settings` also exists: it writes the
-derived new keys into the stored dict once (plugin.py does the write), so the
-modal SHOWS what the runtime does, and stamps `SETTINGS_SCHEMA_KEY`. Once that
-stamp is present the legacy keys are ignored, which is what lets a user later
-choose a new field's default ("Off") and have it stick. The legacy keys are
-deliberately LEFT in the stored dict: a downgrade to a pre-#208 release then
-still finds them.
+derived new keys into the stored dict once (plugin.py does the write, from
+discovery and from every raw settings read), so the modal SHOWS what the
+runtime does, and stamps `SETTINGS_SCHEMA_KEY`. Once that stamp is present the
+legacy keys are ignored, which is what lets a user later choose a new field's
+default ("Off") and have it stick.
+
+The migration reads the RAW stored dict, which carries one fact the resolvers
+cannot see: a new key PRESENT there was put there by a save (the UI sends only
+keys it loaded or the user touched), so the migration keeps it even at its
+default. That covers a save that reached the DB before any migration did (a
+modal still holding pre-migration settings) with "Off" picked: the run() path
+honours the legacy toggle until the next discovery or scheduler read migrates,
+and from then on the user's "Off" stands.
+
+The legacy keys are LEFT in the stored dict, so a downgrade to a pre-#208
+release restores the settings as they were at the upgrade (everything off and
+default weights would be the alternative). It does not carry edits made after
+the upgrade back to the old fields, and edits made in the old release are not
+read again after re-upgrading (the stamp is still there). Dispatcharr's own
+plugin page warns that a downgrade may break saved settings; this is the
+cheapest behaviour that is right for the common case.
 
 Pure: no Django, no I/O, so the whole fallback is unit-testable.
 """
+import math
 from dataclasses import fields as _dataclass_fields
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -207,11 +223,23 @@ def parse_weight_overrides(text: Any) -> Tuple[Dict[str, float], List[str]]:
         if not sep or name not in WEIGHT_NAMES:
             problems.append(f"{entry!r} (expected one of {', '.join(WEIGHT_NAMES)} as name=number)")
             continue
-        try:
-            overrides[name] = float(value.strip())
-        except ValueError:
+        number = _finite(value.strip())
+        if number is None:
             problems.append(f"{entry!r} ({value.strip()!r} is not a number)")
+            continue
+        overrides[name] = number
     return overrides, problems
+
+
+def _finite(raw: Any) -> Optional[float]:
+    """float(raw), or None when it is not a finite number. "nan" and "inf"
+    parse as floats but would turn every affected game's score into NaN or
+    inf, which then sorts arbitrarily and lands in the cache."""
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def weight_overrides(settings: Dict[str, Any]) -> Tuple[Dict[str, float], List[str]]:
@@ -229,16 +257,26 @@ def weight_overrides(settings: Dict[str, Any]) -> Tuple[Dict[str, float], List[s
         legacy = LEGACY_WEIGHT_PREFIX + name
         if name in overrides or legacy not in settings:
             continue
-        try:
-            overrides[name] = float(settings[legacy])
-        except (TypeError, ValueError):
+        number = _finite(settings[legacy])
+        if number is None:
             problems.append(f"{legacy}={settings[legacy]!r} is not a number")
+            continue
+        overrides[name] = number
     return overrides, problems
 
 
+def _format_number(value: float) -> str:
+    """The shortest text that parses back to exactly `value`: "6" rather than
+    "6.0", and never the 6-significant-digit rounding of :g (1.244995 would
+    otherwise migrate as 1.245 and move every score it touches)."""
+    short = f"{value:g}"
+    return short if float(short) == value else repr(float(value))
+
+
 def format_weight_overrides(overrides: Dict[str, float]) -> str:
-    """Render overrides as the `scoring_weights` text, in Weights field order."""
-    return ", ".join(f"{n}={overrides[n]:g}" for n in WEIGHT_NAMES if n in overrides)
+    """Render overrides as the `scoring_weights` text, in Weights field order.
+    Lossless: parsing the result gives back exactly `overrides`."""
+    return ", ".join(f"{n}={_format_number(overrides[n])}" for n in WEIGHT_NAMES if n in overrides)
 
 
 def migrate_stored_settings(stored: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -247,16 +285,20 @@ def migrate_stored_settings(stored: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     (already migrated, or no legacy key stored).
 
     Each new key is computed by the SAME resolver the runtime uses, so the
-    migrated dict behaves identically to the unmigrated one. Only specs whose
-    legacy keys are actually stored are written. Legacy keys are kept (see the
-    module docstring: downgrade safety)."""
+    migrated dict behaves identically to the unmigrated one, except that a new
+    key the user already saved is kept as saved (the raw dict proves it was
+    saved; see the module docstring). Only specs whose legacy keys are
+    actually stored are written. Legacy keys are kept (module docstring:
+    what that does and does not buy on a downgrade)."""
     if is_migrated(stored) or not any(k in stored for k in LEGACY_KEYS):
         return None
     out = dict(stored)
     for select_id, ((_, key_a), (_, key_b)) in LEAGUE_PAIRS.items():
-        if key_a in stored or key_b in stored:
+        # A select already in the raw dict was saved by the user; keep it,
+        # even at "off" (see "The migration reads the RAW stored dict").
+        if select_id not in stored and (key_a in stored or key_b in stored):
             out[select_id] = league_pair_value(stored, select_id)
-    if any(k in stored for k in _NCAAF_LEGACY_KEYS):
+    if NCAAF_SETTING not in stored and any(k in stored for k in _NCAAF_LEGACY_KEYS):
         divisions = ncaaf_divisions(stored)
         if divisions is None:
             out[NCAAF_SETTING] = NCAAF_OFF
