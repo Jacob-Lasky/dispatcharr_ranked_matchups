@@ -236,6 +236,24 @@ class TestHeaderValuesNeverReachTheLog:
         assert "SEKRITKEY99" not in text
         assert "boxing-data-api.p.rapidapi.com" in text
 
+    def test_bytes_header_value_is_masked(self, caplog):
+        from dispatcharr_ranked_matchups._util import http_get_json
+        fake = FakeRequests(raises=FakeRequests.RequestException(
+            "header value: b'SEKRIT\\nKEY99' (SEKRIT\nKEY99)"))
+        with caplog.at_level(logging.WARNING):
+            http_get_json(fake, "u", log=logging.getLogger("t"), tag="t",
+                          headers={"x-api-key": b"SEKRIT\nKEY99"})
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "SEKRIT" not in text and "KEY99" not in text, text
+
+    def test_short_value_does_not_shred_the_message(self, caplog):
+        from dispatcharr_ranked_matchups._util import http_get_json
+        fake = FakeRequests(raises=FakeRequests.RequestException("InvalidHeader: header value"))
+        with caplog.at_level(logging.WARNING):
+            http_get_json(fake, "u", log=logging.getLogger("t"), tag="t",
+                          headers={"x-api-key": "a"})
+        assert caplog.records[0].getMessage() == "[t] u failed: InvalidHeader: header value"
+
     def test_boxing_strips_a_pasted_key(self):
         from dispatcharr_ranked_matchups.sources.boxing import BoxingSource
         assert BoxingSource(api_key="  abc123\n").api_key == "abc123"

@@ -410,10 +410,16 @@ def fetch_days(
 #     costs nothing to keep asking, and it may recover mid-walk, so it is
 #     walked to the end rather than silently truncating the season.
 #
+# A hang that lets one request through per chunk defeats the all-None rule, so
+# every walk ALSO stops once it has spent SCOREBOARD_WALK_BUDGET_SECONDS. The
+# slowest healthy walk measured 2026-10-11 took ~5 s (MLS, 303 days), so 120 s
+# is ~24x headroom and only a degraded endpoint reaches it.
+#
 # The cost is that a walk which meets a hang loses the rest of its window for
 # this refresh (a WARNING says so); the next refresh retries it.
 SCOREBOARD_WALK_CHUNK_DAYS = 2 * _SEASON_WALK_WORKERS
 SCOREBOARD_SLOW_CHUNK_SECONDS = 10.0
+SCOREBOARD_WALK_BUDGET_SECONDS = 120.0
 
 
 def fetch_scoreboard_days(
@@ -432,11 +438,13 @@ def fetch_scoreboard_days(
     days instead of one per day.
 
     Stops early, with a WARNING, at the first chunk that is entirely None AND
-    slow (see SCOREBOARD_WALK_CHUNK_DAYS), so the result can be SHORTER than
-    the window. Callers already treat a missing day as "no games that day".
+    slow, or once the walk has used SCOREBOARD_WALK_BUDGET_SECONDS (see
+    SCOREBOARD_WALK_CHUNK_DAYS), so the result can be SHORTER than the
+    window. Callers already treat a missing day as "no games that day".
     """
     fetch = lambda day: fetch_scoreboard_day(http_get, scoreboard_url, day)  # noqa: E731
     pages: List[Tuple[date, Optional[Dict[str, Any]]]] = []
+    walk_began = time.monotonic()
     chunk_start = start
     while chunk_start <= end:
         chunk_end = min(end, chunk_start + timedelta(days=SCOREBOARD_WALK_CHUNK_DAYS - 1))
@@ -451,6 +459,15 @@ def fetch_scoreboard_days(
                 "requesting the remaining days through %s",
                 scoreboard_url, chunk_start.strftime("%Y%m%d"),
                 chunk_end.strftime("%Y%m%d"), took, end.strftime("%Y%m%d"),
+            )
+            break
+        spent = time.monotonic() - walk_began
+        if chunk_end < end and spent >= SCOREBOARD_WALK_BUDGET_SECONDS:
+            logger.warning(
+                "[espn] %s: walk took %.0f s by %s, past its %.0f s budget; "
+                "not requesting the remaining days through %s",
+                scoreboard_url, spent, chunk_end.strftime("%Y%m%d"),
+                SCOREBOARD_WALK_BUDGET_SECONDS, end.strftime("%Y%m%d"),
             )
             break
         chunk_start = chunk_end + timedelta(days=1)

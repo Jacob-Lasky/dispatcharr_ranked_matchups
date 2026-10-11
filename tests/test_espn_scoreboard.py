@@ -301,6 +301,25 @@ class TestWalkGivesUpOnAHangingEndpoint:
                                   end=date(2025, 2, 16))
         assert len(asked) == 16 and len(pages) == 16
 
+    def test_partial_hang_is_stopped_by_the_walk_budget(self, monkeypatch, caplog):
+        """One good day per chunk keeps every chunk off the all-None rule;
+        the walk budget still ends it. Budget patched to zero: the walk
+        stops after its first chunk."""
+        from dispatcharr_ranked_matchups.sources import _espn
+        monkeypatch.setattr(_espn, "SCOREBOARD_WALK_BUDGET_SECONDS", 0.0)
+        with caplog.at_level(logging.WARNING):
+            asked, pages = self._walk(monkeypatch, ok_days=set(range(0, 303, 16)), slow=True)
+        assert len(asked) == 16 and len(pages) == 16
+        assert any("budget" in r.getMessage() for r in caplog.records)
+
+    def test_a_healthy_walk_is_well_inside_the_budget(self, monkeypatch):
+        """120 s, literally: a guard that the budget was not tightened to a
+        value a healthy season walk (~5 s measured) could reach."""
+        from dispatcharr_ranked_matchups.sources import _espn
+        assert _espn.SCOREBOARD_WALK_BUDGET_SECONDS == 120.0
+        asked, pages = self._walk(monkeypatch, ok_days=set(range(303)), slow=False)
+        assert len(asked) == 303
+
     def test_last_chunk_never_counts_as_a_reason_to_stop(self, monkeypatch, caplog):
         with caplog.at_level(logging.WARNING):
             self._walk(monkeypatch, ok_days=set(range(16)), slow=True,

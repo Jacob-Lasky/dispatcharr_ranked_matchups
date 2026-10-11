@@ -613,26 +613,39 @@ def http_get_json(
 _SECRET_HEADER_NAME_RE = re.compile(r"key|token|secret|auth|pass", re.IGNORECASE)
 
 
-def _redact_header_values(text: str, headers: Optional[Dict[str, str]]) -> str:
+def _redact_header_values(text: str, headers: Optional[Dict[str, Any]]) -> str:
     """Mask the value of every credential-named header that appears in `text`.
 
     `requests` puts a malformed header value in its exception message
     verbatim (`InvalidHeader: ... in header value: ' <key>'`, measured with a
     RapidAPI key pasted with a leading space), and a header is where boxing's
     key travels, so the key-shape regexes in `redact_secrets` never see it.
-    Both the raw value and its `repr` body are masked, because the message
+    The raw value and its `repr` body are both masked, because the message
     quotes the value with `!r` (a trailing newline arrives as a literal
-    backslash-n).
+    backslash-n); a bytes value is masked in both its decoded and its
+    `b'...'` repr forms.
+
+    Values shorter than _MIN_MASKED_HEADER_VALUE are left alone: masking is a
+    plain substring replace, and a one-letter "key" would shred every word of
+    the message it appears in. No real credential is that short.
     """
     for name, value in (headers or {}).items():
         if not _SECRET_HEADER_NAME_RE.search(str(name)):
             continue  # e.g. x-rapidapi-host: the host name helps diagnose, and is public
-        if not isinstance(value, str) or not value.strip():
+        if isinstance(value, bytes):
+            forms = (repr(value)[2:-1], value.decode("latin-1"))
+        elif isinstance(value, str):
+            forms = (repr(value)[1:-1], value)
+        else:
             continue
-        for form in (repr(value)[1:-1], value, value.strip()):
-            if form:
-                text = text.replace(form, "***")
+        for form in forms:
+            for variant in (form, form.strip()):
+                if len(variant) >= _MIN_MASKED_HEADER_VALUE:
+                    text = text.replace(variant, "***")
     return text
+
+
+_MIN_MASKED_HEADER_VALUE = 8
 
 
 _ORDINAL_SUFFIXES = ("th", "st", "nd", "rd")
