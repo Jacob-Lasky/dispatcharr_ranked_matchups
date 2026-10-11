@@ -425,6 +425,18 @@ behind it. The flag is how the next tick knows to re-apply; without it the
 expired games are already absent from the cache and nothing could ever notice
 they still need removing.
 
+**A refresh never takes a game off air; only the reaper does (#240).** The
+refresh rebuilds `games` from the fetch, and apply deletes every channel the
+list omits, but `ncaaf.py` and `mlb.py` list only games that have not kicked
+off, and a failed source degrades to `[]`. So `_rows_to_hold` keeps every
+previously applied row that has kicked off, or whose `sport_label` came back
+empty or raised, until `_partition_expired` would reap it. Held rows the fetch
+still lists are protected from the cap and the bench; held rows it omits are
+carried by `_carry_forward`, re-matched (an empty re-match keeps the old match),
+and flagged `held_on_air` so the reaper does not backfill a cap slot they never
+took. While a held game is on air, a fetched game of the same matchup
+(`_series_key`) waits, keeping one channel per series.
+
 **Reaping delegates deletion to `_action_apply` on purpose.** Apply already
 reaps owned channels missing from the cache, with DVR-recording protection,
 the archive re-home, ChannelStream/EPGData cleanup, and signal-safe queryset
@@ -792,6 +804,10 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   (`_maybe_rematch_after_m3u`, gated on auto-refresh, one run per cooldown
   across all workers). Show current state names it "Refresh + apply after an
   M3U update"; Diagnose explains a late feed instead of calling it a bug
+- A refresh cannot take a live game off air (#240): a game that has kicked off,
+  or one whose source returned nothing this fetch, is held on the applied list
+  (outside the `max_games` cap) and re-matched against the current feeds until
+  the reaper would remove it anyway
 - A scheduled time is no longer lost when something else holds the run lock at
   that second: one worker claims the slot and retries the lock up to 30 minutes
   (never into the next slot), and stands down without running if a refresh +

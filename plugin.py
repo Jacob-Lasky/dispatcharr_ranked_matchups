@@ -2150,6 +2150,12 @@ def _write_cache(data: Dict[str, Any]) -> None:
 
 # ---------- settings parsing ----------
 
+def _series_key(sport_prefix: Optional[str], home: str, away: str) -> Tuple[str, frozenset]:
+    """One matchup, whichever side is home. Shared by _dedup_series_games and
+    the refresh's on-air hold (#240), which must agree on what a series is."""
+    return (sport_prefix or "", frozenset({home, away}))
+
+
 def _dedup_series_games(games: List[Any], sources: List[Any]) -> Tuple[List[Any], List[Any], int]:
     """Collapse a best-of-N playoff series to its next-scheduled game.
 
@@ -2179,9 +2185,8 @@ def _dedup_series_games(games: List[Any], sources: List[Any]) -> Tuple[List[Any]
         return [], [], 0
     by_key: Dict[Tuple[str, frozenset], int] = {}
     for idx, g in enumerate(games):
-        sport_prefix = getattr(g, "sport_prefix", "") or ""
-        teams = frozenset({getattr(g, "home", ""), getattr(g, "away", "")})
-        key = (sport_prefix, teams)
+        key = _series_key(getattr(g, "sport_prefix", ""), getattr(g, "home", ""),
+                          getattr(g, "away", ""))
         prior_idx = by_key.get(key)
         if prior_idx is None:
             by_key[key] = idx
@@ -3069,19 +3074,61 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     all_games: List[Any] = []
     game_sources: List[Any] = []  # parallel to all_games; source index matches game index
     src_summary = []
+    # Labels, not sources: a cache row records only its sport_label. Two
+    # sources can share one (the NCAA Baseball Postseason pair), so a label is
+    # an outage when any of its sources RAISED, or when all of them together
+    # returned nothing. A source that degrades a failure to [] beside a healthy
+    # sibling is indistinguishable from an empty schedule and is not caught.
+    pulled_by_label: Dict[str, int] = {}
+    raised_labels: set = set()
     for src in sources:
+        pulled_by_label.setdefault(src.sport_label, 0)
         try:
             games = src.fetch_upcoming(days_ahead=lookahead)
         except Exception as e:
             logger.exception("[ranked_matchups] source %s fetch failed", src.sport_label)
             src_summary.append(_source_error_entry(src.sport_label, e))
+            raised_labels.add(src.sport_label)
             continue
+        pulled_by_label[src.sport_label] += len(games)
         all_games.extend(games)
         game_sources.extend([src] * len(games))
         src_summary.append(f"{src.sport_label}: {len(games)} games")
         logger.info("[ranked_matchups] %s: pulled %d games", src.sport_label, len(games))
 
-    if not all_games:
+    # 1-. Games already on air, and games whose source came back empty, stay on
+    # air (#240). See _rows_to_hold. `held` is keyed by marker; the ones this
+    # fetch still lists are protected from the cap below, the rest are carried
+    # over from the previous cache and re-matched after the main match.
+    held = _rows_to_hold(
+        _read_cache().get("games") or [],
+        datetime.now(timezone.utc),
+        _reap_settings(settings),
+        settings,
+        raised_labels | {label for label, n in pulled_by_label.items() if n == 0},
+    )
+    held_ids = {id(g) for g in all_games if _gamerow_marker(g) in held}
+    fetched_markers = {_gamerow_marker(g) for g in all_games}
+    carried_rows = [row for marker, row in held.items() if marker not in fetched_markers]
+    # One channel per matchup (see _dedup_series_games): while Game 1 is held on
+    # air, a fetched Game 2 of the same series waits for the refresh after the
+    # reaper removes Game 1, as it did before the hold existed.
+    if carried_rows:
+        on_air_series = {
+            _series_key(r.get("sport_prefix"), r.get("home") or "", r.get("away") or "")
+            for r in carried_rows
+        }
+        keep = [i for i, g in enumerate(all_games)
+                if _series_key(g.sport_prefix, g.home, g.away) not in on_air_series]
+        if len(keep) < len(all_games):
+            logger.info(
+                "[ranked_matchups] refresh: deferred %d game(s) whose series "
+                "already has a game on air", len(all_games) - len(keep),
+            )
+            all_games = [all_games[i] for i in keep]
+            game_sources = [game_sources[i] for i in keep]
+
+    if not all_games and not carried_rows:
         return _empty_refresh_result(
             "No games found in lookahead window. " + " | ".join(src_summary),
             src_summary,
@@ -3136,7 +3183,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 "game(s)%s", fav_only_mode, fav_dropped, postseason_note,
             )
             src_summary.append(f"favorites-only ({fav_only_mode}): dropped {fav_dropped}")
-        if not all_games:
+        if not all_games and not carried_rows:
             return _empty_refresh_result(
                 "Favorites-only filter dropped every game in the lookahead "
                 "window. " + " | ".join(src_summary),
@@ -3350,7 +3397,10 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # Favorites and recorded teams (#216) are never capped away. A recorded
         # team is NOT a favorite: it gets no score weight and no favorites-first
         # sort slot, only the guarantee of being on the list.
-        return bool(item[1].favorite_match) or bool(recorded_by_game.get(id(item[0])))
+        # A game held on air (#240) is never capped away either: removing it
+        # mid-game is the defect the hold exists to stop.
+        return (bool(item[1].favorite_match) or bool(recorded_by_game.get(id(item[0])))
+                or id(item[0]) in held_ids)
 
     if len(scored) > retain:
         forced = [s for s in scored if _forced(s)]
@@ -3427,13 +3477,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             "importance_points": signals.importance_points,
             "importance_notes": signals.importance_notes,
             "importance_thresholds_hit": signals.importance_thresholds_hit,
-            "channel_id": match.channel_id,           # primary, kept for backward-compat
-            "channel_ids": list(match.channel_ids),   # whole-channel matches, primary first
-            "stream_ids": list(match.stream_ids),     # stream-granular (Path C stream-name matches)
-            "channel_name_current": match.channel_name,
-            "program_title": match.program_title,
-            "match_method": match.method,
-            "match_note": match.note,
+            **_match_fields(match),
             "extra": dict(game.extra) if game.extra else {},
         })
 
@@ -3442,6 +3486,22 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # here rather than tagging rows means _action_apply needs no change at
     # all: it still applies exactly the list it is given.
     applied_payload, bench_payload = _split_applied(games_payload, max_games)
+    # A held game the fetch still lists may have sorted onto the bench; it is
+    # on air, so it stays applied (#240).
+    if held:
+        rescued = [r for r in bench_payload if _build_marker_key(r) in held]
+        if rescued:
+            bench_payload = [r for r in bench_payload if _build_marker_key(r) not in held]
+            applied_payload.extend({**r, _HELD_ON_AIR: True} for r in rescued)
+    if carried_rows:
+        carried = _carry_forward(carried_rows, epg_lookup, api_key, model, widen)
+        applied_payload.extend(carried)
+        logger.info(
+            "[ranked_matchups] refresh: kept %d game(s) on air that this fetch "
+            "did not list (already started, or their source returned nothing)",
+            len(carried),
+        )
+        src_summary.append(f"kept on air: {len(carried)}")
 
     # A competition whose season list could not be fetched had no standings
     # stakes simulated for its games; report it like a failed source (#228).
@@ -4857,6 +4917,128 @@ def _promotable(bench, now, remove_after_minutes):
     return out
 
 
+# Cache-row flag: this applied game is on the list only because a refresh held
+# it on air (#240), outside the max_games cap. The reaper does not backfill the
+# slot when it expires, since it never took one.
+_HELD_ON_AIR = "held_on_air"
+
+
+def _match_fields(match: Any) -> Dict[str, Any]:
+    """The cache-row fields a refresh writes from one MatchResult. Shared by the
+    main payload and _carry_forward so a carried game is matched exactly like a
+    fetched one."""
+    return {
+        "channel_id": match.channel_id,           # primary, kept for backward-compat
+        "channel_ids": list(match.channel_ids),   # whole-channel matches, primary first
+        "stream_ids": list(match.stream_ids),     # stream-granular (Path C stream-name matches)
+        "channel_name_current": match.channel_name,
+        "program_title": match.program_title,
+        "match_method": match.method,
+        "match_note": match.note,
+    }
+
+
+def _gamerow_marker(game: Any) -> str:
+    """_build_marker_key for a GameRow that has no cache row yet. Mirrors the
+    payload fields the marker reads, including start_time_utc's isoformat."""
+    return _build_marker_key({
+        "sport_prefix": game.sport_prefix,
+        "home": game.home,
+        "away": game.away,
+        "start_time_utc": game.start_time.isoformat(),
+        "extra": game.extra or {},
+    })
+
+
+def _rows_to_hold(
+    prior_games: List[Dict[str, Any]],
+    now: datetime,
+    remove_after_minutes: int,
+    settings: Dict[str, Any],
+    empty_labels: set,
+) -> Dict[str, Dict[str, Any]]:
+    """Previously applied games a refresh must keep on air, by marker (#240).
+
+    A refresh rebuilds the slate from what the sources return, and apply
+    deletes every channel the new slate does not list. Two kinds of game drop
+    out of a fetch while their channel is still wanted:
+
+    - Games that have KICKED OFF. Several sources list only games that have
+      not started (ncaaf.py and mlb.py filter `start >= now`), so the first
+      refresh after kickoff deleted the live game's channel. On 2026-10-10 the
+      M3U rematch (which runs precisely while games are live) did this to
+      every evening CFB game.
+    - Games from a source that returned NOTHING this refresh. Sources degrade a
+      failed request to an empty list; on 2026-10-10 the CFBD /rankings call
+      returned 525 at 19:00 and every CFB channel, Georgia at Alabama included,
+      was deleted half an hour before kickoff. A source does not lose a listed
+      game for real without listing others, so zero is read as an outage.
+
+    Held until the reaper would remove the game anyway (_partition_expired):
+    the reaper owns taking finished games off air, and a refresh does not.
+    DO NOT hold a row the reaper cannot date: _partition_expired keeps those
+    forever, so holding one here would keep it forever too.
+    """
+    live, _expired = _partition_expired(prior_games, now, remove_after_minutes, settings)
+    held: Dict[str, Dict[str, Any]] = {}
+    for row in live:
+        if _game_reap_at_utc(row, remove_after_minutes) is None:
+            continue
+        start = parse_iso_utc(row.get("start_time_utc"))
+        if start is None:
+            continue
+        if start <= now or row.get("sport_label") in empty_labels:
+            held[_build_marker_key(row)] = row
+    return held
+
+
+def _gamerow_from_row(row: Dict[str, Any]) -> Any:
+    """Rebuild the GameRow a cache row was written from, for re-matching."""
+    from .sources.base import GameRow
+    return GameRow(
+        sport_prefix=row.get("sport_prefix") or "",
+        sport_label=row.get("sport_label") or "",
+        home=row.get("home") or "",
+        away=row.get("away") or "",
+        rank_home=row.get("rank_home"),
+        rank_away=row.get("rank_away"),
+        start_time=parse_iso_utc(row.get("start_time_utc")),
+        venue=row.get("venue"),
+        spread=row.get("spread"),
+        closeness=row.get("closeness"),
+        is_rivalry=bool(row.get("is_rivalry")),
+        extra=dict(row.get("extra") or {}),
+    )
+
+
+def _carry_forward(
+    rows: List[Dict[str, Any]], epg_lookup, api_key: str, model: str, widen: bool,
+) -> List[Dict[str, Any]]:
+    """Held games this fetch did not list, re-matched against the current feeds.
+
+    Re-matched rather than copied: providers rename event slots between M3U
+    refreshes, so the previous match can point at a slot that now carries a
+    different game, and picking up a late or renamed feed for a live game is
+    the reason the M3U rematch exists. Score, signals and description inputs
+    are kept from the refresh that scored the game."""
+    from .matcher import match_games_to_channels
+    games = [_gamerow_from_row(r) for r in rows]
+    matches = match_games_to_channels(
+        [(g, None, None) for g in games], epg_lookup, api_key, model, widen=widen,
+    )
+    out = []
+    for row, m in zip(rows, matches):
+        fields = _match_fields(m)
+        # DO NOT let an empty re-match replace a working one. A held row with
+        # no match can fall under placeholder_min_score, apply then skips it,
+        # and its channel is deleted as stale: the exact removal the hold
+        # exists to prevent. A renamed slot is caught when a match comes back.
+        if not (fields["channel_id"] or fields["channel_ids"] or fields["stream_ids"]):
+            fields = {}
+        out.append({**row, **fields, _HELD_ON_AIR: True})
+    return out
+
+
 def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Drop finished games from the guide, and backfill from the bench.
 
@@ -4917,7 +5099,10 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     promoted = []
     if bench:
         candidates = _promotable(bench, now, remove_after)
-        promoted = candidates[: len(expired)]
+        # One promotion per freed cap slot. A row held on air (#240) sat
+        # outside the cap, so its expiry frees nothing.
+        freed = sum(1 for g in expired if not g.get(_HELD_ON_AIR))
+        promoted = candidates[:freed]
         promoted_ids = {id(g) for g in promoted}
         bench = [g for g in bench if id(g) not in promoted_ids]
 
@@ -7994,7 +8179,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.33.0"
+    version = "1.33.1"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

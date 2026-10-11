@@ -41,12 +41,15 @@ def test_matchresult_declares_stream_ids():
 
 
 def test_refresh_writes_stream_ids_to_cache(plugin_src):
-    # Producer: the cache payload built in _action_refresh must serialise
-    # match.stream_ids under the "stream_ids" key.
-    fn = _func(plugin_src, "_action_refresh")
+    # Producer: _match_fields is the one place a MatchResult becomes cache-row
+    # fields (#240 shares it between fetched and carried games), and
+    # _action_refresh must build its payload through it.
+    fn = _func(plugin_src, "_match_fields")
     body = ast.get_source_segment(plugin_src, fn)
-    assert '"stream_ids"' in body, "_action_refresh must write the stream_ids key"
+    assert '"stream_ids"' in body, "_match_fields must write the stream_ids key"
     assert "match.stream_ids" in body, "cache must serialise match.stream_ids"
+    refresh = ast.get_source_segment(plugin_src, _func(plugin_src, "_action_refresh"))
+    assert "_match_fields(match)" in refresh, "refresh payload must use _match_fields"
 
 
 def test_apply_reads_stream_ids(plugin_src):
