@@ -373,10 +373,22 @@ class TestRankFieldSize:
         assert self._pts(7, None, field=10) == 3.8
         assert self._pts(25, None, field=25) == 0.2
 
-    def test_out_of_poll_rank_is_clamped_to_the_poll(self):
-        """A rank past the poll depth (a 26th entry on a tie) is clamped to
-        the pool, never scored as 26th of the field and never negative."""
-        assert self._pts(26, None, field=215) == self._pts(25, None, field=215)
+    def test_a_rank_past_the_poll_depth_is_a_field_position(self):
+        """Against a field, the rank is a position in the field: #26 of 215
+        is (215 - 26) / 214 -> 4.42, not promoted to #25 (4.44)."""
+        assert self._pts(26, None, field=215) == 4.42
+        assert self._pts(25, None, field=215) == 4.44
+
+    def test_a_rank_past_the_field_is_clamped_not_negative(self):
+        """A source bug must never scale a negative strength into the total:
+        #999 of 215 clamps to last of the field, strength 0.0, no key."""
+        assert self._pts(999, None, field=215) == 0.0
+        assert self._pts(0, None, field=215) == self._pts(1, None, field=215)
+
+    def test_a_tie_at_the_cutoff_scores_both_teams_equally(self):
+        """ESPN's men's soccer poll of 2026-10-11 had 26 entries: San Diego
+        and Syracuse tied at #25. Both carry rank 25 and the same strength."""
+        assert self._pts(25, 25, field=215) == 8.88   # (190/214) * 10
 
     # ---- the note says which scale it used ----
 
@@ -387,6 +399,21 @@ class TestRankFieldSize:
             Weights(),
         ).notes
         assert notes == ["one ranked: #25 in a 25-deep poll of 138 (strength 0.82) vs unranked"], notes
+
+    def test_note_describes_the_scale_that_was_scored(self):
+        """A 1-deep pool is scored as a 25-deep poll; the note must say 25,
+        and a clamped rank must be printed as the rank that was scored."""
+        notes = score_game(
+            GameSignals(rank_a=25, rank_b=None, rank_pool_size=1,
+                        rank_field_size=138),
+            Weights(),
+        ).notes
+        assert notes == ["one ranked: #25 in a 25-deep poll of 138 (strength 0.82) vs unranked"], notes
+        notes = score_game(
+            GameSignals(rank_a=99, rank_b=None, rank_pool_size=25),
+            Weights(),
+        ).notes
+        assert notes == ["one ranked: #25 of 25 (strength 0.04) vs unranked"], notes
 
     def test_note_does_not_print_strength_as_top_percent(self):
         """The #194 note printed a 0.96 strength as 'top 96%', the opposite
@@ -439,31 +466,45 @@ class TestPollSourcesDeclareTheirField:
         assert srcs["NcaaSoccerSource(w)"].rank_field_size == 351
 
     def test_the_poll_source_list_is_complete(self):
-        """Any source class with its own `_fetch_rankings`, and any source
-        module that calls a `/rankings` endpoint, reads a poll. If a new one
-        appears it must be added above (and declare its field)."""
+        """Every SportSource class that reads a poll, by a `_fetch_rankings`
+        it defines OR inherits, or by a `/rankings` call anywhere in its own
+        source, must be listed above (and so declare its field). Checked per
+        CLASS, so a second poll reader added to an already-listed module, or
+        a subclass of a listed one, is caught too."""
         import importlib
         import inspect
-        import os
         import pkgutil
         from dispatcharr_ranked_matchups import sources as pkg
         from dispatcharr_ranked_matchups.sources.base import SportSource
         listed = {type(src).__name__ for src in self._poll_sources().values()}
-        listed_modules = {type(src).__module__ for src in self._poll_sources().values()}
-        readers, endpoint_modules = set(), set()
+        readers = set()
         for info in pkgutil.iter_modules(pkg.__path__):
             mod = importlib.import_module(f"{pkg.__name__}.{info.name}")
-            with open(os.path.join(pkg.__path__[0], f"{info.name}.py")) as fh:
-                if "/rankings" in fh.read():
-                    endpoint_modules.add(mod.__name__)
-            for _name, cls in inspect.getmembers(mod, inspect.isclass):
-                if (cls.__module__ == mod.__name__ and issubclass(cls, SportSource)
-                        and "_fetch_rankings" in cls.__dict__):
-                    readers.add(cls.__name__)
-        # Make the scan fail on purpose first: it must find the known six.
-        assert len(readers) >= 6 and len(endpoint_modules) >= 6, (readers, endpoint_modules)
+            for name, cls in inspect.getmembers(mod, inspect.isclass):
+                if cls.__module__ != mod.__name__ or not issubclass(cls, SportSource):
+                    continue
+                if hasattr(cls, "_fetch_rankings") or "/rankings" in inspect.getsource(cls):
+                    readers.add(name)
+        # Fail on the instrument first: the scan must find the known six.
+        assert {"NcaafSource", "NcaaSoccerSource"} <= readers and len(readers) >= 6, readers
         assert readers <= listed, readers - listed
-        assert endpoint_modules <= listed_modules, endpoint_modules - listed_modules
+
+    def test_declared_fields_match_the_measured_counts(self):
+        """Literal pins, against the counts measured 2026-10-11 and cited at
+        each declaration (CFBD /teams/fbs 2026, CBBD /teams 2026, ESPN D1
+        teams, Wikipedia D1 programme lists). The range test above accepts
+        any plausible typo and the SCORING.md test reads these same
+        declarations, so this is the only check against a wrong number."""
+        got = {name: src.rank_field_size for name, src in self._poll_sources().items()}
+        assert got == {
+            "NcaafSource": 138,
+            "NcaamSource": 365,
+            "NcaawBasketballRegularSource": 362,
+            "NcaaBaseballRegularSource": 304,
+            "NcaaSoftballRegularSource": 309,
+            "NcaaSoccerSource(m)": 215,
+            "NcaaSoccerSource(w)": 351,
+        }
 
     def test_scoring_md_field_table_matches_the_sources(self):
         """SCORING.md publishes each poll's field. That table is a second copy

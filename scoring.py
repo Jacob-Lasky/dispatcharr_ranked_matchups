@@ -1183,38 +1183,64 @@ def _rank_strength(
     """
     if rank is None:
         return 0.0
-    if pool <= 1:
-        # A one-team (or empty) pool carries no ordering information, so the
-        # percentile is undefined rather than 0 or 1. Fall back to the poll
-        # depth instead of dividing by zero.
-        pool = RANK_POOL_DEFAULT
-        exhaustive = False
-    # Clamp defensively: a source emitting a rank outside its own pool is a
-    # bug, but it must not produce a negative or >1 strength that would then
-    # be scaled into the total.
-    rank = max(1, min(int(rank), pool))
+    pool, exhaustive, field = _rank_scale(pool, exhaustive, field)
+    rank = _scored_rank(rank, pool, field)
     if exhaustive:
         # first -> 1.0, last -> 0.0
         return (pool - rank) / (pool - 1)
-    if field is not None and field > pool:
+    if field is not None:
         # first -> 1.0, last of the poll -> (field - pool) / (field - 1)
         return (field - rank) / (field - 1)
     # first -> 1.0, last -> 1/pool (still ahead of unranked)
     return (pool + 1 - rank) / pool
 
 
+def _rank_scale(
+    pool: Optional[int], exhaustive: bool, field: Optional[int],
+) -> Tuple[int, bool, Optional[int]]:
+    """The (pool, exhaustive, field) a rank is actually scored against.
+
+    ONE place, because the score and the note that explains it must describe
+    the same scale: an earlier cut normalized inside the scorer only, so a
+    1-deep pool scored as a 25-deep poll while its note still said "1-deep".
+    """
+    if not pool or pool <= 1:
+        # A one-team (or empty, or undeclared) pool carries no ordering
+        # information, so the percentile is undefined rather than 0 or 1.
+        # Fall back to the poll depth instead of dividing by zero.
+        pool = RANK_POOL_DEFAULT
+        exhaustive = False
+    if exhaustive or field is None or field <= pool:
+        # A league table IS its field; a field no bigger than the poll adds
+        # nothing. Either way the published pool is the scale.
+        field = None
+    return pool, exhaustive, field
+
+
+def _scored_rank(rank: int, pool: int, field: Optional[int]) -> int:
+    """The rank clamped into the scale it is scored on.
+
+    Clamped defensively: a source emitting a rank outside its own scale is a
+    bug, but it must not produce a negative or >1 strength. Against a FIELD
+    the ceiling is the field, not the poll depth: the rank is a position in
+    the field, so a 26 from a deeper-than-declared poll scores as 26th of
+    215 rather than being silently promoted to 25th. (A tie at the cutoff is
+    different and needs nothing: ESPN's men's soccer poll of 2026-10-11 had
+    26 entries because two teams shared #25, and both carry rank 25.)"""
+    return max(1, min(int(rank), field if field is not None else pool))
+
+
 def _rank_note(rank: int, strength: float, pool: int, field: Optional[int],
                exhaustive: bool) -> str:
-    """One team's rank, as the score note states it.
+    """One team's rank, as the score note states it. Takes the scale and the
+    rank AFTER _rank_scale / _scored_rank, so it names what was scored.
 
     Says WHICH scale the strength came from, because a "#7" means different
     things in a 20-club table and a 25-deep poll of 215 teams. The strength
     is written as a plain number in [0, 1]; an earlier note printed it as
     "top 96%", which reads as the opposite of what it meant (0.96 strength
     is the top 4%, not the top 96%)."""
-    if exhaustive:
-        scale = f"of {pool}"
-    elif field is not None and field > pool:
+    if field is not None and not exhaustive:
         scale = f"in a {pool}-deep poll of {field}"
     else:
         scale = f"of {pool}"
@@ -1232,10 +1258,11 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
         # different maxima (10.0 paired vs 4.17 one-ranked) and both hard-coded
         # a 25-team pool, which made a poll rank and a league-table position
         # incomparable. See _rank_strength for the measured consequence.
-        pool = signals.rank_pool_size or RANK_POOL_DEFAULT
-        exhaustive = bool(signals.rank_pool_exhaustive)
         # A league table is its own field; only a poll reads the field size.
-        field = None if exhaustive else signals.rank_field_size
+        pool, exhaustive, field = _rank_scale(
+            signals.rank_pool_size, bool(signals.rank_pool_exhaustive),
+            signals.rank_field_size,
+        )
         sa = _rank_strength(ra, pool, exhaustive, field)
         sb = _rank_strength(rb, pool, exhaustive, field)
         # Mean, not sum: preserves the old formulation's semantics (it scored
@@ -1249,13 +1276,15 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             breakdown["rank_pair" if both else "one_ranked"] = round(rank_pts, 2)
             if both:
                 notes.append(
-                    f"both ranked: {_rank_note(ra, sa, pool, field, exhaustive)} "
-                    f"vs {_rank_note(rb, sb, pool, field, exhaustive)}"
+                    f"both ranked: "
+                    f"{_rank_note(_scored_rank(ra, pool, field), sa, pool, field, exhaustive)} "
+                    f"vs {_rank_note(_scored_rank(rb, pool, field), sb, pool, field, exhaustive)}"
                 )
             else:
                 rank, strength = (ra, sa) if ra is not None else (rb, sb)
                 notes.append(
-                    f"one ranked: {_rank_note(rank, strength, pool, field, exhaustive)} "
+                    f"one ranked: "
+                    f"{_rank_note(_scored_rank(rank, pool, field), strength, pool, field, exhaustive)} "
                     f"vs unranked"
                 )
 

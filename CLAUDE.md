@@ -198,7 +198,8 @@ a NEW sport needs.
    as 0.04 instead of 0.82 (#198). A league source leaves it None: its
    standings table is exhaustive and already is the field.
    `tests/test_scoring.py::TestPollSourcesDeclareTheirField` fails for any
-   source with a `_fetch_rankings` or a `/rankings` call that is not listed.
+   source class that defines or inherits `_fetch_rankings`, or calls a
+   `/rankings` endpoint, and is not listed there.
 
 Shared CFBD key already covers basketball (same Bearer token).
 

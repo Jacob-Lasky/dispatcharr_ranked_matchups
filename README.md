@@ -63,16 +63,16 @@ implementation and testing are done by AI.
 ## Example output
 
 ```
-#5548720  EPL ★10.0 · Brentford at Manchester United · title / UCL race
+#5548720  EPL ★9.4 · Brentford at Manchester United · title / UCL race
           — both top-10 (#3 vs #9), title / UCL race, toss-up (line +0.5)
 
           Description (what TiviMate/Plex/Jellyfin show):
             Kickoff: Today 2:00 PM CDT 🔴 TODAY
             Matchup: Brentford FC @ Manchester United FC
             Sport: English Premier League
-            Score: 10.0/10  (raw 28.3)
+            Score: 9.4/10  (raw 27.75)
             Score breakdown:
-              rank_pair: +7.92
+              rank_pair: +7.37
               close_game: +3.38
               importance: +17.0
             Source: Manchester United

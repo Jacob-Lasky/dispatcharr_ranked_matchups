@@ -510,9 +510,11 @@ class TestRankFieldSizeWiring:
         assert '"rank_field_size": signals.rank_field_size' in src
 
     def test_cache_replay_reads_the_field_back(self, plugin):
-        """Behavioural: the row a refresh wrote comes back as the same
-        signals, and a pre-#198 row (no key) comes back as None, which scores
-        a poll rank against its published pool as that refresh did."""
+        """The row a refresh wrote comes back carrying its field, and a
+        pre-#198 row (no key) comes back as None. Replay does NOT re-score
+        (it returns the cached score and breakdown), so this pins only the
+        reconstructed signals, which feed the tagline; a pre-#198 row keeps
+        its old rank points until the next refresh rewrites it."""
         row = {"home": "SMU", "away": "Virginia", "rank_home": 24,
                "rank_away": None, "rank_pool_size": None,
                "rank_pool_exhaustive": False, "rank_field_size": 138}

@@ -113,6 +113,8 @@ the order of magnitude right is what counts.
 
 The breakdown key is `rank_pair` when both sides are ranked and
 `one_ranked` when only one is; the arithmetic is identical either way.
+A game whose rank points come to 0 (last vs last of a league table, or
+last vs unranked) emits no key and no note.
 
 | Example | pool | field | kind | pts |
 |---|---|---|---|---|
@@ -594,9 +596,9 @@ A typical description for a high-stakes game:
 Kickoff: Today 2:00 PM CDT 🔴 TODAY
 Matchup: Brentford FC @ Manchester United FC
 Sport: English Premier League
-Score: 8.4/10  (raw 21.8)
+Score: 8.7/10  (raw 21.2)
 Score breakdown:
-  rank_pair: +7.92
+  rank_pair: +7.37
   close_game: +2.16        (devigged coinflip-ness 0.72)
   importance: +11.7
 Importance notes (top 3):
@@ -606,8 +608,8 @@ Importance notes (top 3):
 Source: Manchester United
 ```
 
-- **Score: 8.4/10**: the final ★ rating after compression.
-- **(raw 21.8)**: pre-compression raw points, useful for debugging.
+- **Score: 8.7/10**: the final ★ rating after compression.
+- **(raw 21.2)**: pre-compression raw points, useful for debugging.
 - **Score breakdown**: each signal's contribution. Sum equals raw.
 - **Importance notes (top 3)**: the three (team, outcome) tuples with
   the highest leverage. Each line is `team outcome: leverage × weight
