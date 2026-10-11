@@ -32,7 +32,6 @@ import requests
 
 from .base import GameRow
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc
 from ._espn import extract_espn_scoreboard_event, fetch_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_soccer")
