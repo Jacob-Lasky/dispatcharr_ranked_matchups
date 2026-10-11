@@ -283,6 +283,16 @@ class TestBoxingSchedulePages:
         assert len(rows) == 27
         assert len(lost) == 8
 
+    def test_a_last_page_short_of_the_listed_cards_is_reported(self, monkeypatch):
+        """WITNESS (Codex round 4): page 1 lists 26 cards over two pages and
+        page 2 answers in the same terms with no cards. The 26th card was
+        dropped with no lost day reported."""
+        rows, lost, asked = self._run(monkeypatch, {
+            1: self._page(self._cards(0, 25), 1, 2, 26), 2: self._page([], 2, 2, 26),
+        })
+        assert len(asked) == 2 and len(rows) == 25
+        assert len(lost) == 8
+
     def test_one_short_page_is_the_whole_schedule(self, monkeypatch):
         """Guard: the measured case. One request, as before, no `page_num`."""
         rows, lost, asked = self._run(monkeypatch, {1: _SCHEDULE_PAYLOAD})

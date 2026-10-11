@@ -130,12 +130,13 @@ def _match_name(title: str) -> str:
 
 
 def _next_page(
-    data: dict, page: int, n_cards: int, promised: Optional[Tuple[Any, Any]],
+    data: dict, page: int, n_cards: int, n_read: int, promised: Optional[Tuple[Any, Any]],
 ) -> Tuple[Optional[str], Optional[Tuple[Any, Any]]]:
     """(why the schedule cannot be vouched for past `page`, or None; the
     (total_pages, total_items) still to read up to, or None to stop), read
-    off the answer's `pagination`. `promised` is what page 1 gave (None on
-    page 1).
+    off the answer's `pagination`. `n_cards` is this page's card count,
+    `n_read` the distinct cards read so far, `promised` what page 1 gave
+    (None on page 1).
 
     Page 1 with no usable paging (no integer `total_pages`, or an answer for
     a different page than the one asked for): a short page is the whole
@@ -144,7 +145,8 @@ def _next_page(
     page of the SAME schedule: unusable paging there, or a page or card count
     that differs from page 1's (a server ignoring `page_num`, or a schedule
     that changed between the requests, which shifts cards across a page
-    boundary unseen), is a failure. More pages than `_MAX_PAGES`: the rest is not
+    boundary unseen), is a failure. So is a last page that leaves the cards
+    read short of `total_items`. More pages than `_MAX_PAGES`: the rest is not
     read, and so not vouched for either.
     """
     paging = data.get("pagination")
@@ -160,6 +162,10 @@ def _next_page(
             return f"page 1 is full and its pagination {paging!r} cannot say what follows", None
         return None, None
     if page >= total:
+        promised_cards = shape[1]
+        if isinstance(promised_cards, int) and n_read != promised_cards:
+            return (f"read {n_read} cards over {total} pages, but the schedule "
+                    f"lists {promised_cards}"), None
         return None, None
     if page >= _MAX_PAGES:
         return f"{total} pages; only the first {_MAX_PAGES} were read", None
@@ -266,7 +272,7 @@ class BoxingSource(SportSource):
                         seen.add(eid)
                     events.append(ev)
             if not err:
-                err, promised = _next_page(data, page, len(page_events), promised)
+                err, promised = _next_page(data, page, len(page_events), len(events), promised)
                 if promised is not None:
                     page += 1
                     continue
