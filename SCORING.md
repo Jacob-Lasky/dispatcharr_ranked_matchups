@@ -485,7 +485,7 @@ as `1 / sqrt(N)`; at 2000 the noise sits below the consequence-weight
 grid the rankings sort by.
 
 
-## Cross-source chains (the World Cup 2026 case)
+## Cross-source chains (World Cup 2026 and EURO 2028)
 
 The Monte Carlo importance algorithm above runs single-source: it
 samples the rest of THIS competition forward to its outcome bands.
@@ -523,15 +523,50 @@ right direction but possibly wrong magnitude because the simulated
 R16 opponent might not match the canonical one. With the lookup, the
 chain produces leverage that mirrors the real bracket.
 
-The same chain machinery is sport-agnostic and could serve UEFA EURO
-2028, but EURO is NOT wired to it today: `plugin.py`'s `euros` block
-creates the group and knockout sources without calling
-`set_paired_knockout_source`, so `cross_source_chain()` returns None and
-EURO group games take the single-source path. Wiring it needs the
-EURO 2028 R16 slot pairings (not published; they follow the 2027 final
-tournament draw) AND the knockout cascade appended to `EC_GS`, which
-today carries only the `advance` threshold — without that second half a
-working chain would attribute leverage to zero bands. Tracked in #78.
+UEFA EURO 2028 runs on the same chain (#78). Its format is 24 teams in
+six groups of four, with the top two plus the **four best third-placed
+teams** entering a round of 16, so the chain seeds `LAST_16` directly.
+The pairings and the 15-row third-placer table come from the
+[Regulations of the UEFA European Football Championship 2026-28, Article
+21](https://documents.uefa.com/r/Regulations-of-the-UEFA-European-Football-Championship-2026-28/Article-21-Match-system-final-tournament-knockout-stage-Online)
+(`_EURO2028_LAST_16_PAIRINGS`, `_EURO2028_THIRD_PLACER_SLOT_TABLE`).
+EURO 2024 used the identical structure, and seeding its real final
+group tables through the chain reproduces all eight of its round-of-16
+ties, home and away, as football-data.org records them, and its real
+winners then walk the real quarter-finals, semi-finals and final. `EC_GS` carries the
+EURO knockout cascade (`round_of_16` through `winner`) next to
+`advance`, the same way `WC_GS` carries the World Cup's: importance sums
+only over a context's bands, so the cascade is what makes the chain
+visible in the score.
+
+Each competition's bracket lives in one `_CHAIN_BRACKETS` entry in
+`sources/soccer.py`. The chain stays off when a season's group letters
+are not that format's (an older World Cup, a draw not made yet), or
+when a group is missing one of its four named teams (a play-off place
+still TBD), so a bracket is never seeded from the wrong shape.
+
+The simulated bracket plays every round to the final. Until #78 it
+stopped one round after its entry round: a tie whose participants the
+simulation itself decided was recorded as a two-leg tie, so a single-leg
+quarter-final (WC: round of 16) never finished, and the World Cup chain
+only ever reached its `round_of_16` band. It runs for as long as any
+group game is unplayed, and does not wait for football-data.org to leave
+the knockout fixtures blank: their teams fill in as feeder groups
+finish, while other groups still have their decisive final matchday.
+
+Group positions follow the regulations' order: points, then the
+head-to-head record among the teams level on points (reapplied to any
+that are still level), then overall goal difference and goals scored
+(UEFA Article 20.01; FIFA's 2026 regulations also rank head-to-head
+first). EURO's best-third ranking adds wins after goals scored (Article
+19.04). Disciplinary points and the qualifiers ranking are not in
+football-data.org's free data, so teams level after every modelled
+criterion keep a fixed order. That is the one EURO 2024 difference:
+Denmark and Slovenia finished Group C level on everything but cards.
+EURO's Article 20.02 penalty shoot-out (two teams level on points and
+goals that draw their last group match against each other, with no
+third team on the same points) is not modelled either: the pair keeps
+the same fixed order rather than a 50/50 split.
 
 
 ## Stage 3: raw sum + compress to 0-10 ★
@@ -793,10 +828,13 @@ expected before judging the whole guide.
   `remaining_matches` list, the simulator can't propagate the season
   forward far enough to differentiate end-of-season outcomes. Signal
   sharpens as the season's end window narrows.
-- **UEFA EURO 2028 bracket leverage:** the cross-source chain
-  machinery that makes WC 2026 group games show R16+ leverage is
-  WC-specific. EURO 2028 needs analogous wiring once UEFA publishes
-  the bracket structure (~12-18 months pre-tournament).
+- **Group tiebreakers stop before fair play** for WC and EURO group
+  stages: disciplinary points, the qualifiers / FIFA ranking and drawing
+  of lots are not in football-data.org's free data, so teams level on
+  every earlier criterion keep a fixed order. The same holds for EURO's
+  Article 20.02 penalty shoot-out between two level teams that draw
+  their last group match against each other (when no third team is on
+  the same points).
 - **A failed season fetch zeroes importance for that competition**, for
   the run. The simulator replays the competition's full fixture list, so
   if football-data.org cannot be reached for it the games score no

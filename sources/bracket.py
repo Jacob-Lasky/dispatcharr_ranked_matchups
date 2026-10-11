@@ -532,8 +532,16 @@ class BracketSportSource(SportSource):
         if isinstance(stage, str):
             tk = (stage, frozenset({match.home, match.away}))
             prior_tie = new_tie_results.get(tk)
+            # A tie with no record yet (a downstream tie whose participants
+            # the simulation just decided) is built from the game's own
+            # `legs_in_tie`, which `_emit_remaining_games_for_tie` copied from
+            # the bracket. DO NOT drop it: without it AggregateLegSource
+            # assumes two legs, a single-leg WC / EURO knockout tie never
+            # completes, and the simulated bracket stops one round after the
+            # entry round (#78).
             new_tie = self._copy_tie_record(prior_tie) if prior_tie else self._new_tie_record({
                 "stage": stage, "teams": frozenset({match.home, match.away}),
+                "legs_in_tie": extra.get("legs_in_tie"),
             })
             prior_winner = (prior_tie or {}).get("winner")
             self._record_game_into_tie(
@@ -773,8 +781,10 @@ class AggregateLegSource(BracketSportSource):
         # of truth: count the games FD.org publishes for the tie. DO NOT
         # branch on `stage == KO_STAGES[-1]`: that misclassifies single-leg
         # non-finals (WC LAST_16, EURO QF, etc.) as incomplete forever and
-        # the round_reached cascade never fires.
-        games_in_tie = len(tie_meta.get("games") or [])
+        # the round_reached cascade never fires. A tie created mid-simulation
+        # has no published games, so `apply_result` passes the game's own
+        # `legs_in_tie` instead.
+        games_in_tie = len(tie_meta.get("games") or []) or tie_meta.get("legs_in_tie")
         return {
             "stage": tie_meta.get("stage"),
             "teams": tie_meta.get("teams"),
