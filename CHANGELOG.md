@@ -5,6 +5,23 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.33.1] - 2026-10-10
+
+### Fixed
+
+- **A refresh no longer deletes the channel of a game that is on air.** The
+  refresh rebuilds the list from what the sources return, and apply deletes
+  every channel the new list leaves out. NCAA Football and MLB list only games
+  that have not kicked off, so the first refresh after kickoff deleted the live
+  game's channel, and the 1.33.0 M3U rematch runs exactly while games are
+  live. A source whose request failed did the same to all of its games: on
+  2026-10-10 the college football API returned an error at 7:00 PM and Georgia
+  at Alabama lost its channel half an hour before kickoff. A refresh now keeps
+  every game it put on air that has kicked off, or whose source came back with
+  nothing, and re-matches it against the current feeds; finished games are
+  still removed by the reaper on its usual schedule. A live game is also never
+  pushed off the list by the max-games cap. (#240)
+
 ## [1.33.0] - 2026-10-10
 
 ### Fixed
