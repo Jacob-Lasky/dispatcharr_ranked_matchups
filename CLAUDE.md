@@ -155,9 +155,16 @@ channel counts as somebody else's because it lives in another group). Nothing
 in the database refuses a duplicate number, in or across groups, but the M3U, XMLTV and Xtream
 Codes outputs all key the guide on the bare channel number, so a shared number
 binds the guide arbitrarily for BOTH channels. The numbers of stale channels
-this apply will KEEP for an active recording (`_numbers_held_for_recordings`,
-the reap step's own policy run early) are reserved too, so a new game cannot
-take the number such a channel is restored to after parking. All of it reads
+this apply will KEEP (an active recording, or kept by their guide;
+`_numbers_held_for_recordings`, the reap step's own policy run early) are
+reserved too, so a new game cannot take the number such a channel is restored
+to after parking. "Stale" is `_unwritten_channels`, the ONE set the reap also
+uses: every channel the write loop will not write, including an in-slate game
+it skips (no feed, too low for a placeholder). That set is only known after
+apply's pre-pass, so kickoff mode places a second time, with those numbers
+reserved, when the pre-pass found one the first placement (games that left the
+slate) did not (#286). Compact needs no second pass: it keeps every published
+game on its own slot. All of it reads
 through `_published_numbers` (effective, floored, upper bound `< top + 1` so a
 400.5 reserves 400), which `_ensure_archive_channel` also uses so the archive
 never takes a number published in ANY group. Within our own group it also

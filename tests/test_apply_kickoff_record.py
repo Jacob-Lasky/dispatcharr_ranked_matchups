@@ -143,6 +143,100 @@ def scenario_witness_a_kept_channel_keeps_its_record_across_floor_changes(env):
     assert _numbers(env) == {G415: 33772825, G431: 33772827}
 
 
+def scenario_witness_a_skipped_recording_channel_keeps_its_number(env):
+    """#286: 431 is recording when its game moves to 20:02 and loses its feed,
+    scoring too low for a placeholder, so apply skips it and keeps the channel
+    for its recording (#146). Its old number 33772827 is no longer where its
+    game numbers (20:02's block starts at 33772843), and CFB 400, new at 20:01,
+    computes exactly 33772827. The numbers held back for kept channels only
+    covered games that had LEFT the slate, so 400 was handed 33772827, the
+    restore after parking found it taken, and the recording channel was left
+    on a parking number for the rest of the recording."""
+    m = env.m
+    user_ch = _three_published(env)
+    ch431 = _owned(env)[G431]
+    m.Recording.objects.create(
+        channel=ch431, start_time=_now() - timedelta(minutes=30),
+        end_time=_now() + timedelta(hours=3), custom_properties={"status": "recording"},
+    )
+    moved = _row(431, KICKOFF + timedelta(minutes=2), 999999, home="Home431", away="Away431")
+    moved["score"] = 1.0  # below the placeholder threshold, no source channel
+    result = _apply(env, [
+        _game(415, user_ch.id), _game(411, user_ch.id), moved,
+        _row(400, KICKOFF + timedelta(minutes=1), user_ch.id, home="Home400", away="Away400"),
+    ])
+    assert "unmatched_skipped=1" in result["message"], result
+    got = _numbers(env)
+    assert got == {
+        G415: 33772825, G411: 33772826, G431: 33772827, "ranked_matchups:CFB:400": 33772828,
+    }, got
+
+
+def scenario_witness_an_inferred_floor_is_judged_with_the_kept_numbers(env):
+    """Second opinion on #286, round 1: with no state file the floor is
+    inferred, and the inference must hold back the same numbers the placement
+    does. CFB 129 (recording) moves from 20:00 to 20:01, loses its feed and is
+    skipped, and CFB 128 is new at 20:02. Judged without 129's number the
+    inference picked floor 16, and the placement then moved 150, which is
+    still written, from 33772833 to 33772831. Judged with it, floor 17 keeps
+    every number."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    m.Channel.objects.filter(pk=user_ch.pk).update(channel_number=16)
+    spec = {129: 0, 150: 0, 103: 2, 126: 3, 115: 3}
+    _publish(env, [
+        _row(g, KICKOFF + timedelta(minutes=k), user_ch.id, home=f"Home{g}", away=f"Away{g}")
+        for g, k in spec.items()
+    ])
+    before = _numbers(env)
+    assert before == {
+        "ranked_matchups:CFB:129": 33772832, "ranked_matchups:CFB:150": 33772833,
+        "ranked_matchups:CFB:103": 33772849, "ranked_matchups:CFB:126": 33772866,
+        "ranked_matchups:CFB:115": 33772867,
+    }, before
+    m.Recording.objects.create(
+        channel=_owned(env)["ranked_matchups:CFB:129"], start_time=_now() - timedelta(minutes=30),
+        end_time=_now() + timedelta(hours=3), custom_properties={"status": "recording"},
+    )
+    os.remove(env.plugin.NUMBERING_STATE_PATH)
+    moved = _row(129, KICKOFF + timedelta(minutes=1), 999999, home="Home129", away="Away129")
+    moved["score"] = 1.0
+    rows = [moved] + [
+        _row(g, KICKOFF + timedelta(minutes=k), user_ch.id, home=f"Home{g}", away=f"Away{g}")
+        for g, k in spec.items() if g != 129
+    ] + [_row(128, KICKOFF + timedelta(minutes=2), user_ch.id, home="Home128", away="Away128")]
+    result = _apply(env, rows)
+    assert "unmatched_skipped=1" in result["message"], result
+    got = _numbers(env)
+    assert {m_: got[m_] for m_ in before} == before, got
+    assert _state(env)["kickoff_base"] == 17
+
+
+def scenario_compact_mode_keeps_a_skipped_recording_channels_slot(env):
+    """The #286 shape in COMPACT numbering, which takes no second placement:
+    every published game keeps its own slot there, so the skipped recording
+    channel's slot is never handed to the new game, which goes above the
+    highest slot in use."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    compact = {"channel_numbering_mode": "compact", "virtual_channel_base": 500}
+    _publish(env, [_game(g, user_ch.id) for g in (415, 411, 431)], settings=_settings(**compact))
+    assert _numbers(env) == {G411: 500, G415: 501, G431: 502}
+    m.Recording.objects.create(
+        channel=_owned(env)[G431], start_time=_now() - timedelta(minutes=30),
+        end_time=_now() + timedelta(hours=3), custom_properties={"status": "recording"},
+    )
+    moved = _row(431, KICKOFF + timedelta(minutes=2), 999999, home="Home431", away="Away431")
+    moved["score"] = 1.0
+    result = _apply(env, [
+        _game(415, user_ch.id), _game(411, user_ch.id), moved,
+        _row(400, KICKOFF + timedelta(minutes=1), user_ch.id, home="Home400", away="Away400"),
+    ], **compact)
+    assert "unmatched_skipped=1" in result["message"], result
+    got = _numbers(env)
+    assert got == {G411: 500, G415: 501, G431: 502, "ranked_matchups:CFB:400": 503}, got
+
+
 def scenario_a_dry_run_writes_no_record(env):
     """A dry run on a fresh install writes no state file, and one after a real
     apply leaves it byte for byte, even when the slate it rehearses would
@@ -216,6 +310,11 @@ def test_the_fixture_slots_are_what_the_literals_assume(plugin):
         marker = plugin._build_marker_key(_game(gid, 1))
         assert marker == f"ranked_matchups:CFB:{gid}"
         assert plugin.stable_channel_number(11, KICKOFF, marker, timezone.utc) == number, gid
+    # #286: 400 at 20:01 lands on 20:01's first number, 431 at 20:02 on 20:02's last.
+    for gid, start, number in ((400, KICKOFF + timedelta(minutes=1), 33772827),
+                               (431, KICKOFF + timedelta(minutes=2), 33772858)):
+        marker = f"ranked_matchups:CFB:{gid}"
+        assert plugin.stable_channel_number(11, start, marker, timezone.utc) == number, gid
 
 
 # --------------------------------------------------------- pytest driver ---
