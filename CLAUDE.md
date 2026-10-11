@@ -566,9 +566,12 @@ carried by `_carry_forward`, re-matched (an empty re-match keeps the old match),
 and flagged `held_on_air` so the reaper does not backfill a cap slot they never
 took. While a held game is on air, a fetched game of the same matchup
 (`_series_key`) waits, keeping one channel per series. Apply honours the
-same rule when a game's feed vanishes mid-game: a row that has kicked off
-and already has a channel is published as a placeholder whatever its score,
-instead of being skipped and its live channel reaped as stale.
+same rule when a game's feed vanishes mid-game: a row inside the hold's
+window (kicked off, before its reap deadline) that already has a channel is
+published as a placeholder whatever its score, instead of being skipped and
+its live channel reaped as stale. Not one with an active recording: the
+stale path keeps that one for its recording with its stream links (#146),
+where a placeholder would strip them mid-recording.
 
 **A lost day is reported, not read as a quiet one (#261).** A per-day sweep
 that lost a day still returns the other days, so its label is not empty.

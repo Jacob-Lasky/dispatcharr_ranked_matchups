@@ -6718,6 +6718,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from .scoring import pick_tagline
     prep_by_marker: Dict[str, Any] = {}
     prepass_now = datetime.now(timezone.utc)
+    recording_channel_ids = {
+        r.channel_id for r in Recording.objects.filter(
+            channel_id__in=[c.id for c in existing_virtuals.values()],
+        )
+        if _recording_is_active(r, prepass_now)
+    }
     for g in games:
         source_ids = list(g.get("channel_ids") or [])
         # Path C stream-granular matches: specific streams to attach without
@@ -6800,11 +6806,19 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # refresh drops the stream), and skipping it here would send the
             # live channel down the stale reap below whatever the hold did.
             # It stays as a placeholder until a later match re-attaches a
-            # stream or the reaper removes it.
+            # stream or the reaper removes it. "On air" is the hold's own
+            # window: kicked off and not yet at its reap deadline (game end
+            # when reaping is off). A channel with an active recording is
+            # left to the stale path instead, which keeps it for the
+            # recording WITH its stream links (#146); as a placeholder it
+            # would have them stripped mid-recording.
             kickoff = parse_iso_utc(g.get("start_time_utc"))
+            on_air_ch = existing_virtuals.get(_build_marker_key(g))
+            reap_at = _game_reap_at_utc(g, _reap_settings(settings))
             on_air = (
-                kickoff is not None and kickoff <= prepass_now
-                and _build_marker_key(g) in existing_virtuals
+                on_air_ch is not None and on_air_ch.id not in recording_channel_ids
+                and kickoff is not None and reap_at is not None
+                and kickoff <= prepass_now < reap_at
             )
             if score_val >= placeholder_threshold or g.get("recorded_matched") or on_air:
                 placeholder = True

@@ -932,6 +932,49 @@ def scenario_a_live_game_whose_feed_vanished_keeps_its_channel(env):
     assert "unmatched_skipped=0" in result["message"], result
 
 
+def scenario_a_recording_live_game_whose_feed_vanished_keeps_its_stream_links(env):
+    """Guard (codex review): a live channel that is RECORDING keeps the #146
+    path, kept for its recording with its stream links, rather than becoming
+    a placeholder whose links are stripped mid-recording. The stream is
+    removed from the source channel; the Stream row itself remains."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    settings = _settings(placeholder_min_score=9.0)
+    row = _row(401, _now() - timedelta(minutes=30), user_ch.id)
+    _write_cache(env, [{**row, "score": 9.5}])
+    assert env.plugin._action_apply(settings)["status"] == "ok"
+    ch = _owned(env)["ranked_matchups:CFB:401"]
+    m.Recording.objects.create(channel=ch, start_time=_now() - timedelta(minutes=30),
+                               end_time=_now() + timedelta(hours=3),
+                               custom_properties={"status": "recording"})
+    m.ChannelStream.objects.filter(channel=user_ch).delete()
+    _write_cache(env, [{**row, "score": 7.4}])
+
+    result = env.plugin._action_apply(settings)
+
+    assert "ranked_matchups:CFB:401" in _owned(env), result
+    assert list(m.ChannelStream.objects.filter(channel=ch).values_list("stream_id", flat=True)) == [stream.id]
+
+
+def scenario_a_finished_unmatched_game_is_not_kept_as_on_air(env):
+    """Guard (codex review): "on air" ends at the reap deadline. A source that
+    still lists a finished game must not keep its stream-less channel."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    settings = _settings(placeholder_min_score=9.0)
+    row = _row(401, _now() - timedelta(minutes=30), user_ch.id)
+    _write_cache(env, [{**row, "score": 9.5}])
+    assert env.plugin._action_apply(settings)["status"] == "ok"
+    m.Stream.objects.filter(pk=stream.pk).delete()
+    _write_cache(env, [{**row, "score": 7.4,
+                        "start_time_utc": (_now() - timedelta(hours=10)).isoformat()}])
+
+    result = env.plugin._action_apply(settings)
+
+    assert "unmatched_skipped=1" in result["message"], result
+    assert "ranked_matchups:CFB:401" not in _owned(env)
+
+
 def scenario_an_unmatched_game_not_yet_on_air_is_still_skipped(env):
     """Guard: only a game that has kicked off keeps a stream-less channel
     below the threshold. One that has not started goes as before."""
