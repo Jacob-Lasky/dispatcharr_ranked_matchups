@@ -31,7 +31,7 @@ import requests
 
 from .base import GameRow
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc
+from .._util import get_within_deadline, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaam")
 
@@ -133,8 +133,8 @@ class NcaamSource(PointsBasedSportSource):
         poll. None if no poll has been published yet (preseason, before
         mid-October's preseason AP poll)."""
         try:
-            r = requests.get(
-                f"{CBB_BASE}/rankings",
+            r = get_within_deadline(
+                requests, f"{CBB_BASE}/rankings",
                 headers=self._headers,
                 params={"season": season},
                 timeout=15,
@@ -166,8 +166,8 @@ class NcaamSource(PointsBasedSportSource):
         late-season games.
         """
         try:
-            r = requests.get(
-                f"{CBB_BASE}/games",
+            r = get_within_deadline(
+                requests, f"{CBB_BASE}/games",
                 headers=self._headers,
                 params={
                     "startDateRange": start.strftime("%Y-%m-%d"),
@@ -186,8 +186,8 @@ class NcaamSource(PointsBasedSportSource):
         """Same date-range as /games. Returns {gameId: abs(spread)}."""
         out: Dict[int, float] = {}
         try:
-            r = requests.get(
-                f"{CBB_BASE}/lines",
+            r = get_within_deadline(
+                requests, f"{CBB_BASE}/lines",
                 headers=self._headers,
                 params={
                     "startDateRange": start.strftime("%Y-%m-%d"),
@@ -260,8 +260,8 @@ class NcaamSource(PointsBasedSportSource):
         all_games: List[Dict[str, Any]] = []
         for start, end in chunks:
             try:
-                r = requests.get(
-                    f"{CBB_BASE}/games",
+                r = get_within_deadline(
+                    requests, f"{CBB_BASE}/games",
                     headers=self._headers,
                     params={
                         "startDateRange": start.strftime("%Y-%m-%d"),

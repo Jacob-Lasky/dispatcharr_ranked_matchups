@@ -33,7 +33,7 @@ import requests
 
 from .base import GameRow
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc
+from .._util import get_within_deadline, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaaf")
 
@@ -225,8 +225,8 @@ class NcaafSource(PointsBasedSportSource):
         """Return {team_name → rank} for the latest snapshot, or None if no
         poll has been published yet (preseason)."""
         try:
-            r = requests.get(
-                f"{CFBD_BASE}/rankings",
+            r = get_within_deadline(
+                requests, f"{CFBD_BASE}/rankings",
                 headers=self._headers,
                 params={"year": year},
                 timeout=15,
@@ -271,8 +271,8 @@ class NcaafSource(PointsBasedSportSource):
         if cached is not None:
             return cached
         try:
-            r = requests.get(
-                f"{CFBD_BASE}/games",
+            r = get_within_deadline(
+                requests, f"{CFBD_BASE}/games",
                 headers=self._headers,
                 params={"year": year, "seasonType": "regular"},
                 timeout=60,
@@ -371,8 +371,8 @@ class NcaafSource(PointsBasedSportSource):
         out: Dict[int, float] = {}
         for week in weeks:
             try:
-                r = requests.get(
-                    f"{CFBD_BASE}/lines",
+                r = get_within_deadline(
+                    requests, f"{CFBD_BASE}/lines",
                     headers=self._headers,
                     params={"year": year, "week": week, "seasonType": "regular"},
                     timeout=15,

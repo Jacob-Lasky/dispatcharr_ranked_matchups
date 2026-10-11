@@ -17,11 +17,13 @@ Test surface (in dependency order):
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 
 import pytest
 
+from dispatcharr_ranked_matchups import _util
 from dispatcharr_ranked_matchups import llm_descriptions as llm
 
 
@@ -359,6 +361,23 @@ class TestLlmDescribeOrFallback:
 
         out = llm.llm_describe_or_fallback(
             g=g, tagline="", fallback_description="FALLBACK",
+            api_key="k", model="claude-haiku-4-5", cache={},
+            marker="m", caller=caller,
+        )
+        assert out == "FALLBACK"
+
+    @pytest.mark.parametrize("exc", [
+        _util.ResponseDeadlineExceeded("response not complete within 30s"),
+        # A body cut short of its Content-Length. An HTTPException, NOT an
+        # OSError, so it escaped this fallback and failed the whole apply.
+        http.client.IncompleteRead(b'{"content": [', 200),
+    ])
+    def test_deadline_or_cut_body_falls_back(self, exc):
+        def caller(context, api_key, model):
+            raise exc
+
+        out = llm.llm_describe_or_fallback(
+            g=_sample_game(), tagline="", fallback_description="FALLBACK",
             api_key="k", model="claude-haiku-4-5", cache={},
             marker="m", caller=caller,
         )

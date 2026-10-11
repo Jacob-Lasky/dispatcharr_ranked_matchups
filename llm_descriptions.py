@@ -18,6 +18,7 @@ for a 30-line wrapper.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import logging
 import re
@@ -38,6 +39,7 @@ from ._util import (
     series_record_text,
     series_result_lines,
     trusted_impact_narratives,
+    urlopen_read,
     write_json_atomic,
 )
 from .honours import honours_lines
@@ -1135,8 +1137,8 @@ def _call_anthropic(context: str, api_key: str, model: str) -> str:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=ANTHROPIC_TIMEOUT_S) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    _status, body = urlopen_read(req, timeout=ANTHROPIC_TIMEOUT_S)
+    data = json.loads(body.decode("utf-8"))
     blocks = data.get("content") or []
     for b in blocks:
         if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str):
@@ -1405,7 +1407,11 @@ def llm_describe_or_fallback(
     fn = caller or _call_anthropic
     try:
         prose = fn(context, api_key, model)
-    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError) as exc:
+    # http.client.HTTPException covers a body cut short of its Content-Length
+    # (IncompleteRead), which is NOT an OSError and used to escape this
+    # fallback and fail the whole apply.
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError, OSError,
+            http.client.HTTPException) as exc:
         logger.warning("[ranked_matchups] LLM describe failed for %s: %s", marker or "?", exc)
         return fallback_description
     if not prose:

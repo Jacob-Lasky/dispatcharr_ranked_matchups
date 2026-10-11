@@ -34,6 +34,7 @@ from .bracket import AggregateLegSource
 from ._odds import fetch_odds_events
 from .._util import (
     SEED_PLAYED_THRESHOLD,
+    get_within_deadline,
     is_bottom_outcome,
     parse_iso_utc,
     poisson_sample as _poisson,
@@ -173,8 +174,8 @@ def _fd_get(
     for attempt in range(_FD_MAX_ATTEMPTS):
         _fd_sleep_until_slot()
         try:
-            r = requests.get(
-                url,
+            r = get_within_deadline(
+                requests, url,
                 headers={"X-Auth-Token": fd_api_key},
                 params=params,
                 timeout=timeout,

@@ -2838,6 +2838,8 @@ DEFAULT_MAX_GAMES = 25
 # of the timeouts it can hit: the LLM description (llm_descriptions
 # ANTHROPIC_TIMEOUT_S = 30) plus the SportsDB thumb search (logos
 # _HTTP_TIMEOUT_S = 10) and its download (logos _DOWNLOAD_TIMEOUT_S = 15).
+# Each is a whole-response bound since #271 (_util.urlopen_read); before that a
+# timeout only bounded each socket read, and a trickling server could exceed it.
 #
 # A named constant because MAX_GAMES_CEILING is DERIVED from it and a test
 # asserts the derivation still holds; leaving it as a literal in a comment let

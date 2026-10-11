@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from .._util import redact_secrets, write_json_atomic
+from .._util import get_within_deadline, redact_secrets, write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +141,8 @@ def fetch_odds_events(
         return cached
 
     try:
-        r = requests.get(
-            f"{ODDS_BASE}/sports/{sport_key}/odds/",
+        r = get_within_deadline(
+            requests, f"{ODDS_BASE}/sports/{sport_key}/odds/",
             params={"regions": region, "markets": "h2h", "oddsFormat": "decimal",
                     "apiKey": api_key},
             timeout=15,

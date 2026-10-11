@@ -9,7 +9,10 @@ import math
 import os
 import re
 import random
+import socket
+import sys
 import threading
+import urllib.request
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -600,6 +603,258 @@ def redact_secrets(value: Any) -> str:
     return text
 
 
+# ---------- whole-response deadline for every outbound HTTP call (#271) ----------
+#
+# `timeout=` on requests.get / urlopen bounds the connect and each socket READ,
+# not the response. A server that sends a byte every few seconds never trips
+# it, so one request could hold a refresh until the pipeline child is killed at
+# its 25-minute ceiling, and every source on that run lost its games.
+#
+# DO NOT "fix" this by streaming the body with `iter_content` and checking the
+# clock between chunks. Measured 2026-10-11 against a local server sending one
+# byte per 0.2s: `iter_content(chunk_size=65536)` returned its first chunk after
+# 199.95s, because the buffered read under it blocks until the chunk is FULL.
+# A trickle can also stall the status line and headers, which arrive before any
+# body iterator exists. Only a wait the caller controls bounds both, so the
+# request runs on a worker thread and the caller stops waiting at the deadline.
+#
+# The deadline IS the call's existing `timeout`, as a total. Two reasons: every
+# real response this plugin fetches finishes far inside it (statsapi's 3.2MB
+# MLB season schedule in 0.20s, ESPN scoreboards in under 0.2s, measured from
+# Tower 2026-10-11), and plugin.APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME
+# already budgets each call at its timeout, which only became true with this.
+# mlb keeps 20s for the reason in its `_http_get`.
+
+
+class ResponseDeadlineExceeded(TimeoutError):
+    """The whole response did not arrive within its deadline (#271).
+
+    A TimeoutError, so every urllib caller's existing `except Exception` (and
+    any `except OSError`) treats it as the network failure it is. The requests
+    path re-raises it as the caller's `requests.Timeout` instead, see
+    `get_within_deadline`.
+
+    The message names the budget only, never the URL: several URLs carry an
+    API key, and this text reaches log lines."""
+
+
+class _WorkerConnections:
+    """Every socket a deadline worker connects, so the caller can hang up.
+
+    DO NOT hang up by calling the response's `close()` from the caller's
+    thread. The worker is blocked inside the response's buffered read, which
+    holds the reader's lock, and close() waits for that lock: measured
+    2026-10-11, the caller sat ~40s past an 0.8s deadline until the trickle
+    ended. shutdown() acts on the connection, takes no Python-level lock, and
+    wakes the blocked read at once (it returns EOF, the library raises, the
+    worker exits). On Linux it also aborts a connect still in progress
+    (measured: a blackholed connect returned 0.5s in, at the shutdown).
+
+    Sockets are captured at CONNECT, through the `socket.connect` audit event
+    (`_track_worker_connect`), not from the response object: a server that
+    trickles the status line or headers, or a urllib redirect whose 3xx body
+    is still being read, never produces a response to hand over, and its
+    worker would read on long after the caller left. The connect hook sees
+    every connection of both libraries without replacing `requests_mod.get`
+    or `urllib.request.urlopen`, which are the patch points the tests stub.
+
+    `track` keeps a `dup()` of the socket, not the socket: TLS wrapping
+    detaches the original object from its descriptor, and once the worker
+    closes its own descriptor the number can be reused by an unrelated
+    connection. The duplicate pins the connection itself.
+
+    `track` RAISES, which aborts the connect it was called for, in two cases:
+    the deadline has already passed (a late redirect hop), and `dup()` failed
+    (EMFILE). Both would otherwise open a connection nothing can hang up, and
+    no request at all is better than an unbounded one. The audit event fires
+    as connect() BEGINS, so expiry can also land between `track` and the
+    connect syscall; that case is still covered because Linux applies a
+    shutdown() of a not-yet-connected TCP socket anyway (it returns ENOTCONN
+    but sets the shutdown flags): measured 2026-10-11, the later connect
+    succeeds and its first recv returns EOF at once, its first send EPIPE.
+    `test_http_deadline.py` pins that kernel behaviour.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._open: List[socket.socket] = []
+        self._expired = False
+
+    def track(self, sock: socket.socket) -> None:
+        dup = sock.dup()  # an OSError here aborts the connect, see class docstring
+        with self._lock:
+            if not self._expired:
+                self._open.append(dup)
+                return
+        _hang_up(dup)
+        raise ResponseDeadlineExceeded("deadline passed before the connection opened")
+
+    def expire(self) -> None:
+        """The deadline passed: hang up every connection, without waiting."""
+        with self._lock:
+            self._expired = True
+            opened, self._open = self._open, []
+        for dup in opened:
+            _hang_up(dup)
+
+    def release(self) -> None:
+        """The worker finished: close the duplicates only. The connections
+        belong to the library (requests has released them, urlopen's `with`
+        has closed its own), and a duplicate left open would hold each one
+        open until garbage collection."""
+        with self._lock:
+            opened, self._open = self._open, []
+        for dup in opened:
+            dup.close()
+
+
+def _hang_up(dup: socket.socket) -> None:
+    try:
+        dup.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass  # already closed by the peer: nothing left to stop
+    finally:
+        dup.close()
+
+
+# Thread-local, so the process-wide audit hook below only ever acts for a
+# thread run_with_deadline started.
+_deadline_worker = threading.local()
+_connect_hook_lock = threading.Lock()
+_connect_hook_installed = False
+
+
+def _track_worker_connect(event: str, args: tuple) -> None:
+    """sys.addaudithook callback: hand a deadline worker's sockets over.
+
+    Runs for EVERY audit event in the process, so the common case returns on
+    the first comparison, and any thread that is not a deadline worker
+    returns on the second without touching anything.
+
+    An exception from an audit hook aborts the operation being audited. For a
+    deadline worker that is deliberate (`_WorkerConnections.track`); DO NOT
+    add anything here that can raise for any other thread, or it would fail
+    connects all over Dispatcharr."""
+    if event != "socket.connect":
+        return
+    connections = getattr(_deadline_worker, "connections", None)
+    if connections is not None:
+        connections.track(args[0])
+
+
+def _install_connect_hook() -> None:
+    """Audit hooks cannot be removed, so this installs exactly one, the first
+    time a deadline is used (in practice: in the pipeline child)."""
+    global _connect_hook_installed
+    with _connect_hook_lock:
+        if not _connect_hook_installed:
+            sys.addaudithook(_track_worker_connect)
+            _connect_hook_installed = True
+
+
+def run_with_deadline(work: Any, deadline_s: float) -> Any:
+    """Run `work()` on a daemon thread and return what it returns, re-raising
+    whatever it raised, or raise ResponseDeadlineExceeded once `deadline_s`
+    seconds of wall clock have passed.
+
+    THE one deadline implementation; `get_within_deadline` and `urlopen_read`
+    are its only callers. On expiry every socket the worker connected is shut
+    down under it (see `_WorkerConnections`), so its blocked connect or read
+    returns at once and the thread exits instead of draining the trickle,
+    whether it was waiting on headers or body. Whatever the worker produced
+    after the deadline is discarded, so a body cut at the deadline is never
+    parsed.
+
+    The one phase nothing can interrupt is the DNS lookup: getaddrinfo() runs
+    before any socket exists. The caller still returns at the deadline; the
+    abandoned worker ends when the resolver gives up, which glibc bounds at
+    timeout x attempts (5s x 2 by default; Dispatcharr's resolv.conf sets no
+    options). Measured 2026-10-11 against a blackholed nameserver: the bare
+    lookup took 10.0s, the OLD path held the caller those 10.0s (requests'
+    `timeout=` never covered DNS), four 2s-deadline calls returned in 8.0s,
+    and their four abandoned workers were gone 8.5s after the last call. So
+    stalled lookups cannot pile up: at most about 10s / deadline live at once.
+
+    The thread is a daemon because HTTP runs in the pipeline child
+    (tasks.run_pipeline_subprocess), which must be able to exit even if a
+    worker is still inside a call.
+    """
+    if not deadline_s or deadline_s <= 0:
+        # requests reads timeout=None as "no timeout at all"; as a deadline it
+        # would wait forever, and zero or less is no budget. Both are caller bugs.
+        raise ValueError(f"deadline must be a positive number of seconds, got {deadline_s!r}")
+    _install_connect_hook()
+    connections = _WorkerConnections()
+    outcome: Dict[str, Any] = {}
+    done = threading.Event()
+
+    def _run() -> None:
+        _deadline_worker.connections = connections
+        try:
+            outcome["value"] = work()
+        except BaseException as exc:  # noqa: BLE001 - handed to the caller's thread
+            outcome["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name="http-deadline", daemon=True).start()
+    if not done.wait(deadline_s):
+        connections.expire()
+        raise ResponseDeadlineExceeded(f"response not complete within {deadline_s:g}s")
+    connections.release()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+def get_within_deadline(requests_mod: Any, url: str, *, timeout: float, **kwargs: Any) -> Any:
+    """`requests_mod.get(url, timeout=timeout, **kwargs)`, with the WHOLE
+    response (connect, status line, headers, body) bounded by `timeout`.
+
+    Returns the same fully-read Response the bare call returned, so callers
+    keep `raise_for_status()`, `.status_code`, `.headers` and `.json()`. On
+    the deadline it raises `requests_mod.Timeout`, a RequestException, which
+    is what every caller already catches for a read timeout.
+
+    `requests_mod` is the CALLER's module-level `requests` symbol, looked up
+    per call, for the patch-point reason in `http_get_json`. The call is made
+    exactly as the caller wrote it; nothing is added to its arguments.
+
+    DO NOT call `requests.get` / `requests.post` anywhere else in the plugin;
+    `tests/test_http_deadline.py` fails on any call site outside this module.
+    """
+    try:
+        return run_with_deadline(lambda: requests_mod.get(url, timeout=timeout, **kwargs), timeout)
+    except ResponseDeadlineExceeded as exc:
+        raise requests_mod.Timeout(str(exc)) from None
+
+
+def urlopen_read(request: Any, *, timeout: float, max_bytes: Optional[int] = None) -> tuple:
+    """`(status, body_bytes)` for `urllib.request.urlopen(request,
+    timeout=timeout)`, with the whole response bounded by `timeout`.
+
+    Raises what urlopen raises (HTTPError for a 4xx/5xx, carrying its headers,
+    so gamethumbs can still read Retry-After), ResponseDeadlineExceeded on the
+    deadline, and ValueError when the body exceeds `max_bytes`. The body is
+    read whole, in memory, so a caller downloading a file passes `max_bytes`;
+    every caller either parses the body or validates its first bytes before
+    writing it, so a partial body must never reach them.
+
+    `urllib.request.urlopen` is looked up per call: the logo tests patch it on
+    the shared `urllib.request` module.
+    """
+    def _work() -> tuple:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            if max_bytes is None:
+                return resp.status, resp.read()
+            body = resp.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                raise ValueError(f"response larger than {max_bytes} bytes")
+            return resp.status, body
+
+    return run_with_deadline(_work, timeout)
+
+
 def http_get_json(
     requests_mod: Any,
     url: str,
@@ -613,11 +868,13 @@ def http_get_json(
     """GET `url` and return its parsed JSON, or None after logging a WARNING.
 
     The ONE body behind every source module's `_http_get` (#193). A status of
-    400 or above, any `requests` exception and an unparseable body all come
-    back as None, which every caller already reads as "no data from this
-    feed". Both log lines go through `redact_secrets`, on the URL AND on the
-    exception text, because `requests` renders the full URL (query string
-    included) into its exception messages and no caller can sanitise those.
+    400 or above, any `requests` exception, a response still incomplete after
+    `timeout` seconds in total (#271, see `get_within_deadline`) and an
+    unparseable body all come back as None, which every caller already reads
+    as "no data from this feed". Both log lines go through `redact_secrets`, on
+    the URL AND on the exception text, because `requests` renders the full URL
+    (query string included) into its exception messages and no caller can
+    sanitise those.
 
     DO NOT import `requests` in this module, and DO NOT "simplify" the
     per-module `_http_get` wrappers away. Each source keeps a thin
@@ -637,13 +894,13 @@ def http_get_json(
     never took them makes the same `requests.get(url, timeout=...)` call it
     always did.
     """
-    kwargs: Dict[str, Any] = {"timeout": timeout}
+    kwargs: Dict[str, Any] = {}
     if params is not None:
         kwargs["params"] = params
     if headers is not None:
         kwargs["headers"] = headers
     try:
-        r = requests_mod.get(url, **kwargs)
+        r = get_within_deadline(requests_mod, url, timeout=timeout, **kwargs)
         if r.status_code >= 400:
             log.warning("[%s] %s -> %d", tag, redact_secrets(url), r.status_code)
             return None

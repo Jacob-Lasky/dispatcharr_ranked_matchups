@@ -10762,7 +10762,11 @@ class TestFdRequestPacing:
         code = "\n".join(
             ln for ln in src.split("\n") if not ln.lstrip().startswith("#")
         )
-        bare = re.findall(r"requests\.get\(\s*\n?\s*f?\"\{FD_BASE\}", code)
+        # get_within_deadline (#271) is the only other way to make the call,
+        # and it bounds the response without pacing it.
+        bare = re.findall(
+            r"(?:requests\.get|get_within_deadline)\(\s*(?:requests,\s*)?f?\"\{FD_BASE\}", code,
+        )
         assert not bare, (
             f"{len(bare)} bare requests.get against FD_BASE; route them through "
             "_fd_get so they are paced and retried (#159)"
