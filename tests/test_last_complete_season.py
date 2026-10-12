@@ -144,6 +144,29 @@ def test_a_read_that_crosses_a_season_boundary_is_kept_under_its_own_season(monk
     assert store.recall(src.season_store_key()) is None
 
 
+def test_ncaam_reads_and_keys_one_season_however_the_clock_moves(monkeypatch, store):
+    """WITNESS (Codex, round 2): NCAAM read its season from the clock once for
+    the key and again for the read; across Nov 1 UTC a complete 2026-27 read
+    was filed under 2025-26's key. The season is read once per source now."""
+    from tests.test_hold_failed_days import _Resp
+    ncaam = importlib.import_module(f"{PKG}.ncaam")
+    asked = []
+
+    def get(url, **k):
+        if url.endswith("/rankings"):
+            return _Resp([{"pollType": "AP Top 25", "week": 1, "team": "Duke", "ranking": 1}])
+        asked.append((k.get("params") or {}).get("startDateRange"))
+        return _Resp([])
+
+    stub_requests_get(monkeypatch, get)
+    src = ncaam.NcaamSource(api_key="k")
+    years = iter([2026, 2027, 2027, 2027, 2027])
+    monkeypatch.setattr(src, "_current_season_year", lambda: next(years))
+    src._fetch_games_cached()
+    assert src.season_store_key() == "NcaamSource|NCAA Men's Basketball|2026|AP Top 25"
+    assert asked == ["2025-11-01", "2026-01-01", "2026-02-16"]
+
+
 def test_no_prior_read_is_not_simulated(monkeypatch, store):
     """Guard: the #289 behaviour when there is nothing to fall back to."""
     src = _nba(monkeypatch, dead_day="20261225")

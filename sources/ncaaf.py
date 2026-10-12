@@ -135,7 +135,7 @@ class NcaafSource(PointsBasedSportSource):
             logger.warning("[ncaaf] no CFBD API key configured; returning []")
             return []
 
-        season_year = self._current_season_year()
+        season_year = self._season()
         # RAISES RankingsUnavailable for a failed request (#283), so the
         # refresh reports NCAAF as errored and holds its previous games
         # (#240). None is a poll that is not published yet, logged at INFO by
@@ -223,6 +223,16 @@ class NcaafSource(PointsBasedSportSource):
         now = datetime.now(timezone.utc)
         return now.year if now.month >= 8 else now.year - 1
 
+    def _season(self) -> int:
+        """`_current_season_year()`, read ONCE per source (one refresh). The
+        upcoming fetch, the season read and the key its complete read is
+        kept under (`points_based.season_store_key`) must name the same
+        season; three clock reads could straddle the season boundary and
+        file one season's games under the other's key."""
+        if getattr(self, "_season_memo", None) is None:
+            self._season_memo = self._current_season_year()
+        return self._season_memo
+
     def _fetch_rankings(self, year: int) -> Optional[Dict[str, int]]:
         """Return {team_name → rank} for the latest snapshot, or None if no
         poll has been published yet (preseason). RAISES `RankingsUnavailable`
@@ -286,7 +296,7 @@ class NcaafSource(PointsBasedSportSource):
         """The season AND the division selection: the stored population is
         cut to the selected divisions, so another selection is another
         season (`points_based.season_store_key`)."""
-        return f"{self._current_season_year()}|{','.join(sorted(self._allowed_classifications))}"
+        return f"{self._season()}|{','.join(sorted(self._allowed_classifications))}"
 
     def _fetch_raw_season(self, year: int) -> List[Dict]:
         """One CFBD /games call per season year, cached for this instance.
@@ -500,7 +510,7 @@ class NcaafSource(PointsBasedSportSource):
         """
         if not self.api_key:
             return []
-        raw = self._fetch_raw_season(self._current_season_year())
+        raw = self._fetch_raw_season(self._season())
         out: List[Dict[str, Any]] = []
         for g in raw:
             if not self._in_selected_divisions(g):
