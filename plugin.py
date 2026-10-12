@@ -6834,10 +6834,24 @@ def _invalidate_epg_output_cache() -> None:
         )
 
 
+def _fetching_source_message(group_name: str, before_any_write: bool = True) -> str:
+    """Apply's refusal when the live group shares its name with an EPG source
+    that fetches its own guide (see _never_fetches_q). Found again in the main
+    transaction (`before_any_write` False), the recording cancellations
+    committed before it stand, so it says what did not change instead."""
+    unchanged = ("Nothing was changed." if before_any_write
+                 else "No channel or guide was changed.")
+    return (
+        f"The group name {group_name!r} is also the name of an EPG source that "
+        f"fetches its own guide, so the plugin cannot use it for its guide. "
+        f"{unchanged} Rename 'Target group name' (or that EPG source)."
+    )
+
+
 def _commit_group_setup(
     group_name: str, target_group, foreign_owned_groups, foreign_epg_sources,
     deletable_group_names,
-) -> Dict[str, Any]:
+) -> Optional[Dict[str, Any]]:
     """Apply's steps 1 and 2, the COMMITTED half: create the live group if it
     is missing, move our channels out of groups named after a previous live
     group, and make our EPGSource exist (and sit out of the joke-filler path),
@@ -6854,11 +6868,22 @@ def _commit_group_setup(
     (tests/test_apply_no_write_before_gate.py).
 
     Not for a dry run (nothing here is a preview). Returns the target group,
-    the EPGSource, and the counts the summary reports.
+    the EPGSource, and the counts the summary reports; None, having written
+    nothing, when the source named after the live group fetches its own
+    guide (_fetching_source_message).
     """
     from apps.channels.models import Channel, ChannelGroup
     from apps.epg.models import EPGData, EPGSource
     from django.db import transaction
+
+    # Read FIRST, row-locked, and re-checked: apply refused a fetching source
+    # before its pre-pass, which can spend minutes on the network; a source
+    # the user pointed at a guide meanwhile was adopted here (switched
+    # inactive, filled with our rows).
+    epg_source = EPGSource.objects.select_for_update().filter(name=group_name).first()
+    if epg_source is not None and not EPGSource.objects.filter(
+            pk=epg_source.pk).filter(_never_fetches_q()).exists():
+        return None
 
     if target_group is None:
         target_group = ChannelGroup.objects.create(name=group_name)
@@ -6915,7 +6940,6 @@ def _commit_group_setup(
                         old_g.name,
                     )
 
-    epg_source = EPGSource.objects.filter(name=group_name).first()
     if not epg_source:
         epg_source = EPGSource.objects.create(
             name=group_name,
@@ -7061,11 +7085,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         EPGSource.objects.filter(name=group_name).exclude(_never_fetches_q()).first()
     )
     if clashing_src is not None:
-        msg = (
-            f"The group name {group_name!r} is also the name of an EPG source that "
-            f"fetches its own guide, so the plugin cannot use it for its guide. "
-            f"Nothing was changed. Rename 'Target group name' (or that EPG source)."
-        )
+        msg = _fetching_source_message(group_name)
         logger.error("[ranked_matchups] %s", msg)
         return {"status": "error", "message": msg}
     # #206: ordered language preference for each channel's pooled streams. This
@@ -8032,6 +8052,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 group_name, target_group, foreign_owned_groups, foreign_epg_sources,
                 _deletable_group_names,
             )
+            if setup is None:
+                # Nothing written in this transaction yet, so leaving it
+                # commits nothing.
+                msg = _fetching_source_message(group_name, before_any_write=False)
+                logger.error("[ranked_matchups] %s", msg)
+                return {"status": "error", "message": msg}
             target_group, epg_source = setup["target_group"], setup["epg_source"]
             migrated_from_old_group = setup["migrated"]
             deleted_old_groups = setup["deleted_groups"]

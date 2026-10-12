@@ -154,6 +154,35 @@ def scenario_witness_a_case_only_archive_rename_keeps_the_archive(env):
     assert m.ChannelGroup.objects.filter(pk=archive.pk).exists()
 
 
+def scenario_witness_a_source_made_to_fetch_during_the_prepass_is_not_adopted(env):
+    """Codex review, round 12: the "group named after a fetching EPG source"
+    refusal runs before the pre-pass, and the source is now created or
+    upgraded only in the main transaction, minutes later. A user who points
+    that source at a guide meanwhile had it switched inactive and filled
+    with our rows. Re-checked under a row lock, apply refuses instead."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    _publish(env, [game], settings=_settings(**COMPACT))
+    _write_cache(env, [game])
+    prepare = env.plugin._autorecord_prepare
+
+    def user_edits_the_source(*a, **k):
+        m.EPGSource.objects.filter(name=OLD).update(url="http://guide.example/xmltv.xml",
+                                                    is_active=True)
+        return prepare(*a, **k)
+
+    env.plugin._autorecord_prepare = user_edits_the_source
+    try:
+        result = env.plugin._action_apply(_settings(**COMPACT))
+    finally:
+        env.plugin._autorecord_prepare = prepare
+    assert result["status"] == "error" and "fetches its own guide" in result["message"], result
+    assert "No channel or guide was changed." in result["message"], result
+    src = m.EPGSource.objects.get(name=OLD)
+    assert src.is_active is True, "the user's fetching source was switched inactive"
+
+
 def scenario_a_rename_keeps_our_numbers(env):
     """Guard: numbering now runs BEFORE the group move commits, so it must
     count our channels in the group being renamed away from as ours. Counted
