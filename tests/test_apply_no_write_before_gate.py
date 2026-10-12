@@ -1021,19 +1021,43 @@ def scenario_witness_a_name_the_database_rejects_is_refused_before_any_write(env
 
 
 def scenario_every_name_the_setup_writes_is_checked(env):
-    """Guard for _setup_name_problem: both settings, every model each names,
-    the NUL Postgres refuses in any text, and nothing at the limit itself."""
+    """Guard for _setup_name_problem / _recordings_name_problem: every model
+    each setting names, the NUL Postgres refuses in any text, and nothing at
+    the limit itself."""
     m = env.m
-    check = env.plugin._setup_name_problem
+    live, rec = env.plugin._setup_name_problem, env.plugin._recordings_name_problem
     src_limit = m.EPGSource._meta.get_field("name").max_length
     chan_limit = m.Channel._meta.get_field("name").max_length
     assert src_limit and chan_limit, "instrument: the harness models carry no limits"
-    assert check("Top Matchups", "Matchups Recordings") is None
-    assert check("M" * src_limit, "R" * chan_limit) is None
-    assert "Target group name" in check("M" * (src_limit + 1), "Matchups Recordings")
-    assert "Recordings group name" in check("Top Matchups", "R" * (chan_limit + 1))
-    assert "NUL" in check("Top\x00Matchups", "Matchups Recordings")
-    assert "NUL" in check("Top Matchups", "Matchups\x00Recordings")
+    assert live("Top Matchups") is None and rec("Matchups Recordings") is None
+    assert live("M" * src_limit) is None and rec("R" * chan_limit) is None
+    assert "Target group name" in live("M" * (src_limit + 1))
+    assert "Recordings group name" in rec("R" * (chan_limit + 1))
+    assert "NUL" in live("Top\x00Matchups") and "NUL" in rec("Matchups\x00Recordings")
+
+
+def scenario_witness_a_recordings_name_too_long_only_stops_archiving(env):
+    """Codex review, round 21: the up-front name check refused EVERY apply
+    for a 'Recordings group name' too long for Channel.name, though only an
+    apply that archives writes it (base published normally). It switches
+    archiving off instead, as a name equal to the live group's does: the
+    slate publishes, and a channel with recordings is kept, not reaped."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    finished = _publish(env, [_row(401, _now() - timedelta(hours=10), user_ch.id)],
+                        settings=_settings(**COMPACT))[G401]
+    m.Recording.objects.create(
+        channel=finished, start_time=_now() - timedelta(hours=10),
+        end_time=_now() - timedelta(hours=7), custom_properties={"status": "completed"},
+    )
+    game = _row(402, _now() + timedelta(hours=6), user_ch.id)
+    _write_cache(env, [game])
+    too_long = "R" * (m.Channel._meta.get_field("name").max_length + 1)
+    result = env.plugin._action_apply(_settings(recordings_group_name=too_long, **COMPACT))
+    assert result["status"] == "ok", result
+    assert m.Channel.objects.filter(tvg_id="ranked_matchups:CFB:402").exists(), "the slate did not publish"
+    assert m.Channel.objects.filter(pk=finished.pk).exists(), "the channel with a recording was reaped"
+    assert not m.Channel.objects.filter(tvg_id=env.plugin.ARCHIVE_TVG_ID).exists()
 
 
 # ----------------------------------------- class guard, by source (AST) ---

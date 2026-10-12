@@ -6844,32 +6844,42 @@ def _invalidate_epg_output_cache() -> None:
         )
 
 
-def _setup_name_problem(group_name: str, recordings_group_name: str) -> Optional[str]:
-    """Why the database would reject a name apply writes in its main
-    transaction, or None: the live group and our EPGSource are named
-    `group_name`, and the recordings group and its archive channel
-    `recordings_group_name`. Checked before apply's FIRST committed write:
-    that transaction runs after the recording cancellations commit
-    (_autorecord_cancel_committed), so a name rejected there failed every
-    apply after its cancellations, and a displaced recording's replacement,
-    planned in the rolled-back transaction, was never scheduled. Limits are
-    read off the models, so they follow Dispatcharr's schema."""
-    from apps.channels.models import Channel, ChannelGroup
-    from apps.epg.models import EPGSource
-    for setting, value, models in (
-        ("Target group name", group_name, (ChannelGroup, EPGSource)),
-        ("Recordings group name", recordings_group_name, (ChannelGroup, Channel)),
-    ):
-        if "\x00" in value:
-            return (f"'{setting}' contains a NUL character, which the database "
-                    f"refuses. Nothing was changed.")
-        for model in models:
-            limit = model._meta.get_field("name").max_length
-            if limit is not None and len(value) > limit:
-                return (f"'{setting}' is {len(value)} characters long; Dispatcharr "
-                        f"allows at most {limit} for a {model.__name__} name. "
-                        f"Nothing was changed. Shorten it.")
+def _name_problem(setting: str, value: str, models) -> Optional[str]:
+    """Why the database would reject `value` as the name of a row of any of
+    `models`, or None: past the field's max_length (read off the model, so it
+    follows Dispatcharr's schema), or holding a NUL, which Postgres refuses
+    in any text. Apply checks the names it writes in its main transaction
+    BEFORE its first committed write: that transaction runs after the
+    recording cancellations commit (_autorecord_cancel_committed), so a name
+    rejected there failed every apply after its cancellations, and a
+    displaced recording's replacement, planned in the rolled-back
+    transaction, was never scheduled."""
+    if "\x00" in value:
+        return f"'{setting}' contains a NUL character, which the database refuses."
+    for model in models:
+        limit = model._meta.get_field("name").max_length
+        if limit is not None and len(value) > limit:
+            return (f"'{setting}' is {len(value)} characters long; Dispatcharr "
+                    f"allows at most {limit} for a {model.__name__} name.")
     return None
+
+
+def _setup_name_problem(group_name: str) -> Optional[str]:
+    """Apply's refusal for a live-group name the database would reject: the
+    live group and our EPGSource carry it, and every apply writes them."""
+    from apps.channels.models import ChannelGroup
+    from apps.epg.models import EPGSource
+    problem = _name_problem("Target group name", group_name, (ChannelGroup, EPGSource))
+    return None if problem is None else f"{problem} Nothing was changed. Shorten it."
+
+
+def _recordings_name_problem(recordings_group_name: str) -> Optional[str]:
+    """Why the recordings group and its archive channel cannot carry this
+    name, or None. Not a refusal: only an apply that archives writes them, so
+    archiving is switched off instead (as for a name equal to the live
+    group's), and channels with recordings are kept rather than reaped."""
+    from apps.channels.models import Channel, ChannelGroup
+    return _name_problem("Recordings group name", recordings_group_name, (ChannelGroup, Channel))
 
 
 def _fetching_source_message(group_name: str, before_any_write: bool = True) -> str:
@@ -7133,6 +7143,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             "Channels with recordings will be kept rather than reaped.",
             recordings_group_name,
         )
+    recordings_name_problem = _recordings_name_problem(recordings_group_name)
+    if archive_enabled and recordings_name_problem is not None:
+        archive_enabled = False
+        logger.warning(
+            "[ranked_matchups] %s Recording preservation disabled until it is fixed. "
+            "Channels with recordings will be kept rather than reaped.",
+            recordings_name_problem,
+        )
     dry_run = _dry_run_enabled(settings)
     # Our EPGSource is the one named after the live group, and ours never
     # fetches (blank url and file_path, not Schedules Direct: _never_fetches_q).
@@ -7140,7 +7158,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # that DOES fetch, step 2 would adopt the user's source (switch it inactive)
     # and the rename cleanup would write our guide rows into it, replacing
     # programmes on any row that shares a marker. Refuse before any write.
-    name_problem = _setup_name_problem(group_name, recordings_group_name)
+    name_problem = _setup_name_problem(group_name)
     if name_problem is not None:
         logger.error("[ranked_matchups] %s", name_problem)
         return {"status": "error", "message": name_problem}
