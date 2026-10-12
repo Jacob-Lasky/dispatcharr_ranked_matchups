@@ -1,7 +1,8 @@
 """NCAA Softball source: ESPN's unofficial site.api.espn.com.
 No API key required.
 
-Two source classes ship under the `enable_ncaa_softball` toggle:
+Two source classes ship under the `enable_ncaa_softball` league (the
+"Softball" half of the NCAA Baseball & Softball setting, #208):
   - `NcaaSoftballRegularSource(PointsBasedSportSource)`: regular-season
     win-count importance (LEAGUE_CONTEXTS["SBL"]).
   - `NcaaSoftballPlayoffSource(BestOfNSeriesSource)`: postseason.
@@ -26,10 +27,10 @@ Rankings poll: ESPN exposes the ESPN.com/USA Softball Collegiate
 Top 25 (the canonical D1 softball poll). Used for the rank-pair
 signal on upcoming matchups.
 
-Per-day iteration is required: ESPN's range syntax silently caps
-at 25 events. D1 softball can produce 60+ games on a Saturday
-during peak season; per-day single-date queries return all of
-them.
+Per-day iteration with an explicit page size is required: a peak
+Saturday carries ~150 games, past ESPN's default 100-event page, and
+the multi-day `dates=` forms either 400 or silently drop events. See
+`_espn.SCOREBOARD_EVENT_LIMIT`.
 
 Team-name canonicalization uses ESPN's `team.location` (school name:
 "Oklahoma", "Texas") rather than the mascot ("Sooners", "Longhorns")
@@ -39,22 +40,30 @@ because EPG entries use the school name.
 from __future__ import annotations
 
 import logging
-import random
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult
-from .bracket import BestOfNSeriesSource, DoubleEliminationSource
+from .base import GameRow, attach_poll_ranks
+from .bracket import BestOfNSeriesSource, DoubleEliminationSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import (
     extract_game_number_after_marker,
     parse_iso_utc,
-    poisson_sample as _poisson,
+    http_get_json,
 )
-from ._espn import fetch_days
+from ._espn import (
+    dedupe_events,
+    event_identity,
+    fetch_espn_poll,
+    fetch_scoreboard_day,
+    fetch_scoreboard_days,
+    scoreboard_event_over,
+    scoreboard_events,
+    sweep_upcoming_events,
+)
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_softball")
 
@@ -73,17 +82,8 @@ _DEFAULT_RUNS_AGAINST = 5.0
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    """ESPN unofficial wrapper. Returns parsed JSON or None on any
-    failure. Logs at WARNING so silent degradation is observable."""
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[ncaa_softball] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[ncaa_softball] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="ncaa_softball", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -125,15 +125,7 @@ def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not home_team or not away_team:
         return None
 
-    status_type = (comp.get("status") or {}).get("type") or {}
-    completed = bool(status_type.get("completed"))
-    state = (status_type.get("state") or "").lower()
-    if completed or state == "post":
-        status = "FINISHED"
-    elif state == "in":
-        status = "SCHEDULED"
-    else:
-        status = "SCHEDULED"
+    status = "FINISHED" if scoreboard_event_over(event) else "SCHEDULED"
 
     try:
         hp = int(home.get("score")) if status == "FINISHED" else None
@@ -176,6 +168,10 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
     """
 
     league_context_code = "SBL"
+    # The softball Top 25 is drawn from Division I (#198): 309 teams in the
+    # 2025 season (Wikipedia, "2025 NCAA Division I softball season",
+    # checked 2026-10-11). See SportSource.rank_field_size.
+    rank_field_size = 309
     _DEFAULT_POINTS_FOR = _DEFAULT_RUNS_FOR
     _DEFAULT_POINTS_AGAINST = _DEFAULT_RUNS_AGAINST
 
@@ -197,81 +193,52 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
         return "NCAA Softball"
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Per-day scoreboard sweep. Attaches AP-style softball rank
-        from the rankings endpoint when available."""
-        rankings = self._fetch_rankings()
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if not data:
-                continue
-            for event in data.get("events") or []:
-                if _is_postseason_event(event):
-                    # Owned by NcaaSoftballPlayoffSource.
-                    continue
-                rec = _extract_game_record(event)
-                if rec is None:
-                    continue
-                eid = rec.get("id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                rank_home = rankings.get(rec["home"])
-                rank_away = rankings.get(rec["away"])
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=rec["home"],
-                    away=rec["away"],
-                    rank_home=rank_home,
-                    rank_away=rank_away,
-                    start_time=start,
-                    extra={
-                        "ncaasbl_game_id": eid,
-                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                        "game_id": eid,
-                        "fd_competition_code": self.league_context_code,
-                    },
-                ))
-        return out
+        """Upcoming regular-season games through
+        `_espn.sweep_upcoming_events` (window, lookback day, FINISHED and
+        stale drops, dedupe; #256). Attaches the softball poll's ranks after
+        the sweep, only when it found a game (`base.attach_poll_ranks`); a
+        failed poll raises (#283)."""
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
+            if _is_postseason_event(event):
+                # Owned by NcaaSoftballPlayoffSource.
+                return None
+            rec = _extract_game_record(event)
+            if rec is None:
+                return None
+            start = rec.get("start_time")
+            if start is None:
+                return None
+            eid = rec.get("id")
+            return GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=rec["home"],
+                away=rec["away"],
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra={
+                    "ncaasbl_game_id": eid,
+                    # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                    "game_id": event_identity(event),
+                    "fd_competition_code": self.league_context_code,
+                },
+            )
+        return attach_poll_ranks(
+            sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row),
+            self._fetch_rankings,
+        )
 
     def _fetch_rankings(self) -> Dict[str, int]:
-        """Return {school: rank} from ESPN's softball poll. Empty
-        dict if missing."""
-        data = _http_get(f"{ESPN_BASE}/rankings")
-        if not data:
-            return {}
-        ranks_by_team: Dict[str, int] = {}
-        polls = data.get("rankings") or []
-        if not polls:
-            return ranks_by_team
-        # Softball has one canonical poll: ESPN.com/USA Softball Collegiate
-        # Top 25. Take the first poll entry; if ESPN ever adds more we'd
-        # pick the official one explicitly.
-        poll = polls[0]
-        for r in poll.get("ranks") or []:
-            team_obj = r.get("team") or {}
-            name = _team_canonical_name(team_obj)
-            try:
-                rank = int(r.get("current") or 0)
-            except (TypeError, ValueError):
-                continue
-            if name and rank > 0:
-                ranks_by_team[name] = rank
-        return ranks_by_team
+        """{school: rank} from the ESPN.com/USA Softball Collegiate Top 25,
+        the one poll ESPN exposes. Raises `RankingsUnavailable` when it did
+        not answer (#283; see `_espn.fetch_espn_poll`)."""
+        return fetch_espn_poll(_http_get, f"{ESPN_BASE}/rankings", _team_canonical_name)
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
-        """Per-day iteration from season start (Feb 1) through
-        min(today + 7d, end of season). Same trap as ncaa_baseball.py:
-        ESPN range syntax caps at 25 events, daily queries don't.
+        """Per-day iteration from season start (Feb 1) through the end
+        of the season (#229), via `_espn.fetch_scoreboard_day`.
         """
-        seen: Dict[Any, Dict[str, Any]] = {}
         season_start = datetime(self.season_year, SEASON_START_MONTH, 1,
                                 tzinfo=timezone.utc).date()
         # End of season = end of June (covers WCWS Finals).
@@ -286,24 +253,22 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = season_end
 
-        def day_board(day):
-            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+        def keep(event: Dict[str, Any], key: Any) -> Optional[Dict[str, Any]]:
+            if _is_postseason_event(event):
+                # Postseason win/loss counts must NOT flow into
+                # the regular-season Monte Carlo. See class
+                # docstring.
+                return None
+            rec = _extract_game_record(event)
+            if rec is not None:
+                rec["id"] = key  # the event's identity, never None: see dedupe_events
+            return rec
 
-        for _day, data in fetch_days(season_start, end, day_board):
-            if data:
-                for event in data.get("events") or []:
-                    if _is_postseason_event(event):
-                        # Postseason win/loss counts must NOT flow into
-                        # the regular-season Monte Carlo. See class
-                        # docstring.
-                        continue
-                    rec = _extract_game_record(event)
-                    if rec is None or rec["id"] is None:
-                        continue
-                    if rec["id"] in seen:
-                        continue
-                    seen[rec["id"]] = rec
-        return list(seen.values())
+        return dedupe_events(scoreboard_events(
+            data for _day, data in fetch_scoreboard_days(
+                _http_get, f"{ESPN_BASE}/scoreboard", season_start, end,
+            )
+        ), keep)
 
 
 # =====================================================================
@@ -337,7 +302,7 @@ def _parse_softball_playoff_headline(headline: str) -> Tuple[Optional[str], Opti
     return None, None
 
 
-class _SoftballPlayoffStrengthsMixin:
+class _SoftballPlayoffStrengthsMixin(ForcedWinnerPoissonSampler):
     """Shared per-team Poisson strength tracking + sample_result for the
     two NCAA Softball playoff source classes (Super Regional + WCWS Finals
     via BestOfNSeriesSource; Regional + 8-team WCWS bracket via
@@ -369,27 +334,6 @@ class _SoftballPlayoffStrengthsMixin:
             "pf_per_game": _DEFAULT_RUNS_FOR,
             "pa_per_game": _DEFAULT_RUNS_AGAINST,
         }
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        del state
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.1, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.1, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_runs = _poisson(lam_home, rng)
-        away_runs = _poisson(lam_away, rng)
-        if home_runs == away_runs:
-            if rng.random() < 0.5:
-                home_runs += 1
-            else:
-                away_runs += 1
-        return MatchResult(home_goals=home_runs, away_goals=away_runs)
 
 
 class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSource):
@@ -444,26 +388,14 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if not data:
-                continue
-            for event in data.get("events") or []:
-                if not _is_postseason_event(event):
-                    continue
-                row = self._event_to_game_row(event)
-                if row is None:
-                    continue
-                eid = row.extra.get("ncaasbl_game_id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                out.append(row)
-        return out
+        """Upcoming postseason games through `_espn.sweep_upcoming_events`
+        (window, lookback day, FINISHED and stale drops, dedupe; #256), with
+        `_is_postseason_event` filtering IN postseason."""
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
+            if not _is_postseason_event(event):
+                return None
+            return self._event_to_game_row(event)
+        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
 
     def _event_to_game_row(self, event: Dict[str, Any]) -> Optional[GameRow]:
         comps = event.get("competitions") or []
@@ -504,7 +436,7 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
             start_time=start,
             extra={
                 "ncaasbl_game_id": event.get("id"),
-                "game_id": event.get("id"),
+                "game_id": event_identity(event),
                 "fd_competition_code": self._league_context_code(),
                 "stage": stage,
                 "matchday": game_num,
@@ -529,20 +461,22 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
         out: List[Dict[str, Any]] = []
         season_start = datetime(self.season_year, 5, 15, tzinfo=timezone.utc).date()
         season_end = datetime(self.season_year, 6, 15, tzinfo=timezone.utc).date()
-        day = season_start
-        while day <= season_end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if data:
-                for event in data.get("events") or []:
-                    if not _is_postseason_event(event):
-                        continue
-                    rec = self._event_to_bracket_record(event)
-                    if rec is not None:
-                        out.append(rec)
-            day += timedelta(days=1)
+        payloads = self._sweep_bracket_days(
+            season_start, season_end,
+            lambda d: fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", d),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+        for data in payloads:
+            for event in data.get("events") or []:
+                if not _is_postseason_event(event):
+                    continue
+                rec = self._event_to_bracket_record(event)
+                if rec is not None:
+                    out.append(rec)
 
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     def _event_to_bracket_record(self, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         comps = event.get("competitions") or []
@@ -571,13 +505,7 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
         if home_team.upper() == "TBD" or away_team.upper() == "TBD":
             return None
 
-        status_type = (comp.get("status") or {}).get("type") or {}
-        completed = bool(status_type.get("completed"))
-        state = (status_type.get("state") or "").lower()
-        if completed or state == "post":
-            status = "FINISHED"
-        else:
-            status = "SCHEDULED"
+        status = "FINISHED" if scoreboard_event_over(event) else "SCHEDULED"
         try:
             hr = int(home.get("score")) if status == "FINISHED" else None
         except (TypeError, ValueError):
@@ -592,7 +520,7 @@ class NcaaSoftballPlayoffSource(_SoftballPlayoffStrengthsMixin, BestOfNSeriesSou
             ar = None
 
         return {
-            "game_id": event.get("id"),
+            "game_id": event_identity(event),  # never None: see _espn.dedupe_events
             "stage": stage,
             "matchday": game_num,
             "home": home_team,
@@ -708,13 +636,13 @@ def _classify_wcws_sub_brackets(
 
 
 def _wcws_meta_from_raw_events(
-    raw_events: List[Tuple[Dict[str, Any], str, Optional[str]]],
+    raw_events: List[Tuple[Dict[str, Any], str, Optional[str], Any]],
 ) -> List[Dict[str, Any]]:
-    """(home, away, start_time) projection for WCWS events, shared
-    between fetch_upcoming and _fetch_bracket_games. See the baseball
-    sibling helper for context."""
+    """(home, away, start_time) projection for WCWS events, for
+    _fetch_bracket_games only. See the baseball sibling helper for why
+    fetch_upcoming does not classify."""
     out: List[Dict[str, Any]] = []
-    for event, stage, _key in raw_events:
+    for event, stage, _partial_key, _identity in raw_events:
         if stage != "WCWS":
             continue
         comps = event.get("competitions") or []
@@ -784,51 +712,37 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        raw_events: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if not data:
-                continue
-            for event in data.get("events") or []:
-                if not _is_postseason_event(event):
-                    continue
-                eid = event.get("id")
-                if eid in seen_ids:
-                    continue
-                comps = event.get("competitions") or []
-                if not comps:
-                    continue
-                headline = ""
-                for note in (comps[0].get("notes") or []):
-                    if note.get("type") == "event":
-                        headline = note.get("headline") or ""
-                        break
-                stage, partial_key = _parse_softball_bracket_headline(headline)
-                if stage is None:
-                    continue
-                seen_ids.add(eid)
-                raw_events.append((event, stage, partial_key))
+        """Upcoming postseason games whose headline matches a bracket stage
+        (Regional or 8-team WCWS bracket), through
+        `_espn.sweep_upcoming_events` (window, lookback day, FINISHED and
+        stale drops, dedupe; #256)."""
+        def staged(event: Dict[str, Any]) -> Optional[Tuple[Dict[str, Any], str, Optional[str]]]:
+            if not _is_postseason_event(event):
+                return None
+            comps = event.get("competitions") or []
+            if not comps:
+                return None
+            headline = ""
+            for note in (comps[0].get("notes") or []):
+                if note.get("type") == "event":
+                    headline = note.get("headline") or ""
+                    break
+            stage, partial_key = _parse_softball_bracket_headline(headline)
+            if stage is None:
+                return None
+            return event, stage, partial_key
 
-        wcws_sub_by_team = _classify_wcws_sub_brackets(
-            _wcws_meta_from_raw_events(raw_events)
-        )
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
+            tagged = staged(event)
+            return self._event_to_game_row(*tagged) if tagged is not None else None
 
-        for event, stage, partial_key in raw_events:
-            row = self._event_to_game_row(event, stage, partial_key, wcws_sub_by_team)
-            if row is not None:
-                out.append(row)
-        return out
+        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
 
     def _event_to_game_row(
         self,
         event: Dict[str, Any],
         stage: str,
         partial_key: Optional[str],
-        wcws_sub_by_team: Dict[str, str],
     ) -> Optional[GameRow]:
         comps = event.get("competitions") or []
         if not comps:
@@ -851,12 +765,16 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
         if start is None:
             return None
 
-        if stage == "SB_REG":
-            grouping_key = partial_key
-        else:  # WCWS
-            grouping_key = wcws_sub_by_team.get(home_team) or wcws_sub_by_team.get(away_team)
-        if grouping_key is None:
-            return None
+        # A Regional's site is in its own headline. A WCWS game's sub-bracket is
+        # NOT knowable from the upcoming window: it is read off opening-day
+        # pairings, which by Day 3 are outside the window (and FINISHED, so
+        # swept out of it, before that). DO NOT guess it here: the old
+        # window-relative guess labelled whatever came first in the window
+        # sub-bracket 1, and dropped a game whose teams it had not seen (#256
+        # review). Leave it None. place_upcoming stamps the bracket's own key
+        # on every row it places, and a row it cannot place resolves its tie
+        # by team set in `_find_tie_meta`, which a WRONG key would defeat.
+        grouping_key = partial_key if stage == "SB_REG" else None
 
         headline = ""
         for note in (comp.get("notes") or []):
@@ -874,7 +792,7 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
             start_time=start,
             extra={
                 "ncaasbl_game_id": event.get("id"),
-                "game_id": event.get("id"),
+                "game_id": event_identity(event),
                 "fd_competition_code": self._league_context_code(),
                 "stage": stage,
                 "grouping_key": grouping_key,
@@ -888,46 +806,46 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
         if self._bracket_games_cache is not None:
             return self._bracket_games_cache
 
-        raw: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
         season_start = datetime(self.season_year, 5, 15, tzinfo=timezone.utc).date()
         season_end = datetime(self.season_year, 6, 15, tzinfo=timezone.utc).date()
-        day = season_start
-        seen_ids: set = set()
-        while day <= season_end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if data:
-                for event in data.get("events") or []:
-                    if not _is_postseason_event(event):
-                        continue
-                    eid = event.get("id")
-                    if eid in seen_ids:
-                        continue
-                    comps = event.get("competitions") or []
-                    if not comps:
-                        continue
-                    headline = ""
-                    for note in (comps[0].get("notes") or []):
-                        if note.get("type") == "event":
-                            headline = note.get("headline") or ""
-                            break
-                    stage, partial_key = _parse_softball_bracket_headline(headline)
-                    if stage is None:
-                        continue
-                    seen_ids.add(eid)
-                    raw.append((event, stage, partial_key))
-            day += timedelta(days=1)
+        payloads = self._sweep_bracket_days(
+            season_start, season_end,
+            lambda d: fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", d),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+
+        def keep(
+            event: Dict[str, Any], key: Any,
+        ) -> Optional[Tuple[Dict[str, Any], str, Optional[str], Any]]:
+            if not _is_postseason_event(event):
+                return None
+            comps = event.get("competitions") or []
+            if not comps:
+                return None
+            headline = ""
+            for note in (comps[0].get("notes") or []):
+                if note.get("type") == "event":
+                    headline = note.get("headline") or ""
+                    break
+            stage, partial_key = _parse_softball_bracket_headline(headline)
+            if stage is None:
+                return None
+            return (event, stage, partial_key, key)
+
+        raw = dedupe_events(scoreboard_events(payloads), keep)
 
         wcws_sub_by_team = _classify_wcws_sub_brackets(
             _wcws_meta_from_raw_events(raw)
         )
 
         out: List[Dict[str, Any]] = []
-        for event, stage, partial_key in raw:
-            rec = self._event_to_bracket_record(event, stage, partial_key, wcws_sub_by_team)
+        for event, stage, partial_key, key in raw:
+            rec = self._event_to_bracket_record(event, stage, partial_key, wcws_sub_by_team, key)
             if rec is not None:
                 out.append(rec)
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     def _event_to_bracket_record(
         self,
@@ -935,6 +853,7 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
         stage: str,
         partial_key: Optional[str],
         wcws_sub_by_team: Dict[str, str],
+        key: Any,
     ) -> Optional[Dict[str, Any]]:
         comps = event.get("competitions") or []
         if not comps:
@@ -961,13 +880,7 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
         if grouping_key is None:
             return None
 
-        status_type = (comp.get("status") or {}).get("type") or {}
-        completed = bool(status_type.get("completed"))
-        state = (status_type.get("state") or "").lower()
-        if completed or state == "post":
-            status = "FINISHED"
-        else:
-            status = "SCHEDULED"
+        status = "FINISHED" if scoreboard_event_over(event) else "SCHEDULED"
         try:
             hr = int(home.get("score")) if status == "FINISHED" else None
         except (TypeError, ValueError):
@@ -982,7 +895,7 @@ class NcaaSoftballPlayoffBracketSource(_SoftballPlayoffStrengthsMixin, DoubleEli
             ar = None
 
         return {
-            "game_id": event.get("id"),
+            "game_id": key,  # the event's identity, never None: see _espn.dedupe_events
             "stage": stage,
             "matchday": 1,
             "home": home_team,

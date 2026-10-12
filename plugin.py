@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -39,7 +40,7 @@ import types
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     from zoneinfo import ZoneInfo
@@ -61,6 +62,7 @@ from ._util import (
     series_result_lines,
     looks_seeded,
     stable_channel_number,
+    write_json_atomic,
     CHANNEL_NUMBER_TIEBREAK_SLOTS,
     trusted_impact_narratives,
     allocate_compact_numbers,
@@ -78,6 +80,8 @@ from ._util import (
 from . import tasks  # noqa: F401, E402
 # Pure auto-record policy (#216); the ORM calls around it live in this file.
 from . import recording as recording_policy  # noqa: E402
+from . import merged_settings  # noqa: E402
+from .merged_settings import league_enabled  # noqa: E402
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -249,8 +253,9 @@ def _streams_in_groups(group_names_cf: frozenset) -> set:
     1. It is two queries instead of an N+1 over a pool that can hold thousands
        of streams (`.only(...)` on the stream queryset defers the group join).
     2. It lets the EXCLUSION run early enough. The apply must drop excluded
-       streams BEFORE `seen_markers.add(marker)`, because a `continue` after
-       that point leaves an existing channel neither published nor reaped, and
+       streams BEFORE the pre-pass gives the game a plan (prep_by_marker), the
+       plans being what seen_markers is built from (#288): a game given a plan
+       and then skipped leaves an existing channel neither published nor reaped, and
        it then commits at the temporary parking number phase 0 gave it (measured
        live 2026-08-29: 22 channels stranded at 1400-1421). Working in ID sets
        makes the pre-pass able to ask "is every candidate stream excluded?"
@@ -338,6 +343,15 @@ RECORDING_STATE_PATH = os.path.join(PLUGIN_DIR, "recordings_state.json")
 # under the scheduler lock, only ever READ by the live handoff timer, so the
 # timer never races apply's writes. A separate file from the state on purpose.
 RECORDING_STOPS_PATH = os.path.join(PLUGIN_DIR, "recording_stops.json")
+# The floor KICKOFF numbering last used (#219), and the kickoff offset and
+# number each channel published from it was numbered for (#278). Auto mode reads
+# the floor back instead of re-deriving it from the user's lineup on every
+# apply, which moved every published number whenever the top of that lineup
+# changed. The record is what lets a channel nudged past its minute's block keep
+# its number when a game below it leaves (see _place_kickoff_numbers). A file,
+# not a setting: writing it into PluginConfig.settings would replace the user's
+# "0 = auto" with a literal number in the settings form.
+NUMBERING_STATE_PATH = os.path.join(PLUGIN_DIR, "numbering_state.json")
 # Sidecar cache for LLM-rewritten descriptions. Separate from cache.json so the
 # main cache file stays purely deterministic (score, breakdown, score_notes
 # unchanged) and the LLM cache can be safely deleted to force regen without
@@ -370,24 +384,68 @@ EPG_PRE_MIN = 30      # 30 min before game starts (default; matches NCAAF / NFL 
 EPG_POST_HOURS = 4    # 4 hours after game starts (default; covers OT)
 
 # Per-sport match-window override (used by _build_epg_lookup to constrain
-# the regex pre-filter's time bucket). The ProgramData slot we emit for
-# our virtual channel still uses the defaults above: those control
-# user-facing display, not match recall. See #4.
+# the regex pre-filter's time bucket). See #4. It is NOT only match recall:
+# _game_end_utc dates a game's end with the post window, so it also sets when
+# the reaper may remove the channel and, through _live_window's min() with
+# EPG_POST_HOURS, where the Live EPG block and the auto-record window end.
 #
-# Soccer leagues / international tournaments. Soccer games run ~95-120 min
-# (90 reg + halftime + stoppage); add ~10 min for extra time + penalties
-# in knockouts. 5 min pre + 2.5h post covers the actual broadcast window
-# without sweeping in pre-game preview shows from earlier in the day.
+# Soccer. A 90-minute match with stoppage and a 15-minute half time is over
+# about 1 h 55 m after kickoff, so 5 min pre + 2.5 h post covers the broadcast
+# without sweeping in the preview shows from earlier in the day (#4).
+#
+# A tie that can go to extra time and penalties cannot fit 2.5 h: 90 +
+# stoppage + 15 half time + 5 break + 30 extra time + stoppage + a shootout
+# ends about 2 h 45 m after kickoff (#257). Such a game gets
+# _SOCCER_KNOCKOUT_POST_HOURS instead, keeping the tight 5-minute PRE window,
+# which is the part that guards recall. DO NOT shorten it below 2 h 45 m: the
+# post window dates the game's end, so a short one ends the Live block and the
+# auto-record before the shootout, and with a small
+# remove_finished_after_minutes the reaper deletes the channel during it.
+#
+# Which games: a soccer prefix whose games include knockouts gets the long
+# window per GAME, from the row itself: _is_postseason_extra, the same rule the
+# favorites-only gate uses, which reads a postseason `extra["stage"]` (WC /
+# EURO / UCL rounds, MLS Cup rounds, the College Cup) or, for the ESPN sources
+# that carry no stage (NWSL, Liga MX), a playoff `season_slug`. DO NOT key it
+# on the prefix for those: WC, EURO, UCL, MLS, NWSL and Liga MX are mostly
+# group or league games, which keep 2.5 h.
+#
+# The English cups (EFLCUP, FACUP) need no entry of their own: every row
+# sources/english_cup.py emits carries a cup round (CUP_R1 .. FINAL), which
+# _is_postseason_extra reads as a knockout, and a fixture whose round it cannot
+# map is skipped, never emitted stage-less.
+#
+# A prefix in _SOCCER_EVERY_GAME_LONG_WINDOW gets the long window for EVERY
+# game, because its rows cannot tell a game that may need extra time from one
+# that cannot. NCAA soccer's regular-season source also carries the conference
+# tournaments, which go to two overtimes and penalties, with nothing on the
+# ESPN event to tell them apart: measured 2026-10-11, October 2025 games were
+# all "FT" while November's carried "AET", "AGT" and "FT-Pens" under the same
+# season slug, `altGameNote` and empty `notes`. (The College Cup rows carry a
+# stage and would get the long window anyway.) Friendlies (FRIENDLY,
+# FRIENDLYW, CLUBFRIENDLY) never play extra time, so they are plain
+# league-window soccer.
+#
+# Every member must be a sport_prefix a source emits; tests/
+# test_mapped_prefixes.py fails on a dead one (#183), and fails on a soccer
+# prefix a source emits that is missing here (#257: NCAAMSOC/NCAAWSOC, the
+# English cups and the friendlies all fell back to the 4 h gridiron window).
+_SOCCER_KNOCKOUT_POST_HOURS = 3.0
+_SOCCER_EVERY_GAME_LONG_WINDOW = frozenset({"NCAAMSOC", "NCAAWSOC"})
 _SOCCER_PREFIXES = frozenset({
     "EPL", "EFL", "UCL",
     "BL1", "LaLiga", "SerieA", "Ligue1",
     "Eredivisie", "PrimeiraLiga", "BSA",
     "WC", "EURO",
     "MLS", "NWSL", "LigaMX",
-    "NCAAMS", "NCAAWS",
-})
+    "EFLCUP", "FACUP",
+    "FRIENDLY", "FRIENDLYW", "CLUBFRIENDLY",
+}) | _SOCCER_EVERY_GAME_LONG_WINDOW
 _MATCH_WINDOW_OVERRIDE_PRE_MIN: Dict[str, int] = {p: 5 for p in _SOCCER_PREFIXES}
-_MATCH_WINDOW_OVERRIDE_POST_HOURS: Dict[str, float] = {p: 2.5 for p in _SOCCER_PREFIXES}
+_MATCH_WINDOW_OVERRIDE_POST_HOURS: Dict[str, float] = {
+    p: (_SOCCER_KNOCKOUT_POST_HOURS if p in _SOCCER_EVERY_GAME_LONG_WINDOW else 2.5)
+    for p in _SOCCER_PREFIXES
+}
 
 # Boxing (BOX) gets a WIDE window, the opposite of soccer's tight one. The
 # Boxing Data API's start times are unreliable: some cards are date-only and
@@ -400,15 +458,24 @@ _MATCH_WINDOW_OVERRIDE_PRE_MIN["BOX"] = 12 * 60   # 12h before
 _MATCH_WINDOW_OVERRIDE_POST_HOURS["BOX"] = 24.0   # 24h after
 
 
-def _epg_match_window(sport_prefix: Optional[str]) -> Tuple[int, float]:
-    """Returns (pre_min, post_hours) for the EPG match-window pre-filter.
+def _epg_match_window(
+    sport_prefix: Optional[str], extra: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, float]:
+    """Returns (pre_min, post_hours) for one game's EPG match window.
 
-    Defaults to the NCAAF/NFL-tuned (30, 4); soccer prefixes get (5, 2.5);
-    unknown prefixes fall back to the default. See #4.
+    Defaults to the NCAAF/NFL-tuned (30, 4); soccer gets (5, 2.5), or
+    (5, _SOCCER_KNOCKOUT_POST_HOURS) for a knockout (`extra` is the game's
+    `extra` dict, read by _is_postseason_extra) or a prefix in
+    _SOCCER_EVERY_GAME_LONG_WINDOW; unknown prefixes fall back to the
+    default. See #4 and #257.
     """
-    pre = _MATCH_WINDOW_OVERRIDE_PRE_MIN.get(sport_prefix or "", EPG_PRE_MIN)
-    post = _MATCH_WINDOW_OVERRIDE_POST_HOURS.get(sport_prefix or "", float(EPG_POST_HOURS))
+    prefix = sport_prefix or ""
+    pre = _MATCH_WINDOW_OVERRIDE_PRE_MIN.get(prefix, EPG_PRE_MIN)
+    post = _MATCH_WINDOW_OVERRIDE_POST_HOURS.get(prefix, float(EPG_POST_HOURS))
+    if prefix in _SOCCER_PREFIXES and _is_postseason_extra(extra):
+        post = _SOCCER_KNOCKOUT_POST_HOURS
     return pre, post
+
 
 # Marker we put in tvg_id of cloned channels so we can find/clean them up later
 # without needing a custom_properties field on the Channel model.
@@ -438,6 +505,115 @@ def _owned_tvg_id_q(field_prefix: str = ""):
         Q(**{f"{field_prefix}tvg_id__startswith": TVG_ID_PREFIX})
         | Q(**{f"{field_prefix}tvg_id__in": _OWNED_TVG_ID_LEGACY_MARKERS})
     )
+
+
+def _never_fetches_q():
+    """Q matching an EPGSource that fetches nothing: blank url AND file_path,
+    and not Schedules Direct (which fetches with credentials and leaves both
+    blank). Every source this plugin creates is one (step 2 of _action_apply
+    sets neither, type EPG_SOURCE_TYPE, or "dummy" before that), so a source
+    that does fetch is fed from somewhere else and is never ours to adopt,
+    empty or delete, whatever markers its rows carry."""
+    from django.db.models import Q
+    return (
+        (Q(url__isnull=True) | Q(url=""))
+        & (Q(file_path__isnull=True) | Q(file_path=""))
+        & ~Q(source_type="schedules_direct")
+    )
+
+
+def _reverse_foreign_keys(model) -> List[Any]:
+    """Every foreign key elsewhere that points at `model`, HIDDEN ones
+    included: ChannelOverride's (epg_data, channel_group) are related_name="+",
+    and _meta.related_objects leaves hidden relations out. Whatever
+    Dispatcharr adds later is found the same way."""
+    from django.db import models as dj_models
+    return [
+        rel for rel in model._meta.get_fields(include_hidden=True)
+        if rel.auto_created and not rel.concrete and rel.one_to_many
+        and isinstance(rel.field, dj_models.ForeignKey)
+    ]
+
+
+def _group_is_referenced(group) -> bool:
+    """True while anything still points at `group`: a channel, a stream, an
+    M3U account's settings for it (ChannelGroupM3UAccount, CASCADE: deleting
+    the group deletes them), a channel override (SET_NULL), or whatever
+    Dispatcharr adds. A group is deleted only when this is False."""
+    from apps.channels.models import ChannelGroup
+    return any(
+        rel.related_model._base_manager.filter(**{rel.field.name: group}).exists()
+        for rel in _reverse_foreign_keys(ChannelGroup)
+    )
+
+
+def _move_owned_epg_rows(old_src, new_src) -> int:
+    """Move the guide entries we own from `old_src` (a source named after a
+    previous live-group name) onto `new_src`, so every channel pointing at one
+    keeps its guide. Returns how many rows ended up on `new_src`.
+
+    DO NOT replace this with `old_src.delete()` or a delete of our rows. That
+    CASCADEs their ProgramData, and a channel the write loop does not visit
+    this apply (kept for an active recording, #146) is never given a new
+    entry, so its guide went blank for the rest of the recording (#263).
+    Moving the row is also what lets the normal cleanup finish the job: the
+    write loop reuses a moved row for a game still on the slate, the stale reap
+    deletes it with its channel once the recording ends, and the orphan sweep
+    takes any row nothing points at.
+
+    `unique_together = (tvg_id, epg_source)`: the new source can already hold a
+    row for a marker (renamed away and back, or a second stale source carrying
+    the same marker). The new source's row keeps its id, so nothing pointing
+    at it is cut off: every foreign key to the old row (Channel.epg_data,
+    ChannelOverride.epg_data, whatever else Dispatcharr adds) is repointed to
+    it and the emptied old row is deleted. Whose PROGRAMMES (and entry name)
+    survive depends on which row one of OUR channels shows: the destination
+    keeps its own only when an owned channel points at it and none points at
+    the old row (a stale old source processed after the live one, which has
+    already moved its row there). Otherwise the old row's replace them, since
+    the old row is what the group that was live until this apply wrote.
+
+    Every repoint here is a queryset .update(), which skips signals, Channel's
+    destructive post_save among them (see the signal note at the step 4 attach).
+    """
+    from apps.channels.models import Channel
+    from apps.epg.models import EPGData, ProgramData
+
+    ours = EPGData.objects.filter(_owned_tvg_id_q(), epg_source=old_src)
+    clashes = dict(
+        EPGData.objects.filter(
+            epg_source=new_src, tvg_id__in=list(ours.values_list("tvg_id", flat=True)),
+        ).values_list("tvg_id", "id")
+    )
+    if clashes:
+        pointers = _reverse_foreign_keys(EPGData)
+        pairs = list(
+            ours.filter(tvg_id__in=list(clashes)).values_list("id", "tvg_id", "name")
+        )
+        shown = set(
+            Channel.objects.filter(
+                _owned_tvg_id_q(),
+                epg_data_id__in=[i for i, _t, _n in pairs] + list(clashes.values()),
+            ).values_list("epg_data_id", flat=True)
+        )
+        for old_id, tvg_id, old_name in pairs:
+            new_id = clashes[tvg_id]
+            keep_destination = new_id in shown and old_id not in shown
+            if not keep_destination:
+                # The entry's name goes with its programmes: the write loop
+                # never renames a row it does not visit (an off-slate channel).
+                ProgramData.objects.filter(epg_id=new_id).delete()
+                EPGData.objects.filter(id=new_id).update(name=old_name)
+            for rel in pointers:
+                if keep_destination and rel.related_model is ProgramData:
+                    continue  # the old row's programmes go with it below
+                rel.related_model._base_manager.filter(
+                    **{rel.field.name: old_id}
+                ).update(**{rel.field.name: new_id})
+            EPGData.objects.filter(id=old_id).delete()
+    return len(clashes) + EPGData.objects.filter(
+        _owned_tvg_id_q(), epg_source=old_src,
+    ).update(epg_source=new_src)
 
 
 # ---------- DVR recording preservation (#146) ----------
@@ -545,8 +721,8 @@ def _deletable_group_names_for(group_name: str, recordings_group_name: str) -> s
 # Stable tvg_id for the single archive channel. Lives under TVG_ID_PREFIX so it
 # reads as "ours" and is therefore excluded from the matcher (it must never be
 # matched to a game) and from the highest-real-channel scan. It is NOT a game
-# marker, so it is never in seen_markers and is scoped out of existing_virtuals
-# (which is filtered to the live target_group, not the recordings group).
+# marker, so it is never in seen_markers, and _movable_owned_q keeps it out of
+# existing_virtuals and out of "ours" in numbering wherever it sits.
 ARCHIVE_TVG_ID = TVG_ID_PREFIX + "recordings_archive"
 
 # Starting channel number for the single archive channel. It MUST be non-None:
@@ -557,10 +733,21 @@ ARCHIVE_TVG_ID = TVG_ID_PREFIX + "recordings_archive"
 # (every televizo/XC client sees "no playlist"/"update failed"), not just this one
 # channel. DO NOT set the archive channel's number back to None.
 #
+# _PER_GROUP_NUMBER_NOTE. Dispatcharr has NO database constraint on
+# (channel_group, channel_number). Measured against Postgres on 2026-10-11
+# (Dispatcharr 0.32.0): the channel table's only unique constraints are id and
+# uuid, and no migration adds one. Per-group uniqueness is enforced only by
+# Channel.clean(), which queryset .update() and a plain save() never call, so a
+# duplicate number is written silently rather than failing the apply. DO NOT
+# relax the plugin's own distinctness rules on the strength of that: a
+# duplicate still binds the guide arbitrarily (every output keys on the bare
+# number) and the UI's clean() then refuses to save either channel.
 # The exact value is arbitrary: _ensure_archive_channel takes the first free
 # number at/above this within the recordings group (via _first_free_number), so it
-# never trips the unique (channel_group, channel_number) constraint even if the
-# user points recordings_group_name at an already-populated group. Staying out of
+# never duplicates a number in that group even if the user points
+# recordings_group_name at an already-populated group (Dispatcharr checks
+# per-group uniqueness only in Channel.clean(), which a plain save() skips, so
+# nothing would refuse the duplicate; see _PER_GROUP_NUMBER_NOTE). Staying out of
 # the highest-real-channel scan is handled by the ranked_matchups: tvg_id prefix
 # via _owned_tvg_id_q (see _resolve_virtual_base), NOT by the number.
 _ARCHIVE_CHANNEL_NUMBER = 9999
@@ -588,7 +775,8 @@ def _recording_is_active(rec, now) -> bool:
     return end is not None and end > now
 
 
-def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled):
+def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled,
+                                    keep_ids=frozenset()):
     """Decide, for stale (past-game) channels, which are safe to reap and which
     recordings to re-home first. Pure policy, no ORM.
 
@@ -597,17 +785,24 @@ def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled
     now: aware datetime.
     archive_enabled: whether re-homing is available (False when the archive
         group name clashes with the live group, so recordings cannot be moved).
+    keep_ids: channel ids kept whatever their recordings: kept by their guide
+        while the cache cannot vouch for the slate (#264, _kept_by_guide).
+        Kept, not re-homed, so their recordings stay where they are.
 
     Returns (reapable, kept, rehome_rec_ids):
       reapable        channels safe to delete (no recordings, or all done and
                       re-homable).
       kept            channels to leave in place this cycle (active recording,
                       or recordings present but archive disabled so reaping
-                      would destroy them). Reconciles next cycle.
+                      would destroy them, or in `keep_ids`). Reconciles next
+                      cycle.
       rehome_rec_ids  recording ids on reapable channels to move to the archive.
     """
     reapable, kept, rehome_rec_ids = [], [], []
     for ch in stale:
+        if ch.id in keep_ids:
+            kept.append(ch)
+            continue
         recs = recs_by_channel.get(ch.id, [])
         if not recs:
             reapable.append(ch)
@@ -623,6 +818,132 @@ def _partition_stale_for_recordings(stale, recs_by_channel, now, archive_enabled
         rehome_rec_ids.extend(r.id for r in recs)
         reapable.append(ch)
     return reapable, kept, rehome_rec_ids
+
+
+def _unwritten_channels(existing_virtuals: Dict[str, Any], seen_markers) -> List[Any]:
+    """Our channels whose game the write loop will not write this apply: the
+    stale set. The ONE definition, used by the reap and by the numbers held
+    back for the channels it keeps (#286). DO NOT hold numbers back from any
+    other set: they were once taken only from the games that had left the
+    slate, while the reap also keeps in-slate games the write loop skips, and
+    a kept recording channel lost its number to a new game."""
+    return [ch for marker, ch in existing_virtuals.items() if marker not in seen_markers]
+
+
+def _numbers_held_for_recordings(stale, archive_enabled, keep_ids=frozenset(),
+                                 cancelling=frozenset()) -> set:
+    """Channel numbers of stale channels this apply will KEEP, for a recording
+    or because they are in `keep_ids` (kept by their guide, #264).
+
+    Same policy as the reap step (_partition_stale_for_recordings), evaluated
+    before numbering (which runs after apply's pre-pass, over every channel the
+    write loop will not write, #286) so a new game is never handed a number a
+    kept channel is about to be restored to. `cancelling` is the recordings
+    this apply's auto-record cancelled (_AutoRecord.cancelled_ids): already
+    deleted on a real run, and on a dry run the reap leaves them out too, so
+    they keep nothing here either.
+    Fractional numbers are floored like every other reservation (Xtream Codes
+    floors them)."""
+    candidates = [ch for ch in stale if ch.channel_number is not None]
+    if not candidates:
+        return set()
+    from apps.channels.models import Recording
+
+    recs_by_channel: Dict[int, list] = {}
+    for r in Recording.objects.filter(channel_id__in=[c.id for c in candidates]):
+        if r.id not in cancelling:
+            recs_by_channel.setdefault(r.channel_id, []).append(r)
+    _reapable, kept, _rehome = _partition_stale_for_recordings(
+        candidates, recs_by_channel, datetime.now(timezone.utc), archive_enabled,
+        keep_ids,
+    )
+    return {int(ch.channel_number) for ch in kept}
+
+
+
+def _guide_shows_on_air(programmes, now: datetime) -> bool:
+    """Whether a channel's published guide says its game is on air: a Live or
+    Past entry (see _build_program_title) is current. The Upcoming entry does
+    not count, because it runs from the apply that wrote it to the start of
+    the live window. Pure: `programmes` is `(start, end, title)` tuples."""
+    for start, end, title in programmes:
+        if start is not None and end is not None and start <= now < end:
+            if not _is_upcoming_title(title):
+                return True
+    return False
+
+
+def _kept_by_guide(stamp: Optional[Dict[str, Any]], programmes, now: datetime) -> bool:
+    """Apply's fallback for a stale channel on a slate the cache cannot vouch
+    for (#264): keep it while its own guide says it may still be wanted.
+
+    - On air (a current Live or Past entry): always. It may be a live game
+      the refresh had no row for, and the reap would delete it mid-game.
+    - Not yet ended, for a channel with NO stamp: the refresh could not judge
+      it at all (published before apply stamped rows, so its game may belong
+      to a source that is failing right now, which #240 holds). It goes once
+      its guide runs out, which is no later than the reap deadline
+      (_compute_past_slot_end).
+
+    DO NOT keep a STAMPED channel that is not on air: the refresh had its row
+    and dropped it on purpose (a healthy source no longer lists a game that
+    has not started, or the cap). Keeping it would freeze those games until
+    they end, and the unvouched state (which lasts while anything is kept)
+    with them; unstamped channels are a finite set left from before the
+    stamp, so their keep is bounded. Pure: `programmes` is `(start, end,
+    title)` tuples of the entries that have not ended."""
+    if _guide_shows_on_air(programmes, now):
+        return True
+    return stamp is None and any(end is not None and end > now for _s, end, _t in programmes)
+
+
+def _published_guide(channels, now: datetime) -> Dict[int, Tuple[Optional[Dict[str, Any]], list]]:
+    """What apply published for each channel, read back from the guide (#264):
+    `{channel id: (stamped row or None, [(start, end, title) not yet ended])}`.
+
+    Only entries apply wrote FOR THAT CHANNEL count (ProgramData.tvg_id equal
+    to the channel's marker): a channel a user pointed at an ordinary EPG feed
+    must not read that feed's programmes as its own game on air. A stamp
+    counts only when its row builds the channel's own marker, which also
+    rejects one left on an entry a re-keyed channel no longer owns. Read-only."""
+    out: Dict[int, Tuple[Optional[Dict[str, Any]], list]] = {ch.id: (None, []) for ch in channels}
+    by_epg = {ch.epg_data_id: ch for ch in channels if getattr(ch, "epg_data_id", None)}
+    if not by_epg:
+        return out
+    from apps.epg.models import ProgramData
+    for epg_id, tvg_id, start, end, title, props in (
+        ProgramData.objects
+        .filter(epg_id__in=list(by_epg), tvg_id__startswith=TVG_ID_PREFIX)
+        .values_list("epg_id", "tvg_id", "start_time", "end_time", "title", "custom_properties")
+    ):
+        ch = by_epg[epg_id]
+        if tvg_id != ch.tvg_id:
+            continue
+        stamp, progs = out[ch.id]
+        row = (props or {}).get(_PUBLISHED_ROW_KEY) if isinstance(props, dict) else None
+        if isinstance(row, dict) and _build_marker_key(row) == ch.tvg_id:
+            stamp = row
+        if end is not None and end > now:
+            progs = progs + [(start, end, title)]
+        out[ch.id] = (stamp, progs)
+    return out
+
+
+def _owned_published_channels():
+    """Every channel we own, in all groups: a group rename migrates them on
+    the next apply, so they are on air meanwhile. The recordings archive is
+    among them and harmless: apply writes it no guide entries, so it carries
+    no stamp and nothing _kept_by_guide could keep."""
+    from apps.channels.models import Channel
+    return list(Channel.objects.filter(_owned_tvg_id_q()))
+
+
+def _guide_kept_ids(channels, now: datetime) -> set:
+    """Ids of `channels` apply's fallback keeps (_kept_by_guide)."""
+    return {
+        cid for cid, (stamp, progs) in _published_guide(channels, now).items()
+        if _kept_by_guide(stamp, progs, now)
+    }
 
 
 # ---------- Auto-record (#216) ----------
@@ -650,8 +971,22 @@ DEFAULT_RECORDING_POST_ROLL_MINUTES = 120
 def _int_setting(settings: Dict[str, Any], key: str, default: int) -> int:
     try:
         return int(float(settings.get(key, default)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # Overflow: "inf", 10**400
         return default
+
+
+def _float_setting(settings: Dict[str, Any], key: str, default: float) -> float:
+    """A number setting that cannot raise. The UI field is numeric, but a
+    value saved through the API (or a cleared field) can be a string, None or
+    not finite, and apply reads it AFTER the group-rename cleanup has committed, so a raise
+    there failed the action with the database half-changed."""
+    try:
+        value = float(settings.get(key, default))
+    except (TypeError, ValueError, OverflowError):  # Overflow: an int past 1e308
+        return default
+    # "nan" / "inf" / "1e400" parse, but compare false (or true) against every
+    # score, which silently turns the setting off or on rather than failing.
+    return value if math.isfinite(value) else default
 
 
 class _AutoRecord:
@@ -664,6 +999,10 @@ class _AutoRecord:
         self.state: Dict[str, Dict[str, Any]] = {"created": {}, "tombstones": {}}
         self.new_tombstones: List[str] = []
         self.created = self.updated = self.cancelled = 0
+        # Recordings _autorecord_cancel removes (or, on a dry run, would), so
+        # the dry-run reap can leave them out of its keep check as the real
+        # reap does by running after the delete.
+        self.cancelled_ids: set = set()
         self.failed: List[str] = []
         self.names: Dict[str, str] = {}
         self.slate: Optional[set] = None        # every marker in the cache (#224)
@@ -696,20 +1035,45 @@ def _record_leagues(settings: Dict[str, Any]) -> List[str]:
     return [x.casefold() for x in _parse_favorites(settings.get(RECORD_LEAGUES_SETTING, ""))]
 
 
-def _ranked_eligible(g: Dict[str, Any], leagues: List[str]) -> bool:
+def _ranked_eligible(g: Dict[str, Any], leagues: List[str],
+                     streamed: Optional[set] = None) -> bool:
     """A ranked (non-recorded-team) game may take a slot only when it has a
     matched stream NOW and its league is listed (blank list = every league).
     A stream-less ranked game would hold a slot it cannot use and push a
     playable game out; it becomes a candidate on the first apply that matches
-    a stream. Favorites make a game preferred, never eligible, by design."""
-    has_stream = bool(g.get("channel_id") or g.get("channel_ids") or g.get("stream_ids"))
+    a stream. Favorites make a game preferred, never eligible, by design.
+
+    `streamed` is the markers apply's pre-pass actually attached streams to
+    (#291 review). DO NOT judge by the cache's match alone when it is given:
+    a cached channel id can name a channel that no longer exists or no longer
+    carries the game, and a placeholder published for such a game took the
+    only slot from a playable one."""
+    if streamed is not None:
+        has_stream = _build_marker_key(g) in streamed
+    else:
+        has_stream = bool(g.get("channel_id") or g.get("channel_ids") or g.get("stream_ids"))
     in_league = not leagues or str(g.get("sport_prefix", "")).casefold() in leagues
     return has_stream and in_league
 
 
 def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
-                        bench: Optional[List[Dict[str, Any]]] = None) -> "_AutoRecord":
+                        bench: Optional[List[Dict[str, Any]]] = None,
+                        slate_games: Optional[List[Dict[str, Any]]] = None,
+                        streamed: Optional[set] = None,
+                        excluded_stream_ids=frozenset()) -> "_AutoRecord":
     """Read-only: build the plan before apply writes anything.
+
+    `games` are the CANDIDATES: apply passes only the games it will write a
+    channel for (#291), since a game without one cannot be recorded and,
+    planned anyway, took the only slot from a game that has one. `slate_games`
+    (default `games`) is what the cache knows, for the #224 cancel rule; apply
+    passes the whole cache, so a cached game it does not write is KNOWN and
+    unplanned, and its not-yet-started recording is cancelled, as a ranked
+    game with no stream is never eligible (_ranked_eligible). DO NOT pass the
+    candidates as the slate there: "missing from the slate" keeps a recording
+    while its STORED reason holds, which (#291 review) kept a recording the
+    cache had since corrected to another game, and kept one outside the slot
+    budget, the plan seeing neither.
 
     Runs even when the Recorded teams list is empty IF the plugin still has
     recordings of its own, so clearing the list cancels them (the design's
@@ -722,24 +1086,54 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
     record_ranked = bool(settings.get(RECORD_RANKED_SETTING, False))
     recorded_rows = [
         g for g in games
+        if g.get("recorded_matched") or (record_ranked and _ranked_eligible(g, leagues, streamed))
+    ]
+    # Games the CACHE asks to record, bench included, whether or not they are
+    # candidates now (a game apply gives no channel this time, or one on the
+    # bench, is not one, #291): a recording
+    # the user deleted for one of them still has to become a tombstone. Watched
+    # only for that; left to the candidates, a deletion went unrecorded while
+    # the game had no channel, its "created" entry aged out, and the game was
+    # recorded again when it returned (#291 review).
+    watched = [
+        _build_marker_key(g)
+        for g in list(games if slate_games is None else slate_games) + list(bench or [])
         if g.get("recorded_matched") or (record_ranked and _ranked_eligible(g, leagues))
     ]
     ours_rows = list(Recording.objects.filter(
         custom_properties__has_key=recording_policy.MARKER_KEY,
         end_time__gt=now - recording_policy.STATE_RETENTION,
     ))
-    if not recorded_rows and not ours_rows:
+    if not recorded_rows and not ours_rows and not watched:
         return ar
     ar.enabled = True
     ar.state = recording_policy.load_state(RECORDING_STATE_PATH)
     # The slate is EVERYTHING the cache knows about, bench included: a game that
     # dropped to the bench is known and unplanned (cancel), a game missing from
     # both is unknown and may just be a source outage (keep, #224).
-    ar.slate = {_build_marker_key(g) for g in list(games) + list(bench or [])}
+    known = games if slate_games is None else slate_games
+    ar.slate = {_build_marker_key(g) for g in list(known) + list(bench or [])}
     from .scoring import match_favorites
-    ar.reason_holds = recording_policy.reason_checker(
+    reason_holds = recording_policy.reason_checker(
         _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, "")), record_ranked,
         _record_leagues(settings), matcher=match_favorites)
+    # A recording kept for a game missing from the slate (#224) is kept only
+    # while its channel still has a stream it can record from: one the group
+    # policy does not exclude (#206 strips excluded links from a kept channel,
+    # and nothing starts from one). DO NOT keep it on its stored reason alone:
+    # its channel left with no stream, it recorded nothing and still held a
+    # slot, so a playable game got no recording (#297). Cancelled instead, it
+    # is planned again when its game returns with a feed. ONE rule, through
+    # reason_holds, so the cancel step and the slot budget (busy) agree.
+    recordable: set = set()
+    if ours_rows:
+        from apps.channels.models import ChannelStream
+        recordable = set(
+            ChannelStream.objects.filter(channel_id__in={r.channel_id for r in ours_rows})
+            .exclude(stream_id__in=excluded_stream_ids)
+            .values_list("channel_id", flat=True)
+        )
+    ar.reason_holds = lambda r: r.channel_id in recordable and reason_holds(r)
     from apps.m3u.models import M3UAccount
 
     post_roll = timedelta(minutes=max(0, _int_setting(
@@ -766,7 +1160,7 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
                       [str(g.get("home", "")), str(g.get("away", ""))])
 
     ar.ours, skip = recording_policy.classify_existing(
-        ours_rows, ar.state, [c.marker for c in candidates])
+        ours_rows, ar.state, list(dict.fromkeys([c.marker for c in candidates] + watched)))
     ar.new_tombstones = [m for m, why in skip.items()
                          if why == "deleted by you" and m not in ar.state["tombstones"]]
     live_rows = list(Recording.objects.filter(end_time__gt=now))
@@ -785,6 +1179,19 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
             skip[c.marker] = "you are already recording it"
     held = {m: (r.start_time, r.end_time) for m, r in ar.ours.items()
             if recording_policy.is_in_progress(r)}
+    # A scheduled recording of ours that this apply KEEPS whatever the plan
+    # says occupies a slot like any other capture: one the user edited (it is
+    # theirs from then on, never moved or cancelled), and one whose game is
+    # missing from the slate while its stored reason holds (#224). Left out, a
+    # one-slot plan scheduled an overlapping game beside it: two captures for
+    # one stream (#291 review). Running ones are `held` already.
+    cand_markers = {c.marker for c in candidates}
+    busy += [
+        (r.start_time, r.end_time) for m, r in ar.ours.items()
+        if not recording_policy.is_in_progress(r) and recording_policy.occupies_stream(r, now)
+        and (skip.get(m) == "you changed it"
+             or (m not in cand_markers and m not in ar.slate and ar.reason_holds(r)))
+    ]
     limits = list(M3UAccount.objects.filter(is_active=True).values_list("max_streams", flat=True))
     slots = recording_policy.resolve_slot_budget(
         settings.get(RECORDING_SLOTS_SETTING, 0), limits,
@@ -799,15 +1206,20 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
     return ar
 
 
-def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool) -> None:
+def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool, markers=None) -> None:
     """Delete our not-yet-started recordings that the plan no longer wants.
     instance.delete() fires Dispatcharr's revoke_task_on_delete, which cancels
-    the scheduled capture. Only rows carrying our marker are ever considered."""
+    the scheduled capture. Only rows carrying our marker are ever considered,
+    and only those of `markers` when given (apply cancels in two steps, see
+    _autorecord_cancel_committed). A recording already counted is skipped, so
+    a dry run that plans twice does not count one twice."""
     if not ar.enabled:
         return
     from apps.channels.models import Recording
     for rec in recording_policy.cancellable(ar.ours, ar.plan, ar.slate, ar.reason_holds):
         m = recording_policy.rec_marker(rec)
+        if (markers is not None and m not in markers) or rec.pk in ar.cancelled_ids:
+            continue
         if not dry_run:
             # Re-check a LOCKED fresh copy: the row in ar.ours was loaded when
             # the plan was built, and a recording that has started since must
@@ -816,12 +1228,43 @@ def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool) -> None:
             if rec is None or recording_policy.is_in_progress(rec) or recording_policy.is_terminal(rec):
                 continue
         ar.cancelled += 1
+        ar.cancelled_ids.add(rec.pk)
         if dry_run:
             continue
         rec.delete()
         # We removed it, so its absence next time is not the user's doing.
         ar.state["created"].pop(m, None)
         ar.ours.pop(m, None)
+
+
+def _autorecord_cancel_committed(ar: "_AutoRecord", dry_run: bool, markers=None) -> None:
+    """_autorecord_cancel in a transaction of its own (its re-check locks the
+    row), with the state change saved BEFORE that transaction commits.
+
+    Saved here, not left to _autorecord_finish: an apply that returned or
+    failed in between kept the deleted recordings in the "created" state, and
+    the next plan read each missing row as one the user deleted and tombstoned
+    it for good (#288 review). If the apply fails after this, the
+    cancellations and their bookkeeping both stand.
+
+    Write-ahead, inside the transaction, NOT after the commit: a kill between
+    the commit and the file write left the same stale "created" entry, and the
+    game was tombstoned the next time it was wanted. Saved first, a kill before
+    the commit rolls the deletion back and leaves a row of ours with no
+    "created" entry, which the plan reads as ours and unedited
+    (recording.was_edited) and never as a user deletion.
+
+    The residual of this order is smaller than the one it replaces: it needs a
+    kill between the file write and the commit AND the user then deleting or
+    editing that same row, one the plan had just decided it did not want,
+    before the next apply (which otherwise cancels it again). The old order's
+    needed only the kill, and cost the game for good."""
+    from django.db import transaction
+    with transaction.atomic():
+        before = ar.cancelled
+        _autorecord_cancel(ar, dry_run, markers)
+        if ar.cancelled > before and not dry_run:
+            recording_policy.save_state(RECORDING_STATE_PATH, ar.state)
 
 
 def _reason_props(ar: "_AutoRecord", marker: str) -> Dict[str, Any]:
@@ -948,7 +1391,12 @@ def _read_stops() -> Dict[str, Dict[str, Any]]:
             data = json.load(f)
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    # Entry by entry too: one non-dict entry made recording.next_stop_delay
+    # raise on every reaper tick, a 10-minute crash loop that stopped the
+    # handoffs, the reaping and the scheduler-staleness check with it.
+    return {k: v for k, v in data.items() if isinstance(v, dict)}
 
 
 def _autorecord_finish(ar: "_AutoRecord", games: List[Dict[str, Any]], dry_run: bool) -> str:
@@ -989,7 +1437,7 @@ def _first_free_number(used, start: int) -> int:
     """Smallest integer >= ``start`` that is not in ``used`` (any collection of
     numbers). Pure and ORM-free so it is unit-testable without a Django DB
     (mirrors the offline-policy pattern used elsewhere in this plugin). Shared by
-    _assign_channel_numbers (resolving same-minute game collisions) and
+    _place_kickoff_numbers (resolving same-minute game collisions) and
     _ensure_archive_channel (placing the archive channel collision-free)."""
     num = int(start)
     while num in used:
@@ -997,7 +1445,68 @@ def _first_free_number(used, start: int) -> int:
     return num
 
 
-def _ensure_archive_channel(recordings_group_name):
+def _movable_owned_q() -> Any:
+    """Q for our channels apply may move between groups: every one but the
+    recordings archive channel, which stays in its archive group whatever the
+    settings say (a case-only change of 'Recordings group name' must not move
+    it into the live group, where it was reaped)."""
+    from django.db.models import Q
+    return ~Q(tvg_id=ARCHIVE_TVG_ID)
+
+
+def _archive_group(recordings_group_name):
+    """The recordings group for this setting, or None: the group named
+    exactly as the setting, else a case variant that holds the archive
+    channel (as archive_enabled compares names ignoring case). Without the
+    variant, changing only the case of the setting created a second archive
+    group and channel, splitting the recordings. The exact name wins over a
+    variant holding the archive (_ensure_archive_channel moves the archive
+    in): the variant first, recordings kept going where the setting no
+    longer says, and cleanup could delete the exactly named group. DO NOT
+    fall back to a case variant WITHOUT the archive: a user's own group that
+    only differs in case, adopted as the archive, was later deleted by
+    cleanup as ours."""
+    named = _archive_groups(recordings_group_name)
+    return (named.filter(name=recordings_group_name).first()
+            or named.filter(channels__tvg_id=ARCHIVE_TVG_ID).distinct().order_by("pk").first())
+
+
+def _archive_group_is_ours(group, archive, recordings_group_name, live_group_name="") -> bool:
+    """Whether `group`, holding `archive`, is ours to delete once nothing
+    references it: the one made for the archive (_made_for_archive), or a
+    name this plugin creates (_deletable_group_names_for). Else an old live
+    group that held a stray archive beside our game channel stayed for good:
+    the rename left it for the archive, and the archive's move left it
+    nameless to us. NEVER the live group (`live_group_name`), by either rule:
+    an archive made when the recordings group bore today's live name
+    carries that name, and the live group apply publishes to was deleted."""
+    if group is None:
+        return False
+    name = group.name.strip().lower()
+    if live_group_name and name == str(live_group_name).strip().lower():
+        return False
+    return _made_for_archive(group, archive) or name in _deletable_group_names_for(
+        live_group_name, recordings_group_name)
+
+
+def _made_for_archive(group, archive) -> bool:
+    """True when `group` is the one `archive` was made for: _ensure_archive_channel
+    names the archive channel as its group (and renames it with a move), so
+    the pair agreeing is our mark on the group. DO NOT count a group as ours
+    merely for HOLDING the archive: a user who filed the archive channel in
+    their own group had that group deleted when the archive moved out or
+    was cleaned up. Ignoring case, as the group lookup does."""
+    return (group is not None and archive.name is not None
+            and group.name.casefold() == archive.name.casefold())
+
+
+def _archive_groups(recordings_group_name) -> Any:
+    """Every group whose name matches the setting ignoring case."""
+    from apps.channels.models import ChannelGroup
+    return ChannelGroup.objects.filter(name__iexact=str(recordings_group_name).strip())
+
+
+def _ensure_archive_channel(recordings_group_name, live_group_name=""):
     """Get-or-create the persistent recordings group and its single archive
     channel. The archive channel is stream-less (a recording container only),
     carries a non-null channel_number (a null number truncates the whole Xtream
@@ -1005,23 +1514,41 @@ def _ensure_archive_channel(recordings_group_name):
     is found again on the next apply. Scan-exclusion comes from the owned tvg_id,
     not the number."""
     from apps.channels.models import Channel, ChannelGroup
-    grp, _ = ChannelGroup.objects.get_or_create(name=recordings_group_name)
+    grp = _archive_group(recordings_group_name)
+    if grp is None:
+        grp = ChannelGroup.objects.create(name=recordings_group_name)
     arch = Channel.objects.filter(
         channel_group=grp, tvg_id=ARCHIVE_TVG_ID,
     ).first()
-    if arch is not None and arch.channel_number is not None:
+    moved = False
+    if arch is None:
+        # The recordings group was renamed: the ONE archive moves (with its
+        # recordings) rather than a second one being made beside it.
+        arch = _move_archive_into(grp, live_group_name)
+        moved = arch is not None
+    if arch is not None and arch.channel_number is not None and not (
+        moved and Channel.objects.filter(channel_group=grp, channel_number=arch.channel_number)
+        .exclude(pk=arch.pk).exists()
+    ):
         return arch
 
     # Either a fresh create, or a self-heal of an install whose archive channel
     # was created before _ARCHIVE_CHANNEL_NUMBER existed (null number, silently
     # breaking the XC feed). Take the first free number at/above the constant
-    # within the group so the unique (channel_group, channel_number) constraint
-    # can't fire even if recordings_group_name points at a populated group.
+    # within the group so no number is duplicated there even if
+    # recordings_group_name points at a populated group (_PER_GROUP_NUMBER_NOTE), AND
+    # that no channel ANYWHERE publishes under: the guide keys on the bare
+    # number, so a compact game or a user channel already at 9999 in another
+    # group would bind the guide arbitrarily for both (review finding, #219).
+    # This runs inside apply's transaction after the game writes, so this
+    # apply's own new numbers are already visible here.
     used = set(
         Channel.objects.filter(channel_group=grp)
         .exclude(tvg_id=ARCHIVE_TVG_ID)
         .exclude(channel_number__isnull=True)
         .values_list("channel_number", flat=True)
+    ) | _published_numbers(
+        Channel.objects.exclude(tvg_id=ARCHIVE_TVG_ID), _ARCHIVE_CHANNEL_NUMBER,
     )
     number = _first_free_number(used, _ARCHIVE_CHANNEL_NUMBER)
 
@@ -1039,12 +1566,41 @@ def _ensure_archive_channel(recordings_group_name):
         )
     else:
         # update() bypasses the post_save signal chain (the epg_data-wipe trap).
+        was = arch.channel_number
         Channel.objects.filter(pk=arch.pk).update(channel_number=number)
         arch.channel_number = number
         logger.info(
-            "[ranked_matchups] backfilled archive channel id=%s number=%s (was None)",
-            arch.id, number,
+            "[ranked_matchups] renumbered archive channel id=%s number=%s (was %s)",
+            arch.id, number, was,
         )
+    return arch
+
+
+def _move_archive_into(grp, live_group_name=""):
+    """Move the archive channel kept in another group (the recordings group
+    was renamed) into `grp`, its recordings with it (they point at the
+    channel). Its old group goes once nothing references it, if it is ours
+    (_archive_group_is_ours). None when there is no archive yet."""
+    from apps.channels.models import Channel, ChannelGroup
+    arch = (
+        Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).exclude(channel_group=grp)
+        .order_by("pk").first()
+    )
+    if arch is None:
+        return None
+    # Locked, then judged as it is now (see _commit_group_setup).
+    old = (ChannelGroup.objects.select_for_update().filter(pk=arch.channel_group_id).first()
+           if arch.channel_group_id is not None else None)
+    old_was_ours = _archive_group_is_ours(old, arch, grp.name, live_group_name)
+    # update(), not save(): no Channel post_save (the epg_data-wipe trap).
+    # Renamed with the move, so the new group carries our mark (_made_for_archive).
+    Channel.objects.filter(pk=arch.pk).update(channel_group=grp, name=grp.name)
+    arch.channel_group = grp
+    arch.name = grp.name
+    logger.info("[ranked_matchups] moved recordings archive channel id=%s into group %r",
+                arch.id, grp.name)
+    if old is not None and old_was_ours and not _group_is_referenced(old):
+        old.delete()
     return arch
 
 
@@ -1203,23 +1759,67 @@ def _sync_profile_memberships(settings: Dict[str, Any], dry_run: bool = False) -
     return stats
 
 
-def _cleanup_empty_archive(recordings_group_name) -> bool:
-    """Remove the archive channel (and then the group) once no recordings remain
+def _cleanup_empty_archive(recordings_group_name, live_group_name="") -> bool:
+    """Remove the archive channel (and then its group) once no recordings remain
     under it, so the group exists only while it holds recordings. Returns True if
     anything was removed. Safe: the archive channel is deleted only when it has
-    zero Recording rows, so the CASCADE takes nothing with it."""
+    zero Recording rows, so the CASCADE takes nothing with it.
+
+    The archive is found by WHAT IT IS (ARCHIVE_TVG_ID), wherever it sits, not
+    by the setting's name: after the recordings group was renamed (or only
+    its case changed) a lookup by the new name never saw the old archive, which
+    stayed forever beside a second one. While any archive holds recordings,
+    they all fold into the one in the setting's group (moved there if none
+    is): left apart, split archives (an install the old exact-name lookup
+    split) both stayed for good, and one left in the live group was reaped
+    there with its recordings. A group goes only
+    when nothing references it (_group_is_referenced) and it is ours: one an
+    archive sits in that was made for it or carries a name this plugin
+    creates (_archive_group_is_ours), or named exactly as the setting (as
+    before). A group of the user's, empty or holding the archive
+    they filed there, is never deleted."""
     from apps.channels.models import Channel, ChannelGroup, Recording
-    grp = ChannelGroup.objects.filter(name=recordings_group_name).first()
-    if grp is None:
-        return False
+    from django.db import transaction
     removed = False
-    arch = Channel.objects.filter(channel_group=grp, tvg_id=ARCHIVE_TVG_ID).first()
-    if arch is not None and not Recording.objects.filter(channel_id=arch.id).exists():
-        arch.delete()
-        removed = True
-    if Channel.objects.filter(channel_group=grp).count() == 0:
-        grp.delete()
-        removed = True
+    with transaction.atomic():  # the row locks below need one; nests as a savepoint
+        # Locked before their recordings are checked, so a recording made on
+        # one meanwhile waits (its foreign-key check) rather than being
+        # CASCADEd away with the channel. A list, not .exists(): that locks
+        # one row (LIMIT 1).
+        list(Channel.objects.select_for_update().filter(tvg_id=ARCHIVE_TVG_ID)
+             .values_list("pk", flat=True))
+        # Their groups locked too, before the names ownership is judged by
+        # are read (see _commit_group_setup). By pk: DO NOT lock through the
+        # channels join, Postgres refuses FOR UPDATE on the nullable side of
+        # the outer join an OR across it makes.
+        candidates = set(
+            Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).exclude(channel_group=None)
+            .values_list("channel_group_id", flat=True)
+        ) | set(ChannelGroup.objects.filter(name=recordings_group_name).values_list("pk", flat=True))
+        list(ChannelGroup.objects.select_for_update().filter(pk__in=candidates)
+             .values_list("pk", flat=True))
+        archives = list(Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).select_related("channel_group"))
+        ours = {a.channel_group_id for a in archives
+                if _archive_group_is_ours(a.channel_group, a, recordings_group_name, live_group_name)}
+        ours |= set(ChannelGroup.objects.filter(name=recordings_group_name).values_list("pk", flat=True))
+        if Recording.objects.filter(channel_id__in=[a.id for a in archives]).exists():
+            # Idempotent when the one archive already sits in the setting's
+            # group; otherwise it moves there (_move_archive_into).
+            keep = _ensure_archive_channel(recordings_group_name, live_group_name)
+            others = [a.id for a in archives if a.id != keep.id]
+            if Recording.objects.filter(channel_id__in=others).update(channel_id=keep.id):
+                removed = True
+            archives = list(Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID))
+        for arch in archives:
+            if not Recording.objects.filter(channel_id=arch.id).exists():
+                arch.delete()
+                removed = True
+        for group_id in sorted(ours):
+            # Row lock before the reference check: see _commit_group_setup.
+            grp = ChannelGroup.objects.select_for_update().filter(pk=group_id).first()
+            if grp is not None and not _group_is_referenced(grp):
+                grp.delete()
+                removed = True
     return removed
 
 
@@ -1961,8 +2561,8 @@ def _live_window(g: Dict[str, Any], start_dt: datetime) -> Tuple[datetime, datet
     prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
     # DO NOT compute this as start_dt + EPG_POST_HOURS. That is a flat
     # 4h for every sport, while the reaper dates a game's end with the
-    # PER-SPORT window (_game_end_utc -> _epg_match_window: 2.5h for
-    # soccer, 24h for boxing). The two disagreed, so a soccer channel
+    # PER-GAME window (_game_end_utc -> _epg_match_window: 2.5h for
+    # league soccer, 3h for a soccer knockout, 24h for boxing). The two disagreed, so a soccer channel
     # was reaped at start+2.5h+remove_after while its own live programme
     # still claimed the match ran to start+4h: exactly the failure
     # _game_end_utc's docstring warns about, and a second duration table
@@ -1975,14 +2575,31 @@ def _live_window(g: Dict[str, Any], start_dt: datetime) -> Tuple[datetime, datet
     # the match window's generosity into a user-facing duration.
     # _epg_match_window is a MATCH-RECALL prefilter: boxing's +24h
     # absorbs a feed whose start times can be a day off, and using it
-    # raw here would label a card "live" for 24 hours. Soccer's 2.5h is
-    # genuinely shorter than the 4h default, so the min still fixes the
-    # soccer case that motivated this (a channel reaped 30 minutes
-    # before its own live row ended).
+    # raw here would label a card "live" for 24 hours. Soccer's windows
+    # (2.5h league, 3h knockout, #257) are genuinely shorter than the
+    # 4h default, so the min still fixes the soccer case that motivated
+    # this (a channel reaped 30 minutes before its own live row ended).
+    # _published_guide_end reads prog_end from here too; DO NOT recompute
+    # it there.
     _display_end = start_dt + timedelta(hours=EPG_POST_HOURS)
     _sport_end = _game_end_utc(g)
     prog_end = min(_sport_end, _display_end) if _sport_end else _display_end
     return prog_start, prog_end
+
+
+# The Upcoming entry's title prefix. One constant for the writer below and
+# _is_upcoming_title, which apply's on-air fallback (#264) reads it back with.
+_UPCOMING_TITLE_PREFIX = "Upcoming: "
+
+
+def _is_upcoming_title(title: Optional[str]) -> bool:
+    """Whether `title` is an Upcoming entry _build_program_title wrote, with or
+    without its recording dot."""
+    t = title or ""
+    dot = f"{recording_policy.DOT} "
+    if t.startswith(dot):
+        t = t[len(dot):]
+    return t.startswith(_UPCOMING_TITLE_PREFIX)
 
 
 def _build_program_title(state: str, matchup: str, kickoff_local: str, recording: bool = False) -> str:
@@ -1994,7 +2611,8 @@ def _build_program_title(state: str, matchup: str, kickoff_local: str, recording
     on Past: by then the recording is over, and a dot there reads as "will
     record". The caller derives it from the channel's actual Recording rows."""
     if state == "upcoming":
-        title = f"Upcoming: {matchup}, {kickoff_local}" if kickoff_local else f"Upcoming: {matchup}"
+        title = (f"{_UPCOMING_TITLE_PREFIX}{matchup}, {kickoff_local}" if kickoff_local
+                 else f"{_UPCOMING_TITLE_PREFIX}{matchup}")
     elif state == "live":
         title = f"{matchup} ᴸᶦᵛᵉ"
     elif state == "past":
@@ -2083,7 +2701,7 @@ def _compute_past_slot_end(
     if not settings.get("auto_refresh_enabled", False):
         return _bounded(prog_end_utc + _PAST_SLOT_DEFAULT_DURATION)
     tz = _resolve_tz(settings.get("local_timezone", "UTC"))
-    times = _parse_scheduled_times(settings.get("scheduled_times", ""))
+    times = _parse_scheduled_times(settings.get("scheduled_times", _DEFAULT_SCHEDULED_TIMES))
     if not times:
         return _bounded(prog_end_utc + _PAST_SLOT_DEFAULT_DURATION)
     prog_end_local = prog_end_utc.astimezone(tz)
@@ -2119,33 +2737,214 @@ def _resolve_key(settings: Dict[str, Any], setting_id: str, *fallback_paths: str
 
 
 def _read_cache() -> Dict[str, Any]:
+    """The last refresh's cache, or the empty shape when there is none to read.
+
+    Missing, unreadable (bad JSON, bad UTF-8) and non-object files all return
+    `{"games": [], "refreshed_at": None}`, so every caller can `.get()` without
+    guarding. DO NOT add `_EMPTY_SLATE_KNOWN_KEY` to this shape: its absence
+    is what stops apply publishing it as an empty slate and deleting every
+    channel the plugin owns (_cache_has_slate), and the `None` stamp is what
+    apply's toast reads to say "run refresh first".
+    """
     try:
         with open(CACHE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"games": [], "refreshed_at": None}
+            data = json.load(f)
+    except (FileNotFoundError, ValueError):
+        # ValueError covers json.JSONDecodeError and UnicodeDecodeError.
+        data = None
+    if isinstance(data, dict):
+        return data
+    return {"games": [], "refreshed_at": None}
+
+
+# True on a cache whose writer KNEW what the slate it replaced held, which is
+# what makes an EMPTY `games` list safe to publish (#241). See _cache_has_slate.
+_EMPTY_SLATE_KNOWN_KEY = "empty_slate_known"
+
+
+def _cache_has_slate(cache: Dict[str, Any]) -> bool:
+    """True when `cache` is a slate apply may publish, EVEN AN EMPTY ONE (#241).
+
+    A non-empty `games` list is a slate, as it always was. An EMPTY one is a
+    slate only when its writer set `_EMPTY_SLATE_KNOWN_KEY`: a refresh that
+    either built on a vouched cache or heard back from every source
+    (`_slate_known`), and the reaper, which carries forward the answer of the
+    slate it is emptying (`_cache_vouched`), which apply stamps once it has
+    published that slate for real (`_vouch_published_slate`). Publishing an empty slate
+    deletes every channel the plugin owns, and the only defence against doing
+    that during a source outage is _rows_to_hold carrying the previous games
+    forward, which needs the previous slate. Everything else is refused:
+    `_read_cache`'s shape for a missing or unreadable file, `games` not a list,
+    a pre-#241 empty cache (no key: nothing says how it was written), and an
+    empty refresh after the cache was lost (cache.json gone when the plugin
+    folder is replaced on upgrade) with a source failing.
+
+    DO NOT relax this to "games is a list" or "refreshed_at is set": each of
+    those accepts a cache an outage could have produced.
+    """
+    games = cache.get("games")
+    if not isinstance(games, list):
+        return False
+    return bool(games) or cache.get(_EMPTY_SLATE_KNOWN_KEY) is True
+
+
+def _cache_vouched(cache: Dict[str, Any]) -> bool:
+    """Whether `cache` lists everything the plugin may have on air, so a later
+    writer that starts from it can vouch for an empty result too.
+
+    Stricter than _cache_has_slate: a NON-empty slate is published whatever
+    its key says, but one written `empty_slate_known: false` (cache lost during
+    an outage) may omit a live channel, and that doubt must travel with it to
+    the reaper and to the next refresh, until an apply publishes it and
+    stamps it (_vouch_published_slate). DO NOT use _cache_has_slate here: it
+    launders the doubt away, and an empty slate built on such a cache would
+    delete the channel it omitted. A cache from before the key existed is
+    vouched when non-empty (its own refresh read the cache before it) and not
+    when empty (nothing says how it was written)."""
+    games = cache.get("games")
+    if not isinstance(games, list):
+        return False
+    return cache.get(_EMPTY_SLATE_KNOWN_KEY, bool(games)) is True
+
+
+def _vouch_published_slate(cache: Dict[str, Any]) -> bool:
+    """Record that apply has just published `cache` for real, so it now lists
+    everything the plugin has on air and `_cache_vouched` holds (#241).
+
+    Why apply may vouch: its stale reap deletes every plugin channel the slate
+    does not list, so once a non-dry-run apply has finished with no stale
+    channel kept for an active recording (the caller checks), no channel on
+    air can be missing from the slate. Without this, an unvouched slate (cache.json
+    lost, which Dispatcharr's plugin import does on every upgrade by replacing
+    the folder) stays unvouched for good: a real install always has a source
+    answering with no games (a tournament out of season), so `_slate_known`
+    never sees zero outages, and every later refresh and reap inherits the
+    doubt, which re-opens #241 for as long as the install runs.
+
+    Writes only when the cache on disk is still the one apply read (same
+    `refreshed_at` and `reaped_at`; refresh and reap each change one of those
+    whenever they change `games`). Apply runs under the scheduler lock, so a
+    mismatch means the lock failed open and another writer got in; vouching
+    for ITS slate would be a guess, so this leaves it alone. Returns whether
+    the stamp was written."""
+    on_disk = _read_cache()
+    identity = ("refreshed_at", "reaped_at")
+    if any(on_disk.get(k) != cache.get(k) for k in identity):
+        logger.warning(
+            "[ranked_matchups] apply: cache.json changed during apply; not "
+            "marking the slate it published as vouched (#241)"
+        )
+        return False
+    on_disk[_EMPTY_SLATE_KNOWN_KEY] = True
+    _write_cache(on_disk)
+    return True
+
+
+def _slate_known(prior_cache: Dict[str, Any], outage_labels: set, unaccounted: int = 0) -> bool:
+    """Whether a refresh can vouch for an empty result (`_EMPTY_SLATE_KNOWN_KEY`).
+
+    Yes when the previous cache was vouched (so _rows_to_hold could carry
+    anything a failed source dropped), or when no source failed, came back
+    empty or lost a day (so there is nothing an outage could have dropped)
+    AND no channel the hold could not see is still running its guide
+    (`unaccounted == 0`, see _published_rows). The second half matters
+    because a source that answered still omits games that have kicked off
+    (ncaaf.py, mlb.py), and only the hold keeps those: a channel published
+    before apply stamped its rows (#264) may be one, and a vouched slate
+    turns off apply's fallback that would keep it. `outage_labels` is every
+    label _rows_to_hold treats as an outage, the lost-day ones included."""
+    if _cache_vouched(prior_cache):
+        return True
+    return not outage_labels and unaccounted == 0
+
+
+# ProgramData.custom_properties key under which apply stamps the cache row a
+# channel's LIVE guide entry was written from (#264). The DB is then a second
+# record of the published slate that survives what cache.json does not: the
+# plugin folder replaced on upgrade (Dispatcharr's plugin import does that),
+# or a damaged file. Read back by _published_rows. Namespaced, because
+# Dispatcharr's XMLTV writer reads its own keys from the same dict
+# (categories, episode, ...); any other key is ignored there.
+_PUBLISHED_ROW_KEY = "ranked_matchups_row"
+
+
+def _finite_json(value: Any) -> Any:
+    """`value` with every NaN or infinite float replaced by None. Python's json
+    writes those as the bare tokens NaN / Infinity, which Postgres jsonb
+    refuses ("invalid input syntax for type json")."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _finite_json(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_finite_json(v) for v in value]
+    return value
+
+
+def _published_row_stamp(row: Dict[str, Any]) -> Dict[str, Any]:
+    """The custom_properties apply writes on a live guide entry. The row goes
+    through JSON first: JSONField's encoder rejects a datetime that the cache
+    writer (default=str) would have accepted, and a failed stamp would fail
+    the whole apply transaction. For the same reason a non-finite float (a
+    score or probability that came out NaN) is stamped as null: cache.json
+    accepts NaN, jsonb does not."""
+    return {_PUBLISHED_ROW_KEY: _finite_json(json.loads(json.dumps(row, default=str)))}
+
+
+def _published_rows() -> Tuple[List[Dict[str, Any]], int]:
+    """The cache rows apply stamped on the channels it has on air (#264), and
+    how many channels the hold cannot see but apply's fallback still keeps:
+    no usable stamp (published before the stamp existed, or by a dry run),
+    and a guide that has not ended (_kept_by_guide). See _published_guide for
+    which stamps count. Read-only.
+
+    DO NOT catch a DB error here: a refresh that cannot read what is on air
+    must fail (no cache written, so no apply follows), not carry on as if
+    nothing were."""
+    now = datetime.now(timezone.utc)
+    guide = _published_guide(_owned_published_channels(), now)
+    rows = [stamp for stamp, _progs in guide.values() if stamp is not None]
+    unaccounted = sum(
+        1 for stamp, progs in guide.values()
+        if stamp is None and _kept_by_guide(stamp, progs, now)
+    )
+    return rows, unaccounted
+
+
+def _prior_games(prior_cache: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], int]:
+    """The previous slate the refresh's hold starts from (#240, #264), and how
+    many channels on air it could not describe (for _slate_known).
+
+    A vouched cache lists everything on air, so it is used alone, as before.
+    Otherwise (cache.json missing, unreadable, or written while it could not
+    vouch) the rows apply stamped into the DB are added to whatever the cache
+    still lists, the cache's copy first: a channel the cache does not name can
+    still be live, and without its row nothing holds it. DO NOT drop the DB
+    half: Dispatcharr's plugin import replaces the plugin folder on every
+    upgrade, cache.json with it, and the first refresh after that, with one
+    source failing, deleted that source's live channels (#264)."""
+    games = [g for g in (prior_cache.get("games") or []) if isinstance(g, dict)]
+    if _cache_vouched(prior_cache):
+        return games, 0
+    published, unaccounted = _published_rows()
+    seen = {_build_marker_key(g) for g in games}
+    added = [r for r in published if _build_marker_key(r) not in seen]
+    if added:
+        logger.info(
+            "[ranked_matchups] refresh: cache.json cannot vouch for the slate "
+            "on air; %d published game(s) read back from the DB for the hold",
+            len(added),
+        )
+    return games + added, unaccounted
 
 
 def _write_cache(data: Dict[str, Any]) -> None:
-    # The temp name is per-writer, NOT a fixed CACHE_PATH + ".tmp". Several
-    # processes can legitimately be writing here at once (a uwsgi worker, the
-    # scheduler's pipeline subprocess, the reaper's), and a shared temp path
-    # lets one truncate the file another is still writing, so os.replace can
-    # publish a half-written cache. os.replace itself is atomic, so distinct
-    # temp names make the whole publish atomic.
-    tmp = f"{CACHE_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, sort_keys=False, ensure_ascii=False, default=str)
-        os.replace(tmp, CACHE_PATH)
-    finally:
-        # A crash between open and replace would otherwise leave litter next
-        # to the cache forever, one file per crashed writer.
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    # Several processes write here at once (a uwsgi worker, the scheduler's
+    # pipeline subprocess, the reaper's); write_json_atomic is what keeps one
+    # from publishing another's half-written cache.
+    write_json_atomic(
+        CACHE_PATH, data, indent=2, sort_keys=False, ensure_ascii=False, default=str,
+    )
 
 
 # ---------- settings parsing ----------
@@ -2251,7 +3050,7 @@ def _parse_favorites(raw: str) -> List[str]:
 # Curation presets (#9). Each preset bundles a Weights tuning + a max_games
 # cap so users don't have to tune 9 individual knobs to get a "vibe":
 #
-# - "manual": read individual weight + max_games settings (V0 behavior).
+# - "manual": read the Scoring weights + max_games settings (V0 behavior).
 # - "high_curation": narrow to ~10 high-leverage games; weights emphasize
 #   structural importance + rank, downweight favorites/spread so they don't
 #   dominate the list when the user wants tight curation.
@@ -2260,7 +3059,7 @@ def _parse_favorites(raw: str) -> List[str]:
 #   matchups still show up even on quiet days.
 #
 # Manual mode and a non-manual preset are mutually exclusive in spirit but
-# not enforced. Picking a preset overrides individual weight + max_games
+# not enforced. Picking a preset overrides the Scoring weights + max_games
 # settings during refresh; users who tune individual knobs should leave the
 # preset on "manual".
 _CURATION_PRESETS: Dict[str, Dict[str, float]] = {
@@ -2293,10 +3092,10 @@ def _build_weights(settings: Dict[str, Any]):
     from .scoring import Weights
     d = Weights()
 
-    # Preset path: if a non-manual preset is selected, individual weight_*
-    # settings are IGNORED and the preset bundle wins. Manual (or any
-    # unrecognized preset name) falls through to the individual-setting
-    # path so power-users keep their tuning.
+    # Preset path: if a non-manual preset is selected, the Scoring weights
+    # setting is IGNORED and the preset bundle wins. Manual (or any
+    # unrecognized preset name) falls through to the user's weights so
+    # power-users keep their tuning.
     preset_key = str(settings.get("curation_preset", "manual") or "manual").lower()
     if preset_key != "manual" and preset_key in _CURATION_PRESETS:
         p = _CURATION_PRESETS[preset_key]
@@ -2310,28 +3109,88 @@ def _build_weights(settings: Dict[str, Any]):
             importance=float(p["importance"]),
         )
 
-    return Weights(
-        rank=float(settings.get("weight_rank", d.rank)),
-        spread=float(settings.get("weight_spread", d.spread)),
-        favorite=float(settings.get("weight_favorite", d.favorite)),
-        rivalry=float(settings.get("weight_rivalry", d.rivalry)),
-        tournament=float(settings.get("weight_tournament", d.tournament)),
-        narrative=float(settings.get("weight_narrative", d.narrative)),
-        importance=float(settings.get("weight_importance", d.importance)),
-    )
+    # Manual path: the "Scoring weights" text (#208, which replaced seven
+    # weight_<name> number fields), with a stored legacy weight_<name> filling
+    # any weight the text does not name on an install saved before #208. A
+    # weight named nowhere keeps the dataclass default.
+    overrides, problems = merged_settings.weight_overrides(settings)
+    for problem in problems:
+        logger.warning("[ranked_matchups] ignoring scoring weight %s", problem)
+    return Weights(**{name: overrides.get(name, getattr(d, name))
+                      for name in merged_settings.WEIGHT_NAMES})
 
 
 DEFAULT_MAX_GAMES = 25
 
-# Worst-case seconds apply's network pre-pass can spend on ONE game, as the sum
-# of the timeouts it can hit: the LLM description (llm_descriptions
-# ANTHROPIC_TIMEOUT_S = 30) plus the SportsDB thumb search (logos
-# _HTTP_TIMEOUT_S = 10) and its download (logos _DOWNLOAD_TIMEOUT_S = 15).
+# Seconds of network time apply's pre-pass may spend per game, ENFORCED as a
+# total: the pre-pass gets this times the number of games as one wall-clock
+# budget (_http.NetworkBudget, #271), and once it is spent every remaining
+# cosmetic fetch (LLM description, SportsDB thumb, game-thumbs composite,
+# league badge) is skipped and takes the fallback its own failure already
+# takes. The figure is the SportsDB path's sum of timeouts: the LLM description
+# (llm_descriptions ANTHROPIC_TIMEOUT_S = 30), the thumb search (logos
+# _HTTP_TIMEOUT_S = 10) and its download (logos _DOWNLOAD_TIMEOUT_S = 15). It
+# is NOT an estimate of one game's worst case any more: a game that also falls
+# through to game-thumbs and the badge can spend more, and the budget is what
+# stops a slate of those from outrunning the lock. The pre-pass can overrun the
+# total by at most the one call in flight when it runs out (30s).
+#
+# Inside the pipeline child the allowance is also capped at the child's
+# remaining life minus APPLY_WRITE_RESERVE_SECONDS: tasks.py kills the child at
+# _SUBPROCESS_TIMEOUT_SECONDS (25 min) whatever this says, and auto_pipeline
+# spends part of that on refresh first. Without the cap a large slate (28+
+# games x 55s > 1500s) would run the child out before the budget ever
+# skipped anything, and apply would die without publishing.
 #
 # A named constant because MAX_GAMES_CEILING is DERIVED from it and a test
 # asserts the derivation still holds; leaving it as a literal in a comment let
 # the two drift silently. Re-derive both if any of those three timeouts change.
 APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME = 30 + 10 + 15
+
+# What apply keeps for itself after the pre-pass, inside the pipeline child:
+# the one fetch in flight when the budget runs out (up to 30s) plus the DB
+# writes. Generous on purpose: the writes are a 0.55s transaction (#137) plus
+# the sweeps, and a whole live auto_pipeline (refresh AND apply) took 382s on
+# 2026-10-11.
+#
+# It is also the least time left in the child for apply to START, and to
+# commit its first recording cancellation (_apply_time_short): a slow refresh
+# in auto_pipeline can leave apply seconds to live, and a kill that lands
+# after a committed cancellation but before the main transaction leaves the
+# cancelled recording's replacement unwritten until the next run.
+APPLY_WRITE_RESERVE_SECONDS = 120
+
+
+def _apply_time_short(before: str, dry_run: bool) -> Optional[Dict[str, Any]]:
+    """None when apply may go on; otherwise the error result to return.
+
+    Inside the pipeline child, apply must not begin a step it cannot finish
+    before tasks.py kills the child. Below APPLY_WRITE_RESERVE_SECONDS it
+    stops and says so, and its result carries tasks.APPLY_STOPPED_FOR_TIME,
+    so tasks.run_pipeline_subprocess re-runs it at once in a fresh child when
+    it came from auto_pipeline (a standalone apply or reap is left to the next
+    run; reap's pending path finishes it).
+    A dry run is never stopped: it writes nothing, so a kill costs nothing.
+    Outside a child (no deadline) nothing is ever stopped.
+
+    120s is about three times the slowest whole live apply (5.8s to 39.4s
+    over the 12 runs logged 2026-10-11, network fetches included). No time
+    check can bound a query blocked on a lock; a kill that still lands after
+    a cancellation is repaired by the next apply (see the cancellation step).
+    """
+    if dry_run:
+        return None
+    left = tasks.pipeline_child_seconds_left()
+    if left is None or left >= APPLY_WRITE_RESERVE_SECONDS:
+        return None
+    message = (
+        f"Apply stopped {before}: not enough time left in this pipeline run "
+        f"({int(max(left, 0.0))}s; it keeps {APPLY_WRITE_RESERVE_SECONDS}s to finish). "
+        "No recording was cancelled and the slate was not published; it is "
+        "applied again in a fresh pipeline run, or by the next one."
+    )
+    logger.warning("[ranked_matchups] %s", message)
+    return {"status": "error", "message": message, tasks.APPLY_STOPPED_FOR_TIME: True}
 
 # Hard ceiling on max_games, derived from the scheduler-lock budget rather than
 # picked for roundness.
@@ -2405,7 +3264,8 @@ def _clamp_max_games(raw: Any, source: str) -> int:
 # `extra["stage"]` is treated as a knockout/playoff round. DO NOT invert this
 # into an allowlist of postseason stages: every bracket source defines its own
 # stage vocabulary (NFL WC/DIV/CONF/SB, NHL/NBA/MLB rounds + FINALS, NCAA
-# R64..NCG, BSB_REG/SB_REG regionals, soccer LAST_32..FINAL, golf MAJOR) and new
+# R64..NCG, BSB_REG/SB_REG regionals, soccer LAST_32..FINAL, golf MAJOR and
+# TOUR_PLAYOFF) and new
 # ones get added, so over-including an unknown stage as postseason is the safe
 # failure direction (mirrors the source layer's "better to over-emit a new
 # knockout stage than under-emit a known one" rule in sources/soccer.py).
@@ -2417,16 +3277,42 @@ def _clamp_max_games(raw: Any, source: str) -> int:
 _NON_POSTSEASON_STAGES = frozenset({
     "REGULAR_SEASON",  # FD.org soccer league play
     "GROUP_STAGE",     # WC / EURO group phase
+    "LEAGUE_STAGE",    # UCL / UEL / UECL league phase: their GROUP_STAGE since 2024
     "ALLSTAR",         # exhibition (most sources reject it upstream anyway)
     "EVENT",           # field-event regular tour stop (weekly golf/F1/NASCAR)
 })
 
+# ESPN `season.slug` values that are NOT postseason, for the rows that carry a
+# slug and no stage (sources/mls.py: NWSL and Liga MX, whose playoffs are not
+# bracket sources). Any OTHER non-empty slug on a stage-less row is a playoff
+# round, for the same reason as _NON_POSTSEASON_STAGES: the vocabulary is
+# open-ended (measured 2026-10-11: NWSL "playoffs---quarterfinals" ..
+# "playoffs---championship", Liga MX "apertura---8th-seed-game" ..
+# "apertura---finals"), and over-including an unknown slug costs a rescued
+# game and a 30-minute-longer soccer window, where under-including drops a
+# playoff game and cuts its recording off before the shootout (#257). Only
+# soccer sources write `season_slug` today.
+_NON_POSTSEASON_SEASON_SLUGS = frozenset({
+    "regular-season",   # MLS, NWSL
+    "preseason",        # exhibitions, where ESPN lists them
+    "all-star-game",    # exhibition, measured on usa.1 2025-07-23 (MLS drops
+                        # it upstream; NWSL / Liga MX would not). ALLSTAR twin
+    "torneo-apertura",  # Liga MX fall table
+    "torneo-clausura",  # Liga MX spring table
+})
 
-def _empty_refresh_result(msg: str, src_summary: List[str]) -> Dict[str, Any]:
+
+def _empty_refresh_result(msg: str, src_summary: List[str], slate_known: bool) -> Dict[str, Any]:
     """Log `msg`, persist an empty cache (so a stale prior cache doesn't keep
     serving games that no longer pass the curator), and return the action's
     ok-with-message payload. Shared by the no-games-fetched and
-    everything-filtered-out exits so the two can't drift."""
+    everything-filtered-out exits so the two can't drift.
+
+    `slate_known` (see _slate_known) decides whether apply may publish this
+    empty slate and take the old channels down (#241). When it is False the
+    cache is still written, for Show current state, but apply leaves the
+    guide alone until a refresh that can vouch for its result.
+    """
     # WARNING, not info: an empty slate is either a real off-day or upstream
     # breakage, and in the background-run log the two must not look routine.
     logger.warning("[ranked_matchups] %s", msg)
@@ -2434,19 +3320,62 @@ def _empty_refresh_result(msg: str, src_summary: List[str]) -> Dict[str, Any]:
         "games": [],
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
         "summary": src_summary,
+        _EMPTY_SLATE_KNOWN_KEY: slate_known,
     })
     return {"status": "ok", "message": msg}
 
 
+def _place_in_bracket(src: Any, games: List[Any], *, for_scoring: bool) -> None:
+    """Stamp a bracket source's upcoming rows with their round (#243); see
+    BracketSportSource.place_upcoming for why both importance and
+    favorites_only need it. Runs at fetch (for the favorites filter) and again
+    at scoring, after the season-fetch retry, against the bracket importance
+    will use. Never fails the refresh: an unplaced row keeps its game, it
+    just scores no bracket importance, which is what the warning is for. Both
+    passes warn: the favorites filter can drop an unplaced game before
+    scoring ever runs."""
+    place = getattr(src, "place_upcoming", None)
+    if not games or not callable(place):
+        return
+    when = "scoring" if for_scoring else "fetch"
+    try:
+        unplaced = place(games, for_scoring=for_scoring)
+    except Exception:
+        logger.exception("[ranked_matchups] %s: could not place games in the bracket (%s)",
+                         src.sport_label, when)
+        return
+    if unplaced:
+        logger.warning(
+            "[ranked_matchups] %s: %d of %d upcoming game(s) not found in the "
+            "bracket (%s); they score no bracket importance and, unless the "
+            "source is playoffs-only, count as regular season",
+            src.sport_label, unplaced, len(games), when,
+        )
+
+
 def _is_postseason_game(game: Any) -> bool:
     """True when this game is a postseason/playoff round (vs regular season,
-    group stage, or a weekly field event). Reads the source-set
-    `extra["stage"]`; see `_NON_POSTSEASON_STAGES` for the taxonomy."""
-    stage = (getattr(game, "extra", None) or {}).get("stage")
+    group stage, or a weekly field event). See _is_postseason_extra."""
+    return _is_postseason_extra(getattr(game, "extra", None))
+
+
+def _is_postseason_extra(extra: Optional[Dict[str, Any]]) -> bool:
+    """_is_postseason_game on a game's `extra` dict, so a cache row (where it
+    is a key, not an attribute) is judged by the same rule. Reads the
+    source-set `extra["stage"]`; see `_NON_POSTSEASON_STAGES` for the
+    taxonomy. A row flagged `postseason` by a playoff-only source counts
+    whatever its stage, so a failed bracket fetch cannot demote it (#243)."""
+    extra = extra or {}
+    if extra.get("postseason") is True:
+        return True
+    stage = extra.get("stage")
     if not stage:
-        # No stage = regular-season league play (NFL/NBA/NHL/MLB only stamp a
-        # stage on playoff games; their parsers return None otherwise).
-        return False
+        # No stage = regular-season league play, unless an ESPN season slug
+        # says otherwise (see _NON_POSTSEASON_SEASON_SLUGS). The NFL/NBA/NHL/
+        # MLB/WNBA/NCAAW playoff sources do not stamp a stage themselves:
+        # _place_in_bracket does, at fetch, from the source's own bracket (#243).
+        slug = str(extra.get("season_slug") or "").strip().lower()
+        return bool(slug) and slug not in _NON_POSTSEASON_SEASON_SLUGS
     return str(stage).strip().upper() not in _NON_POSTSEASON_STAGES
 
 
@@ -2520,17 +3449,18 @@ def _build_sources(settings: Dict[str, Any]):
     cfbd_key = _resolve_key(settings, "cfbd_api_key", CFBD_KEY_PATH)
     fd_key = _resolve_key(settings, "football_data_api_key", FD_KEY_PATH)
     odds_key = _resolve_key(settings, "odds_api_key", ODDS_KEY_PATH)
-    if settings.get("enable_ncaaf", False) and cfbd_key:
+    if league_enabled(settings, "enable_ncaaf") and cfbd_key:
         # Divisions gate BOTH the emitted games and the Monte Carlo season
-        # population; see sources/ncaaf.py. DO NOT spell the default value
-        # here: NcaafSource normalizes an unset or unrecognised value to its
-        # own DEFAULT_DIVISIONS, so this stays a single source of truth.
+        # population; see sources/ncaaf.py. They come from the same `ncaaf`
+        # select as the on/off (#208). DO NOT normalise the value here:
+        # NcaafSource maps an unrecognised one to its own DEFAULT_DIVISIONS
+        # (and warns), so that stays a single source of truth.
         sources.append(NcaafSource(
             api_key=cfbd_key,
-            divisions=settings.get("ncaaf_divisions"),
+            divisions=merged_settings.ncaaf_divisions(settings),
         ))
     # NCAAM uses the same CFBD/CBB-Data Bearer token as NCAAF.
-    if settings.get("enable_ncaam", False) and cfbd_key:
+    if league_enabled(settings, "enable_ncaam") and cfbd_key:
         sources.append(NcaamSource(api_key=cfbd_key))
 
     def _make_soccer(comp_key: str):
@@ -2544,22 +3474,22 @@ def _build_sources(settings: Dict[str, Any]):
         cls = KnockoutSoccerSource if (ctx and ctx.format == "knockout") else SoccerSource
         return cls(comp_key, fd_api_key=fd_key, odds_api_key=odds_key)
 
-    if settings.get("enable_epl", False) and fd_key:
+    if league_enabled(settings, "enable_epl") and fd_key:
         sources.append(_make_soccer("epl"))
-    if settings.get("enable_championship", False) and fd_key:
+    if league_enabled(settings, "enable_championship") and fd_key:
         sources.append(_make_soccer("championship"))
-    if settings.get("enable_ucl", False) and fd_key:
+    if league_enabled(settings, "enable_ucl") and fd_key:
         sources.append(_make_soccer("ucl"))
     # Top-flight European leagues. Same FD.org key as EPL etc.;
     # _make_soccer routes each to SoccerSource because their LEAGUE_CONTEXTS
     # entries default to format="league".
-    if settings.get("enable_bundesliga", False) and fd_key:
+    if league_enabled(settings, "enable_bundesliga") and fd_key:
         sources.append(_make_soccer("bundesliga"))
-    if settings.get("enable_la_liga", False) and fd_key:
+    if league_enabled(settings, "enable_la_liga") and fd_key:
         sources.append(_make_soccer("la_liga"))
-    if settings.get("enable_serie_a", False) and fd_key:
+    if league_enabled(settings, "enable_serie_a") and fd_key:
         sources.append(_make_soccer("serie_a"))
-    if settings.get("enable_ligue_1", False) and fd_key:
+    if league_enabled(settings, "enable_ligue_1") and fd_key:
         sources.append(_make_soccer("ligue_1"))
     # International tournaments. Each toggle fans out to TWO sources
     # sharing the same FD.org competition fetch:
@@ -2567,27 +3497,26 @@ def _build_sources(settings: Dict[str, Any]):
     #     fetch_upcoming filters GROUP_STAGE out so it doesn't double
     #     up with the group-stage source.
     #   - GroupStageSoccerSource for the per-group "advance / eliminated"
-    #     importance signal (top 2 per group).
-    if settings.get("enable_world_cup", False) and fd_key:
-        wc_knockout = _make_soccer("world_cup")
-        wc_groups = GroupStageSoccerSource(
-            "world_cup", fd_api_key=fd_key, odds_api_key=odds_key,
+    #     importance signal (top 2 per group + best third-placers).
+    # The pair is wired into the cross-source chain (#53 WC, #78 EURO):
+    # while the group stage is in progress, group-game importance runs
+    # through monte_carlo_importance_batch_chain, which seeds the
+    # published knockout bracket (sources/soccer.py _CHAIN_BRACKETS) from
+    # each simulated group table so R16+ leverage reaches group games.
+    for setting, comp_key in (
+        ("enable_world_cup", "world_cup"),
+        ("enable_euros", "euros"),
+    ):
+        if not (league_enabled(settings, setting) and fd_key):
+            continue
+        knockout = _make_soccer(comp_key)
+        groups = GroupStageSoccerSource(
+            comp_key, fd_api_key=fd_key, odds_api_key=odds_key,
         )
-        # Wire the cross-source chain (#53): while wc_knockout's
-        # _fetch_bracket_games returns empty (pre-tournament FD.org
-        # state), group-game importance routes through
-        # monte_carlo_importance_batch_chain so R16+ leverage fires.
-        # Once FD publishes real LAST_32 teams, the chain toggles off
-        # automatically.
-        if isinstance(wc_knockout, KnockoutSoccerSource):
-            wc_groups.set_paired_knockout_source(wc_knockout)
-        sources.append(wc_knockout)
-        sources.append(wc_groups)
-    if settings.get("enable_euros", False) and fd_key:
-        sources.append(_make_soccer("euros"))
-        sources.append(GroupStageSoccerSource(
-            "euros", fd_api_key=fd_key, odds_api_key=odds_key,
-        ))
+        if isinstance(knockout, KnockoutSoccerSource):
+            groups.set_paired_knockout_source(knockout)
+        sources.append(knockout)
+        sources.append(groups)
 
     # International friendlies (ESPN, no API key). Exhibition games with no
     # standings, so these sources don't support importance simulation; a
@@ -2610,13 +3539,13 @@ def _build_sources(settings: Dict[str, Any]):
         + _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, ""))
     )
     friendlies_favorites_only_setting = bool(settings.get("friendlies_favorites_only", True))
-    if settings.get("enable_intl_friendlies", False):
+    if league_enabled(settings, "enable_intl_friendlies"):
         sources.append(InternationalFriendliesSource(
             gender="m",
             favorites=friendlies_favorites,
             favorites_only=friendlies_favorites_only_setting,
         ))
-    if settings.get("enable_intl_friendlies_women", False):
+    if league_enabled(settings, "enable_intl_friendlies_women"):
         sources.append(InternationalFriendliesSource(
             gender="w",
             favorites=friendlies_favorites,
@@ -2632,7 +3561,7 @@ def _build_sources(settings: Dict[str, Any]):
     # This is the only path for a club pre-season friendly to reach the guide:
     # Football-Data.org's competition codes carry no friendlies at all, and
     # fifa.friendly is national teams only. See #153.
-    if settings.get("enable_club_friendlies", False):
+    if league_enabled(settings, "enable_club_friendlies"):
         sources.append(ClubFriendliesSource(
             favorites=friendlies_favorites,
             favorites_only=friendlies_favorites_only_setting,
@@ -2653,19 +3582,19 @@ def _build_sources(settings: Dict[str, Any]):
     # scoring.py and sort to the bottom, where max_games trims them. That is
     # the plugin's standing philosophy: thin-slate filler is intended, and
     # absolute score floors are not a lever this plugin offers.
-    if settings.get("enable_efl_cup", False):
+    if league_enabled(settings, "enable_efl_cup"):
         sources.append(EflCupSource())
-    if settings.get("enable_fa_cup", False):
+    if league_enabled(settings, "enable_fa_cup"):
         sources.append(FaCupSource())
 
     # Additional FD.org free-tier leagues. Same _make_soccer
     # router; LEAGUE_CONTEXTS uses format="league" so dispatch goes
     # to SoccerSource (not KnockoutSoccerSource).
-    if settings.get("enable_eredivisie", False) and fd_key:
+    if league_enabled(settings, "enable_eredivisie") and fd_key:
         sources.append(_make_soccer("eredivisie"))
-    if settings.get("enable_primeira_liga", False) and fd_key:
+    if league_enabled(settings, "enable_primeira_liga") and fd_key:
         sources.append(_make_soccer("primeira_liga"))
-    if settings.get("enable_brazilian_serie_a", False) and fd_key:
+    if league_enabled(settings, "enable_brazilian_serie_a") and fd_key:
         sources.append(_make_soccer("brazilian_serie_a"))
 
     # NFL: no API key required (ESPN unofficial). Same pair-and-seed
@@ -2674,7 +3603,7 @@ def _build_sources(settings: Dict[str, Any]):
     # -> SB. Strength sharing matters most here because NFL teams
     # play only 17 regular-season games: even fewer baseline games
     # than WNBA.
-    if settings.get("enable_nfl", False):
+    if league_enabled(settings, "enable_nfl"):
         nfl_reg = NflRegularSource()
         sources.append(nfl_reg)
         nfl_po = NflPlayoffSource()
@@ -2682,6 +3611,7 @@ def _build_sources(settings: Dict[str, Any]):
             nfl_po.set_regular_season_strengths(nfl_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[nfl] could not seed playoff strengths: %s", exc)
+        _seeded_from([nfl_reg], nfl_po)
         sources.append(nfl_po)
 
     # NHL: no API key required (api-web.nhle.com is free). Pair the
@@ -2690,7 +3620,7 @@ def _build_sources(settings: Dict[str, Any]):
     # 70-game per-team baseline informs playoff-game sampling instead
     # of the league-average prior. If the user enables only one of the
     # two, the playoff source falls back to the 3.0/3.0 prior.
-    if settings.get("enable_nhl", False):
+    if league_enabled(settings, "enable_nhl"):
         nhl_reg = NhlRegularSource()
         sources.append(nhl_reg)
         nhl_po = NhlPlayoffSource()
@@ -2703,6 +3633,7 @@ def _build_sources(settings: Dict[str, Any]):
             # Don't let a strengths-seeding hiccup gate the playoff
             # source: it can still run on the default prior.
             logger.warning("[nhl] could not seed playoff strengths: %s", exc)
+        _seeded_from([nhl_reg], nhl_po)
         sources.append(nhl_po)
 
     # MLB: no API key required (statsapi.mlb.com is free). Same pair-and-
@@ -2710,7 +3641,7 @@ def _build_sources(settings: Dict[str, Any]):
     # strength estimates from the regular source so postseason game-
     # sampling reflects per-team scoring skill instead of the 4.5/4.5
     # league-average prior.
-    if settings.get("enable_mlb", False):
+    if league_enabled(settings, "enable_mlb"):
         mlb_reg = MlbRegularSource()
         sources.append(mlb_reg)
         mlb_po = MlbPlayoffSource()
@@ -2718,6 +3649,7 @@ def _build_sources(settings: Dict[str, Any]):
             mlb_po.set_regular_season_strengths(mlb_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[mlb] could not seed playoff strengths: %s", exc)
+        _seeded_from([mlb_reg], mlb_po)
         sources.append(mlb_po)
 
     # NBA: no API key required. ESPN unofficial API is used (stats.nba.com
@@ -2727,7 +3659,7 @@ def _build_sources(settings: Dict[str, Any]):
     # informs playoff-game sampling instead of the 115/115 league-average
     # prior. If the user enables only one of the two, the playoff source
     # falls back to that default.
-    if settings.get("enable_nba", False):
+    if league_enabled(settings, "enable_nba"):
         nba_reg = NbaRegularSource()
         sources.append(nba_reg)
         nba_po = NbaPlayoffSource()
@@ -2735,6 +3667,7 @@ def _build_sources(settings: Dict[str, Any]):
             nba_po.set_regular_season_strengths(nba_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[nba] could not seed playoff strengths: %s", exc)
+        _seeded_from([nba_reg], nba_po)
         sources.append(nba_po)
 
     # MLS: issue #30 part A: register MlsEastSource + MlsWestSource
@@ -2752,7 +3685,7 @@ def _build_sources(settings: Dict[str, Any]):
     # WC/LDS/LCS/WS mix). Strengths are merged across both conferences
     # before seeding the cup source: the MLS Cup Final is cross-
     # conference, so per-team scoring rates need to be in one dict.
-    if settings.get("enable_mls", False):
+    if league_enabled(settings, "enable_mls"):
         mls_east = MlsEastSource(odds_api_key=odds_key or "")
         mls_west = MlsWestSource(odds_api_key=odds_key or "")
         sources.append(mls_east)
@@ -2765,40 +3698,41 @@ def _build_sources(settings: Dict[str, Any]):
             mls_cup.set_regular_season_strengths(merged_strengths)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[mls_cup] could not seed playoff strengths: %s", exc)
+        _seeded_from([mls_east, mls_west], mls_cup)
         sources.append(mls_cup)
 
     # NWSL: same V1 minimal pattern as MLS (schedule + closeness).
     # Subclasses MlsSource with NWSL-specific endpoint and Odds API
     # key. No importance / playoff bracket in V1.
-    if settings.get("enable_nwsl", False):
+    if league_enabled(settings, "enable_nwsl"):
         sources.append(NwslSource(odds_api_key=odds_key or ""))
 
     # Liga MX: Mexican top-flight. Same V1 minimal pattern.
-    if settings.get("enable_liga_mx", False):
+    if league_enabled(settings, "enable_liga_mx"):
         sources.append(LigaMxSource(odds_api_key=odds_key or ""))
 
     # Field events (racing + golf). No two-team head-to-head;
     # each row is one race or tournament. Low event volume (~1/week)
     # means "surface if toggled" is the right product: no importance
     # ranking needed.
-    if settings.get("enable_f1", False):
+    if league_enabled(settings, "enable_f1"):
         sources.append(F1Source())
-    if settings.get("enable_nascar", False):
+    if league_enabled(settings, "enable_nascar"):
         sources.append(NascarSource())
-    if settings.get("enable_golf", False):
+    if league_enabled(settings, "enable_golf"):
         sources.append(GolfSource())
 
     # UFC. Same field-event shape: each fight card is one
     # row with home=card title ("UFC 309: Jones vs. Miocic"). PPVs
     # (numbered UFC events) get MAJOR tier, Fight Nights get EVENT.
-    if settings.get("enable_ufc", False):
+    if league_enabled(settings, "enable_ufc"):
         sources.append(UfcSource())
 
     # Boxing. Same field-event shape as UFC (one row per fight card), but a
     # DIFFERENT upstream: ESPN has no boxing feed (verified 2026-07-10), so
     # boxing pulls from the Boxing Data API (RapidAPI) and REQUIRES a key.
     # Enabled-but-unkeyed is a no-op with a warning, matching the CFBD/FD gate.
-    if settings.get("enable_boxing", False):
+    if league_enabled(settings, "enable_boxing"):
         boxing_key = _resolve_key(settings, "boxing_data_api_key", BOXING_KEY_PATH)
         if boxing_key:
             sources.append(BoxingSource(api_key=boxing_key))
@@ -2810,16 +3744,16 @@ def _build_sources(settings: Dict[str, Any]):
     # matches: so tennis fits the FieldEventSource model. Grand
     # Slams + year-end Finals get MAJOR; regular tour stops get
     # EVENT.
-    if settings.get("enable_atp", False):
+    if league_enabled(settings, "enable_atp"):
         sources.append(AtpSource())
-    if settings.get("enable_wta", False):
+    if league_enabled(settings, "enable_wta"):
         sources.append(WtaSource())
 
     # WNBA: ESPN unofficial API; same pair-and-seed pattern as NHL/MLB/
     # NBA. Per-stage series lengths via BestOfNSeriesSource hooks: R1
     # best-of-3, SF best-of-5, FINALS best-of-5 in 2024 / best-of-7
     # in 2025+.
-    if settings.get("enable_wnba", False):
+    if league_enabled(settings, "enable_wnba"):
         wnba_reg = WnbaRegularSource()
         sources.append(wnba_reg)
         wnba_po = WnbaPlayoffSource()
@@ -2827,12 +3761,13 @@ def _build_sources(settings: Dict[str, Any]):
             wnba_po.set_regular_season_strengths(wnba_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[wnba] could not seed playoff strengths: %s", exc)
+        _seeded_from([wnba_reg], wnba_po)
         sources.append(wnba_po)
 
     # NCAA Women's Basketball + March Madness: no API key required.
     # Single-game-elim bracket (SERIES_LENGTH=1 per stage). Pair-and-
     # seed strength sharing identical to NHL/MLB/NBA/WNBA.
-    if settings.get("enable_ncaaw_basketball", False):
+    if league_enabled(settings, "enable_ncaaw_basketball"):
         ncaaw_reg = NcaawBasketballRegularSource()
         sources.append(ncaaw_reg)
         ncaaw_po = NcaawBasketballPlayoffSource()
@@ -2840,6 +3775,7 @@ def _build_sources(settings: Dict[str, Any]):
             ncaaw_po.set_regular_season_strengths(ncaaw_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ncaaw_basketball] could not seed playoff strengths: %s", exc)
+        _seeded_from([ncaaw_reg], ncaaw_po)
         sources.append(ncaaw_po)
 
     # NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
@@ -2854,7 +3790,7 @@ def _build_sources(settings: Dict[str, Any]):
     #     inference + headline site labels for grouping.
     # All three (regular + 2 playoff sources) share strength data so
     # postseason Poisson sampling reflects per-team scoring skill.
-    if settings.get("enable_ncaa_baseball", False):
+    if league_enabled(settings, "enable_ncaa_baseball"):
         ncbsb_reg = NcaaBaseballRegularSource()
         sources.append(ncbsb_reg)
         try:
@@ -2867,13 +3803,14 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(ncbsb_po)
         ncbsb_br = NcaaBaseballPlayoffBracketSource()
         ncbsb_br.set_regular_season_strengths(ncbsb_strengths)
+        _seeded_from([ncbsb_reg], ncbsb_po, ncbsb_br)
         sources.append(ncbsb_br)
 
     # NCAA Division I softball. Same two-playoff-source fan-out as
     # baseball above: NcaaSoftballPlayoffSource owns the best-of-3
     # stages (SB_SR + WCWS_F), NcaaSoftballPlayoffBracketSource owns
     # the Regional + 8-team WCWS bracket (SB_REG + WCWS).
-    if settings.get("enable_ncaa_softball", False):
+    if league_enabled(settings, "enable_ncaa_softball"):
         ncsbl_reg = NcaaSoftballRegularSource()
         sources.append(ncsbl_reg)
         try:
@@ -2886,6 +3823,7 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(ncsbl_po)
         ncsbl_br = NcaaSoftballPlayoffBracketSource()
         ncsbl_br.set_regular_season_strengths(ncsbl_strengths)
+        _seeded_from([ncsbl_reg], ncsbl_po, ncsbl_br)
         sources.append(ncsbl_br)
 
     # NCAA D1 men's + women's soccer. One source class
@@ -2900,7 +3838,7 @@ def _build_sources(settings: Dict[str, Any]):
     # `set_regular_season_strengths`. Without the seed, College Cup
     # samples fall back to the 1.5/1.5 league-average prior; with it,
     # the 20-game regular season informs scoring rates for each team.
-    if settings.get("enable_ncaa_mens_soccer", False):
+    if league_enabled(settings, "enable_ncaa_mens_soccer"):
         ncaa_msoc_reg = NcaaSoccerSource(gender="m")
         sources.append(ncaa_msoc_reg)
         ncaa_msoc_cup = NcaaSoccerCupSource(gender="m")
@@ -2910,8 +3848,9 @@ def _build_sources(settings: Dict[str, Any]):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ncaa_mens_soccer] could not seed cup strengths: %s", exc)
+        _seeded_from([ncaa_msoc_reg], ncaa_msoc_cup)
         sources.append(ncaa_msoc_cup)
-    if settings.get("enable_ncaa_womens_soccer", False):
+    if league_enabled(settings, "enable_ncaa_womens_soccer"):
         ncaa_wsoc_reg = NcaaSoccerSource(gender="w")
         sources.append(ncaa_wsoc_reg)
         ncaa_wsoc_cup = NcaaSoccerCupSource(gender="w")
@@ -2921,6 +3860,7 @@ def _build_sources(settings: Dict[str, Any]):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ncaa_womens_soccer] could not seed cup strengths: %s", exc)
+        _seeded_from([ncaa_wsoc_reg], ncaa_wsoc_cup)
         sources.append(ncaa_wsoc_cup)
     return sources
 
@@ -3081,10 +4021,39 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # sibling is indistinguishable from an empty schedule and is not caught.
     pulled_by_label: Dict[str, int] = {}
     raised_labels: set = set()
+    # Days a per-day sweep asked for and got no answer for (#261), by label.
+    # The sweep still returns its other days, so without this a lost day reads
+    # as a quiet one and the games published for it are dropped.
+    lost_days_by_label: Dict[str, set] = {}
+    from .sources.base import recording_lost_days
+    # Read here, not at the favorites-only gate below, because the season
+    # check in the fetch loop asks the same gate whether a source's games
+    # will be scored at all.
+    fav_only_mode = str(settings.get(_FAVORITES_ONLY_SETTING, _FAVORITES_ONLY_OFF)
+                        or _FAVORITES_ONLY_OFF).lower()
     for src in sources:
         pulled_by_label.setdefault(src.sport_label, 0)
         try:
-            games = src.fetch_upcoming(days_ahead=lookahead)
+            with recording_lost_days() as lost_days:
+                games = src.fetch_upcoming(days_ahead=lookahead)
+            # Placed BEFORE the season check: the favorites-only gate it asks
+            # keeps a non-favorite game in postseason mode only once the
+            # bracket has stamped its round (#243), so a playoff game checked
+            # unplaced would be dropped here, skip its seeding season, and
+            # then be kept and scored by the real gate below (#289 review).
+            _place_in_bracket(src, games, for_scoring=False)
+            # A season the simulator would replay with holes in it is an
+            # outage, like a failed rank feed (#283), so the label's previous
+            # games are held, scored as they were, instead of republished with
+            # no standings stakes (#289). Asked only when a game of this
+            # source will be scored for importance: none fetched, all dropped
+            # by the favorites-only gate, or importance turned off, and this
+            # check asks for no season. (A playoff source's seeding season
+            # was read when the sources were built, whatever the slate.)
+            if weights.importance > 0 and _filter_favorites_only(
+                    games, [src] * len(games), favorites, fav_only_mode,
+                    always_keep=recorded_teams)[0]:
+                _require_seasons(src)
         except Exception as e:
             logger.exception("[ranked_matchups] source %s fetch failed", src.sport_label)
             src_summary.append(_source_error_entry(src.sport_label, e))
@@ -3093,19 +4062,41 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         pulled_by_label[src.sport_label] += len(games)
         all_games.extend(games)
         game_sources.extend([src] * len(games))
-        src_summary.append(f"{src.sport_label}: {len(games)} games")
-        logger.info("[ranked_matchups] %s: pulled %d games", src.sport_label, len(games))
+        if lost_days:
+            lost_days_by_label.setdefault(src.sport_label, set()).update(lost_days)
+            src_summary.append(_source_partial_entry(src.sport_label, len(games), lost_days))
+            logger.warning(
+                "[ranked_matchups] %s: pulled %d games, but no answer for %d "
+                "day(s): %s", src.sport_label, len(games), len(lost_days),
+                ", ".join(d.isoformat() for d in sorted(lost_days)),
+            )
+        else:
+            src_summary.append(f"{src.sport_label}: {len(games)} games")
+            logger.info("[ranked_matchups] %s: pulled %d games", src.sport_label, len(games))
 
-    # 1-. Games already on air, and games whose source came back empty, stay on
-    # air (#240). See _rows_to_hold. `held` is keyed by marker; the ones this
-    # fetch still lists are protected from the cap below, the rest are carried
-    # over from the previous cache and re-matched after the main match.
+    # 1-. Games already on air, games whose source came back empty, and games
+    # dated on a day their source's sweep lost, stay on air (#240, #261). See
+    # _rows_to_hold. `held` is keyed by marker; the ones this fetch still
+    # lists are protected from the cap below, the rest are carried over from
+    # the previous slate and re-matched after the main match. The previous
+    # slate is the cache, or, when the cache cannot vouch for it (lost on
+    # upgrade, unreadable, written during an outage), what apply published
+    # into the DB as well (#264, _prior_games).
+    prior_cache = _read_cache()
+    empty_labels = raised_labels | {label for label, n in pulled_by_label.items() if n == 0}
+    # A label that lost days could have dropped games too, so it is an
+    # outage for vouching an empty result (_slate_known), while the hold
+    # keeps only its games dated on the days it lost.
+    outage_labels = empty_labels | set(lost_days_by_label)
+    prior_games, unaccounted = _prior_games(prior_cache)
+    slate_known = _slate_known(prior_cache, outage_labels, unaccounted)
     held = _rows_to_hold(
-        _read_cache().get("games") or [],
+        prior_games,
         datetime.now(timezone.utc),
         _reap_settings(settings),
         settings,
-        raised_labels | {label for label, n in pulled_by_label.items() if n == 0},
+        empty_labels,
+        lost_days_by_label,
     )
     held_ids = {id(g) for g in all_games if _gamerow_marker(g) in held}
     fetched_markers = {_gamerow_marker(g) for g in all_games}
@@ -3132,6 +4123,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         return _empty_refresh_result(
             "No games found in lookahead window. " + " | ".join(src_summary),
             src_summary,
+            slate_known,
         )
 
     # 1a. Series dedup. Best-of-N playoff sources (NHL, NBA, MLB, NCAA
@@ -3159,8 +4151,6 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # drop. Independent of and composable with the per-source
     # friendlies_favorites_only gate (a friendly already gated to favorites
     # simply survives this too). See `_filter_favorites_only`.
-    fav_only_mode = str(settings.get(_FAVORITES_ONLY_SETTING, _FAVORITES_ONLY_OFF)
-                        or _FAVORITES_ONLY_OFF).lower()
     if fav_only_mode in _FAVORITES_ONLY_ACTIVE_MODES and not favorites:
         logger.warning(
             "[ranked_matchups] favorites_only=%s but no Favorites are "
@@ -3188,6 +4178,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 "Favorites-only filter dropped every game in the lookahead "
                 "window. " + " | ".join(src_summary),
                 src_summary,
+                slate_known,
             )
 
     # 2. Score. The Lahvička Monte Carlo importance signal covers three
@@ -3201,7 +4192,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     #     outcomes out of contention.
     from .scoring import (
         match_favorites, LEAGUE_CONTEXTS, build_impact_narratives,
-        compute_match_importance, wc_knockout_importance,
+        compute_match_importance, knockout_importance, knockout_premium_note,
     )
     importance_seasons = _importance_seasons(settings)
     scored: List[Tuple[Any, GameSignals, Any]] = []
@@ -3215,6 +4206,17 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # early reads gets its one retry here (#228), BEFORE the shared importance
     # run below, which is the first thing to read them.
     _soccer_allow_scoring_retry()
+    # Again, now: a bracket whose season fetch failed at fetch time gets its
+    # retry here, and a row placed against an empty bracket would otherwise
+    # never reach its tie (#243). Idempotent on rows already placed. The
+    # bracket's own fetch (an ESPN day sweep, a series schedule) is
+    # guaranteed that retry the same way as the soccer season lists (#245).
+    for src in {id(s): s for s in game_sources}.values():
+        retry = getattr(src, "allow_bracket_scoring_retry", None)
+        if callable(retry):
+            retry()
+        _place_in_bracket(src, [g for g, s in zip(all_games, game_sources) if s is src],
+                          for_scoring=True)
     # Importance for every game whose source can share simulated seasons,
     # computed per league up front (#230); the loop below falls back to the
     # per-game simulator only for the rest (knockouts, active group->knockout
@@ -3261,7 +4263,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # Monte Carlo importance. Queries cover the two playing teams'
         # outcome bands AND any in-league favorites' outcome bands
         # (so a non-favorite game that swings a favorite's relegation
-        # chance gets credit structurally). weight_importance=0
+        # chance gets credit structurally). An `importance=0` scoring weight
         # disables the per-game cost entirely. Catches any exception
         # so a flaky source can't take down the entire refresh.
         importance_pts: float = 0.0
@@ -3283,17 +4285,20 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                     g.home, g.away, e,
                 )
 
-        # World Cup knockout premium. A knockout tie is win-or-go-home, but the
-        # Monte Carlo above scores it 0 (binary outcome, no standings leverage to
-        # simulate), so a marquee Round-of-32 game would otherwise rank at the
-        # bottom and fall under placeholder_min_score. Override with a round-
-        # scaled importance premium; the gate (WC competition + knockout stage)
-        # lives in the pure, unit-tested wc_knockout_importance so WC group games
-        # keep their simulated importance and no other competition is affected.
-        _ko_premium = wc_knockout_importance(comp_code, extra.get("stage"))
-        if _ko_premium is not None:
+        # International-tournament knockout FLOOR (World Cup, EURO). A
+        # knockout tie placed in its simulated bracket (#243) scores its real
+        # stakes above, usually well over this; one that could not be placed
+        # scores 0 and would rank at the bottom, under placeholder_min_score.
+        # So the round-scaled premium applies only when it beats the simulated
+        # value: DO NOT make it an override, which cut a placed EURO final
+        # from 18.4 to 6.0 (see scoring._KNOCKOUT_IMPORTANCE). The gate
+        # (competition + knockout stage) lives in the pure, unit-tested
+        # scoring.knockout_importance, so group games and club and domestic
+        # cups are not affected.
+        _ko_premium = knockout_importance(comp_code, extra.get("stage"))
+        if _ko_premium is not None and _ko_premium > importance_pts:
             importance_pts = _ko_premium
-            importance_notes = ["World Cup knockout: win or go home"]
+            importance_notes = [knockout_premium_note(comp_code)]
             importance_thresholds_hit = []
 
         # Rivalry detection: source-set is_rivalry takes precedence (no adapter
@@ -3321,12 +4326,19 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # larger field, so its last entry is still elite. See
         # scoring._rank_strength.
         rank_pool_exhaustive = bool(scoring_table)
+        # A poll's ranks are positions in the sport's whole eligible field
+        # (#198: AP #25 is 25th of 138 FBS teams, not last of 25). A league
+        # table is its own field, so it never forwards one.
+        rank_field = None if rank_pool_exhaustive else getattr(
+            src, "rank_field_size", None,
+        )
 
         signals = GameSignals(
             rank_a=g.rank_home,
             rank_b=g.rank_away,
             rank_pool_size=rank_pool,
             rank_pool_exhaustive=rank_pool_exhaustive,
+            rank_field_size=rank_field,
             team_a=g.home,
             team_b=g.away,
             favorite_match=match_favorites(g.home, g.away, favorites),
@@ -3363,7 +4375,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         # game should beat a 9.5-rated title-race contender for THIS user.
         # The favorite-weight bump alone wasn't enough: Man City still
         # dominated the top-5 because their stakes+rank pile was bigger
-        # than weight_favorite=6 could overcome. Adding favorite-match as
+        # than the default favorite weight (6) could overcome. Adding favorite-match as
         # a hard sort key guarantees slots 1..N_favorites belong to the
         # favorite-involved games whenever they exist in the bucket.
         game, signals, score = item
@@ -3460,6 +4472,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             # defaulting a league game to a 25-team pool.
             "rank_pool_size": signals.rank_pool_size,
             "rank_pool_exhaustive": signals.rank_pool_exhaustive,
+            "rank_field_size": signals.rank_field_size,
             "start_time_utc": game.start_time.isoformat(),
             "kickoff_local": _format_kickoff(game.start_time, tz_local),
             "is_today": _is_today_local(game.start_time, tz_local),
@@ -3498,17 +4511,37 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         applied_payload.extend(carried)
         logger.info(
             "[ranked_matchups] refresh: kept %d game(s) on air that this fetch "
-            "did not list (already started, or their source returned nothing)",
+            "did not list (already started, or their source returned nothing "
+            "or lost their day)",
             len(carried),
         )
         src_summary.append(f"kept on air: {len(carried)}")
 
     # A competition whose season list could not be fetched had no standings
     # stakes simulated for its games; report it like a failed source (#228).
-    # "Not simulated", not "scored 0": a World Cup knockout tie still gets its
+    # "Not simulated", not "scored 0": a World Cup or EURO knockout tie still gets its
     # round premium. Before the cache write, so Show current state sees it.
     for code, err in _soccer_season_fetch_failures().items():
         src_summary.append(_source_error_entry(f"{code} season fixtures (stakes not simulated)", err))
+    # Likewise a playoff bracket whose fetch gave up (#245): its games were
+    # not placed in their series, so they carry no bracket stakes. One entry
+    # per label: two sources can share one (the NCAA Baseball Postseason
+    # pair), and one outage must not read as two failed sources.
+    bracket_failures: Dict[str, List[str]] = {}
+    for src in sources:
+        failure = getattr(src, "bracket_fetch_failure", None)
+        err = failure() if callable(failure) else None
+        if isinstance(err, str) and err:
+            errs = bracket_failures.setdefault(src.sport_label, [])
+            if err not in errs:
+                errs.append(err)
+    for label, errs in bracket_failures.items():
+        src_summary.append(_source_error_entry(f"{label} bracket (stakes not simulated)", "; ".join(errs)))
+    # A points-based season scored from its last complete read (#289
+    # follow-up); one with no kept read was held as an outage at fetch. Only
+    # when importance ran: a seed read at build time used nothing otherwise.
+    if weights.importance > 0:
+        src_summary.extend(_season_fallback_entries(sources, game_sources))
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
@@ -3519,6 +4552,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         "weights": asdict(weights),
         "games": applied_payload,
         "bench": bench_payload,
+        _EMPTY_SLATE_KNOWN_KEY: slate_known,
     }
     _write_cache(cache)
 
@@ -3588,10 +4622,13 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
     stats = {"stale_dated_streams_dropped": 0, "policy_streams_excluded": 0}
 
     def lookup(game) -> List[ChannelCandidate]:
-        # Per-sport match window: soccer needs a tighter window to avoid
+        # Per-game match window: soccer needs a tighter window to avoid
         # false-matching pre-game preview shows earlier in the day; NCAAF
         # / NFL keep the wide default for long pre-game shows + OT. See #4.
-        pre_min, post_hours = _epg_match_window(game.sport_prefix)
+        # A soccer knockout's longer post window comes from its own `extra`
+        # (#257), so pass it, not just the prefix.
+        pre_min, post_hours = _epg_match_window(
+            game.sport_prefix, getattr(game, "extra", None))
         window_start = game.start_time - timedelta(minutes=pre_min)
         window_end = game.start_time + timedelta(hours=post_hours)
 
@@ -3833,9 +4870,10 @@ def _game_end_utc(game: Dict[str, Any]) -> Optional[datetime]:
     """Best estimate of when a cached game FINISHES, in UTC.
 
     There is no real end time in any feed we consume, so this reuses the SAME
-    per-sport post-game window the EPG matcher already trusts
-    (_epg_match_window): 4 hours for gridiron sports, 2.5 for soccer, and so
-    on. DO NOT introduce a second duration table for reaping. The window is
+    per-game post-game window the EPG matcher already trusts
+    (_epg_match_window): 4 hours for gridiron sports, 2.5 for league soccer, 3
+    for a soccer knockout that can go to penalties (#257), and so on. DO NOT
+    introduce a second duration table for reaping. The window is
     deliberately generous because it also has to cover overtime, and a reaper
     that fired earlier than the EPG window would delete a channel while its
     own programme entry still claimed the game was on air.
@@ -3846,7 +4884,8 @@ def _game_end_utc(game: Dict[str, Any]) -> Optional[datetime]:
     start = parse_iso_utc(start_raw)
     if start is None:
         return None
-    _pre_min, post_hours = _epg_match_window(game.get("sport_prefix") or "")
+    _pre_min, post_hours = _epg_match_window(
+        game.get("sport_prefix") or "", game.get("extra"))
     return start + timedelta(hours=float(post_hours))
 
 
@@ -3954,9 +4993,9 @@ def _unique_by_marker(games) -> Tuple[List[Any], int]:
     """Keep the first game per marker, in order; return (games, n_dropped).
 
     DO NOT let apply see two games with one marker. The write loop would create
-    two channels with the same tvg_id and the same channel number, and the
-    unique (channel_group, channel_number) constraint then fails the whole
-    apply transaction. Since #217 a marker is a source event id, so the same
+    two channels with the same tvg_id and the same channel number. Nothing in
+    the database refuses that (_PER_GROUP_NUMBER_NOTE), so both are published
+    and the guide binds arbitrarily between them. Since #217 a marker is a source event id, so the same
     event listed by two sources (or twice by one) collapses here even when the
     team names differ. The cache is in rank order, so the first is the best.
     """
@@ -4021,6 +5060,12 @@ def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) 
     ~5,548,720 and is invisible in practice. Any help text, log line or doc that
     calls this "the first channel number" without naming the mode is wrong.
 
+    This is the resolver for COMPACT mode, and KICKOFF mode's last resort on a
+    fresh install. DO NOT call it for kickoff mode directly: re-deriving the
+    floor from the lineup on every apply renumbers every published game whenever
+    the top of the lineup changes (#219). Kickoff goes through
+    _resolve_kickoff_base, which remembers the floor.
+
     `virtual_channel_base` setting:
       - Positive int → use that as the base.
       - 0 (sentinel) → auto: pick (highest existing non-virtual channel) + 1,
@@ -4034,28 +5079,336 @@ def _resolve_virtual_base(settings: Dict[str, Any], highest_non_virtual: float) 
     The auto path falls back to _AUTO_BASE_FALLBACK on a fresh install (no
     other channels exist) so we don't return 1 and squat on prime real estate.
     """
-    raw = settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE)
-    try:
-        base = int(float(raw))
-    except (TypeError, ValueError):
-        base = 0
-    if base > 0:
-        return base
+    explicit = _explicit_virtual_base(settings)
+    if explicit is not None:
+        return explicit
     candidate = int(highest_non_virtual) + 1
     return candidate if candidate > 1 else _AUTO_BASE_FALLBACK
 
 
-def _resolve_park_base(max_target_number: int) -> int:
+def _explicit_virtual_base(settings: Dict[str, Any]) -> Optional[int]:
+    """The user's `virtual_channel_base` when it is a positive number, else None
+    (0, blank, negative or unparseable all mean auto). The one parse of the
+    setting, shared by _resolve_virtual_base and _resolve_kickoff_base."""
+    raw = settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE)
+    try:
+        base = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return base if base > 0 else None
+
+
+# How many reserved numbers, in total, _infer_kickoff_base walks over when it
+# works out how far a nudge can have pushed a published channel (see
+# longest_nudge there). Measured with it: a 60-game slate (the max_games cap)
+# infers in about 10 ms.
+_INFER_RESERVED_RUN = 64
+
+
+def _infer_kickoff_base(
+    published: List[Tuple[Any, datetime, str]],
+    tz,
+    hint: Optional[int] = None,
+    unpublished: Sequence[Tuple[datetime, str]] = (),
+    reserved: Optional[set] = None,
+) -> Optional[int]:
+    """Recover the floor the published KICKOFF channels were numbered from.
+
+    `published` is (live channel number, the game's kickoff, its marker) for
+    every game that already has a channel; `unpublished` is (kickoff, marker)
+    for the slate's games that do not have one yet, and `reserved` the numbers
+    apply will hold back (other channels' numbers, and those of channels kept
+    for a recording; apply collects both before the floor for this reason). A
+    kickoff number is ``base + minutes * SLOTS + slot``, so each channel admits
+    SLOTS candidate floors that put it inside its own kickoff minute's block.
+
+    Each candidate is scored by RUNNING the placement apply will run
+    (_place_kickoff_numbers, the same function _assign_channel_numbers uses) and
+    counting the published channels that come out on the number they already
+    carry. DO NOT go back to counting channels inside their block as a proxy for
+    "does not move": a same-minute collision nudges a channel past the end of its
+    block, and under the true floor the same nudge reproduces it every apply, so
+    it does not move, yet the proxy counts it as lost. On a ten-game Saturday
+    slate two such nudges made the floor one higher win, and that floor moved the
+    channel sitting on the first slot of its block (review finding, #219).
+
+    Ties go to the candidate most channels name exactly (a channel on the number
+    a fresh placement from that floor would give it: its marker's hash slot, or
+    the nudge above it), then to the one nearest `hint` (the floor auto mode
+    would otherwise pick), then the lowest. Why every block candidate and not just the
+    exact ones: a channel can sit off its hash slot (the #217 hold after its
+    marker was re-keyed from the legacy hash), and when no channel names the true
+    floor exactly, an exact-only search cannot find it. Why the `hint`: two
+    channels, one of them rescheduled since it was numbered, name two floors that
+    each keep one channel; the rescheduled one is off by whole hours (1920 per
+    two hours), while the hint is off by at most the lineup's drift since the
+    last apply.
+
+    Only consulted when NUMBERING_STATE_PATH has no floor (the first apply after
+    upgrading, or a lost file), so that apply keeps every published number
+    instead of re-deriving the floor from the lineup (#219). The placement is
+    run with NO record of what each channel was numbered for (#278), and that is
+    exactly what apply then runs: the record is only valid under the floor it
+    was written with, and with no floor remembered there is none to trust.
+    """
+    slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
+    rows: List[Tuple[str, int, int, int]] = []  # (marker, number, offset, block start)
+    for number, start_dt, marker in published:
+        if number is None or start_dt is None:
+            continue
+        offset = stable_channel_number(0, start_dt, marker, tz)
+        rows.append((marker, int(number), offset, offset - offset % slots))
+    entries = [(m, off) for m, _n, off, _blk in rows] + [
+        (marker, stable_channel_number(0, start_dt, marker, tz))
+        for start_dt, marker in unpublished if start_dt is not None
+    ]
+    held = {m: n for m, n, _off, _blk in rows}
+    blocked = {int(n) for n in (reserved or ())}
+
+    def longest_nudge(n: int) -> int:
+        # The longest upward nudge that can end on `n`. Every number a nudge
+        # walks over is taken, by another game of this slate or by a reserved
+        # number, so walk down from n - 1 spending one number per other game.
+        # At most _INFER_RESERVED_RUN reserved numbers IN TOTAL are walked over
+        # per channel (not per run: a per-run cap lets a chain of short runs
+        # restore the blow-up): each number walked adds a candidate, and every
+        # candidate scored runs two placements that each scan the run (second
+        # opinion, round 2: 12.7 s for 10,000 consecutive reserved numbers,
+        # 208 s for 20,000). More than that means scores of the user's
+        # channels inside the 7-digit kickoff range; a channel nudged across
+        # them names no floor this way, the inference falls back to the
+        # candidates other channels name or the hint, as before #267.
+        others, run, k = len(entries) - 1, 0, 0
+        while True:
+            if n - 1 - k in blocked and run < _INFER_RESERVED_RUN:
+                run, k = run + 1, k + 1
+            elif n - 1 - k not in blocked and others > 0:
+                others, k = others - 1, k + 1
+            else:
+                return k
+
+    # Each channel names the SLOTS floors that put it inside its own block, and
+    # the floors from which an upward nudge reaches it (at least 1..SLOTS-1, and
+    # as far as the slate and the reserved numbers could have pushed it): a
+    # channel nudged past its block's end names its true floor only that way,
+    # and without it the hint cannot pick the true floor among floors that keep
+    # every channel. The placement holds a nudge of any length (#267), so a
+    # crowded minute that pushed a channel 16 or more past its computed number
+    # must still name the floor that keeps it. Candidates below 1 are COMPACT
+    # numbers, not a floor.
+    candidates = {
+        c
+        for _m, n, off, blk in rows
+        for c in [n - blk - s for s in range(slots)] + [
+            n - off - k for k in range(1, max(slots - 1, longest_nudge(n)) + 1)
+        ]
+        if c >= 1
+    }
+    if not candidates:
+        return None
+
+    def bound(c: int) -> int:
+        # Most channels candidate `c` could keep: one is kept only by the
+        # in-block hold, or by an upward nudge from below its own number (a
+        # fresh one, or the hold on a channel nudged past its block, #267).
+        return sum(
+            1 for _m, n, off, blk in rows
+            if (c + blk <= n < c + blk + slots and n not in blocked) or n > c + off
+        )
+
+    def score(c: int) -> Tuple[int, int, int, int]:
+        placed, _collisions, _blocked = _place_kickoff_numbers(entries, c, held, blocked)
+        stays = sum(1 for m, n, _off, _blk in rows if placed.get(m) == n)
+        # "Exact": the number the channel would get from `c` with no hold at all,
+        # nudges included, so a channel nudged off a neighbour or a stranger
+        # still names its own floor rather than the one a nudge above it.
+        fresh, _collisions, _blocked = _place_kickoff_numbers(entries, c, {}, blocked)
+        exact = sum(1 for m, n, _off, _blk in rows if fresh.get(m) == n)
+        near = -abs(c - hint) if hint is not None else 0
+        return (stays, exact, near, -c)
+
+    # Branch and bound: a full placement per candidate is O(slate log slate), so
+    # skip any candidate that cannot reach the best count already found.
+    best: Optional[int] = None
+    best_score: Optional[Tuple[int, int, int, int]] = None
+    for c in sorted(candidates, key=bound, reverse=True):
+        if best_score is not None and bound(c) < best_score[0]:
+            break
+        sc = score(c)
+        if best_score is None or sc > best_score:
+            best, best_score = c, sc
+    return best
+
+
+def _resolve_kickoff_base(
+    settings: Dict[str, Any],
+    highest_non_virtual: float,
+    remembered: Optional[int],
+    published: List[Tuple[Any, datetime, str]],
+    tz,
+    unpublished: Sequence[Tuple[datetime, str]] = (),
+    reserved: Optional[set] = None,
+) -> int:
+    """The floor for KICKOFF numbering, which must not follow the user's lineup.
+
+    In kickoff mode the floor sits under a time term in the millions, so it buys
+    no separation from the user's channels. Re-deriving it as "highest other
+    channel + 1" on every apply (what _resolve_virtual_base does, and what this
+    mode did before #219) therefore bought nothing and cost a uniform renumber of
+    every published game whenever the top of the lineup changed: measured live
+    2026-09-26, the highest non-matchups channel went 6891 -> 6838 and all seven
+    unchanged games moved by -53. Dispatcharr's M3U, XMLTV and Xtream Codes
+    outputs bind the guide by the bare channel number (#117), so a moved number
+    is exactly what kickoff mode exists to prevent.
+
+    Precedence:
+      1. A positive `virtual_channel_base`: used as given, as before.
+      2. `remembered`, the floor the last kickoff apply used (numbering_state.json).
+      3. The floor the published channels were numbered from (_infer_kickoff_base,
+         given the slate's `unpublished` games and the `reserved` numbers apply
+         already holds back, so it can run the real placement), so upgrading, or
+         losing the state file, keeps as many published numbers as any floor
+         can, normally all (with no record, a channel nudged past its block
+         over a gap can still move, see _place_kickoff_numbers).
+      4. Highest other channel + 1 (_resolve_virtual_base's auto rule), for a
+         fresh install with nothing published, where no number can move.
+
+    Not re-deriving the floor drops the old side effect that kept every kickoff
+    number above the lineup. Collision-freedom with the user's channels comes
+    from apply reserving their effective numbers instead (_reserved_channel_numbers,
+    passed to _assign_channel_numbers in both modes).
+    """
+    explicit = _explicit_virtual_base(settings)
+    if explicit is not None:
+        return explicit
+    if remembered is not None and int(remembered) >= 1:
+        return int(remembered)
+    lineup_floor = _resolve_virtual_base(settings, highest_non_virtual)
+    inferred = _infer_kickoff_base(
+        published, tz, hint=lineup_floor, unpublished=unpublished, reserved=reserved,
+    )
+    return inferred if inferred is not None else lineup_floor
+
+
+def _plain_int(value: Any, lowest: int) -> Optional[int]:
+    """`value` when it is a real int (not a bool, float or string) >= `lowest`,
+    else None: what a hand-edited or damaged numbering_state.json reads as."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < lowest:
+        return None
+    return value
+
+
+def _load_numbering_state(
+    path: Optional[str] = None,
+) -> Tuple[Optional[int], Dict[str, Tuple[int, int, int]]]:
+    """(the floor the last kickoff apply used, the record of what was numbered).
+
+    The record maps each published channel's marker to the (kickoff offset,
+    channel number, floor) it was numbered for, offset meaning
+    ``stable_channel_number(0, ...)`` as in _place_kickoff_numbers. Each entry
+    names its own floor because a channel kept for a recording keeps the number
+    an earlier floor gave it (see _numbered_for_floor). The floor is None when
+    the file is missing, unreadable or holds anything but a positive integer,
+    and the record is then empty too, so the floor inference and the apply after
+    it both run the record-free placement. A malformed entry is dropped on its
+    own, so one bad row costs only that channel the record (it falls back to the
+    chain rule). A file from before #278 has no record and reads as an empty
+    one."""
+    path = path or NUMBERING_STATE_PATH
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None, {}
+    if not isinstance(data, dict):
+        return None, {}
+    base = _plain_int(data.get("kickoff_base"), 1)
+    raw = data.get("numbered_for")
+    if base is None or not isinstance(raw, dict):
+        return base, {}
+    record: Dict[str, Tuple[int, int, int]] = {}
+    for marker, entry in raw.items():
+        if not isinstance(entry, list) or len(entry) != 3:
+            continue
+        values = (_plain_int(entry[0], 0), _plain_int(entry[1], 1), _plain_int(entry[2], 1))
+        if None not in values:
+            record[marker] = values
+    return base, record
+
+
+def _save_numbering_state(
+    base: int,
+    numbered_for: Dict[str, Tuple[int, int, int]],
+    path: Optional[str] = None,
+) -> None:
+    """Remember the kickoff floor and the record of what was numbered (see
+    _load_numbering_state). Only apply writes it, under the scheduler lock,
+    after its transaction commits, never on a dry run.
+
+    A failed write is logged and swallowed. When the file on disk names a
+    DIFFERENT floor it is removed: left in place, that floor would be read back
+    as current, and after an apply under another floor (an explicit base the
+    user has since cleared) the next auto apply would renumber every game onto
+    the old one. With no file, the next apply infers the floor from the
+    published channels (#219), and with no record a channel nudged past its
+    block falls back to the chain rule. A file naming THIS floor is kept: its
+    record can only be older than this apply's, and an entry is only trusted
+    while its channel still carries the recorded number in the recorded minute
+    (_place_kickoff_numbers), so keeping it holds what deleting it would let
+    move. Its worst case is an entry still under the legacy marker of a
+    channel the failed apply re-keyed (#217): that channel gets the chain
+    rule, as every channel did before #278.
+
+    Two keys, and `kickoff_base` keeps its pre-#278 shape: older code reads that
+    key alone, so a downgrade keeps the floor. The older code rewrites the file
+    with that key only when the floor changes, so a record it leaves behind can
+    be stale; _place_kickoff_numbers only trusts an entry whose number the
+    channel still carries."""
+    path = path or NUMBERING_STATE_PATH
+    try:
+        write_json_atomic(path, {
+            "kickoff_base": int(base),
+            "numbered_for": {
+                m: [int(off), int(n), int(fl)]
+                for m, (off, n, fl) in sorted(numbered_for.items())
+            },
+        })
+    except OSError as e:
+        logger.warning("[ranked_matchups] could not save kickoff numbering state to %s: %s", path, e)
+        if _load_numbering_state(path)[0] == int(base):
+            return
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e2:
+            logger.warning(
+                "[ranked_matchups] could not remove the stale kickoff numbering state %s: %s",
+                path, e2,
+            )
+
+
+def _resolve_park_base(max_target_number: int, highest_in_group: float = 0) -> int:
     """Pick a parking range that's guaranteed past every target number we'll
-    write. Parking + writing happens in one transaction within our own group,
-    so we only need to clear our own target range; +1000 slack keeps the
-    parking range comfortably out of the highest target we're about to assign.
+    write AND every number a channel in the group already holds. Parking +
+    writing happens in one transaction within our own group, so only the group
+    matters to keeping in-group numbers distinct at every step
+    (_PER_GROUP_NUMBER_NOTE); +1000 slack
+    keeps the parking range comfortably clear of both.
 
     `max_target_number` is the largest channel number this apply will write
     (channel numbers are kickoff-time based, so the ceiling is driven by how far
     ahead the slate reaches, NOT by the game count). Callers pass the target
-    base itself when the slate is empty so the result stays sane."""
-    return int(max_target_number) + 1000
+    base itself when the slate is empty so the result stays sane.
+
+    `highest_in_group` is the highest number any channel in the target group
+    holds now. Without it, a channel the user added to our group by hand above
+    our targets could sit exactly on a parking number, sharing it for the rest
+    of the transaction (no database constraint refuses it,
+    _PER_GROUP_NUMBER_NOTE). Parking numbers are never committed: every parked
+    channel is either written with its target or restored to a free number
+    (the kept-channel restore in _action_apply)."""
+    return int(max(max_target_number, int(highest_in_group or 0))) + 1000
 
 
 def _resolve_numbering_mode(settings: Dict[str, Any]) -> str:
@@ -4096,6 +5449,164 @@ def _resolve_compact_band_size(settings: Dict[str, Any], game_count: int) -> int
     return max(1, int(game_count))
 
 
+def _place_kickoff_numbers(
+    entries: Sequence[Tuple[str, int]],
+    virtual_base: int,
+    held: Dict[str, int],
+    reserved_numbers: Optional[set] = None,
+    numbered_for: Optional[Dict[str, Tuple[int, int]]] = None,
+) -> Tuple[Dict[str, int], int, int]:
+    """KICKOFF placement: the ONE implementation, shared by
+    _assign_channel_numbers and _infer_kickoff_base (which runs it once per
+    candidate floor, so the floor it recovers is judged by what apply will really
+    do; DO NOT give the inference its own copy of these rules).
+
+    `entries` is (marker, offset) per game, offset being
+    ``stable_channel_number(0, ...)``: the number is ``virtual_base + offset``.
+    `held` maps a marker to the number its live channel carries. `numbered_for`
+    is the record apply kept of the (offset, number) each channel was numbered
+    for FROM THIS SAME FLOOR (numbering_state.json, #278, filtered by
+    _numbered_for_floor). Returns
+    (marker -> number, +1 nudges taken, games whose number was reserved).
+    """
+    # A game whose channel already holds a number inside its OWN kickoff
+    # minute's block keeps it, even when the tiebreak hash would now pick a
+    # different slot. The hash is of the marker, so without this the #217
+    # marker migration would shuffle same-minute games between slots, and a
+    # number vacated by one game could be handed to another: the #117
+    # wrong-programme binding. A reschedule changes the minute, so the old
+    # number falls outside the new block and is released, as it should be
+    # (unless it is exactly where the new minute's nudge would land, below).
+    #
+    # `reserved_numbers` (numbers other channels publish under) are never handed
+    # out, held or fresh: the guide keys on the bare number, so sharing one with
+    # the user's channel binds the wrong programme to both (#202). The floor no
+    # longer tracks the lineup (#219), so this is what keeps the two apart.
+    slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
+    reserved = {int(n) for n in (reserved_numbers or ())}
+    pairs: List[Tuple[str, int, int]] = []  # (marker, number, 0 if kept else 1)
+    beyond: List[Tuple[int, str, int]] = []  # (prior, marker, number) above the block
+    for marker, offset in entries:
+        number = virtual_base + offset
+        block = number - offset % slots
+        prior = held.get(marker)
+        if prior is None or int(prior) in reserved:
+            pairs.append((marker, number, 1))
+        elif block <= int(prior) < block + slots:
+            pairs.append((marker, int(prior), 0))
+        elif int(prior) >= block + slots:
+            beyond.append((int(prior), marker, number))
+        else:
+            pairs.append((marker, number, 1))
+
+    # A channel ABOVE its own block is held in two cases. A same-minute
+    # collision near the block's last slot nudges a game past the block's end,
+    # and without a hold a NEW game in that minute, placed first, took the
+    # nudged channel's number, or a game below it leaving released it to its
+    # computed number: a live channel moved (the guide binds by the bare
+    # number, #117).
+    #  - RECORDED (#278): the record says this channel was numbered from this
+    #    floor for its game's CURRENT kickoff minute and still carries the
+    #    number it was given then, so it is a nudge, not a reschedule. It keeps
+    #    the number while it is free (not reserved, not taken by a channel
+    #    decided before it), gap in the chain or not. The minute, not the whole
+    #    offset: they agree for one marker, and a #217 re-key changes the
+    #    marker's hash slot but not the kickoff.
+    #  - CHAIN (#267, the fallback when the record does not name the channel:
+    #    the first apply after upgrading, a lost or damaged file, a floor other
+    #    than the one it was written under): its number is exactly where an
+    #    upward nudge from its computed number lands today, every number from
+    #    the computed one up to (not including) its own being taken by a channel
+    #    kept this apply or by a reserved number.
+    # Ascending order, because a chain can run through another channel held
+    # this way (the lower one is decided first).
+    #
+    # DO NOT hold a channel the record does not vouch for on anything looser
+    # than the chain, such as "any number within SLOTS above the computed
+    # one". Without the record that cannot tell a nudged channel from a game
+    # rescheduled one minute EARLIER that sat below its hash slot in its old
+    # minute (both sit a few numbers above the new computed number), and it
+    # would hold the rescheduled game in the next minute's block, which the
+    # release above exists to prevent. With the record a reschedule shows as a
+    # changed offset and gets no recorded hold; without it, the chain tells
+    # the two apart, because a rescheduled game passes it only when a fresh
+    # nudge from its new number would land on that same number anyway. A gap
+    # in the chain then still releases the channel, as before #278.
+    record = numbered_for or {}
+    taken = set(reserved)
+    taken.update(n for _m, n, kept in pairs if kept == 0)
+    for prior, marker, number in sorted(beyond):
+        rec_offset, rec_number = record.get(marker, (None, None))
+        recorded = (
+            rec_number == prior
+            and rec_offset // slots == (number - virtual_base) // slots
+        )
+        if (recorded and prior not in taken) or _first_free_number(taken, number) == prior:
+            pairs.append((marker, prior, 0))
+            taken.add(prior)
+        else:
+            pairs.append((marker, number, 1))
+
+    # Kept numbers are placed BEFORE any fresh one, not merely sorted ahead of
+    # it at equal value: a fresh game nudged +1 off a neighbour could otherwise
+    # land on a slot a later kept game holds, and push that kept game out of
+    # its minute's block. Kept numbers are distinct (they are live channel
+    # numbers in one group), so placing them first never collides.
+    pairs.sort(key=lambda p: (p[2], p[1], p[0]))
+    assigned: Dict[str, int] = {}
+    used: set = set(reserved)
+    collisions = 0
+    blocked = 0
+    for marker, number, _kept in pairs:
+        if number in reserved:
+            blocked += 1
+        free = _first_free_number(used, number)
+        collisions += free - number  # == number of +1 nudges taken
+        used.add(free)
+        assigned[marker] = free
+    return assigned, collisions, blocked
+
+
+def _kickoff_offsets(games: List[Dict[str, Any]], tz) -> List[Tuple[str, int]]:
+    """(marker, offset) per game with a parseable kickoff, offset being
+    ``stable_channel_number(0, ...)``: what _place_kickoff_numbers places, and
+    what apply records each published channel was numbered for (#278). One
+    helper for both, so the record compares like with like."""
+    entries: List[Tuple[str, int]] = []
+    for g in games:
+        start_dt = parse_iso_utc(g.get("start_time_utc"))
+        if start_dt is None:
+            continue
+        marker = _build_marker_key(g)
+        entries.append((marker, stable_channel_number(0, start_dt, marker, tz)))
+    return entries
+
+
+def _numbered_for_floor(
+    record: Dict[str, Tuple[int, int, int]],
+    virtual_base: int,
+    renames: Sequence[Tuple[Any, str, str]] = (),
+) -> Dict[str, Tuple[int, int]]:
+    """The entries of apply's record (marker -> (offset, number, floor)) that
+    were numbered from `virtual_base`, as the (offset, number) map
+    _place_kickoff_numbers takes, with each entry of a channel re-keyed this
+    apply (`renames`, (channel, legacy marker, new marker) from
+    _rekey_legacy_virtuals, #217) moved to its new marker.
+
+    DO NOT trust an entry from another floor: there the same offset means a
+    different number, and holding the old one would keep a channel above its
+    block on a number only the old floor explains (under a new floor, the
+    in-block hold and the chain rule decide). Per entry, not per file, because
+    a channel kept for a recording keeps the number an earlier floor gave it
+    across floor changes, and its entry must survive them for when its game
+    returns."""
+    moved = {legacy: new for _ch, legacy, new in renames}
+    return {
+        moved.get(m, m): (offset, number)
+        for m, (offset, number, floor) in record.items() if floor == virtual_base
+    }
+
+
 def _assign_channel_numbers(
     games: List[Dict[str, Any]],
     virtual_base: int,
@@ -4104,6 +5615,7 @@ def _assign_channel_numbers(
     band_size: Optional[int] = None,
     existing_numbers: Optional[Dict[str, int]] = None,
     reserved_numbers: Optional[set] = None,
+    numbered_for: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> Dict[str, int]:
     """Map each game's marker to its channel number for this apply.
 
@@ -4114,18 +5626,27 @@ def _assign_channel_numbers(
     kickoff holds, regardless of how the slate is ranked or which other games are
     present. `existing_numbers` is honoured within the kickoff minute: a game
     whose channel already holds a slot in its own minute's block keeps that slot
-    even if the marker hash now points elsewhere (#217).
+    even if the marker hash now points elsewhere (#217), and a channel nudged
+    past its block keeps its number while `numbered_for` (apply's record from
+    the same floor, #278) says it was numbered for the game's current kickoff,
+    or, with no record for it, while that nudge is still what reaches it (#267;
+    see _place_kickoff_numbers for both).
     That stability is what lets both the default M3U/XMLTV output and the Xtream
     Codes API bind the EPG correctly with no client setting (#121), while the
     numbers still increase with kickoff time so the list sorts soonest-first.
 
     Two DIFFERENT games can only land on the same number if they share a kickoff
-    minute AND a hash slot (uncommon; see CHANNEL_NUMBER_TIEBREAK_SLOTS). That
-    would violate the unique ``(channel_group, channel_number)`` constraint, so
-    we resolve it deterministically: walk the games in (number, marker) order and
-    bump any exact duplicate to the next free integer. This perturbs ONLY a
-    colliding same-minute game, never games at other minutes, and is reproducible
-    across applies.
+    minute AND a hash slot (uncommon; see CHANNEL_NUMBER_TIEBREAK_SLOTS). Nothing
+    in the database would refuse the duplicate (_PER_GROUP_NUMBER_NOTE), and the
+    guide would bind it arbitrarily, so we resolve it deterministically: kept
+    numbers first, then the fresh games in (number, marker) order, each bumped
+    to the next free integer. This moves ONLY a colliding game (a crowded
+    minute's last one can land in the next minute's block, which is why a nudge
+    past the block is held), and is reproducible across applies.
+    `reserved_numbers` (every number some other channel already publishes under)
+    is skipped the same way and never kept by either hold,
+    since a shared number binds the guide arbitrarily for both channels (#219:
+    the floor no longer tracks the lineup, so nothing else keeps them apart).
 
     COMPACT hands the ordering job to `allocate_compact_numbers`, which keeps
     every number inside a band the user names. Games are passed in kickoff order
@@ -4154,7 +5675,7 @@ def _assign_channel_numbers(
         if blocked:
             logger.info(
                 "[ranked_matchups] compact band %d-%d: %d number(s) skipped, already "
-                "used by channels outside our group (the guide keys on the channel "
+                "used by another channel (the guide keys on the channel "
                 "number alone, so a shared number breaks EPG binding)",
                 virtual_base, virtual_base + size - 1, blocked,
             )
@@ -4170,44 +5691,18 @@ def _assign_channel_numbers(
             )
         return assigned
 
-    # A game whose channel already holds a number inside its OWN kickoff
-    # minute's block keeps it, even when the tiebreak hash would now pick a
-    # different slot. The hash is of the marker, so without this the #217
-    # marker migration would shuffle same-minute games between slots, and a
-    # number vacated by one game could be handed to another: the #117
-    # wrong-programme binding. A reschedule changes the minute, so the old
-    # number falls outside the new block and is released, as it should be.
-    slots = CHANNEL_NUMBER_TIEBREAK_SLOTS
-    held = existing_numbers or {}
-    pairs: List[Tuple[str, int, int]] = []  # (marker, number, 0 if kept else 1)
-    for g in games:
-        start_dt = parse_iso_utc(g.get("start_time_utc"))
-        if start_dt is None:
-            continue
-        marker = _build_marker_key(g)
-        number = stable_channel_number(virtual_base, start_dt, marker, tz)
-        block = number - (number - virtual_base) % slots
-        prior = held.get(marker)
-        if prior is not None and block <= int(prior) < block + slots:
-            pairs.append((marker, int(prior), 0))
-        else:
-            pairs.append((marker, number, 1))
-
-    # Kept numbers are placed BEFORE any fresh one, not merely sorted ahead of
-    # it at equal value: a fresh game nudged +1 off a neighbour could otherwise
-    # land on a slot a later kept game holds, and push that kept game out of
-    # its minute's block. Kept numbers are distinct (they are live channel
-    # numbers in one group), so placing them first never collides.
-    pairs.sort(key=lambda p: (p[2], p[1], p[0]))
-    assigned: Dict[str, int] = {}
-    used: set = set()
-    collisions = 0
-    for marker, number, _kept in pairs:
-        free = _first_free_number(used, number)
-        collisions += free - number  # == number of +1 nudges taken
-        used.add(free)
-        assigned[marker] = free
-    if collisions:
+    # The hold, the reservation and the nudge live in _place_kickoff_numbers.
+    assigned, collisions, blocked = _place_kickoff_numbers(
+        _kickoff_offsets(games, tz), virtual_base, existing_numbers or {},
+        reserved_numbers, numbered_for,
+    )
+    if blocked:
+        logger.warning(
+            "[ranked_matchups] %d game(s) moved off a channel number another of your "
+            "channels already uses (the guide keys on the number alone)",
+            blocked,
+        )
+    elif collisions:
         logger.warning(
             "[ranked_matchups] resolved %d channel-number collision(s) by +1 nudge; "
             "raise CHANNEL_NUMBER_TIEBREAK_SLOTS in _util.py if this recurs",
@@ -4248,6 +5743,9 @@ def _build_signals_score_from_payload(g: Dict[str, Any]):
         # dominate a pre-upgrade cache, and self-corrects on the next refresh.
         rank_pool_size=g.get("rank_pool_size"),
         rank_pool_exhaustive=bool(g.get("rank_pool_exhaustive")),
+        # A cache row predating #198 yields None, which scores a poll rank
+        # against its published pool exactly as that refresh did.
+        rank_field_size=g.get("rank_field_size"),
         team_a=g.get("home", ""),
         team_b=g.get("away", ""),
         favorite_match=g.get("favorites_matched", []),
@@ -4851,9 +6349,7 @@ def _published_guide_end(game: Dict[str, Any], settings: Dict[str, Any]) -> Opti
     start = parse_iso_utc(game.get("start_time_utc"))
     if start is None:
         return None
-    sport_end = _game_end_utc(game)
-    display_end = start + timedelta(hours=EPG_POST_HOURS)
-    prog_end = min(sport_end, display_end) if sport_end else display_end
+    _prog_start, prog_end = _live_window(game, start)
     remove_after = _reap_settings(settings)
     return _compute_past_slot_end(
         prog_end, settings,
@@ -4956,6 +6452,7 @@ def _rows_to_hold(
     remove_after_minutes: int,
     settings: Dict[str, Any],
     empty_labels: set,
+    lost_days: Optional[Dict[str, set]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Previously applied games a refresh must keep on air, by marker (#240).
 
@@ -4973,6 +6470,12 @@ def _rows_to_hold(
       returned 525 at 19:00 and every CFB channel, Georgia at Alabama included,
       was deleted half an hour before kickoff. A source does not lose a listed
       game for real without listing others, so zero is read as an outage.
+    - Games dated on a DAY their source's sweep lost (#261): `lost_days` maps
+      a label to the calendar days a per-day sweep got no answer for
+      (sources.base.report_lost_days). The sweep returned its other days, so
+      the label is not empty, but the lost day's games are just as missing.
+      Only that day's games are held: a game on a day that answered and no
+      longer lists it really is gone. See _on_lost_day for the date rule.
 
     Held until the reaper would remove the game anyway (_partition_expired):
     the reaper owns taking finished games off air, and a refresh does not.
@@ -4987,9 +6490,27 @@ def _rows_to_hold(
         start = parse_iso_utc(row.get("start_time_utc"))
         if start is None:
             continue
-        if start <= now or row.get("sport_label") in empty_labels:
+        label = row.get("sport_label")
+        if (start <= now or label in empty_labels
+                or _on_lost_day(start, (lost_days or {}).get(label))):
             held[_build_marker_key(row)] = row
     return held
+
+
+def _on_lost_day(start: datetime, lost: Optional[set]) -> bool:
+    """Whether a game kicking off at `start` (UTC) may sit in one of the
+    `lost` sweep days (#261).
+
+    A sweep day is the source's own calendar bucket, and ESPN buckets by US
+    EASTERN date (see _espn.SCOREBOARD_LOOKBACK_DAYS), so a 01:00Z kickoff
+    belongs to the previous day's bucket. Both candidates are checked, the
+    UTC date and the date five hours earlier: Eastern is UTC-4 or UTC-5, so
+    its date is always one of the two. Over-matching only ever holds a game
+    one more refresh; under-matching deletes a channel, so DO NOT narrow
+    this to one zone."""
+    if not lost:
+        return False
+    return start.date() in lost or (start - timedelta(hours=5)).date() in lost
 
 
 def _gamerow_from_row(row: Dict[str, Any]) -> Any:
@@ -5039,6 +6560,15 @@ def _carry_forward(
     return out
 
 
+def _carry_apply_vouch(cache: Dict[str, Any], apply_result: Dict[str, Any]) -> None:
+    """Keep the stamp apply just wrote (`slate_vouched`, see
+    _vouch_published_slate) in the reaper's copy of the cache, which it
+    writes back after apply returns. DO NOT drop this: the reaper's write
+    would erase the stamp and leave the slate unvouched (#241)."""
+    if apply_result.get("slate_vouched") is True:
+        cache[_EMPTY_SLATE_KNOWN_KEY] = True
+
+
 def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Drop finished games from the guide, and backfill from the bench.
 
@@ -5053,7 +6583,9 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     EPGData cleanup, and the signal-safe queryset deletes. A second deletion
     path here would be a copy that has to stay in agreement with that one,
     and the two would drift silently: see the plugin's own history of
-    exactly that failure mode. So: edit the cache, then call apply.
+    exactly that failure mode. So: edit the cache, then call apply. That holds
+    for the LAST game too: a reap can leave `games` empty, and apply must run
+    on that empty slate rather than treat it as "no cache" (#241).
     """
     remove_after = _reap_settings(settings)
     if remove_after <= 0:
@@ -5075,6 +6607,7 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("[ranked_matchups] reap: retrying an apply left pending")
         retry = _action_apply(settings)
         if str(retry.get("status", "ok")).lower() != "error":
+            _carry_apply_vouch(cache, retry)
             cache["reap_apply_pending"] = False
             _write_cache(cache)
         else:
@@ -5106,9 +6639,18 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
         promoted_ids = {id(g) for g in promoted}
         bench = [g for g in bench if id(g) not in promoted_ids]
 
+    # Whether apply may publish the slate if this leaves it EMPTY (#241). The
+    # reaper only removes finished games, so the answer is whatever the slate
+    # it started from could vouch for (_cache_vouched), read BEFORE the games
+    # are replaced. DO NOT set True outright: a refresh that lost the previous
+    # cache during an outage writes False on a non-empty slate, the DB can
+    # still hold a live channel that slate omits, and emptying it would have
+    # apply delete that channel.
+    vouched = _cache_vouched(cache)
     cache["games"] = live + promoted
     cache["bench"] = bench
     cache["reaped_at"] = now.isoformat()
+    cache[_EMPTY_SLATE_KNOWN_KEY] = vouched
     _write_cache(cache)
 
     logger.info(
@@ -5127,6 +6669,7 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     apply_result = _action_apply(settings)
     failed = str(apply_result.get("status", "ok")).lower() == "error"
     if not failed:
+        _carry_apply_vouch(cache, apply_result)
         cache["reap_apply_pending"] = False
         _write_cache(cache)
     else:
@@ -5152,9 +6695,15 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _reserved_channel_numbers(target_group, band_start: int, band_end: int) -> set:
+def _reserved_channel_numbers(
+    target_group, band_start: int, band_end: Optional[int] = None,
+    pending_groups=(),
+) -> set:
     """Every channel number in [band_start, band_end] that some OTHER channel
-    already publishes under, so compact allocation can route around it.
+    already publishes under, so numbering can route around it. `band_end=None`
+    means no upper bound: KICKOFF mode passes the lowest number its slate can
+    take under any floor, alone, because a game nudged off a reserved number can
+    walk past any fixed top (#219).
 
     Two things this must get right, both found by review after the live test:
 
@@ -5176,27 +6725,81 @@ def _reserved_channel_numbers(target_group, band_start: int, band_end: int) -> s
     channels the nearest FREE integer after all integers are placed, so no
     single integer is predictable. Reserving the floor covers the common case
     without over-reserving the whole band.
+
+    RAW NUMBERS OF A STRANGER IN OUR GROUP (third review round, #219).
+    Dispatcharr's per-group uniqueness (Channel.clean(), see
+    _PER_GROUP_NUMBER_NOTE) compares the RAW ``channel_number``. A channel
+    someone added to our group by hand at raw 400, overridden to publish as 500,
+    reserves only 500 above; a game handed 400 would then sit on the same raw
+    number in the same group, which the UI refuses to save for either channel
+    from then on. So those are reserved at their raw number too,
+    integral ones only: a raw 400.5 does not conflict with our 400.
+
+    NOT COVERED, on purpose: a ChannelOverride on one of OUR game channels. The
+    plugin manages those numbers; reserving the override would refuse a channel
+    its own slot (an override of 400 to 400.5 floors back to 400, and two
+    channels with swapped overrides would block each other), so a user who
+    overrides a matchups channel's number owns any collision that causes.
     """
     from apps.channels.models import Channel
     from django.db.models import Q
 
-    qs = Channel.objects.exclude(_owned_tvg_id_q() & Q(channel_group=target_group))
-    field = "channel_number"
-    try:
-        from apps.channels.managers import with_effective_values
-        qs = with_effective_values(qs)
-        field = "effective_channel_number"
-    except Exception:
-        logger.warning(
-            "[ranked_matchups] with_effective_values unavailable; compact numbering "
-            "is reading raw channel numbers and may miss a ChannelOverride",
-            exc_info=True,
+    # Ours: our game channels in the target group, and in `pending_groups`,
+    # the previous groups apply's _commit_group_setup is about to move them
+    # out of (in place). Numbering runs BEFORE that move commits, so a full
+    # band refused there leaves nothing moved, and it must reserve exactly
+    # what it would read after the move. NOT the recordings archive channel
+    # (_movable_owned_q), wherever it sits: no game owns its number, so an
+    # archive in the live group, unreserved, had a game numbered onto it.
+    in_groups = Q(channel_group__in=list(pending_groups))
+    if target_group is not None:
+        in_groups |= Q(channel_group=target_group)
+    ours = _owned_tvg_id_q() & _movable_owned_q() & in_groups
+    reserved = _published_numbers(Channel.objects.exclude(ours), band_start, band_end)
+    if target_group is not None:
+        reserved |= _published_numbers(
+            Channel.objects.filter(channel_group=target_group).exclude(ours),
+            band_start, band_end, effective=False,
         )
+    return reserved
+
+
+def _published_numbers(
+    qs, band_start: int, band_end: Optional[int] = None, effective: bool = True,
+) -> set:
+    """The integer channel numbers the channels in `qs` publish under, within
+    [band_start, band_end] (no upper bound when band_end is None). EFFECTIVE
+    numbers (a ChannelOverride wins, as in every output path) and floored, the
+    reasoning for both is in _reserved_channel_numbers. `effective=False` reads
+    the raw column instead, which is what the per-group uniqueness check
+    (Channel.clean()) sees, and keeps only INTEGRAL values: that check compares
+    exact numbers, so a raw 400.5 does not stop us writing 400.
+
+    The upper bound is ``< band_end + 1``, not ``<= band_end``: a channel at
+    400.5 publishes as 400 over Xtream Codes, so it must reserve 400 even when
+    400 is the top of the band (review finding, #219)."""
+    field = "channel_number"
+    if effective:
+        try:
+            from apps.channels.managers import with_effective_values
+            qs = with_effective_values(qs)
+            field = "effective_channel_number"
+        except Exception:
+            logger.warning(
+                "[ranked_matchups] with_effective_values unavailable; channel numbering "
+                "is reading raw channel numbers and may miss a ChannelOverride",
+                exc_info=True,
+            )
+    bounds = {f"{field}__gte": band_start}
+    if band_end is not None:
+        bounds[f"{field}__lt"] = band_end + 1
     rows = (
         qs.exclude(**{f"{field}__isnull": True})
-        .filter(**{f"{field}__gte": band_start, f"{field}__lte": band_end})
+        .filter(**bounds)
         .values_list(field, flat=True)
     )
+    if not effective:
+        return {int(n) for n in rows if float(n).is_integer()}
     return {int(n) for n in rows}
 
 
@@ -5241,6 +6844,225 @@ def _invalidate_epg_output_cache() -> None:
         )
 
 
+def _name_problem(setting: str, value: str, models) -> Optional[str]:
+    """Why the database would reject `value` as the name of a row of any of
+    `models`, or None: past the field's max_length (read off the model, so it
+    follows Dispatcharr's schema), or holding a NUL, which Postgres refuses
+    in any text. Apply checks the names it writes in its main transaction
+    BEFORE its first committed write: that transaction runs after the
+    recording cancellations commit (_autorecord_cancel_committed), so a name
+    rejected there failed every apply after its cancellations, and a
+    displaced recording's replacement, planned in the rolled-back
+    transaction, was never scheduled."""
+    if "\x00" in value:
+        return f"'{setting}' contains a NUL character, which the database refuses."
+    for model in models:
+        limit = model._meta.get_field("name").max_length
+        if limit is not None and len(value) > limit:
+            return (f"'{setting}' is {len(value)} characters long; Dispatcharr "
+                    f"allows at most {limit} for a {model.__name__} name.")
+    return None
+
+
+def _setup_name_problem(group_name: str) -> Optional[str]:
+    """Apply's refusal for a live-group name the database would reject: the
+    live group and our EPGSource carry it, and every apply writes them."""
+    from apps.channels.models import ChannelGroup
+    from apps.epg.models import EPGSource
+    problem = _name_problem("Target group name", group_name, (ChannelGroup, EPGSource))
+    return None if problem is None else f"{problem} Nothing was changed. Shorten it."
+
+
+def _recordings_name_problem(recordings_group_name: str) -> Optional[str]:
+    """Why the recordings group and its archive channel cannot carry this
+    name, or None. Not a refusal: only an apply that archives writes them, so
+    archiving is switched off instead (as for a name equal to the live
+    group's), and channels with recordings are kept rather than reaped."""
+    from apps.channels.models import Channel, ChannelGroup
+    return _name_problem("Recordings group name", recordings_group_name, (ChannelGroup, Channel))
+
+
+def _fetching_source_message(group_name: str, before_any_write: bool = True) -> str:
+    """Apply's refusal when the live group shares its name with an EPG source
+    that fetches its own guide (see _never_fetches_q). Found again in the main
+    transaction (`before_any_write` False), the recording cancellations
+    committed before it stand, so it says what did not change instead."""
+    unchanged = ("Nothing was changed." if before_any_write
+                 else "No channel or guide was changed.")
+    return (
+        f"The group name {group_name!r} is also the name of an EPG source that "
+        f"fetches its own guide, so the plugin cannot use it for its guide. "
+        f"{unchanged} Rename 'Target group name' (or that EPG source)."
+    )
+
+
+def _commit_group_setup(
+    group_name: str, target_group, foreign_owned_groups, foreign_epg_sources,
+    deletable_group_names,
+) -> Optional[Dict[str, Any]]:
+    """Apply's steps 1 and 2, the COMMITTED half: create the live group if it
+    is missing, move our channels out of groups named after a previous live
+    group, and make our EPGSource exist (and sit out of the joke-filler path),
+    moving our guide rows off sources named after a previous group (#263).
+
+    Call it ONLY as the first step of apply's main transaction. Committed
+    before apply's last _apply_time_short check, a stopped rename left our
+    channel in the new group on its old number beside a channel the user had
+    filed there on that number (the guide binds by the bare number; the UI
+    refuses to save either). Committed before the full-band refusal, a refused
+    one did the same, and committed on its own, an error later in apply (an
+    EPGSource name the database rejects) left the rename half done. Inside the
+    transaction it commits, or rolls back, with the slate it makes room for
+    (tests/test_apply_no_write_before_gate.py).
+
+    Not for a dry run (nothing here is a preview). Returns the target group,
+    the EPGSource, and the counts the summary reports; None, having written
+    nothing, when the source named after the live group fetches its own
+    guide (_fetching_source_message).
+    """
+    from apps.channels.models import Channel, ChannelGroup
+    from apps.epg.models import EPGData, EPGSource
+    from django.db import transaction
+
+    # Read FIRST, row-locked, and re-checked: apply refused a fetching source
+    # before its pre-pass, which can spend minutes on the network; a source
+    # the user pointed at a guide meanwhile was adopted here (switched
+    # inactive, filled with our rows).
+    epg_source = EPGSource.objects.select_for_update().filter(name=group_name).first()
+    if epg_source is not None and not EPGSource.objects.filter(
+            pk=epg_source.pk).filter(_never_fetches_q()).exists():
+        return None
+    # The previous sources, chosen before the pre-pass, re-read the same way:
+    # one the user pointed at a guide meanwhile is theirs (_never_fetches_q),
+    # and was emptied and deleted below. Never the live source: one the user
+    # renamed to the live name meanwhile is both, and its rows, "moved" onto
+    # themselves, each clashed with itself and were deleted.
+    foreign_epg_sources = list(
+        EPGSource.objects.select_for_update()
+        .filter(pk__in=[s.pk for s in foreign_epg_sources]).filter(_never_fetches_q())
+        .exclude(pk__in=[epg_source.pk] if epg_source is not None else [])
+        .order_by("pk")
+    )
+
+    if target_group is None:
+        # Missing before the pre-pass, re-read row-locked: one a user created
+        # meanwhile is adopted (as base's lookup-then-create did). Created
+        # blind, it hit the unique name and failed the transaction after the
+        # recording cancellations had committed.
+        target_group = ChannelGroup.objects.select_for_update().filter(name=group_name).first()
+    if target_group is None:
+        target_group = ChannelGroup.objects.create(name=group_name)
+        logger.info("[ranked_matchups] created ChannelGroup id=%s name=%r",
+                    target_group.id, group_name)
+
+    # Migrate any virtual channels in old groups INTO the target group, in
+    # place. DO NOT delete + recreate: Channel.id is the stable handle that
+    # ChannelProfileMembership, IPTV-client playlist caches, and the user's
+    # pinned-channel state all key off. A delete-then-create cycle silently
+    # orphans every one of those: profile memberships are gone (Dispatcharr
+    # auto-adds new channels to existing profiles ONLY at profile-creation
+    # time, never on channel-creation), and IPTV clients that cached the old
+    # tvg-id render an empty slot for the renamed channel until the user
+    # manually refreshes: exactly what bit us during the #1 live-verify.
+    #
+    # The .update() bypasses Django's post_save signal (mirroring the same
+    # signal-bypass pattern at apps/channels/signals.py:60 / our epg_data
+    # write at the bottom of the loop). The downstream main loop will hit
+    # the "existing" branch keyed by tvg_id and update name / channel_number
+    # / logo / streams in place. ChannelStream rows are FK'd to Channel, so
+    # they survive the channel_group change untouched.
+    migrated_from_old_group = 0
+    deleted_old_groups = 0
+    if foreign_owned_groups:
+        for old_g in foreign_owned_groups:
+            # Row lock and re-read FIRST, so a concurrent assignment (an M3U
+            # refresh) cannot land between the reference check and the delete
+            # below (on Postgres its foreign-key check takes a key-share lock
+            # on this row, which waits on ours), and the group is judged as it
+            # is NOW: chosen before the pre-pass, a group the user renamed
+            # meanwhile was deleted under its old name.
+            old_g = ChannelGroup.objects.select_for_update().filter(pk=old_g.pk).first()
+            if old_g is None:
+                continue
+            old_chans = Channel.objects.filter(_owned_tvg_id_q() & _movable_owned_q(), channel_group=old_g)
+            n = old_chans.count()
+            old_chans.update(channel_group=target_group)
+            migrated_from_old_group += n
+            # Delete the old group only if it is now empty AND its name is one
+            # this plugin itself would have created. Exact, case-insensitive:
+            # see _DELETABLE_LEGACY_GROUP_NAMES for why this is not a substring
+            # test and must not become one again (#157).
+            # Kept while ANYTHING still points at it (_group_is_referenced):
+            # a stream, an M3U account's settings for it, an override.
+            if not _group_is_referenced(old_g):
+                if old_g.name.strip().lower() in deletable_group_names:
+                    old_g.delete()
+                    deleted_old_groups += 1
+                    logger.info("[ranked_matchups] deleted empty old group %r", old_g.name)
+                else:
+                    # A group WE did not name, that happened to hold our channels
+                    # (typically the user filed one there by hand). Our channels
+                    # are migrated out; the empty shell is the user's to remove.
+                    logger.info(
+                        "[ranked_matchups] left empty group %r in place: not a name "
+                        "this plugin creates, so it is not ours to delete",
+                        old_g.name,
+                    )
+
+    if not epg_source:
+        epg_source = EPGSource.objects.create(
+            name=group_name,
+            source_type=EPG_SOURCE_TYPE,
+            is_active=EPG_SOURCE_IS_ACTIVE,
+            refresh_interval=0,
+        )
+        logger.info("[ranked_matchups] created EPGSource id=%s name=%r",
+                    epg_source.id, group_name)
+    else:
+        # Existing source: upgrade away from any prior source_type="dummy" /
+        # is_active=True we may have written. Idempotent for already-correct rows.
+        upgrade_fields = []
+        if epg_source.source_type != EPG_SOURCE_TYPE:
+            upgrade_fields.append("source_type")
+            epg_source.source_type = EPG_SOURCE_TYPE
+        if epg_source.is_active != EPG_SOURCE_IS_ACTIVE:
+            upgrade_fields.append("is_active")
+            epg_source.is_active = EPG_SOURCE_IS_ACTIVE
+        if upgrade_fields:
+            epg_source.save(update_fields=upgrade_fields)
+            logger.info("[ranked_matchups] upgraded EPGSource id=%s fields=%s",
+                        epg_source.id, upgrade_fields)
+
+    # Old EPGSources we own, named after a previous live-group name. AFTER
+    # step 2 on purpose: our rows on them MOVE to the current source rather
+    # than being deleted with it, and that needs the current source to exist
+    # (#263, see _move_owned_epg_rows for why a delete blanks a recording
+    # channel's guide). The old source itself goes only when every row on it
+    # was ours; one that also holds another owner's rows stays theirs.
+    deleted_old_sources = 0
+    if foreign_epg_sources and epg_source is not None:
+        for old_src in foreign_epg_sources:
+            with transaction.atomic():
+                moved = _move_owned_epg_rows(old_src, epg_source)
+                if moved:
+                    logger.info(
+                        "[ranked_matchups] moved %d guide row(s) from old EPGSource %r to %r",
+                        moved, old_src.name, epg_source.name,
+                    )
+                if not EPGData.objects.filter(epg_source=old_src).exists():
+                    old_src.delete()  # empty now, so the cascade takes nothing
+                    deleted_old_sources += 1
+                    logger.info("[ranked_matchups] deleted old EPGSource %r", old_src.name)
+
+    return {
+        "target_group": target_group,
+        "epg_source": epg_source,
+        "migrated": migrated_from_old_group,
+        "deleted_groups": deleted_old_groups,
+        "deleted_sources": deleted_old_sources,
+    }
+
+
 def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Clone-into-group + EPG-overlay strategy:
 
@@ -5261,23 +7083,47 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from apps.channels.models import Channel, ChannelGroup, ChannelStream, Recording, Stream
     from apps.epg.models import EPGSource, EPGData, ProgramData
     from django.db import transaction
+    from django.db.models import Q
 
     from .scoring import format_channel_name
 
     cache = _read_cache()
-    games, dup_dropped = _unique_by_marker(cache.get("games", []))
-    if not games:
+    # Return early ONLY when there is no slate at all (see _cache_has_slate).
+    # DO NOT narrow this back to `if not games`. A real cache with no games
+    # (the reaper took the last one off, #241; or a refresh found nothing to
+    # air) is a slate like any other, and the stale reap, the orphan-EPG sweep
+    # and the auto-record bookkeeping below all have to run for it. Returning
+    # on it left the last finished game's channel on air until the next
+    # refresh that produced games.
+    if not _cache_has_slate(cache):
+        if cache.get("refreshed_at") and isinstance(cache.get("games"), list):
+            # An empty slate nobody could vouch for: say so, rather than
+            # "run refresh", which is what produced it.
+            return {"status": "ok", "message": (
+                "The cache lists no games but cannot rule out a source "
+                "outage, so no channels were removed. They are rechecked on "
+                "the next refresh that finds games."
+            )}
         return {"status": "ok", "message": "Cache empty; run refresh first."}
+    # Before ANY write: a slow refresh in the same pipeline child can leave
+    # apply too little life to finish (see APPLY_WRITE_RESERVE_SECONDS).
+    short = _apply_time_short("before starting", _dry_run_enabled(settings))
+    if short is not None:
+        return short
+    games, dup_dropped = _unique_by_marker(cache.get("games", []))
     if dup_dropped:
         logger.warning(
             "[ranked_matchups] apply: dropped %d cached game(s) sharing a marker "
             "with a higher-ranked one (same source event listed twice)", dup_dropped,
         )
-    # Auto-record plan (#216). Read-only; the writes happen per game below.
     # Recorded teams are re-matched against the CURRENT setting first, so an
-    # edit takes effect on this apply rather than the next refresh (#221).
+    # edit takes effect on this apply rather than the next refresh (#221). The
+    # auto-record plan that reads them is built after the pre-pass (#291). The
+    # bench too: the plan watches benched games for deleted recordings, and a
+    # stale match there missed one (#291 review).
     _rematch_recorded_teams(games, settings)
-    autorec = _autorecord_prepare(games, settings, bench=cache.get("bench") or [])
+    bench = list(cache.get("bench") or [])
+    _rematch_recorded_teams(bench, settings)
 
     group_name = settings.get("channel_profile_name", DEFAULT_GROUP_NAME)
     # Archive group for preserved DVR recordings (#146). Blank falls back to the
@@ -5297,7 +7143,32 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             "Channels with recordings will be kept rather than reaped.",
             recordings_group_name,
         )
+    recordings_name_problem = _recordings_name_problem(recordings_group_name)
+    if archive_enabled and recordings_name_problem is not None:
+        archive_enabled = False
+        logger.warning(
+            "[ranked_matchups] %s Recording preservation disabled until it is fixed. "
+            "Channels with recordings will be kept rather than reaped.",
+            recordings_name_problem,
+        )
     dry_run = _dry_run_enabled(settings)
+    # Our EPGSource is the one named after the live group, and ours never
+    # fetches (blank url and file_path, not Schedules Direct: _never_fetches_q).
+    # If the group is named after a source
+    # that DOES fetch, step 2 would adopt the user's source (switch it inactive)
+    # and the rename cleanup would write our guide rows into it, replacing
+    # programmes on any row that shares a marker. Refuse before any write.
+    name_problem = _setup_name_problem(group_name)
+    if name_problem is not None:
+        logger.error("[ranked_matchups] %s", name_problem)
+        return {"status": "error", "message": name_problem}
+    clashing_src = (
+        EPGSource.objects.filter(name=group_name).exclude(_never_fetches_q()).first()
+    )
+    if clashing_src is not None:
+        msg = _fetching_source_message(group_name)
+        logger.error("[ranked_matchups] %s", msg)
+        return {"status": "error", "message": msg}
     # #206: ordered language preference for each channel's pooled streams. This
     # used to be `bool(settings.get(_WIDEN_STREAM_POOL_SETTING))`, i.e. English
     # ordering was reachable only by turning on an unrelated pool-widening
@@ -5354,19 +7225,56 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # sweep: the archive channel is intentionally "ours" (so the matcher skips
     # it), which would otherwise make this sweep migrate it into the live group
     # and delete the archive group out from under preserved recordings.
-    _protected_group_names = [group_name, recordings_group_name]
+    # For GROUPS only the LIVE name is protected by name. DO NOT add the
+    # recordings name back there: the archive is protected per CHANNEL
+    # (_movable_owned_q), and a recordings name equal to the OLD live group's
+    # name, protected by name, stranded that group's game channels beside
+    # copies in the new group.
+    _protected_group_names = [group_name]
+    # For SOURCES the recordings name stays protected, as on base: nothing
+    # per row replaces it, and a swept source named as the recordings group
+    # had its rows merged onto the live source, replacing the programmes of a
+    # row with the same marker there.
+    _protected_source_names = [group_name, recordings_group_name]
     # Names the cleanup sweep may delete once empty. See #157.
     _deletable_group_names = _deletable_group_names_for(
         group_name, recordings_group_name,
     )
+    # A slate the cache cannot vouch for may omit a channel that must stay
+    # (#264: cache.json lost, and the channel published before apply stamped
+    # its row, so the refresh could not hold it). Those are kept by their own
+    # guide (_kept_by_guide) instead of reaped. Read HERE, before the rename
+    # cleanup below touches an old EPG source: it moves our rows to the current
+    # source (#263) rather than deleting them, but the keep must not depend on
+    # that ordering.
+    # Over every channel we own; only the stale ones are ever looked up.
+    guide_kept_ids = (
+        set() if _cache_vouched(cache)
+        else _guide_kept_ids(_owned_published_channels(), datetime.now(timezone.utc))
+    )
+    # The archive CHANNEL never moves (_movable_owned_q), wherever it sits:
+    # changing just the case of 'Recordings group name' made the existing
+    # archive group look like a previous live group, and the setup moved its
+    # archive channel into the live group, where it was reaped. Excluded per
+    # CHANNEL, not per group: a previous live group that also holds a stray
+    # archive channel must still give up its game channels. DO NOT protect
+    # names ignoring case instead: an archive name equal (in any case) to the
+    # OLD live group's name then protected the old live group, stranding our
+    # channels in it beside new copies. Names stay exact, so a case-only
+    # rename of the live group still moves our channels.
     foreign_owned_groups = list(
         ChannelGroup.objects.exclude(name__in=_protected_group_names)
-        .filter(_owned_tvg_id_q("channels__"))
-        .distinct()
+        .filter(pk__in=Channel.objects.filter(_owned_tvg_id_q() & _movable_owned_q())
+                .values("channel_group"))
     )
+    # Our sources never fetch anything (blank url and file_path, not Schedules
+    # Direct, see _never_fetches_q). A source that does is fed from somewhere else, even when its rows carry
+    # our marker (a user who added this server's own XMLTV output as a
+    # source), so it is never ours to empty or delete.
     foreign_epg_sources = list(
-        EPGSource.objects.exclude(name__in=_protected_group_names)
+        EPGSource.objects.exclude(name__in=_protected_source_names)
         .filter(_owned_tvg_id_q("epgs__"))
+        .filter(_never_fetches_q())
         .distinct()
     )
 
@@ -5376,118 +7284,64 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # group and dry_run defaults on, so apply returns here having
             # written nothing and logged nothing, and the caller discards the
             # message. _dry_run_report puts it in the log too.
+            moving = Channel.objects.filter(
+                _owned_tvg_id_q() & _movable_owned_q(), channel_group__in=foreign_owned_groups,
+            ).count()
             return {
                 "status": "ok",
                 "message": _dry_run_report(
-                    f"[dry] Would create ChannelGroup {group_name!r} + EPGSource and clone "
-                    f"{sum(1 for g in games if g.get('channel_id'))} matched games into it. "
-                    f"Would also clean up {len(foreign_owned_groups)} stale group(s) and "
-                    f"{len(foreign_epg_sources)} stale EPGSource(s) from prior target names.",
+                    f"[dry] Would create ChannelGroup {group_name!r} + EPGSource, move "
+                    f"{moving} existing channel(s) into it in place (same Channel.id) from "
+                    f"{len(foreign_owned_groups)} previous group(s), and publish "
+                    f"{sum(1 for g in games if g.get('channel_id'))} matched games there. "
+                    f"Would also move our guide rows off {len(foreign_epg_sources)} previous "
+                    f"EPGSource(s), and remove a previous group or source once nothing is left in it.",
                     dry_run,
                 ),
             }
-        target_group = ChannelGroup.objects.create(name=group_name)
-        logger.info("[ranked_matchups] created ChannelGroup id=%s name=%r",
-                    target_group.id, group_name)
 
-    # Migrate any virtual channels in old groups INTO the target group, in
-    # place. DO NOT delete + recreate: Channel.id is the stable handle that
-    # ChannelProfileMembership, IPTV-client playlist caches, and the user's
-    # pinned-channel state all key off. A delete-then-create cycle silently
-    # orphans every one of those: profile memberships are gone (Dispatcharr
-    # auto-adds new channels to existing profiles ONLY at profile-creation
-    # time, never on channel-creation), and IPTV clients that cached the old
-    # tvg-id render an empty slot for the renamed channel until the user
-    # manually refreshes: exactly what bit us during the #1 live-verify.
-    #
-    # The .update() bypasses Django's post_save signal (mirroring the same
-    # signal-bypass pattern at apps/channels/signals.py:60 / our epg_data
-    # write at the bottom of the loop). The downstream main loop will hit
-    # the "existing" branch keyed by tvg_id and update name / channel_number
-    # / logo / streams in place. ChannelStream rows are FK'd to Channel, so
-    # they survive the channel_group change untouched.
+    # Steps 1 and 2 only READ here. Their writes (creating the group, moving
+    # our channels and guide rows out of a previous group and source, creating
+    # or upgrading our EPGSource) are _commit_group_setup, the first step of
+    # the main transaction: committed here, a stopped apply left our channel
+    # in the new group on its old number beside a channel the user filed there
+    # (two channels on one number in one group). See _commit_group_setup.
     migrated_from_old_group = 0
     deleted_old_groups = 0
-    if not dry_run and foreign_owned_groups:
-        for old_g in foreign_owned_groups:
-            old_chans = Channel.objects.filter(_owned_tvg_id_q(), channel_group=old_g)
-            n = old_chans.count()
-            old_chans.update(channel_group=target_group)
-            migrated_from_old_group += n
-            # Delete the old group only if it is now empty AND its name is one
-            # this plugin itself would have created. Exact, case-insensitive:
-            # see _DELETABLE_LEGACY_GROUP_NAMES for why this is not a substring
-            # test and must not become one again (#157).
-            if Channel.objects.filter(channel_group=old_g).count() == 0:
-                if old_g.name.strip().lower() in _deletable_group_names:
-                    old_g.delete()
-                    deleted_old_groups += 1
-                    logger.info("[ranked_matchups] deleted empty old group %r", old_g.name)
-                else:
-                    # A group WE did not name, that happened to hold our channels
-                    # (typically the user filed one there by hand). Our channels
-                    # are migrated out; the empty shell is the user's to remove.
-                    logger.info(
-                        "[ranked_matchups] left empty group %r in place: not a name "
-                        "this plugin creates, so it is not ours to delete",
-                        old_g.name,
-                    )
-
-    # Same for old EPGSources we own
     deleted_old_sources = 0
-    if not dry_run and foreign_epg_sources:
-        for old_src in foreign_epg_sources:
-            # Only auto-delete if all its EPGData entries are ours (no other plugin owns it)
-            total = EPGData.objects.filter(epg_source=old_src).count()
-            ours = EPGData.objects.filter(_owned_tvg_id_q(), epg_source=old_src).count()
-            if total > 0 and total == ours:
-                old_src.delete()  # cascades EPGData + ProgramData
-                deleted_old_sources += 1
-                logger.info("[ranked_matchups] deleted old EPGSource %r (%d entries)",
-                            old_src.name, total)
-            else:
-                # Mixed: just nuke our entries, leave the source alone
-                EPGData.objects.filter(_owned_tvg_id_q(), epg_source=old_src).delete()
 
-    # 2. Ensure our EPGSource exists and is configured to sit out of
-    # Dispatcharr's joke-filler path (see EPG_SOURCE_TYPE comment above).
+    # 2. Our EPGSource, configured to sit out of Dispatcharr's joke-filler path
+    # (see EPG_SOURCE_TYPE comment above). Read here; created or upgraded by
+    # _commit_group_setup. A dry run only reports what it would do.
     epg_source = EPGSource.objects.filter(name=group_name).first()
-    if not epg_source:
-        if dry_run:
+    if dry_run:
+        if not epg_source:
             logger.info("[ranked_matchups] [dry] would create EPGSource name=%r type=%s",
                         group_name, EPG_SOURCE_TYPE)
         else:
-            epg_source = EPGSource.objects.create(
-                name=group_name,
-                source_type=EPG_SOURCE_TYPE,
-                is_active=EPG_SOURCE_IS_ACTIVE,
-                refresh_interval=0,
-            )
-            logger.info("[ranked_matchups] created EPGSource id=%s name=%r",
-                        epg_source.id, group_name)
-    else:
-        # Existing source: upgrade away from any prior source_type="dummy" /
-        # is_active=True we may have written. Idempotent for already-correct rows.
-        upgrade_fields = []
-        if epg_source.source_type != EPG_SOURCE_TYPE:
-            upgrade_fields.append("source_type")
-            epg_source.source_type = EPG_SOURCE_TYPE
-        if epg_source.is_active != EPG_SOURCE_IS_ACTIVE:
-            upgrade_fields.append("is_active")
-            epg_source.is_active = EPG_SOURCE_IS_ACTIVE
-        if upgrade_fields:
-            if dry_run:
+            dry_upgrade = [f for f, ok in (
+                ("source_type", epg_source.source_type == EPG_SOURCE_TYPE),
+                ("is_active", epg_source.is_active == EPG_SOURCE_IS_ACTIVE),
+            ) if not ok]
+            if dry_upgrade:
                 logger.info("[ranked_matchups] [dry] would upgrade EPGSource id=%s fields=%s",
-                            epg_source.id, upgrade_fields)
-            else:
-                epg_source.save(update_fields=upgrade_fields)
-                logger.info("[ranked_matchups] upgraded EPGSource id=%s fields=%s",
-                            epg_source.id, upgrade_fields)
+                            epg_source.id, dry_upgrade)
 
-    # 3. Existing virtual channels we'll update or delete
+    # 3. Existing virtual channels we'll update or delete: ours in the target
+    # group AND in the previous groups _commit_group_setup will move into it
+    # (in place, same Channel.id), so everything decided before the move sees
+    # the channels it will act on. A dry run counts them too: it previews
+    # what the real apply does (updates, not creates).
+    # NEVER the recordings archive channel, wherever it sits: no game marks
+    # it seen, so it was reaped as stale, its recordings first "re-homed"
+    # onto itself, and the CASCADE took them (an archive left in the live
+    # group by the old case-only rename bug).
+    moving_groups = foreign_owned_groups
+    in_target = Q(channel_group=target_group) if target_group is not None else Q(pk__in=[])
     existing_virtuals = {
         ch.tvg_id: ch for ch in Channel.objects.filter(
-            _owned_tvg_id_q(), channel_group=target_group,
+            _owned_tvg_id_q() & _movable_owned_q()
+            & (in_target | Q(channel_group__in=moving_groups)),
         )
     }
     # Channels made before #217 carry a marker that hashed the kickoff time.
@@ -5496,106 +7350,20 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # this game's channel. The DB write happens inside the transaction below.
     marker_renames = _rekey_legacy_virtuals(existing_virtuals, games)
 
-    # Resolve the virtual channel base. In auto mode we slot in just after
-    # the user's highest real channel (excluding our own virtuals) so we
-    # don't squat on prime numbers like 1-100.
-    from django.db.models import Max as _Max
-    highest_other = (
-        Channel.objects.exclude(_owned_tvg_id_q())
-        .aggregate(m=_Max("channel_number"))["m"] or 0
-    )
-    virtual_base = _resolve_virtual_base(settings, highest_other)
-    numbering_mode = _resolve_numbering_mode(settings)
-    band_size = _resolve_compact_band_size(settings, len(games))
-    # Per-game channel numbers (marker -> number). Computed once up front so
-    # collision resolution sees the whole slate and so park_base can be set above
-    # the true ceiling. In KICKOFF mode that ceiling is driven by how far ahead
-    # the slate reaches rather than by the game count; in COMPACT mode it is the
-    # top of the band. Existing numbers are passed so COMPACT can hold a
-    # published game on the slot it already has (see allocate_compact_numbers).
-    # COMPACT only: every number in use by a channel we do NOT own. The DB
-    # constraint is per-group, so nothing stops a collision, but the M3U, XMLTV
-    # and Xtream Codes outputs all key the guide on the bare channel number, so
-    # a shared number silently binds the wrong programme. Measured live on
-    # 2026-08-29 against a Peacock lineup occupying 400-499. Skipped entirely in
-    # kickoff mode, where numbers are ~7 digits and cannot collide with a real
-    # lineup, so the extra scan is not paid on the default path.
-    reserved_numbers = None
-    if numbering_mode == NUMBERING_MODE_COMPACT:
-        reserved_numbers = _reserved_channel_numbers(
-            target_group, virtual_base, virtual_base + band_size - 1,
-        )
-    chnum_by_marker = _assign_channel_numbers(
-        games, virtual_base, apply_tz,
-        mode=numbering_mode,
-        band_size=band_size,
-        existing_numbers={
-            marker: int(ch.channel_number)
-            for marker, ch in existing_virtuals.items()
-            if ch.channel_number is not None
-        },
-        reserved_numbers=reserved_numbers,
-    )
-    if numbering_mode == NUMBERING_MODE_COMPACT and games:
-        # A game with no slot cannot be published: a null channel_number
-        # truncates the whole Xtream Codes feed. Drop it HERE, before the
-        # pre-pass, rather than skipping it in the write loop further down.
-        # seen_markers is populated by the pre-pass, so a game that reaches the
-        # pre-pass and is skipped afterwards is neither renumbered nor reaped: it
-        # keeps the temporary parking number it was given in phase 0 and is
-        # stranded there. Measured live on 2026-08-29, which left 22 channels
-        # sitting at 1400-1421. Dropping the game before the pre-pass hands its
-        # existing channel to the normal stale path, which preserves DVR
-        # recordings on the way out (#146).
-        placeable = [g for g in games if _build_marker_key(g) in chnum_by_marker]
-        if not placeable:
-            # Every slot in the band is taken. Publishing nothing would reap the
-            # entire group over what is almost certainly a mis-set range, so fail
-            # safe: touch nothing and tell the user which setting to move.
-            band_top = virtual_base + band_size - 1
-            # NOT "nothing was changed": by this point apply may already have
-            # created the target group, migrated channels into it after a rename,
-            # and created or upgraded the EPG source, all outside the transaction
-            # below. Claiming otherwise would send someone looking in the wrong
-            # place. What is true is that no channel was added, renumbered or
-            # removed, because every one of those happens after this return.
-            msg = (
-                f"Compact numbering found no free channel numbers in {virtual_base}-"
-                f"{band_top}: every number in that range is already used by another "
-                f"channel. No channels were added, renumbered or removed. Move "
-                f"'Starting channel number' to an empty stretch of your lineup, or "
-                f"raise 'Compact range size'."
-            )
-            logger.error("[ranked_matchups] %s", msg)
-            return {"status": "error", "message": msg}
-        if len(placeable) != len(games):
-            logger.warning(
-                "[ranked_matchups] compact: publishing %d of %d games; the rest have "
-                "no free number in %d-%d",
-                len(placeable), len(games), virtual_base, virtual_base + band_size - 1,
-            )
-        games = placeable
-
-    max_target = max(chnum_by_marker.values(), default=virtual_base)
-    park_base = _resolve_park_base(max_target)
-    logger.info(
-        "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r), "
-        "mode=%s, band_size=%d, max_target=%d, park_base=%d",
-        virtual_base, highest_other,
-        settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE),
-        numbering_mode, band_size, max_target, park_base,
-    )
-
     created = 0
     updated = 0
     deleted_stale = 0
     skipped_unmatched = 0
     rehomed_recordings = 0      # #146: recordings moved to the archive this run
-    kept_for_recording_n = 0    # #146: stale channels kept (active recording)
-    seen_markers = set()
+    kept_stale_n = 0            # #146/#264: stale channels kept (recording, or guide)
+    kept_by_guide_n = 0         # #264: of those, kept by their guide (_kept_by_guide)
+    # marker -> the number this run actually WROTE on its channel (not the plan
+    # in chnum_by_marker, which also names games the write loop skipped): what
+    # the kickoff record (#278) remembers each channel was numbered for.
+    written_numbers: Dict[str, int] = {}
+    kept_numbered: Dict[str, Tuple[int, int, int]] = {}  # record entries of kept channels
 
-    placeholder_threshold = float(settings.get("placeholder_min_score", 5.0))
-    placeholder_channels_created = 0
+    placeholder_threshold = _float_setting(settings, "placeholder_min_score", 5.0)
 
     # Optional Claude-rewritten EPG descriptions. Default off; when on, prose
     # replaces the deterministic `_build_description` output for non-placeholder
@@ -5707,6 +7475,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             matchup_logos.LOGO_DIR, matchup_logos.badge_filename(league_id),
         )
         if not os.path.exists(badge_path):
+            if not prepass_budget.allow():
+                return None
             badge_url = matchup_logos.resolve_league_badge_url(league_id, sportsdb_api_key)
             if not badge_url:
                 return None
@@ -5715,7 +7485,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             except OSError as e:
                 logger.warning("[ranked_matchups] cannot mkdir %s: %s", matchup_logos.LOGO_DIR, e)
                 return None
-            if not matchup_logos.download_thumb(badge_url, badge_path):
+            if not prepass_budget.allow() or not matchup_logos.download_thumb(badge_url, badge_path):
                 return None
         return _logo_id_for_file(
             badge_path, f"League badge: {game.get('sport_prefix', '?')}",
@@ -5753,6 +7523,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 away=game.get("away", ""),
                 home=game.get("home", ""),
                 dest_path=local_path,
+                allow=prepass_budget.allow,
             )
             if url is None:
                 # Only a DEFINITIVE miss is cached. A transient failure (429,
@@ -5803,6 +7574,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 # game-thumbs resolves purely from the team pair, so an
                 # unparseable start time still gets a real matchup image.
                 return _gamethumbs_or_badge()
+            if not prepass_budget.allow():
+                # Out of budget: NOT a miss, so nothing is cached and the next
+                # apply asks SportsDB again.
+                return _gamethumbs_or_badge()
             thumb_url = matchup_logos.resolve_thumb_url(
                 home=game.get("home", ""),
                 away=game.get("away", ""),
@@ -5824,7 +7599,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             matchup_logos.LOGO_DIR, matchup_logos.marker_to_filename(marker),
         )
         if not os.path.exists(local_path):
-            if not matchup_logos.download_thumb(thumb_url, local_path):
+            if not prepass_budget.allow() or not matchup_logos.download_thumb(thumb_url, local_path):
                 return _gamethumbs_or_badge()
         return _logo_id_for_file(local_path, _matchup_logo_name(game)), "matchup"
 
@@ -5837,13 +7612,25 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # a 13.9s Postgres checkpoint right after an apply on a ~6.3k-channel box).
     # Both calls are cache-backed, so this pass moves them earlier, it does not
     # add work. Each surviving game's precomputed plan is stored by marker; the
-    # transaction then does nothing but writes. This pre-pass mirrors the skip /
+    # transaction then does nothing but writes. The pass runs in two halves:
+    # this loop DECIDES (stream pool, placeholder, start time: DB reads only),
+    # then numbering, then the network half (names, descriptions, logos) for
+    # the games numbering placed (#288). This pre-pass mirrors the skip /
     # placeholder / bad-start-time semantics of the write loop exactly (same
-    # marker key, same seen_markers set, same counters) so the two stay in lockstep.
+    # marker key, same counters; its plans are what numbering and seen_markers
+    # are built from, after it) so the two stay in lockstep.
     from types import SimpleNamespace
+    from ._http import NetworkBudget
     from .matcher import _strong_team_keywords, select_streams_for_game
     from .scoring import pick_tagline
     prep_by_marker: Dict[str, Any] = {}
+    prepass_now = datetime.now(timezone.utc)
+    recording_channel_ids = {
+        r.channel_id for r in Recording.objects.filter(
+            channel_id__in=[c.id for c in existing_virtuals.values()],
+        )
+        if _recording_is_active(r, prepass_now)
+    }
     for g in games:
         source_ids = list(g.get("channel_ids") or [])
         # Path C stream-granular matches: specific streams to attach without
@@ -5872,12 +7659,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # decision, and let that decision key on whether anything is actually
         # attachable. Two reasons it has to be here and not lower down:
         #
-        #  - The decision below sits above `seen_markers.add(marker)`, and the
-        #    comment on that line is explicit that every `continue` must stay
-        #    above it: a marker added and then skipped leaves its existing
-        #    channel neither published nor reaped, so it commits at phase 0's
-        #    temporary parking number (measured live 2026-08-29, 22 channels
-        #    stranded at 1400-1421).
+        #  - The decision below sits above the game's prep_by_marker entry,
+        #    and every `continue` must stay above that: a game given a plan and
+        #    then skipped is marked seen, so its existing channel is neither
+        #    published nor reaped and commits at phase 0's temporary parking
+        #    number (measured live 2026-08-29, 22 channels stranded at
+        #    1400-1421).
         #  - Asking "would this source donate anything?" is the only question
         #    that cannot disagree with what the pool later does. A cheaper
         #    proxy ("does it own a non-excluded stream?") was tried and was
@@ -5888,9 +7675,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         #
         # A game with nothing attachable therefore falls into the EXISTING
         # "no source, no streams" path, which already does the right thing:
-        # placeholder if the score earns one, otherwise skip, and either way its
-        # old channel goes down the normal stale route, which preserves DVR
-        # recordings (#146).
+        # placeholder if the score earns one (or the game is already on air),
+        # otherwise skip, and then its old channel goes down the normal stale
+        # route, which preserves DVR recordings (#146).
         field_event = is_field_event(g.get("away"), g.get("extra"))
         home_kws = [] if field_event else _strong_team_keywords(g.get("home") or "")
         away_kws = [] if field_event else _strong_team_keywords(g.get("away") or "")
@@ -5920,9 +7707,28 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # publish an event feed only hours before kickoff, and the recording
             # has to exist on the channel before then. The next apply that
             # matches a stream attaches it to this same row (same marker).
-            if score_val >= placeholder_threshold or g.get("recorded_matched"):
+            # A game already ON AIR keeps its channel the same way (#240: a
+            # refresh never takes a game off air, only the reaper does). Its
+            # feed can vanish mid-game (a provider renames the slot, an M3U
+            # refresh drops the stream), and skipping it here would send the
+            # live channel down the stale reap below whatever the hold did.
+            # It stays as a placeholder until a later match re-attaches a
+            # stream or the reaper removes it. "On air" is the hold's own
+            # window: kicked off and not yet at its reap deadline (game end
+            # when reaping is off). A channel with an active recording is
+            # left to the stale path instead, which keeps it for the
+            # recording WITH its stream links (#146); as a placeholder it
+            # would have them stripped mid-recording.
+            kickoff = parse_iso_utc(g.get("start_time_utc"))
+            on_air_ch = existing_virtuals.get(_build_marker_key(g))
+            reap_at = _game_reap_at_utc(g, _reap_settings(settings))
+            on_air = (
+                on_air_ch is not None and on_air_ch.id not in recording_channel_ids
+                and kickoff is not None and reap_at is not None
+                and kickoff <= prepass_now < reap_at
+            )
+            if score_val >= placeholder_threshold or g.get("recorded_matched") or on_air:
                 placeholder = True
-                placeholder_channels_created += 1
             else:
                 skipped_unmatched += 1
                 continue
@@ -5952,23 +7758,305 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)
             continue
 
-        # ONLY NOW is the game genuinely seen. seen_markers drives stale
-        # detection, so a marker added before a later `continue` leaves its
-        # existing channel neither published nor reaped: it keeps the temporary
-        # parking number phase 0 gave it and commits there permanently. This
-        # line used to sit above the start-time parse, which stranded any
-        # channel whose cached start_time_utc had gone malformed, in BOTH
-        # numbering modes. Every `continue` above this point must stay above it.
-        seen_markers.add(marker)
+        # Past this point the game is DECIDED: it gets a plan in prep_by_marker
+        # below, and only a decided game is numbered, marked seen and given its
+        # name, description and logo (all after this pass). A game left out of
+        # prep_by_marker goes down the stale path. This used to mark the game
+        # seen right here, below the start-time parse, which once sat above it
+        # and stranded any channel whose cached start_time_utc had gone
+        # malformed, in BOTH numbering modes. Every `continue` must stay above
+        # the prep_by_marker entry.
 
+        prep_by_marker[marker] = SimpleNamespace(
+            g=g,
+            source=source,
+            signals=signals,
+            score=score,
+            rank_source=rank_source,
+            tagline=tagline,
+            source_streams=source_streams,
+            start_dt=start_dt,
+            placeholder=placeholder,
+        )
+
+    # Resolve the virtual channel base. COMPACT auto slots in just after the
+    # user's highest real channel (excluding our own virtuals) so it doesn't
+    # squat on prime numbers like 1-100. KICKOFF must NOT re-derive it that way
+    # on every apply: its floor sits under a time term in the millions, so
+    # following the lineup bought nothing and renumbered every published game
+    # whenever the top of the lineup changed (#219). It reuses the floor it
+    # used last time, or the one its published channels were numbered from.
+    from django.db.models import Max as _Max
+    highest_other = (
+        Channel.objects.exclude(_owned_tvg_id_q())
+        .aggregate(m=_Max("channel_number"))["m"] or 0
+    )
+    numbering_mode = _resolve_numbering_mode(settings)
+    remembered_base = None
+    remembered_record: Dict[str, Tuple[int, int, int]] = {}
+    numbered_for: Dict[str, Tuple[int, int]] = {}
+    # Number ONLY the games the pre-pass decided to write (prep_by_marker),
+    # which is why numbering runs after it. DO NOT number the whole slate: a
+    # game the write loop skips (no feed, too low for a placeholder) is known
+    # only once the pre-pass has run, and numbered anyway it held its channel's
+    # slot, so a full compact band dropped a new game for a slot the skipped
+    # game's channel then gave up (#288), and in kickoff mode a game whose
+    # kickoff moved was placed while its kept channel's old number went to a
+    # new game (#286).
+    decided_games = [g for g in games if _build_marker_key(g) in prep_by_marker]
+    decided_by_marker = {_build_marker_key(g): g for g in decided_games}
+    # The auto-record plan (#216; read-only, the writes happen per game below)
+    # plans the same games, and only them. A game with no channel cannot be
+    # recorded: planned anyway, it could take the only recording slot from a
+    # game that has one, whose recording was then cut short or cancelled
+    # while nothing recorded the channel-less game (#291). Its slate is still
+    # the whole cache (see _autorecord_prepare): such a game's own scheduled
+    # recording is cancelled, and planned again once it has a channel.
+    # The markers the pre-pass attached a stream to: what "has a stream now"
+    # means for a ranked game's eligibility (_ranked_eligible).
+    streamed = {m for m, p in prep_by_marker.items() if p.source_streams}
+    autorec = _autorecord_prepare(
+        decided_games, settings, bench=bench,
+        slate_games=games, streamed=streamed, excluded_stream_ids=excluded_ids,
+    )
+    # Auto-record (#216), first step: drop our not-yet-started recordings the
+    # plan no longer wants on channels apply will NOT write (games the
+    # pre-pass did not decide on), BEFORE the numbers held for kept channels
+    # are read (below) and before the stale reap, so such a game whose team
+    # was removed neither holds its channel's number nor keeps its channel.
+    # Read first and cancelled later, a recording counted as keeping its
+    # channel held a slot a full compact band then refused a new game, and the
+    # apply aborted with the unwanted recording still scheduled (#288 review).
+    # A recording that starts before this runs is not cancelled (the locked
+    # re-check there), and is then counted as keeping its channel. Only these
+    # markers: the decided games' recordings wait for the plan over the games
+    # numbering places (second step, below, #291).
+    #
+    # This is apply's first IRREVERSIBLE commit, so the time check runs again
+    # here: the deciding half above (stream pools over every game) can spend
+    # the margin the check at the start saw. Past this point apply does not
+    # stop on time: stopping between the two cancellation steps would itself
+    # split a cancellation from its replacement, and the network half below is
+    # capped at the child's remaining life less the reserve.
+    #
+    # DO NOT move the cancellations into the main transaction to make them
+    # atomic with their replacements. They commit first on purpose (#288,
+    # #291: a recording counted as keeping its channel held a full compact
+    # band's slot, and the second plan must name the channels numbering
+    # placed), and the network half between them cannot sit inside a
+    # transaction (#136). A kill that still lands after this commit is
+    # repaired by the next apply: the cancelled recording left the "created"
+    # state when it committed, so the next plan schedules the replacement and
+    # does not read the missing row as a user deletion
+    # (tests/test_apply_time_reserve.py pins both).
+    short = _apply_time_short("before cancelling recordings", dry_run)
+    if short is not None:
+        return short
+    _autorecord_cancel_committed(
+        autorec, dry_run,
+        markers={m for m in autorec.ours if m not in prep_by_marker},
+    )
+
+    # A live group missing at the lookup above may exist by now (a user, or an
+    # M3U refresh, made it meanwhile), and the setup adopts it: read it again
+    # so numbering reserves the RAW numbers its channels hold. Missed, our
+    # channel was numbered onto a raw number a channel there held under an
+    # override (_reserved_channel_numbers). One made after numbering is the
+    # race any group has with a channel filed during the pre-pass; the next
+    # apply's numbering moves ours off it.
+    if target_group is None:
+        target_group = ChannelGroup.objects.filter(name=group_name).first()
+        if target_group is not None:
+            in_target = Q(channel_group=target_group)
+
+    # A channel this apply KEEPS without writing it (an active recording, #146,
+    # or kept by its guide, #264) goes back to its number after parking, unless
+    # a new game was handed that number, in which case it stays at a parking
+    # number and its published number changes mid-recording. So those numbers
+    # are held back from every game: the reap's own policy over the channels
+    # whose game is not decided (_unwritten_channels; the reap below uses the
+    # same helper over seen_markers, which differs only by a compact game
+    # left without a slot, and such a game's channel has no free slot in the
+    # band for anyone to take). Collected BEFORE the floor, because the kickoff
+    # floor inference must run the placement apply will run (#219).
+    held_for_recordings = _numbers_held_for_recordings(
+        _unwritten_channels(existing_virtuals, prep_by_marker),
+        archive_enabled, guide_kept_ids, autorec.cancelled_ids,
+    )
+    # The WHOLE slate's size, not the decided games': with the auto band (one
+    # slot per game) a band sized to the decided games would shrink whenever a
+    # game is skipped and push published channels out of it.
+    band_size = _resolve_compact_band_size(settings, len(games))
+    # Per-game channel numbers (marker -> number). Computed once, for every game
+    # apply will write, so collision resolution sees all of them and park_base can be set above
+    # the true ceiling. In KICKOFF mode that ceiling is driven by how far ahead
+    # the slate reaches rather than by the game count; in COMPACT mode it is the
+    # top of the band. Existing numbers are passed so COMPACT can hold a
+    # published game on the slot it already has (see allocate_compact_numbers).
+    # Every number in use by a channel we do NOT own is reserved, in BOTH modes.
+    # Uniqueness is per-group at most (and only in Channel.clean(), see
+    # _PER_GROUP_NUMBER_NOTE), so nothing stops a collision, but the M3U,
+    # XMLTV and Xtream Codes outputs all key the guide on the bare channel number,
+    # so a shared number silently binds the wrong programme. Measured live on
+    # 2026-08-29 against a Peacock lineup occupying 400-499. Kickoff mode used to
+    # skip this because its floor followed the lineup; since #219 the floor is
+    # fixed, so a channel the user later adds in the millions is routed around
+    # here instead. No upper bound in kickoff mode: a nudge can walk past any.
+    if numbering_mode == NUMBERING_MODE_KICKOFF:
+        published = []
+        unpublished = []
+        for marker, g in decided_by_marker.items():
+            ch = existing_virtuals.get(marker)
+            start_dt = parse_iso_utc(g.get("start_time_utc"))
+            if ch is None or ch.channel_number is None:
+                unpublished.append((start_dt, marker))
+            else:
+                published.append((ch.channel_number, start_dt, marker))
+        # Kickoff reserves from the lowest number this slate can take under ANY
+        # floor (a floor is at least 1), not from the floor itself: the floor is
+        # not known yet, and _infer_kickoff_base must judge each candidate with
+        # the same reservations the real placement will honour (review finding,
+        # #219: a stranger on a published slot made the inference pick a floor
+        # that then nudged a published game). Nothing below this can be assigned.
+        starts = [(start_dt, marker) for _n, start_dt, marker in published] + unpublished
+        lowest_kickoff = 1 + min(
+            (
+                stable_channel_number(0, start_dt, marker, apply_tz)
+                for start_dt, marker in starts if start_dt is not None
+            ),
+            default=0,
+        )
+        reserved_numbers = (
+            _reserved_channel_numbers(target_group, lowest_kickoff, pending_groups=moving_groups)
+            | held_for_recordings
+        )
+        remembered_base, remembered_record = _load_numbering_state()
+        virtual_base = _resolve_kickoff_base(
+            settings, highest_other, remembered_base, published, apply_tz,
+            unpublished=unpublished, reserved=reserved_numbers,
+        )
+        # What each channel was numbered for (#278), from this floor only.
+        numbered_for = _numbered_for_floor(remembered_record, virtual_base, marker_renames)
+    else:
+        virtual_base = _resolve_virtual_base(settings, highest_other)
+        reserved_numbers = _reserved_channel_numbers(
+            target_group, virtual_base, virtual_base + band_size - 1,
+            pending_groups=moving_groups,
+        ) | held_for_recordings
+    existing_numbers = {
+        marker: int(ch.channel_number)
+        for marker, ch in existing_virtuals.items()
+        if ch.channel_number is not None
+    }
+    chnum_by_marker = _assign_channel_numbers(
+        decided_games, virtual_base, apply_tz,
+        mode=numbering_mode,
+        band_size=band_size,
+        existing_numbers=existing_numbers,
+        reserved_numbers=reserved_numbers,
+        numbered_for=numbered_for,
+    )
+    if numbering_mode == NUMBERING_MODE_COMPACT and decided_games:
+        # A game with no slot cannot be published: a null channel_number
+        # truncates the whole Xtream Codes feed. Drop it HERE, before
+        # seen_markers is filled below, rather than skipping it in the write
+        # loop: a game marked seen and skipped afterwards is neither renumbered
+        # nor reaped, keeps the temporary parking number phase 0 gave it, and
+        # is stranded there. Measured live on 2026-08-29, which left 22
+        # channels sitting at 1400-1421. Dropping the game here hands its
+        # existing channel to the normal stale path, which preserves DVR
+        # recordings on the way out (#146).
+        placeable = [g for g in decided_games if _build_marker_key(g) in chnum_by_marker]
+        if not placeable:
+            # Every slot in the band is taken. Publishing nothing would reap the
+            # entire group over what is almost certainly a mis-set range, so fail
+            # safe: add, renumber and remove no channel, and tell the user which
+            # setting to move.
+            band_top = virtual_base + band_size - 1
+            # NOT "nothing was changed": by this point apply may already have
+            # committed the first step's recording cancellations (they run
+            # before numbering on purpose, #288). The group and guide setup
+            # has NOT run: it is the first step of the main transaction, so a
+            # refused rename leaves our channels where they were. (No description or logo
+            # has been fetched yet: the pre-pass's network half runs after
+            # numbering, #288.) What is true is that no channel was added,
+            # renumbered, moved or removed.
+            msg = (
+                f"Compact numbering found no free channel numbers in {virtual_base}-"
+                f"{band_top}: every number in that range is already used by another "
+                f"channel. No channels were added, renumbered or removed. Move "
+                f"'Starting channel number' to an empty stretch of your lineup, or "
+                f"raise 'Compact range size'."
+            )
+            logger.error("[ranked_matchups] %s", msg)
+            return {"status": "error", "message": msg}
+        if len(placeable) != len(decided_games):
+            logger.warning(
+                "[ranked_matchups] compact: publishing %d of %d games; the rest have "
+                "no free number in %d-%d",
+                len(placeable), len(decided_games), virtual_base, virtual_base + band_size - 1,
+            )
+    # ONLY NOW is a game genuinely seen: decided by the pre-pass AND given a
+    # number. seen_markers drives stale detection, so a marker in it whose game
+    # the write loop then skips leaves its channel neither published nor
+    # reaped, stranded at its parking number. A game left without a number
+    # loses its plan here, so the write loop and seen_markers agree.
+    # The games the pre-pass decided on, kept for the description and logo
+    # caches (live_markers, at the end of apply).
+    decided_markers = set(prep_by_marker)
+    for marker in [m for m in prep_by_marker if m not in chnum_by_marker]:
+        del prep_by_marker[marker]
+    seen_markers = set(prep_by_marker)
+    placeholder_channels_created = sum(1 for p in prep_by_marker.values() if p.placeholder)
+    # Auto-record, second step (#291). A game numbering left without a slot
+    # (compact, full band) has no channel either, so the plan is built again
+    # over the games that kept theirs, for the reason above (same slate). Then the decided
+    # games' cancellations, by the plan that names their channels. Both before
+    # the network half, which writes the 🔴 into channel names from the plan.
+    unplaced = decided_markers - set(prep_by_marker)
+    if unplaced and autorec.enabled:
+        first = autorec
+        autorec = _autorecord_prepare(
+            [g for g in decided_games if _build_marker_key(g) not in unplaced],
+            settings, bench=bench, slate_games=games,
+            streamed=streamed, excluded_stream_ids=excluded_ids,
+        )
+        # Carried over: what the first plan already did (its cancellations)
+        # and saw (a recording the user deleted, a tombstone the second plan
+        # cannot see once the game left it, #291 review).
+        autorec.cancelled += first.cancelled
+        autorec.cancelled_ids |= first.cancelled_ids
+        autorec.new_tombstones = list(dict.fromkeys(first.new_tombstones + autorec.new_tombstones))
+    _autorecord_cancel_committed(autorec, dry_run)
+
+    # The pre-pass's network half (#136: still before the transaction), run
+    # only for the games apply will write. DO NOT move it back above numbering:
+    # there it fetched descriptions and logos for compact games then left
+    # without a slot, spending the network budget the published games needed,
+    # and fetched them before a full-band abort that publishes nothing (#288).
+    # ONE wall-clock allowance for every cosmetic fetch below (#271), see
+    # APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME, sized by and started for the
+    # games fetched for, so the deciding half and numbering spend none of it.
+    # DO NOT gate anything on it that decides WHICH channels publish or what
+    # streams they carry: the stream pool and the placeholder decision make no
+    # network call, and must never start to depend on one that can be skipped.
+    prepass_allowance = APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME * len(prep_by_marker)
+    child_seconds_left = tasks.pipeline_child_seconds_left()
+    if child_seconds_left is not None:
+        prepass_allowance = max(
+            0.0, min(prepass_allowance, child_seconds_left - APPLY_WRITE_RESERVE_SECONDS),
+        )
+    prepass_budget = NetworkBudget(prepass_allowance)
+    for marker, prep in prep_by_marker.items():
+        g, source, placeholder, tagline = prep.g, prep.source, prep.placeholder, prep.tagline
         new_name = format_channel_name(
-            g["sport_prefix"], signals, score, g["home"], g["away"],
+            g["sport_prefix"], prep.signals, prep.score, g["home"], g["away"],
             tagline=tagline,
             template=name_template,
-            rank_source=rank_source,
+            rank_source=prep.rank_source,
             sport_label=g.get("sport_label", ""),
             venue=g.get("venue"),
-            start_dt=start_dt,
+            start_dt=prep.start_dt,
             tz=apply_tz,
             recording=autorec.will_record(marker),
         )
@@ -5989,6 +8077,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 cache=llm_cache,
                 boundary_summary=_boundary,
                 marker=marker,
+                # A dry run serves cached prose only: an uncached call costs
+                # money for a description nothing will write or cache.
+                allow_network=(lambda: False) if dry_run else prepass_budget.allow,
                 # Supplies the outcome-band cutoffs the prompt needs to state
                 # each team's exact distance from relegation / Europe rather
                 # than leaving the model to infer it from a table slice (#209).
@@ -6010,24 +8101,66 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 matchup_logos_fallback += 1
 
-        prep_by_marker[marker] = SimpleNamespace(
-            new_name=new_name,
-            description=description,
-            tagline=tagline,
-            logo_id=resolved_logo_id,
-            source_streams=source_streams,
-            start_dt=start_dt,
+        prep.new_name = new_name
+        prep.description = description
+        prep.logo_id = resolved_logo_id
+    if prepass_budget.skipped:
+        logger.warning(
+            "[ranked_matchups] apply's network budget (%gs for %d games) ran out; "
+            "skipped %d cosmetic fetch(es) (descriptions, logos), which keep their "
+            "fallback until the next apply",
+            prepass_budget.seconds, len(prep_by_marker), prepass_budget.skipped,
         )
+
+    max_target = max(chnum_by_marker.values(), default=virtual_base)
+    # Park above every number ANY channel in the group holds (see
+    # _resolve_park_base): a hand-added channel in our group is reserved from
+    # assignment, but not from the parking range.
+    # The group as the setup (first thing in the transaction below) will
+    # leave it: what it holds now, plus our channels it moves in.
+    highest_in_group = (
+        Channel.objects.filter(
+            in_target | (_owned_tvg_id_q() & _movable_owned_q() & Q(channel_group__in=moving_groups)))
+        .aggregate(m=_Max("channel_number"))["m"] or 0
+    )
+    park_base = _resolve_park_base(max_target, highest_in_group)
+    logger.info(
+        "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r, "
+        "remembered=%s), mode=%s, band_size=%d, max_target=%d, park_base=%d",
+        virtual_base, highest_other,
+        settings.get("virtual_channel_base", DEFAULT_VIRTUAL_CHANNEL_BASE),
+        remembered_base,
+        numbering_mode, band_size, max_target, park_base,
+    )
 
     # Set by step 8 inside the transaction; stays None on a dry run so the
     # summary can tell "no profiles touched" apart from "nothing to say".
     profile_stats: Optional[Dict[str, Any]] = None
 
     with transaction.atomic():
-        # Auto-record (#216): drop our not-yet-started recordings the plan no
-        # longer wants BEFORE the stale reap looks at recordings, so a game
-        # whose team was removed can have its channel reaped this same run.
-        _autorecord_cancel(autorec, dry_run)
+        # Group and guide setup FIRST, inside this transaction: after apply's
+        # last time check and after the full-band refusal above, and atomic
+        # with everything below, so a stopped, refused or FAILED apply never
+        # leaves a rename half done (our channel moved into the new group
+        # beside a channel already on its number, or moved while its guide
+        # stayed on the old source). Numbering above already read the
+        # channels as this leaves them (_reserved_channel_numbers'
+        # pending_groups, and highest_in_group).
+        if not dry_run:
+            setup = _commit_group_setup(
+                group_name, target_group, foreign_owned_groups, foreign_epg_sources,
+                _deletable_group_names,
+            )
+            if setup is None:
+                # Nothing written in this transaction yet, so leaving it
+                # commits nothing.
+                msg = _fetching_source_message(group_name, before_any_write=False)
+                logger.error("[ranked_matchups] %s", msg)
+                return {"status": "error", "message": msg}
+            target_group, epg_source = setup["target_group"], setup["epg_source"]
+            migrated_from_old_group = setup["migrated"]
+            deleted_old_groups = setup["deleted_groups"]
+            deleted_old_sources = setup["deleted_sources"]
 
         # Persist the #217 re-key. Queryset .update(), not ch.save(): only the
         # tvg_id moves, and staying off save() keeps every Channel post_save
@@ -6052,8 +8185,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         len(marker_renames))
 
         # Phase 0: park existing virtual channels in a high temporary number
-        # range so we can renumber based on cache order without colliding with
-        # the unique (channel_group, channel_number) constraint. park_base is
+        # range so we can renumber based on cache order without two channels
+        # ever sharing a number in the group (_PER_GROUP_NUMBER_NOTE). park_base is
         # guaranteed to be past every target number we're about to write.
         # Capture pre-park numbers so a channel we end up KEEPING (active
         # recording, #146) can be restored to its real number instead of being
@@ -6061,10 +8194,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # the loop below, so without this a kept stale channel would sit at the
         # parking number until the next cycle reaps it.
         prepark_numbers = {ch.id: ch.channel_number for ch in existing_virtuals.values()}
-        # Every channel number this run actually assigns to a channel. Used by
-        # the kept-for-recording restore below, which must not treat a merely
-        # PLANNED number as occupied.
-        written_numbers: set = set()
         if not dry_run and existing_virtuals:
             parked = list(existing_virtuals.values())
             for i, ch in enumerate(parked):
@@ -6095,15 +8224,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # _assign_channel_numbers / #121). In KICKOFF mode this is always
             # present: that map and the pre-pass skip exactly the same
             # bad-start_time rows, so any marker with a plan also has a number.
-            # In COMPACT mode unplaceable games are filtered out of `games`
-            # BEFORE the pre-pass (see the placeable filter above), so this guard
-            # should never fire. It stays as a belt: publishing a channel with a
+            # In COMPACT mode a game left without a slot loses its plan before
+            # seen_markers is filled (see the placeable filter above), so this
+            # guard should never fire. It stays as a belt: publishing a channel with a
             # null channel_number truncates the whole Xtream Codes feed (see
             # _ARCHIVE_CHANNEL_NUMBER), which is far worse than dropping a game.
             target_chnum = chnum_by_marker.get(marker)
             if target_chnum is None:
                 continue
-            written_numbers.add(target_chnum)
             prog_start, prog_end = _live_window(g, start_dt)
             existing = existing_virtuals.get(marker)
 
@@ -6132,6 +8260,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         .order_by("order")
                         .values_list("stream_id", flat=True)
                     )
+                    # DO NOT remove a stream link from a channel that is
+                    # recording right now (except an excluded-group one, the
+                    # rule #206 applies to a channel kept for its recording).
+                    # A placeholder (no feed matched this time: the provider
+                    # renamed the slot, an M3U refresh dropped the source's
+                    # link) still clears the score threshold or plays a
+                    # Recorded team, so it is written, and replacing its links
+                    # with the empty pool cut the running capture (batch
+                    # interaction review); a different non-empty pool can pull
+                    # the stream it is capturing from just the same. While it
+                    # records, the new pool's streams are ADDED after its
+                    # current ones, and the next apply after the recording
+                    # ends trims them.
+                    if current_ordered and any(
+                        recording_policy.is_in_progress(r)
+                        for r in Recording.objects.filter(channel=existing)
+                    ):
+                        kept_links = [sid for sid in current_ordered if sid not in excluded_ids]
+                        source_streams = kept_links + [
+                            sid for sid in source_streams if sid not in kept_links
+                        ]
                     if current_ordered != source_streams:
                         ChannelStream.objects.filter(channel=existing).delete()
                         for order, sid in enumerate(source_streams):
@@ -6158,6 +8307,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                             channel=vc, stream_id=sid, order=order,
                         )
                     created += 1
+            if vc is not None and not dry_run:
+                written_numbers[marker] = target_chnum
 
             # Auto-record this game (#216). Outside the EPG block on purpose: a
             # recording is scheduled whether or not an EPG source exists.
@@ -6260,6 +8411,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     sub_title=subtitle,
                     description=live_description,
                     tvg_id=marker,
+                    # The row this channel was published from, so a refresh
+                    # that lost cache.json can still hold it (#264). On the
+                    # LIVE entry because it is the one every channel gets.
+                    custom_properties=_published_row_stamp(g),
                 )
                 # Past slot: bridges the final whistle to the apply that drops
                 # the channel, so the guide doesn't go blank in between. Its end
@@ -6291,18 +8446,26 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # re-home completed recordings onto a persistent archive channel and skip
         # reaping any channel whose recording is still active (it reconciles next
         # cycle once the recording finishes).
-        stale = [ch for marker, ch in existing_virtuals.items() if marker not in seen_markers]
+        stale = _unwritten_channels(existing_virtuals, seen_markers)
         if stale and not dry_run:
             now_reap = datetime.now(timezone.utc)
             stale_ids_all = [c.id for c in stale]
+            # Row locks first: a recording made on a stale channel between
+            # this read and the delete below would go with it (CASCADE). On
+            # Postgres its foreign-key check waits on these locks.
+            list(Channel.objects.select_for_update().filter(id__in=stale_ids_all)
+                 .values_list("pk", flat=True))
             recs_by_channel: Dict[int, list] = {}
             for r in Recording.objects.filter(channel_id__in=stale_ids_all):
                 recs_by_channel.setdefault(r.channel_id, []).append(r)
-            reapable, kept_for_recording, rehome_rec_ids = _partition_stale_for_recordings(
-                stale, recs_by_channel, now_reap, archive_enabled,
+            # `kept_stale` is every stale channel left in place this run: for
+            # an active recording (#146), or by its guide while the cache cannot
+            # vouch for the slate (#264, guide_kept_ids).
+            reapable, kept_stale, rehome_rec_ids = _partition_stale_for_recordings(
+                stale, recs_by_channel, now_reap, archive_enabled, guide_kept_ids,
             )
             if rehome_rec_ids:
-                archive_ch = _ensure_archive_channel(recordings_group_name)
+                archive_ch = _ensure_archive_channel(recordings_group_name, group_name)
                 # .update() on the Recording queryset: re-point the FK without
                 # invoking per-row save hooks. Recording carries no destructive
                 # post_save signal (unlike Channel.epg_data), so this is a plain
@@ -6323,55 +8486,138 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     EPGData.objects.filter(
                         epg_source=epg_source, tvg_id__in=reap_markers,
                     ).delete()
-            # #206: a channel KEPT for an active recording never goes through
-            # the write loop, so its ChannelStream rows are whatever the last
-            # apply left. If the user has since excluded one of those streams'
-            # groups, it would stay attached indefinitely and quietly contradict
-            # "excluded streams are never attached". Strip it here.
+            # #206: a channel KEPT (for an active recording, or by its guide, #264)
+            # never goes through the write loop, so its ChannelStream rows are
+            # whatever the last apply left. If the user has since excluded one
+            # of those streams' groups, it would stay attached indefinitely and
+            # quietly contradict "excluded streams are never attached". Strip
+            # it here.
             #
             # Membership only, never the Channel and never the Recording: the
             # channel is being kept ON PURPOSE so an in-flight recording keeps
             # its target (#146). A recording already writing from an excluded
             # stream is left to finish; the point is that nothing STARTS from
             # one after the user excluded it.
-            if kept_for_recording and excluded_ids:
+            if kept_stale and excluded_ids:
                 stripped = ChannelStream.objects.filter(
-                    channel_id__in=[c.id for c in kept_for_recording],
+                    channel_id__in=[c.id for c in kept_stale],
                     stream_id__in=excluded_ids,
                 ).delete()[0]
                 if stripped:
                     policy_dropped_stream_ids |= set(excluded_ids)
                     logger.info(
                         "[ranked_matchups] stripped %d excluded-group stream "
-                        "link(s) from %d channel(s) kept for an active recording",
-                        stripped, len(kept_for_recording),
+                        "link(s) from %d kept channel(s)",
+                        stripped, len(kept_stale),
                     )
 
-            # Restore kept channels (active recording) to their pre-park number
-            # so they don't linger at a ~park_base value. Only restore numbers
-            # not claimed by a current game this run (assigned set), so the
-            # unique (channel_group, channel_number) constraint can't be hit;
-            # any (rare) collision leaves that channel parked, still safe.
-            if kept_for_recording:
-                # Numbers actually WRITTEN this run, not the whole plan.
-                # chnum_by_marker still holds entries for games the compact
-                # placeable-filter dropped and for games the pre-pass skipped,
-                # and treating those as taken refuses a kept channel its own
-                # original number and leaves it parked. Only a number some
-                # channel really carries can block a restore.
-                assigned_now = written_numbers
-                restore = []
-                for ch in kept_for_recording:
-                    orig = prepark_numbers.get(ch.id)
-                    if orig is not None and orig not in assigned_now:
+            # Restore kept channels (recording, or guide) to their pre-park number,
+            # or, when another channel has it now, to the first number above it
+            # that is free. DO NOT leave a kept channel on its parking number:
+            # parking is only clear of our own group, so a channel in ANOTHER
+            # group could publish the same number, and the guide keys on the
+            # bare number everywhere (#117, #202): the kept channel's guide then
+            # bound to the wrong programme (batch interaction review). One rule:
+            # free means no channel in the group carries it raw and no channel
+            # anywhere else publishes it (_reserved_channel_numbers, effective).
+            if kept_stale:
+                # Raw numbers channels in the group REALLY carry now, read back
+                # rather than planned. DO NOT use only the numbers this run
+                # wrote: after a rename the group can already
+                # hold a channel that is not ours (one the user filed there by
+                # hand) on a kept channel's old number, and the rename's
+                # queryset .update() moved the kept channel in beside it with
+                # nothing refusing the clash (1.34.0 batch review). And DO NOT
+                # use chnum_by_marker: it is the plan, not what the group's
+                # channels carry, and only what they carry can collide.
+                kept_ids = [ch.id for ch in kept_stale]
+                taken_now = set(
+                    Channel.objects.filter(channel_group=target_group)
+                    .exclude(id__in=kept_ids)
+                    .values_list("channel_number", flat=True)
+                )
+                # Two passes: every kept channel whose old number is free gets it
+                # back FIRST, so one that has to move never takes another kept
+                # channel's old number and pushes that one along too.
+                origs = {ch.id: prepark_numbers.get(ch.id) for ch in kept_stale}
+
+                def _free(number, blocked) -> bool:
+                    # Reservations are floored (_reserved_channel_numbers), so a
+                    # fractional number is free only if its floor is too.
+                    return number not in blocked and int(number) not in blocked
+
+                restore, moving = [], []
+                for ch in kept_stale:
+                    orig = origs[ch.id]
+                    if orig is not None and _free(
+                            orig, taken_now | _reserved_channel_numbers(target_group, int(orig))):
                         ch.channel_number = orig
                         restore.append(ch)
+                        taken_now.add(orig)  # two kept channels, one old number
+                    else:
+                        moving.append(ch)
+                held_origs = {n for n in origs.values() if n is not None}
+                for ch in moving:
+                    orig = origs[ch.id]
+                    # No old number (cleared by hand): from the floor, as a
+                    # fresh game would be.
+                    start = int(orig) if orig is not None else int(virtual_base)
+                    blocked = (taken_now | held_origs
+                               | _reserved_channel_numbers(target_group, start))
+                    ch.channel_number = float(_first_free_number(blocked, start))
+                    restore.append(ch)
+                    taken_now.add(ch.channel_number)
                 if restore:
                     Channel.objects.bulk_update(restore, ["channel_number"])
+                # A kept channel back on the number it was numbered for is
+                # still published under it, so its entry in the kickoff record
+                # (#278) is carried over, whatever floor it names: if its game
+                # returns to the slate under that floor, it keeps the number.
+                # One left parked has no entry to carry.
+                # One that had to move is recorded at its NEW number (same
+                # offset and floor): it was not numbered there, but holding it
+                # spares the recording channel a second move when its game
+                # returns (batch interaction review).
+                kept_id_set = {ch.id for ch in kept_stale}
+                moved_ids = {ch.id for ch in moving}
+                renamed = {new: legacy for _ch, legacy, new in marker_renames}
+                for kept_marker, kept_ch in existing_virtuals.items():
+                    entry = remembered_record.get(renamed.get(kept_marker, kept_marker))
+                    if kept_ch.id not in kept_id_set or not entry:
+                        continue
+                    if kept_ch.id in moved_ids:
+                        kept_numbered[kept_marker] = (entry[0], int(kept_ch.channel_number), entry[2])
+                    elif entry[1] == kept_ch.channel_number:
+                        kept_numbered[kept_marker] = entry
             deleted_stale = len(reap_ids)
-            kept_for_recording_n = len(kept_for_recording)
+            kept_stale_n = len(kept_stale)
+            kept_by_guide_n = sum(1 for c in kept_stale if c.id in guide_kept_ids)
+            if kept_by_guide_n:
+                logger.warning(
+                    "[ranked_matchups] apply: kept %d channel(s) the slate omits "
+                    "because their guide has not run out and the cache cannot "
+                    "vouch for the slate (#264)", kept_by_guide_n,
+                )
         elif stale and dry_run:
-            deleted_stale = len(stale)
+            # The same keep policy as the real reap above, read-only, so a
+            # rehearsal reports what a real run would delete (#170: a dry run
+            # that overstates its deletions is as misleading as a silent one).
+            # DO NOT count every stale channel: after an upgrade lost
+            # cache.json, that reported deleting the live channels a real run
+            # keeps by their guide (#264), and channels kept for a recording
+            # (#146) were overcounted the same way. A recording auto-record
+            # would cancel above is left out, as the real reap never sees it.
+            dry_recs: Dict[int, list] = {}
+            for r in Recording.objects.filter(channel_id__in=[c.id for c in stale]).exclude(
+                    id__in=autorec.cancelled_ids):
+                dry_recs.setdefault(r.channel_id, []).append(r)
+            dry_reapable, dry_kept, dry_rehome = _partition_stale_for_recordings(
+                stale, dry_recs, datetime.now(timezone.utc), archive_enabled, guide_kept_ids,
+            )
+            deleted_stale = len(dry_reapable)
+            rehomed_recordings = len(dry_rehome)
+            kept_stale_n = len(dry_kept)
+            kept_by_guide_n = sum(1 for c in dry_kept if c.id in guide_kept_ids)
 
         # 6. Defensive: clean up orphan EPGData entries on our source whose
         # tvg_id has no corresponding virtual channel (left over from earlier
@@ -6401,7 +8647,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # while it holds recordings. Drop the archive channel and its group once
         # empty (e.g. after the user deletes the last preserved recording).
         if not dry_run and archive_enabled:
-            _cleanup_empty_archive(recordings_group_name)
+            _cleanup_empty_archive(recordings_group_name, group_name)
 
         # 8. Channel Profile membership (#172). LAST inside the transaction, and
         # deliberately so: it reads the set of channels we own, which is only
@@ -6420,28 +8666,74 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     if not dry_run:
         _invalidate_epg_output_cache()
 
-    # Persist the LLM-description cache (prune entries whose marker is no
-    # longer in this refresh; keep file bounded to live games). Save outside
-    # the atomic block: sidecar JSON file is independent of the DB.
+    # Remember the kickoff floor (#219), and what each channel was numbered for
+    # (#278), only now that the channels carrying them have COMMITTED. Saving
+    # before the transaction would let a failed apply leave a floor on disk that
+    # no published channel uses, and the next auto apply would renumber every
+    # game onto it. The record is rebuilt from what this run WROTE (plus kept
+    # channels still on their number), so a game no longer published drops out.
+    offsets = dict(_kickoff_offsets(games, apply_tz))
+    kickoff_record = {
+        m: (offsets[m], n, virtual_base) for m, n in written_numbers.items() if m in offsets
+    }
+    kickoff_record.update(kept_numbered)
+    if (
+        not dry_run
+        and numbering_mode == NUMBERING_MODE_KICKOFF
+        and (virtual_base, kickoff_record) != (remembered_base, remembered_record)
+    ):
+        _save_numbering_state(virtual_base, kickoff_record)
+
+    # The markers whose cached descriptions, logo URLs and logo files stay:
+    # every game the pre-pass decided on (a game left without a compact slot
+    # is published by a later apply, and its fetches should not be paid twice)
+    # and every channel of ours still in the group. DO NOT use seen_markers
+    # alone: a channel kept for its recording or by its guide is not seen, and
+    # sweeping its logo file left the live channel pointing at a deleted image
+    # for the rest of the recording (#288 review).
+    live_markers = set(decided_markers)
+    # Logo files ANY channel still points at are kept by NAME too: a channel
+    # of ours re-keyed (#217) and kept rather than rewritten shows the file
+    # named after its old marker, and a user may have given one of their own
+    # channels a matchup logo.
+    referenced_logo_files: frozenset = frozenset()
+    if not dry_run and target_group is not None and (llm_enabled or matchup_logos_enabled):
+        live_markers |= set(
+            Channel.objects.filter(_owned_tvg_id_q(), channel_group=target_group)
+            .values_list("tvg_id", flat=True)
+        )
+        referenced_logo_files = frozenset(
+            os.path.basename(url) for url in Channel.objects.filter(
+                logo__url__startswith=os.path.join(
+                    matchup_logos.LOGO_DIR, matchup_logos.LOGO_FILENAME_PREFIX,
+                ),
+            ).values_list("logo__url", flat=True) if url
+        )
+
+    # Persist the LLM-description cache, pruned to live_markers so the file
+    # stays bounded. Saved outside the atomic block: the sidecar JSON file is
+    # independent of the DB.
     if llm_enabled and not dry_run:
-        pruned = llm_descriptions.prune_cache(llm_cache, seen_markers)
+        pruned = llm_descriptions.prune_cache(llm_cache, live_markers)
         llm_descriptions.write_cache(LLM_DESCRIPTIONS_CACHE_PATH, pruned)
 
     # Persist the SportsDB thumb-URL cache and sweep stale matchup logo files
-    # from /data/logos/. Both prune to the live marker set so disk usage
-    # doesn't grow unbounded across many refresh cycles. Logo rows pointing
-    # at deleted files are left for Dispatcharr's own cleanup_unused_logos
-    # endpoint: deleting them here would race with concurrent UI reads.
+    # from /data/logos/. Both prune to live_markers so disk usage doesn't grow
+    # unbounded across many refresh cycles. Logo rows pointing at deleted
+    # files are left for Dispatcharr's own cleanup_unused_logos endpoint:
+    # deleting them here would race with concurrent UI reads.
     stale_logo_files_swept = 0
     if matchup_logos_enabled and not dry_run and thumb_cache is not None:
-        thumb_cache.prune(seen_markers)
+        thumb_cache.prune(live_markers)
         thumb_cache.save()
         if gamethumbs_cache is not None:
-            gamethumbs_cache.prune(seen_markers)
+            gamethumbs_cache.prune(live_markers)
             gamethumbs_cache.save()
         # Sweeps BOTH providers' files: sweep_stale_logo_files derives its live
         # set from every extension marker_to_filename can write.
-        stale_logo_files_swept = matchup_logos.sweep_stale_logo_files(seen_markers)
+        stale_logo_files_swept = matchup_logos.sweep_stale_logo_files(
+            live_markers, keep_filenames=referenced_logo_files,
+        )
 
     prefix = "[dry] " if dry_run else ""
     rename_msg = ""
@@ -6490,13 +8782,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         foreign_msg += (
             f" Excluded-group streams skipped: {len(policy_dropped_stream_ids)}."
         )
-    autorec_msg = _autorecord_finish(autorec, games, dry_run)
+    # The bench is still known: its recording state is kept like the games'
+    # (#291 review), or a benched game's deletion record aged out.
+    autorec_msg = _autorecord_finish(autorec, games + bench, dry_run)
     rec_msg = ""
-    if rehomed_recordings or kept_for_recording_n:
+    if rehomed_recordings or kept_stale_n > kept_by_guide_n:
         rec_msg = (
             f" Recordings: {rehomed_recordings} re-homed to {recordings_group_name!r}, "
-            f"{kept_for_recording_n} channel(s) kept (active recording)."
+            f"{kept_stale_n - kept_by_guide_n} channel(s) kept (active recording)."
         )
+    if kept_by_guide_n:
+        rec_msg += f" Kept until their guide ends (not in the cache): {kept_by_guide_n}."
     msg = (
         f"{prefix}Group {group_name!r}: created={created}, updated={updated} "
         f"(placeholders={placeholder_channels_created} included), "
@@ -6506,6 +8802,10 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         f"{profile_msg} "
         f"WHY descriptions written to EPG source."
     )
+    if not games:
+        # Otherwise the toast reads like a normal run that happened to delete
+        # everything, with no hint of why the group just emptied (#241).
+        msg = f"No games to air (the cache is empty). {msg}"
     # The "[dry] " prefix alone reads as a label, not as "and therefore your
     # channels do not exist"; state the consequence and the fix (#170).
     msg = _dry_run_report(msg, dry_run)
@@ -6514,7 +8814,19 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # the ones they configured, and that is the most important thing in
         # this message (#126).
         msg = f"WARNING: {tmpl_problem}\n\n{msg}"
-    return {"status": "ok", "message": msg}
+    result = {"status": "ok", "message": msg}
+    # The DB now matches this slate, so it can vouch for an empty one built on
+    # it (#241, see _vouch_published_slate). Only for a real run that left
+    # nothing behind: a dry run deleted nothing, and a stale channel kept for
+    # its active recording, or kept by its guide (#264), is on air
+    # without being in the slate (it may be a live game whose source was
+    # failing when the cache was lost).
+    # `slate_vouched` tells the reaper, which rewrites the cache after this
+    # returns and would otherwise drop the stamp.
+    if (not dry_run and not kept_stale_n and not _cache_vouched(cache)
+            and _vouch_published_slate(cache)):
+        result["slate_vouched"] = True
+    return result
 
 
 # ---------- auto pipeline ----------
@@ -6548,10 +8860,13 @@ def _action_auto_pipeline_sync(settings: Dict[str, Any]) -> Dict[str, Any]:
     # not reported as stalled at refresh's last line (#227).
     logger.info("[ranked_matchups] apply: starting")
     r2 = _action_apply(settings)
-    return {
+    out = {
         "status": r2.get("status", "ok"),
         "message": f"refresh: {r1.get('message')} | apply: {r2.get('message')}",
     }
+    if r2.get(tasks.APPLY_STOPPED_FOR_TIME):
+        out[tasks.APPLY_STOPPED_FOR_TIME] = True  # the parent re-applies in a fresh child
+    return out
 
 
 def _action_auto_pipeline_async(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -6619,13 +8934,13 @@ def _action_apply_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
     token is a parent-process global, so acquiring again in the child would fail
     and silently skip the work.
     """
-    token = _try_acquire_scheduler_lock(destructive=True)
+    token = _try_acquire_scheduler_lock("apply", "apply")
     if not token:
         return {
             "status": "busy",
             "message": (
-                "Another refresh or apply is already running (or Redis is "
-                "unreachable). Nothing was changed. Try again shortly."
+                f"Nothing was changed: {_run_lock_unavailable_reason()}. "
+                "Try again shortly."
             ),
         }
     try:
@@ -6683,8 +8998,82 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
 _SOURCE_ERROR_MARK = ": error ("
 
 
+def _require_seasons(src: Any) -> None:
+    """RAISE `SeasonUnavailable` when `src`'s own points-based season, or a
+    regular season its playoff strengths were seeded from
+    (`strength_sources`, `_seeded_from`), could not be fetched whole (#289).
+
+    `_action_refresh` calls this right after a source's `fetch_upcoming`, in
+    the same `try`, so a failed season takes the path a failed rank feed
+    takes (#283): the label is an outage, the games it published last time
+    are held with the scores they had, and the summary says `<label>: error`.
+    The season is read once per source and cached for scoring, so this costs
+    no extra request; a seeding season was read when the sources were built.
+    """
+    for s in (src, *getattr(src, "strength_sources", ())):
+        require = getattr(s, "require_season", None)
+        if callable(require):
+            require()
+
+
+def _season_fallback_entries(sources: List[Any], game_sources: List[Any]) -> List[str]:
+    """Summary entries for the points-based seasons this refresh simulated
+    from their last COMPLETE read (#289 follow-up, `sources/_season_store`):
+    "<label> season (using the last complete read from <time>)", one per
+    label (MLS East and West share "MLS"). Informational, not an error: the
+    games were scored, on stakes a little old. A failed season with no kept
+    read never reaches here; `_require_seasons` made its label an outage.
+
+    Reported for a source whose games were scored, or whose read seeded a
+    scored playoff or bracket source (`strength_sources`); a league with
+    nothing on the slate used nothing.
+    """
+    affected = {id(s) for s in game_sources}
+    for s in game_sources:
+        affected.update(id(r) for r in getattr(s, "strength_sources", ()))
+    by_label: Dict[str, List[str]] = {}
+    for src in sources:
+        fallback = getattr(src, "season_fallback", None)
+        read_at = fallback() if callable(fallback) and id(src) in affected else None
+        if read_at is None:
+            continue
+        when = read_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+        reads = by_label.setdefault(src.sport_label, [])
+        if when not in reads:
+            reads.append(when)
+    return [f"{label} season (using the last complete read from {', '.join(reads)})"
+            for label, reads in by_label.items()]
+
+
+def _seeded_from(regulars: List[Any], *seeded: Any) -> None:
+    """Record on each playoff / bracket source in `seeded` the regular-season
+    sources its team strengths came from, so a regular season that failed
+    holds the playoff label too (`_require_seasons`, #289): its playoff model
+    would otherwise run on the league prior with nothing said. Call it
+    wherever `set_regular_season_strengths` is fed from a regular source."""
+    for s in seeded:
+        s.strength_sources = tuple(regulars)
+
+
 def _source_error_entry(label: str, err: Any) -> str:
     return f"{label}{_SOURCE_ERROR_MARK}{err})"
+
+
+# A source whose per-day sweep lost days (#261): it answered, so it is not
+# "error", but its list is short by those days. Same contract as the error
+# mark: _slate_problems keys on this exact string.
+_SOURCE_PARTIAL_MARK = ": partial ("
+
+
+def _source_partial_entry(label: str, n_games: int, lost_days: set) -> str:
+    days = [d.isoformat() for d in sorted(lost_days)]
+    return f"{label}{_SOURCE_PARTIAL_MARK}{n_games} games, no answer for {_first_few(days)})"
+
+
+def _first_few(items: List[str], n: int = 3) -> str:
+    """'a, b, c +2 more': a list short enough for a toast line."""
+    more = f" +{len(items) - n} more" if len(items) > n else ""
+    return ", ".join(items[:n]) + more
 
 
 def _soccer_season_fetch_failures() -> Dict[str, str]:
@@ -6706,9 +9095,10 @@ def _is_playable(game: Dict[str, Any]) -> bool:
 
 def _slate_problems(summary: List[Any], games: List[Dict[str, Any]]) -> List[str]:
     """Upstream breakage a refresh can complete 'ok' through (#227): sources
-    that errored, and a list with nothing playable on it. One phrase each,
-    shared by the refresh result (log + toast) and Show current state so the
-    two surfaces can never disagree about what went wrong."""
+    that errored, sources whose sweep lost days (#261), and a list with
+    nothing playable on it. One phrase each, shared by the refresh result
+    (log + toast) and Show current state so the two surfaces can never
+    disagree about what went wrong."""
     problems: List[str] = []
     errored = [
         entry.split(_SOURCE_ERROR_MARK, 1)[0]
@@ -6716,9 +9106,19 @@ def _slate_problems(summary: List[Any], games: List[Dict[str, Any]]) -> List[str
         if isinstance(entry, str) and _SOURCE_ERROR_MARK in entry
     ]
     if errored:
-        shown = ", ".join(errored[:3]) + (f" +{len(errored) - 3} more" if len(errored) > 3 else "")
         problems.append(
-            f"{len(errored)} source(s) failed to fetch ({shown}); the log has each error"
+            f"{len(errored)} source(s) failed to fetch ({_first_few(errored)}); "
+            "the log has each error"
+        )
+    partial = [
+        entry.split(_SOURCE_PARTIAL_MARK, 1)[0]
+        for entry in summary
+        if isinstance(entry, str) and _SOURCE_PARTIAL_MARK in entry
+    ]
+    if partial:
+        problems.append(
+            f"{len(partial)} source(s) lost days of their schedule "
+            f"({_first_few(partial)}); games published for those days stay on air"
         )
     if games and not any(_is_playable(g) for g in games):
         problems.append(
@@ -6744,6 +9144,8 @@ def _fmt_run_time(iso: Optional[str], tz) -> str:
 def _run_health_lines(
     cache: Dict[str, Any], last_run: Optional[Dict[str, Any]], tz,
     inflight: Optional[Dict[str, Any]] = None,
+    run_lock: Optional[Tuple[str, Optional[str]]] = None,
+    scheduler_stale: Optional[str] = None,
 ) -> Tuple[List[str], List[str]]:
     """The verdict block that ends Show current state (#227): did the last
     background run work, is one running now, and did the result contain
@@ -6763,13 +9165,36 @@ def _run_health_lines(
     unticking dry run fixes nothing. Because the warnings sit ABOVE it and
     can scroll off, an OK verdict says how many there are, and a run in
     progress is stated in the verdict too, so the last line never presents
-    the PREVIOUS run's result as the answer to the click just made."""
+    the PREVIOUS run's result as the answer to the click just made.
+
+    `run_lock` is _read_run_lock()'s answer. A HELD lock names its holder
+    (#239), which is the only surface that can: an apply, a reap, or a thread
+    in a process whose INFO log never reaches the container log (a Celery
+    worker) holds it without writing the inflight key. An UNREACHABLE Redis is
+    said outright, because every run now refuses to start without the lock
+    (#199) and the guide stops updating until Redis is back.
+
+    `scheduler_stale` is _scheduler_staleness's line (#252). It goes LAST,
+    after the run verdict: "Last run OK" is true and still the wrong answer
+    when no scheduler has run since, so the line that says nothing will run
+    again on its own must be the one the toast always shows."""
     out = [
         f"WARNING: {problem}."
         for problem in _slate_problems(cache.get("summary") or [], cache.get("games") or [])
     ]
     verdict: List[str] = []
     labels = tasks.RUN_KIND_LABELS
+    lock_state, lock_detail = run_lock or (_LOCK_UNKNOWN, None)
+    if lock_state == _LOCK_UNREACHABLE:
+        # The detail is what failed (a connection error, or the client helper
+        # itself), so a reader can tell an outage from a broken client.
+        verdict.append(
+            f"WARNING: Redis is unreachable ({str(lock_detail or '?')[:80]}), so no "
+            "refresh, apply or reap can run (each needs the run lock); the guide "
+            "stays as it is until that is fixed."
+        )
+    elif lock_state == _LOCK_HELD:
+        verdict.append(f"Run lock: held by {lock_detail}.")
     if inflight:
         running = labels.get(inflight.get("kind"), inflight.get("kind") or "A run")
         verdict.append(
@@ -6798,10 +9223,16 @@ def _run_health_lines(
         skipped_at = last_run.get("skipped_at")
         if skipped_at and str(skipped_at) > str(last_run.get("finished_at") or "") and not inflight:
             skipped = labels.get(last_run.get("skipped_kind"), last_run.get("skipped_kind") or "A run")
+            # Only a reason stamped with THIS skip: an older-code skip leaves
+            # the previous skip's reason behind (see tasks.record_skipped_run).
+            why = (last_run.get("skipped_reason")
+                   if last_run.get("skipped_reason_at") == skipped_at else None)
+            why = why or _LOCK_REASON_UNRECORDED
             verdict.append(
-                f"NOTE: {skipped} requested {_fmt_run_time(skipped_at, tz)} did not run: "
-                "another run held the lock, or Redis was unreachable."
+                f"NOTE: {skipped} requested {_fmt_run_time(skipped_at, tz)} did not run: {why}."
             )
+    if scheduler_stale:
+        verdict.append(scheduler_stale)
     return out, verdict
 
 
@@ -6851,7 +9282,9 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     # verdict after them as the very last line, because whether the pipeline
     # works at all is what a confused user needs most. See _run_health_lines.
     status_tz = _resolve_tz((settings or {}).get("local_timezone", "UTC"))
-    data_warnings, run_verdict = _run_health_lines(cache, tasks.read_last_run(), status_tz, inflight)
+    data_warnings, run_verdict = _run_health_lines(
+        cache, tasks.read_last_run(), status_tz, inflight, _read_run_lock(),
+        scheduler_stale=_scheduler_staleness(settings or {}))
     notices = data_warnings + notices + run_verdict
 
     games = cache.get("games", [])
@@ -6992,7 +9425,7 @@ def _diagnose_annotation(channel_name, title, home, away, home_kws, away_kws,
 
 
 def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_kws,
-                            field=False):
+                            field=False, extra=None):
     """Return rows of candidate programming airing in the chosen game's window,
     so a human can spot the game sitting under a spelling our keywords miss.
 
@@ -7009,12 +9442,15 @@ def _diagnose_window_sample(start_dt, sport_prefix, home, away, home_kws, away_k
 
     rows: list of (channel_name, program_title, annotation), one per channel,
     ordered with naming channels first.
+
+    `extra` is the game's cache-row `extra`, so the window searched is the one
+    the matcher used for it (a soccer knockout's is longer, #257).
     """
     from apps.epg.models import ProgramData
     from apps.channels.models import Channel
     from django.db.models import Q
 
-    pre_min, post_hours = _epg_match_window(sport_prefix)
+    pre_min, post_hours = _epg_match_window(sport_prefix, extra)
     win_start = start_dt - timedelta(minutes=pre_min)
     win_end = start_dt + timedelta(hours=post_hours)
 
@@ -7224,7 +9660,7 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 rows = _diagnose_window_sample(
                     start_dt, target.get("sport_prefix"), home, away,
-                    home_kws, away_kws, field=field)
+                    home_kws, away_kws, field=field, extra=target.get("extra"))
             except Exception:  # diagnostic must never raise
                 rows = []
             # Single most relevant listing that names a team (both > one); an
@@ -7341,14 +9777,19 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 # Scheduler state (the running thread + its stop Event) lives in a registry
 # stashed in sys.modules under a synthetic key, NOT in module globals, so it
-# SURVIVES a plugin reload. #110: the loader's force_reload path (reload
-# endpoint / .reload_token / settings-save) unloads this module by file path and
-# re-imports it WITHOUT calling stop() — it only calls stop() on disable/delete.
+# SURVIVES a plugin reload. #110: the loader's force_reload paths (install,
+# repo update, and every OTHER worker reacting to .reload_token) unload this
+# module by file path and re-import it WITHOUT calling stop(). Only disable /
+# delete and the reload endpoint itself (stop_all_plugins(reason="reload"),
+# then discover_plugins(force_reload=True), read in the live loader 2026-10-11)
+# call stop() first.
 # Module globals reset on reload, so the new incarnation could never see the
 # thread the old one started, orphaning it (and its DB connection) every reload.
 # That re-leaks the exact thread #82's stop() was meant to reclaim. Keeping the
-# state in a reload-stable registry lets the new incarnation's __init__ find and
-# tear down the prior thread before starting its own. The synthetic module has
+# state in a reload-stable registry lets the new incarnation's __init__ find the
+# prior thread: it KEEPS a healthy one (no churn, #82/#136; it runs the old code
+# until the process exits) and replaces one that stop() signaled
+# (_thread_running, bounded by _MAX_RETIRING_THREADS). The synthetic module has
 # no __file__/__path__ under the plugin dir, so the loader's _unload_path_modules
 # leaves it in place across reloads.
 _SCHEDULER_REGISTRY_KEY = "_dispatcharr_ranked_matchups_scheduler_state"
@@ -7370,7 +9811,7 @@ def _stop_scheduler(thread, stop_event, reason: str) -> None:
     The loop polls its own stop_event between work units (and on every park via
     _scheduler_sleep), so setting it drops the loop out at its next wake-up
     (immediate: set() wakes a thread waiting on the Event); the loop's finally
-    then closes its DB connection. Only stop() (disable/delete) calls this now:
+    then closes its DB connection. Only stop() (disable/delete/reload) calls this:
     __init__ is idempotent and leaves a healthy thread running rather than
     restarting it (#82/#136), so there is no longer a reload path that needed the
     old non-blocking (join=False) variant.
@@ -7389,12 +9830,15 @@ def _stop_scheduler(thread, stop_event, reason: str) -> None:
 def _clear_if_exited(reg, reason: str) -> None:
     """Signal a registry's thread and clear the slot ONLY if it actually died.
 
-    DO NOT unconditionally null the registry. A thread that is mid-work (the
-    reaper can be parked on a subprocess for minutes) outlives the 5s join, and
-    a cleared slot makes the next __init__ believe none exists and spawn a
-    SECOND one. Leaving the live reference is the safer failure: the loop is
-    already signaled and exits at its next wake-up, and until then the
-    idempotence check correctly reports a live thread.
+    A thread that is mid-work (a scheduled pipeline or a reap runs for
+    minutes) outlives the 5s join. Its reference stays, so a second stop()
+    still finds and joins it; it is already signaled, finishes the work in
+    hand and exits at its next check. It does NOT count as running for the
+    next __init__ (see _thread_running): the reload endpoint calls stop() and
+    then rebuilds the Plugin in the same worker, and a signaled thread left
+    standing as "the" scheduler meant that worker had none once it exited
+    (#252; with the threads confined to uwsgi workers, a single-worker install
+    then had no scheduler at all).
     """
     _stop_scheduler(reg.thread, reg.stop_event, reason)
     if reg.thread is None or not reg.thread.is_alive():
@@ -7402,9 +9846,59 @@ def _clear_if_exited(reg, reason: str) -> None:
         reg.stop_event = None
 
 
-def _parse_scheduled_times(raw: str) -> List[Tuple[int, int]]:
+def _thread_running(reg) -> bool:
+    """Whether a registry holds a thread that will keep running: alive AND
+    not told to stop. A signaled thread is on its way out (its loop checks the
+    event after the work in hand) and will never fire another slot or reap, so
+    __init__ must start a replacement rather than keep it."""
+    if reg.thread is None or not reg.thread.is_alive():
+        return False
+    return reg.stop_event is None or not reg.stop_event.is_set()
+
+
+# How many signaled-but-still-alive threads one registry may leave behind
+# before __init__ stops replacing them. Each can hold a Django DB connection
+# until its work in hand returns (a reaper blocked on a row lock, say), so
+# replacing on every reload without a bound is the #82 connection leak with
+# a different trigger. Past the bound the worker runs without that thread
+# until one exits, and says so; the staleness check covers the scheduler.
+_MAX_RETIRING_THREADS = 2
+
+
+def _may_start(reg, what: str) -> bool:
+    """Whether __init__ may start a new thread for `reg`: none is running
+    (_thread_running), and the signaled ones still finishing their work are
+    within _MAX_RETIRING_THREADS. Records a signaled live thread as retiring
+    before it is replaced, since the registry slot is about to drop it."""
+    if _thread_running(reg):
+        return False
+    retiring = [t for t in (getattr(reg, "retiring", None) or []) if t.is_alive()]
+    if reg.thread is not None and reg.thread.is_alive() and reg.thread not in retiring:
+        retiring.append(reg.thread)
+    reg.retiring = retiring
+    if len(retiring) > _MAX_RETIRING_THREADS:
+        logger.warning(
+            "[ranked_matchups] not starting a new %s thread (pid=%s): %d stopped ones "
+            "are still finishing their work; it starts on a discovery after one exits",
+            what, os.getpid(), len(retiring))
+        return False
+    return True
+
+
+# plugin.json's default for scheduled_times. Every reader that falls back
+# when the stored settings lack the key uses THIS, because the modal shows the
+# manifest default for a missing value: the scheduler used to fall back to
+# "0400" and the expiry maths to "", so a key that was never stored ran once a
+# day while the UI said four times. tests/test_thread_host.py pins it to the
+# manifest.
+_DEFAULT_SCHEDULED_TIMES = "0400,1000,1600,2200"
+
+
+def _parse_scheduled_times(raw: str, quiet: bool = False) -> List[Tuple[int, int]]:
     """Parse 'HHMM,HHMM,...' into [(hour, minute), ...], sorted, deduped.
-    Tolerates whitespace / colons / 'HH:MM'. Bad entries are skipped."""
+    Tolerates whitespace / colons / 'HH:MM'. Bad entries are skipped, with a
+    warning unless `quiet` (the staleness check reads the setting on every
+    discovery and must not repeat the scheduler's warning each time)."""
     out: List[Tuple[int, int]] = []
     if not raw:
         return out
@@ -7415,14 +9909,24 @@ def _parse_scheduled_times(raw: str) -> List[Tuple[int, int]]:
         if len(s) == 3:
             s = "0" + s
         if len(s) != 4 or not s.isdigit():
-            logger.warning("[ranked_matchups] bad scheduled_times token: %r", tok)
+            if not quiet:
+                logger.warning("[ranked_matchups] bad scheduled_times token: %r", tok)
             continue
         h, m = int(s[:2]), int(s[2:])
         if 0 <= h < 24 and 0 <= m < 60:
             out.append((h, m))
-        else:
+        elif not quiet:
             logger.warning("[ranked_matchups] out-of-range scheduled_times token: %r", tok)
     return sorted(set(out))
+
+
+def _slots_on(day, times: List[Tuple[int, int]], tz) -> List[datetime]:
+    """The scheduled slots of one local calendar day, built exactly as the
+    scheduler builds the slot it claims. The claim key is the slot's
+    isoformat(), so anything that looks a claim up (_scheduler_staleness)
+    must build its slot through here too, or the strings differ."""
+    return [datetime.combine(day, datetime.min.time(), tz).replace(hour=h, minute=m)
+            for h, m in times]
 
 
 def _next_fire_time(times: List[Tuple[int, int]], tz, now: Optional[datetime] = None) -> Optional[datetime]:
@@ -7432,16 +9936,27 @@ def _next_fire_time(times: List[Tuple[int, int]], tz, now: Optional[datetime] = 
     if now is None:
         now = datetime.now(tz)
     today = now.date()
-    candidates = [datetime.combine(today, datetime.min.time(), tz).replace(hour=h, minute=m)
-                  for h, m in times]
-    candidates += [datetime.combine(today + timedelta(days=1), datetime.min.time(), tz).replace(hour=h, minute=m)
-                   for h, m in times]
+    candidates = _slots_on(today, times, tz) + _slots_on(today + timedelta(days=1), times, tz)
     # Compare and pick in UTC, NOT in `tz`: two datetimes sharing one ZoneInfo
     # compare by WALL time, so on the night clocks fall back a slot that already
     # passed (01:30 EDT) reads as later than 01:00 EST and is picked again.
     now_utc = now.astimezone(timezone.utc)
     future = [c for c in candidates if c.astimezone(timezone.utc) > now_utc]
     return min(future, key=lambda c: c.astimezone(timezone.utc)) if future else None
+
+
+def _previous_fire_time(times: List[Tuple[int, int]], tz, now: datetime) -> Optional[datetime]:
+    """The most recent slot at or before `now`, compared in UTC for the same
+    fall-back reason as _next_fire_time. `now` may be in any zone; its date is
+    taken in `tz`, and yesterday's slots are included so a time before the
+    day's first slot finds the previous evening's."""
+    if not times:
+        return None
+    today = now.astimezone(tz).date()
+    candidates = _slots_on(today - timedelta(days=1), times, tz) + _slots_on(today, times, tz)
+    now_utc = now.astimezone(timezone.utc)
+    past = [c for c in candidates if c.astimezone(timezone.utc) <= now_utc]
+    return max(past, key=lambda c: c.astimezone(timezone.utc)) if past else None
 
 
 def _scheduler_close_db():
@@ -7494,7 +10009,8 @@ def _scheduler_loop(plugin_ref, stop_event):
                     _scheduler_sleep(stop_event, 300)
                     continue
                 tz = _resolve_tz(settings.get("local_timezone", "UTC"))
-                times = _parse_scheduled_times(settings.get("scheduled_times", "0400"))
+                times = _parse_scheduled_times(
+                    settings.get("scheduled_times", _DEFAULT_SCHEDULED_TIMES))
                 if not times:
                     logger.warning("[ranked_matchups] no valid scheduled_times; idling 5m")
                     _scheduler_sleep(stop_event, 300)
@@ -7555,8 +10071,11 @@ def _scheduler_loop(plugin_ref, stop_event):
 # is exactly the apply hammering that wedges Dispatcharr's login worker.
 _SCHEDULER_SLOT_KEY_PREFIX = f"plugins:{PLUGIN_KEY}:scheduler:slot:"
 # Long enough that no worker can re-claim a slot it already ran, short
-# enough that the keys clean themselves up.
-_SCHEDULER_SLOT_CLAIM_TTL_SECONDS = 24 * 3600
+# enough that the keys clean themselves up, AND longer than a day plus
+# _SCHEDULER_STALE_GRACE_SECONDS: _scheduler_staleness reads the claim of the
+# most recent slot, which with a single daily time can be that long ago, and
+# an expired claim would read as "no scheduler ran it". DO NOT cut back to 24h.
+_SCHEDULER_SLOT_CLAIM_TTL_SECONDS = 48 * 3600
 _SCHEDULED_RETRY_SECONDS = 60
 # How long the slot's owner keeps retrying before giving up and recording
 # the skip. Also capped at the next slot (see _scheduled_retry_deadline), so a
@@ -7610,7 +10129,7 @@ def _scheduled_retry_deadline(slot: datetime, times: List[Tuple[int, int]], tz) 
 
 
 # Run kinds that do a scheduled slot's whole job (refresh + apply).
-_PIPELINE_RUN_KINDS = frozenset({"auto_pipeline", "scheduled_auto_pipeline", "m3u_rematch"})
+_PIPELINE_RUN_KINDS = frozenset({"auto_pipeline", tasks.SCHEDULED_RUN_KIND, "m3u_rematch"})
 
 
 def _slot_already_covered(slot: datetime) -> bool:
@@ -7641,31 +10160,43 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
     wait for the same reason the loop re-reads them after its long sleep
     (#223): a user can turn auto-refresh off while the run is waiting.
     """
+    woke = datetime.now(timezone.utc)  # before the claim, which can stall on Redis
     claim = _claim_scheduled_slot(slot)
     if claim == _SLOT_ELSEWHERE:
         logger.info("[ranked_matchups] scheduled slot %s is owned by another worker",
                     slot.isoformat())
         return False
     deadline = _scheduled_retry_deadline(slot, times, tz)
+    # Said when the run is given up WITHOUT an attempt because it is already
+    # past the deadline. DO NOT use _run_lock_unavailable_reason for that case:
+    # nothing tried the lock, and with it free that read "the run lock could
+    # not be taken, and is free now". Blame the wake only if the wake WAS late:
+    # the slot claim can itself stall past a short deadline (Dispatcharr's
+    # RedisClient retries its connect before giving up).
+    late = (f"the scheduler woke after {deadline.isoformat()}, too late to start it"
+            if woke > deadline else
+            f"it was already past {deadline.isoformat()} when it could have started")
     if claim == _SLOT_UNKNOWN:
         if datetime.now(timezone.utc) <= deadline:
             tasks.run_scheduled_pipeline(settings)
         else:
-            tasks.record_skipped_run("scheduled_auto_pipeline")
+            tasks.record_skipped_run(tasks.SCHEDULED_RUN_KIND, late)
         return False
+    attempted = False
     while True:
         # Checked BEFORE each attempt too, so a late wake never starts this
         # slot's run past its deadline (into the next slot's time).
-        if datetime.now(timezone.utc) <= deadline and \
-                tasks.run_scheduled_pipeline(settings, record_skip=False):
-            return False
+        if datetime.now(timezone.utc) <= deadline:
+            attempted = True
+            if tasks.run_scheduled_pipeline(settings, record_skip=False):
+                return False
         if datetime.now(timezone.utc) + timedelta(seconds=_SCHEDULED_RETRY_SECONDS) > deadline:
+            reason = _run_lock_unavailable_reason() if attempted else late
             logger.warning(
-                "[ranked_matchups] scheduled run for %s did NOT run: the run lock was "
-                "still held at %s (another refresh, apply or reap kept it, or Redis is "
-                "unreachable). The next scheduled time picks it up.",
-                slot.isoformat(), deadline.isoformat())
-            tasks.record_skipped_run("scheduled_auto_pipeline")
+                "[ranked_matchups] scheduled run for %s did NOT run (deadline %s): %s. "
+                "The next scheduled time picks it up.",
+                slot.isoformat(), deadline.isoformat(), reason)
+            tasks.record_skipped_run(tasks.SCHEDULED_RUN_KIND, reason)
             return False
         logger.info("[ranked_matchups] scheduled run for %s waiting %ds for the run lock",
                     slot.isoformat(), _SCHEDULED_RETRY_SECONDS)
@@ -7700,10 +10231,6 @@ _SCHEDULER_LOCK_KEY = f"plugins:{PLUGIN_KEY}:scheduler:lock"
 # pre-pass; see _resolve_max_games, which clamps max_games against this budget.
 _SCHEDULER_LOCK_TTL_SECONDS = 90 * 60
 
-# Sentinel returned by _try_acquire_scheduler_lock on the fail-open path: the
-# caller may proceed but holds nothing, so releasing must be a no-op.
-_LOCK_NOT_HELD = "__not_held__"
-
 # Atomic compare-and-delete. Plain get-then-delete is racy: the lock can expire
 # and be re-acquired between the two calls, which is the exact bug this replaces.
 _RELEASE_LOCK_LUA = """
@@ -7714,9 +10241,11 @@ return 0
 """
 
 
-def _action_reap_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
+def _action_reap_locked(settings: Dict[str, Any], task_id: str = "reap_now") -> Dict[str, Any]:
     """HTTP/scheduler-facing reap: takes the cross-worker lock, runs the body
-    OUT OF PROCESS.
+    OUT OF PROCESS. `task_id` names the trigger in the lock's holder record
+    (#239): the reaper loop passes its own, the Reap now button keeps the
+    default.
 
     Reaping deletes Channels, ChannelStreams and EPGData and then re-applies,
     so it is exactly as destructive as apply and races it just as badly. It
@@ -7728,12 +10257,12 @@ def _action_reap_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
     bulk DB writes wedged a gevent worker even after the transaction was
     shrunk to sub-second, and reap ends by calling apply.
     """
-    token = _try_acquire_scheduler_lock(destructive=True)
+    token = _try_acquire_scheduler_lock("reap", task_id)
     if not token:
         return {
             "status": "ok",
             "lock_busy": True,
-            "message": "Another refresh/apply is in flight; skipping this reap.",
+            "message": f"Skipping this reap: {_run_lock_unavailable_reason()}.",
         }
     try:
         return tasks.run_pipeline_subprocess(tasks.ACTION_REAP, settings)
@@ -7800,6 +10329,38 @@ def _next_reap_delay(settings: Dict[str, Any]) -> float:
 _HANDOFF_RECHECK_SECONDS = 300
 
 
+def _cached_live_starts() -> Tuple[Dict[str, Optional[datetime]], set]:
+    """What the cache says NOW about each game, for _run_due_stops: (marker ->
+    the start of its live block, from the games; the markers only the bench
+    lists). The FIRST row of a marker wins, as apply keeps it
+    (_unique_by_marker). A cache that cannot be read this way (not a list, a
+    row that is not a mapping) yields nothing rather than raising: an
+    exception here ended the reaper's pass, and a stop that came due
+    meanwhile was lost to its grace window. Nothing known means the stops run
+    as planned, as before this check existed."""
+    starts: Dict[str, Optional[datetime]] = {}
+    benched: set = set()
+    try:
+        cache = _read_cache()
+        for key in ("games", "bench"):
+            rows = cache.get(key)
+            for g in (rows if isinstance(rows, list) else []):
+                if not isinstance(g, dict):
+                    continue
+                marker = _build_marker_key(g)
+                if marker in starts or marker in benched:
+                    continue
+                if key == "bench":
+                    benched.add(marker)
+                    continue
+                start_dt = parse_iso_utc(g.get("start_time_utc"))
+                starts[marker] = _live_window(g, start_dt)[0] if start_dt is not None else None
+    except Exception:
+        logger.exception("[ranked_matchups] handoff check could not read the cache")
+        return {}, set()
+    return starts, benched
+
+
 def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> int:
     """Stop our running recordings whose planned handoff time has come (#216
     phase C). Every worker's reaper loop runs this; each stop is a locked,
@@ -7848,6 +10409,33 @@ def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> 
                     logger.warning(
                         "[ranked_matchups] handoff for recording %s skipped: %s is no "
                         "longer set to record", rid, entry.get("taker_name") or taker)
+                    continue
+                # The taker must still start when the plan said. DO NOT trust
+                # the taker's scheduled recording for that: a refresh that
+                # moved the game later leaves the row at its old time until
+                # the next apply moves it, and the reaper runs in between (the
+                # apply's network pre-pass alone can take minutes). It stopped
+                # the holder for a game now hours away (batch interaction
+                # review). A taker the cache does not list (a source outage,
+                # #224) gives no sign the handoff moved, so it still runs.
+                # Read here, per stop, with the holder locked, so a refresh
+                # that lands mid-pass is seen. A benched taker is no longer
+                # planned (apply cancels its recording), so it gets no slot.
+                cached_starts, benched = _cached_live_starts()
+                if taker in benched:
+                    logger.warning(
+                        "[ranked_matchups] handoff for recording %s skipped: %s is on the "
+                        "bench now; the next apply replans it", rid,
+                        entry.get("taker_name") or taker)
+                    continue
+                taker_start = cached_starts.get(taker)
+                planned_at = recording_policy.entry_at(entry)
+                if taker_start is not None and planned_at is not None and taker_start > planned_at:
+                    logger.warning(
+                        "[ranked_matchups] handoff for recording %s skipped: %s now starts "
+                        "at %s, after the planned handoff; the next apply replans it", rid,
+                        entry.get("taker_name") or taker,
+                        taker_start.astimezone(tz).strftime("%-I:%M %p"))
                     continue
                 cp = recording_policy.stopped_properties(rec.custom_properties, now, taker)
                 if cp is None:
@@ -8040,6 +10628,9 @@ def _reaper_loop(plugin_ref, stop_event):
                     return
                 settings = plugin_ref.get_current_settings()
                 _run_due_stops(settings)
+                # Never raises. Catches a scheduler thread that died while
+                # this one lives; one log line per missed slot (#252).
+                _warn_if_scheduler_stale(settings)
                 # Its own try: a failure here must not cost this tick's reap.
                 try:
                     _maybe_rematch_after_m3u(settings)
@@ -8047,7 +10638,7 @@ def _reaper_loop(plugin_ref, stop_event):
                     logger.exception("[ranked_matchups] M3U rematch check failed")
                 if reap_delay is None or delay + 1 < reap_delay:
                     continue
-                result = _action_reap_locked(settings)
+                result = _action_reap_locked(settings, task_id=f"reaper-{os.getpid()}")
                 if result.get("reaped") or result.get("promoted"):
                     logger.info(
                         "[ranked_matchups] reaper: %s", result.get("message", ""),
@@ -8069,9 +10660,391 @@ def _reaper_loop(plugin_ref, stop_event):
         _scheduler_close_db()
 
 
-def _try_acquire_scheduler_lock(destructive: bool = True) -> Optional[str]:
+def _process_label() -> str:
+    """Which process this is, for the lock's holder record (#239).
+
+    The plugin runs in more processes than the uwsgi workers: every process
+    whose Django start discovers plugins builds a Plugin and starts its
+    threads, Celery workers and daphne included, and those keep whatever code
+    they loaded until the container restarts. A pid alone does not say which
+    of them holds the lock.
+
+    The label is copied into Redis, the log, toasts and last_run.json, so it
+    is built from an ALLOWLIST, never from arbitrary argv: the program name,
+    any script name (`manage.py`), the Celery and Django subcommands that say
+    which process this is, and a Celery `-Q` queue list. DO NOT loosen this to
+    "short arguments" or "arguments that look like flags": `-p hunter2` and
+    `--token=abc` are both short, and a `manage.py shell -c "<script>"` exec
+    can carry anything."""
+    wid = _uwsgi_worker_id()
+    if wid is not None:
+        return f"uwsgi worker {wid}" if wid > 0 else "uwsgi (not a worker)"
+    argv = [str(a) for a in (sys.argv or [])]
+    if not argv:
+        return "?"
+    parts = [os.path.basename(argv[0])]
+    for prev, arg in zip(argv[1:], argv[2:] + [""]):
+        if _SCRIPT_NAME_RE.fullmatch(os.path.basename(prev)):
+            parts.append(os.path.basename(prev))
+        elif prev in _PROCESS_LABEL_WORDS:
+            parts.append(prev)
+            if prev == "-Q" and _QUEUE_LIST_RE.fullmatch(arg):
+                parts.append(arg)
+    return " ".join(parts)[:120] or "?"
+
+
+def _uwsgi_worker_id() -> Optional[int]:
+    """uwsgi.worker_id() when this process runs inside uwsgi, else None.
+
+    The `uwsgi` module is built into the uwsgi binary's embedded interpreter
+    and exists nowhere else: measured on Tower 2026-10-11, the venv python
+    that runs Celery, daphne and manage.py finds no `uwsgi` module (pip's
+    uWSGI ships only `uwsgidecorators.py`, which imports it). So this, NOT an
+    environment variable, is the test. DO NOT switch to UWSGI_* variables:
+    uwsgi exports UWSGI_ORIGINAL_PROC_NAME and UWSGI_RELOADS to its
+    attach-daemons, so Celery and daphne carry them and the workers do not.
+
+    0 is the master (or a mule), 1..N a worker. A uwsgi process whose id
+    cannot be read returns 0 too, so callers treat it as "not certainly a
+    worker"."""
+    try:
+        import uwsgi  # type: ignore[import-not-found]  # only importable under uwsgi
+    except ImportError:
+        return None
+    try:
+        return int(uwsgi.worker_id())
+    except Exception:  # noqa: BLE001 - any failure means "cannot tell"
+        return 0
+
+
+# Programs whose processes run plugin discovery but serve no plugin requests:
+# Celery's worker_process_init discovers in every prefork child and in the
+# thread-pool worker, daphne at Django start. None of them may run the
+# scheduler or the reaper (#252).
+_THREADLESS_PROGRAMS = frozenset({"celery", "daphne"})
+# Programs that serve Dispatcharr's web app outside uwsgi (the legacy
+# entrypoint.aio.sh runs gunicorn). They run the threads, as uwsgi workers do.
+_WEB_SERVER_PROGRAMS = frozenset({"gunicorn"})
+
+
+def _program_name(argv: Sequence[str]) -> str:
+    """The program a process was started as: argv[0]'s basename, or the
+    package for `python -m <pkg>` (argv[0] is then <pkg>/__main__.py)."""
+    if not argv:
+        return ""
+    first = str(argv[0])
+    name = os.path.basename(first)
+    if name == "__main__.py":
+        name = os.path.basename(os.path.dirname(first))
+    return name
+
+
+def _thread_host() -> Tuple[bool, bool]:
+    """Should THIS process run the scheduler and reaper? (start, certain).
+
+    Only the processes that serve plugin requests run them: uwsgi workers (or
+    gunicorn / runserver, where Dispatcharr is served that way). Before #252
+    every process that ran plugin discovery started both threads: every
+    Celery prefork child, the Celery thread worker, daphne and any
+    `manage.py` exec. Those copies took part in every scheduled slot on code
+    the plugin reload never reaches, and a Celery copy that won a slot logged
+    nothing, because Celery drops this plugin's INFO lines.
+
+    A WRONG "no" here means no scheduler anywhere, which is worse than an
+    extra copy (the slot claim makes an extra copy harmless). So only
+    processes positively identified as non-serving decline; anything the
+    function cannot place (uwsgi with worker id 0, an unknown program)
+    STARTS the threads and returns certain=False so the caller logs a
+    WARNING. DO NOT invert that default to "decline unless sure". The
+    pipeline child is handled before this is called (PIPELINE_CHILD_ENV)."""
+    wid = _uwsgi_worker_id()
+    if wid is not None:
+        return True, wid > 0
+    argv = [str(a) for a in (sys.argv or [])]
+    prog = _program_name(argv)
+    if prog in _THREADLESS_PROGRAMS:
+        return False, True
+    if prog in _WEB_SERVER_PROGRAMS:
+        return True, True
+    if prog == "manage.py":
+        return (len(argv) > 1 and argv[1] == "runserver"), True
+    return True, False
+
+
+# ---------- is any scheduler running at all? (#252) ----------
+#
+# With the threads confined to uwsgi workers, a detection that is wrong
+# everywhere would leave NO scheduler running, and nothing else would say so:
+# the guide just stops changing. So the claim every firing scheduler makes
+# (_claim_scheduled_slot) doubles as a heartbeat. If the most recent slot that
+# should have fired (allowing the grace below) has no claim, no process ran
+# its scheduler then, and Show current state and the log say so.
+#
+# The watch key records WHEN this check started expecting claims for the
+# current schedule, so a fresh install, a Redis restart, or a schedule just
+# turned on or changed does not count slots from before it as missed.
+_SCHEDULER_WATCH_KEY = f"plugins:{PLUGIN_KEY}:scheduler:watch"
+# A scheduler claims its slot the moment it wakes; this covers a late wake
+# and Dispatcharr's RedisClient retrying its connect.
+_SCHEDULER_STALE_GRACE_SECONDS = 15 * 60
+
+
+def _scheduler_staleness(settings: Dict[str, Any],
+                         now: Optional[datetime] = None) -> Optional[str]:
+    """A WARNING line when no scheduler claimed the most recent slot it should
+    have, else None. None also when the answer is unknown (Redis unreachable:
+    Show current state already reports that through the run lock line).
+
+    `settings` must resolve auto_refresh_enabled, scheduled_times and
+    local_timezone as the scheduler does, which the context settings
+    (manifest defaults merged in) and the raw stored dict both do, because
+    the scheduler falls back to the manifest defaults. Never raises."""
+    try:
+        enabled = bool(settings.get("auto_refresh_enabled", False))
+        tz = _resolve_tz(settings.get("local_timezone", "UTC"))
+        times = _parse_scheduled_times(
+            settings.get("scheduled_times", _DEFAULT_SCHEDULED_TIMES), quiet=True)
+        now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        from core.utils import RedisClient
+        # ONE connect attempt. DO NOT use get_client()'s default retries:
+        # Dispatcharr's RedisClient sleeps 1+2+4+8 s between them when Redis
+        # is down, and this status line runs inside Show current state (after
+        # _read_run_lock has already waited that out once) and inside Celery's
+        # worker_process_init. A failed attempt is not cached, so the next
+        # caller retries normally; a live client is cached whatever the args.
+        r = RedisClient.get_client(max_retries=1)
+        if r is None:
+            return None
+        # Built from RESOLVED values: the reaper reads the raw stored dict and
+        # Show current state the merged one, and two spellings of the same
+        # schedule would otherwise keep resetting each other's watch.
+        sig = json.dumps([enabled, times, str(tz)])
+        watch: Dict[str, Any] = {}
+        try:
+            raw = r.get(_SCHEDULER_WATCH_KEY)
+            watch = json.loads(raw) if raw else {}
+        except ValueError:
+            watch = {}
+        if not isinstance(watch, dict) or watch.get("sig") != sig:
+            r.set(_SCHEDULER_WATCH_KEY, json.dumps({"sig": sig, "since": now_utc.isoformat()}))
+            return None
+        if not enabled or not times:
+            return None
+        expected = _previous_fire_time(
+            times, tz, now_utc - timedelta(seconds=_SCHEDULER_STALE_GRACE_SECONDS))
+        since = parse_iso_utc(watch.get("since"))
+        if expected is None or since is None or since > expected.astimezone(timezone.utc):
+            return None
+        if r.exists(_SCHEDULER_SLOT_KEY_PREFIX + expected.isoformat()):
+            return None
+        # A SCHEDULED run in progress can be the scheduler itself, still
+        # inside an earlier slot's pipeline when this one came due (a single
+        # worker with close-together times): busy, not missing. Only that
+        # kind: a manual run or a reap holding the lock says nothing about
+        # whether any scheduler is alive, and would otherwise hide a dead one
+        # for as long as people keep clicking.
+        holder = r.get(_SCHEDULER_LOCK_KEY)
+        try:
+            holder_kind = json.loads(holder).get("kind") if holder else None
+        except (ValueError, AttributeError):
+            holder_kind = None
+        if holder_kind == tasks.SCHEDULED_RUN_KIND:
+            return None
+        # The same case once that run has ended: the busy scheduler picks its
+        # next slot from the run's END (_next_fire_time from now), so it never
+        # claims the slot it was busy through. A scheduled run that started
+        # before `expected` and finished after it (less a minute for the lock
+        # release and cleanup after finished_at is stamped) accounts for the
+        # missing claim; the next slot is judged on its own. A finish in the
+        # FUTURE is a bad clock or file, never a finished run: it must not
+        # hide every later slot.
+        last = tasks.read_last_run() or {}
+        if last.get("kind") == tasks.SCHEDULED_RUN_KIND:
+            began = parse_iso_utc(last.get("started_at"))
+            ended = parse_iso_utc(last.get("finished_at"))
+            due = expected.astimezone(timezone.utc)
+            if (began is not None and ended is not None and ended <= now_utc
+                    and began <= due <= ended + timedelta(seconds=60)):
+                return None
+    except Exception:  # noqa: BLE001 - a status line must never break its caller
+        return None
+    when = _fmt_run_time(expected.astimezone(timezone.utc).isoformat(), tz)
+    return (
+        f"WARNING: no scheduler started the {when} run: no process claimed that "
+        "slot, so automatic Refresh + apply may not be running anywhere. If "
+        "Dispatcharr was not running then, the next scheduled run clears this; "
+        "otherwise check the log for 'scheduler thread started' (one per uwsgi "
+        "worker) and restart Dispatcharr."
+    )
+
+
+def _warn_if_scheduler_stale(settings: Dict[str, Any]) -> None:
+    """Log _scheduler_staleness at WARNING, once per missed slot per process.
+
+    Called on every reaper tick, and from Plugin.__init__ in the processes
+    that start no threads (Celery's WARNING lines reach the log, its INFO
+    lines do not), so a scheduler that is missing everywhere is still
+    reported by the processes that are not supposed to run one."""
+    line = _scheduler_staleness(settings)
+    reg = _scheduler_registry()
+    if line is None or getattr(reg, "stale_warned", None) == line:
+        return
+    reg.stale_warned = line
+    logger.warning("[ranked_matchups] %s (pid=%s, %s)", line[len("WARNING: "):],
+                   os.getpid(), _process_label())
+
+
+# What _process_label may copy out of argv. See its docstring.
+_PROCESS_LABEL_WORDS = frozenset({"worker", "beat", "shell", "-Q"})
+_QUEUE_LIST_RE = re.compile(r"[A-Za-z0-9_,]{1,40}")
+_SCRIPT_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,40}\.py")
+
+
+def _new_lock_value(kind: str, task_id: str, version: Optional[str] = None) -> str:
+    """The VALUE stored under the run lock: who holds it, as JSON (#239).
+
+    It used to be a bare uuid, so a run that found the lock held could only
+    say "another refresh / auto_pipeline is in flight, or Redis is
+    unreachable", and a 16:00 slot waited seven minutes on a holder nothing
+    could name. The value is still unique per acquire (the `token` field), and
+    the WHOLE string is what release compares, so the compare-and-delete
+    ownership guarantee is unchanged."""
+    return json.dumps({
+        "token": uuid.uuid4().hex,
+        "kind": kind,
+        "task_id": task_id or "",
+        "pid": os.getpid(),
+        "process": _process_label(),
+        "thread": threading.current_thread().name,
+        "version": version or Plugin.version,
+        "acquired_at": datetime.now(timezone.utc).isoformat(),
+    }, sort_keys=True)
+
+
+def _parse_lock_value(raw: Any) -> Optional[Dict[str, Any]]:
+    """The holder record from a lock value, or None for a value that is not
+    one: a bare token written by a plugin version from before #239 (still
+    possible in any process the reload did not reach), or garbage."""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        rec = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+def _describe_lock_holder(raw: Any, now: Optional[datetime] = None) -> str:
+    """One line naming whoever holds the run lock, for logs and toasts.
+
+    NEVER raises: it runs on the contended path of a daemon thread (and inside
+    Show current state and the busy apply toast), and the value it reads was
+    written by whichever plugin version, in whichever process, took the lock."""
+    try:
+        return _describe_lock_record(raw, now)
+    except Exception:  # noqa: BLE001 - see docstring
+        return "a holder whose lock value could not be read"
+
+
+def _describe_lock_record(raw: Any, now: Optional[datetime]) -> str:
+    rec = _parse_lock_value(raw)
+    if rec is None:
+        return ("a plugin version from before holder records (#239), so no "
+                "details: likely a thread still running old code in a process "
+                "the plugin reload did not reach, such as a Celery worker")
+    kind = str(rec.get("kind") or "?")
+    label = tasks.RUN_KIND_LABELS.get(kind, kind)
+    bits = [label]
+    if rec.get("task_id"):
+        bits.append(f"task {rec['task_id']}")
+    bits.append(f"pid {rec.get('pid', '?')} ({rec.get('process') or '?'})")
+    if rec.get("version"):
+        bits.append(f"plugin {rec['version']}")
+    acquired = parse_iso_utc(rec.get("acquired_at"))
+    if acquired is not None:
+        age = ((now or datetime.now(timezone.utc)) - acquired).total_seconds()
+        bits.append(f"held {_fmt_duration(age)}")
+    return ", ".join(bits)
+
+
+# The skip reason when nothing better is known: the Redis helper could not be
+# imported, or the skip was recorded by code from before #239. One copy, shared
+# by _run_lock_unavailable_reason and the Show current state skip note.
+_LOCK_REASON_UNRECORDED = "another run held the lock, or Redis was unreachable"
+
+# What _read_run_lock reports.
+_LOCK_FREE = "free"
+_LOCK_HELD = "held"
+_LOCK_UNREACHABLE = "unreachable"
+_LOCK_UNKNOWN = "unknown"
+
+
+def _read_run_lock() -> Tuple[str, Optional[str]]:
+    """(state, holder description) for the run lock right now. Never raises.
+
+    UNKNOWN only when Dispatcharr's Redis helper cannot even be imported (the
+    tests), which says nothing. Everything else that fails is UNREACHABLE,
+    including get_client() returning None: Dispatcharr's RedisClient gives up
+    after its connect retries and returns None rather than raising, so DO NOT
+    read this through tasks._redis(), which folds that case into "no client"
+    and would hide exactly the outage this exists to report."""
+    try:
+        from core.utils import RedisClient
+    except ImportError:
+        return _LOCK_UNKNOWN, None
+    except Exception as e:  # noqa: BLE001 - the helper exists but cannot load
+        return _LOCK_UNREACHABLE, str(e)
+    try:
+        r = RedisClient.get_client()
+        if r is None:
+            return _LOCK_UNREACHABLE, "no Redis connection"
+        raw = r.get(_SCHEDULER_LOCK_KEY)
+    except Exception as e:
+        return _LOCK_UNREACHABLE, str(e)
+    # `is None`, not falsiness: an EMPTY value is still a held key (SET NX
+    # refuses against it), and reporting it as free would contradict the
+    # refusal the caller just got.
+    if raw is None:
+        return _LOCK_FREE, None
+    return _LOCK_HELD, _describe_lock_holder(raw)
+
+
+def _run_lock_unavailable_reason() -> str:
+    """Why a caller just failed to take the lock, worded to finish a sentence.
+    Re-reads the lock, so the holder can have changed (or left) since the
+    attempt; that is said rather than guessed."""
+    state, detail = _read_run_lock()
+    if state == _LOCK_HELD:
+        return f"the run lock is held by {detail}"
+    if state == _LOCK_UNREACHABLE:
+        return "Redis is unreachable, so the run lock cannot be taken"
+    if state == _LOCK_FREE:
+        # Not "someone released it": a Redis blip during the attempt reads
+        # the same way, and nothing here saw a holder.
+        return "the run lock could not be taken, and is free now"
+    return _LOCK_REASON_UNRECORDED
+
+
+def _try_acquire_scheduler_lock(kind: str = "", task_id: str = "", *,
+                                destructive: Optional[bool] = None) -> Optional[str]:
     """Cross-worker mutex via Redis. Returns the caller's TOKEN on success (a
     truthy string), or None if the lock is held elsewhere / we refuse to run.
+
+    `kind` and `task_id` name the caller in the holder record stored as the
+    lock's value (#239), which is what a contended attempt logs and Show
+    current state prints. Use the RUN_KIND_LABELS ids (plus "apply" and
+    "reap").
 
     Pass the returned token to _release_scheduler_lock. DO NOT stash it in a
     module global: the scheduler daemon thread and an HTTP request greenlet can
@@ -8079,43 +11052,69 @@ def _try_acquire_scheduler_lock(destructive: bool = True) -> Optional[str]:
     one clobber the other's token and turn its release into a silent no-op,
     leaking the lock until the TTL expires.
 
-    The VALUE stored in Redis is that unique token so release can prove
+    The VALUE stored in Redis is unique per acquire so release can prove
     ownership. DO NOT go back to a constant: with one, a run that overruns the
     TTL deletes the lock belonging to the run that replaced it, and a third run
     then starts while the second is still writing.
 
-    `destructive` selects the behavior when REDIS ITSELF is unreachable, which
-    is a real judgement call rather than an oversight:
-      - destructive=False (refresh): fail OPEN, returning _LOCK_NOT_HELD.
-        Refresh only reads upstream APIs and rewrites cache.json, so a duplicate
-        run wastes API quota but cannot corrupt anything. Silently freezing all
-        refreshes because Redis blipped is the worse outcome.
-      - destructive=True (apply / auto_pipeline, the default): fail CLOSED,
-        returning None. These delete Channels and ProgramData and renumber the
-        guide. Two concurrent runs can drop channels the other just created. A
-        skipped cycle is recoverable; an interleaved apply is not.
+    FAILS CLOSED FOR EVERY CALLER when Redis is unreachable, refresh included
+    (#199). DO NOT reintroduce a fail-open path for "non-destructive" refresh:
+    refresh PUBLISHES cache.json, and cache.json is what apply and reap delete
+    by. A reap reads the cache, rewrites it, runs apply (which reads it AGAIN)
+    and then writes its own copy back, so a refresh landing in between makes
+    apply delete against a generation the reap never saw and is then erased by
+    the reap's write. Redis going away mid-run is exactly when the destructive
+    holder is still running, so "no lock" is not "no one is writing". The cost
+    is that no refresh runs while Redis is down, which costs little: apply,
+    reap and the scheduled pipeline already refuse to run then, so a refreshed
+    cache could not reach the guide anyway, and Dispatcharr itself (streams,
+    Celery) does not work without Redis. The refusal is logged at ERROR and
+    Show current state says Redis is unreachable, so it is never silent.
+
+    `destructive` is accepted ONLY for callers running OLDER code, and it
+    changes nothing (they fail closed too). DO NOT remove it while a release
+    from before #199 can be upgraded in place: a plugin reload replaces this
+    module in sys.modules, but a thread that was already running is kept and
+    runs the tasks.py it loaded, whose _run_under_lock imports this function
+    lazily and calls it as `_try_acquire_scheduler_lock(destructive=...)`. A
+    TypeError there lands after that thread has claimed the scheduled slot, so
+    the slot then runs nowhere. Such a caller passes no kind: destructive=False
+    was a bare refresh, True one of the refresh + apply kinds.
     """
-    token = uuid.uuid4().hex
+    version = None
+    if destructive is not None:
+        kind = kind or ("refresh" if destructive is False else "auto_pipeline")
+        task_id = task_id or "older plugin code"
+        version = f"older than {Plugin.version}"
+    value = _new_lock_value(kind, task_id, version)
     try:
         from core.utils import RedisClient
         r = RedisClient.get_client()
         acquired = bool(r.set(
-            _SCHEDULER_LOCK_KEY, token, nx=True, ex=_SCHEDULER_LOCK_TTL_SECONDS,
+            _SCHEDULER_LOCK_KEY, value, nx=True, ex=_SCHEDULER_LOCK_TTL_SECONDS,
         ))
     except Exception as e:
-        if destructive:
-            logger.error(
-                "[ranked_matchups] redis lock unavailable (%s); REFUSING to run a "
-                "destructive action unserialized (two concurrent applies can drop "
-                "channels). Retry once Redis is reachable.", e,
-            )
-            return None
-        logger.warning(
-            "[ranked_matchups] redis lock unavailable (%s); proceeding without it "
-            "(non-destructive action, worst case is duplicate upstream fetches)", e,
+        logger.error(
+            "[ranked_matchups] redis lock unavailable (%s); REFUSING to run %s "
+            "unserialized (an unlocked run can publish or delete against a cache "
+            "another run is using). Retry once Redis is reachable.", e, kind,
         )
-        return _LOCK_NOT_HELD
-    return token if acquired else None
+        return None
+    if acquired:
+        logger.info("[ranked_matchups] run lock taken by %s (task %s, pid %s)",
+                    kind, task_id or "-", os.getpid())
+        return value
+    try:
+        holder = r.get(_SCHEDULER_LOCK_KEY)
+        who = (_describe_lock_holder(holder) if holder is not None
+               else "a run that released it before it could be read")
+    except Exception as e:
+        who = f"a holder that could not be read ({e})"
+    logger.info(
+        "[ranked_matchups] run lock wanted by %s (task %s, pid %s) is held by %s",
+        kind, task_id or "-", os.getpid(), who,
+    )
+    return None
 
 
 def _release_scheduler_lock(token: Optional[str]) -> None:
@@ -8126,11 +11125,12 @@ def _release_scheduler_lock(token: Optional[str]) -> None:
     run start while the second was still applying. The token check makes an
     overrun release a no-op instead.
 
-    `token` is whatever _try_acquire_scheduler_lock returned. None or
-    _LOCK_NOT_HELD means nothing was acquired, so there is nothing to release.
+    `token` is whatever _try_acquire_scheduler_lock returned. None means
+    nothing was acquired, so there is nothing to release.
     """
-    if not token or token == _LOCK_NOT_HELD:
+    if not token:
         return
+    rec = _parse_lock_value(token) or {}
     try:
         from core.utils import RedisClient
         r = RedisClient.get_client()
@@ -8142,6 +11142,12 @@ def _release_scheduler_lock(token: Optional[str]) -> None:
                 "If this recurs, the TTL or max_games needs revisiting.",
                 _SCHEDULER_LOCK_TTL_SECONDS,
             )
+            return
+        acquired = parse_iso_utc(rec.get("acquired_at"))
+        held = (_fmt_duration((datetime.now(timezone.utc) - acquired).total_seconds())
+                if acquired is not None else "?")
+        logger.info("[ranked_matchups] run lock released by %s (task %s) after %s",
+                    rec.get("kind", "?"), rec.get("task_id") or "-", held)
     except Exception as e:
         logger.warning("[ranked_matchups] scheduler lock release failed: %s", e)
 
@@ -8169,6 +11175,83 @@ _ACTION_HANDLERS = {
 }
 
 
+def _read_settings_migrating() -> Optional[Dict[str, Any]]:
+    """The stored settings, with the merge #208 made written into them once.
+
+    Returns the (migrated) stored dict, or None when there is no config row or
+    Dispatcharr is not importable. Raises on a DB error; callers decide.
+
+    The runtime does not NEED the write: every reader resolves a merged
+    setting through merged_settings, which falls back to the legacy keys. The
+    MODAL does: it shows `value ?? field.default`, so without a stored value
+    for the new field it would show "Off" for a league a legacy toggle still
+    runs, and blank weights while the old tuned ones are in force. Doing it on
+    every raw read too means the scheduler and reaper always see the migrated
+    dict, which matters once a save has stored a new field at its default
+    (only the raw dict can tell that was saved; see merged_settings).
+
+    The write is a compare-and-swap on the whole settings JSON
+    (`.filter(settings=<what we read>).update(...)`): a user saving the form
+    between our read and our write makes the filter match nothing, so their
+    save is never overwritten; we then re-read and return their dict, and it
+    is migrated on the next read. Anything but a successful write returns
+    what is STORED, never an in-memory migration, so this path and run()
+    always resolve the same row. `.update()` skips signals, which is fine:
+    nothing listens to PluginConfig saves for settings.
+    """
+    try:
+        from apps.plugins.models import PluginConfig
+        from django.db import transaction
+    except ImportError:
+        return None  # not inside Dispatcharr (tests, offline tools)
+    pc = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
+    if pc is None:
+        return None
+    stored = pc.settings if isinstance(pc.settings, dict) else {}
+    migrated = merged_settings.migrate_stored_settings(stored)
+    if migrated is None:
+        return dict(stored)
+    try:
+        # A savepoint, so a failed write cannot poison a transaction the
+        # loader might be running discovery inside.
+        with transaction.atomic():
+            written = PluginConfig.objects.filter(
+                pk=pc.pk, settings=stored,
+            ).update(settings=migrated)
+    except Exception as e:  # noqa: BLE001
+        # Return what is STORED, not the in-memory migration: run() reads the
+        # stored dict too, and the two paths must resolve the same settings
+        # (a saved new key at its default reads differently before and after
+        # migration). The next read retries the write.
+        logger.warning("[ranked_matchups] could not save migrated settings: %s", e)
+        return dict(stored)
+    if written:
+        logger.info(
+            "[ranked_matchups] migrated saved settings to the merged layout "
+            "(#208): %s",
+            ", ".join(sorted(k for k in migrated if migrated.get(k) != stored.get(k))),
+        )
+        return migrated
+    # Lost the race: somebody saved in between. Their dict is the truth, so
+    # re-read it rather than hand back the snapshot they just replaced; it is
+    # migrated on the next read.
+    fresh = PluginConfig.objects.filter(pk=pc.pk).first()
+    if fresh is None or not isinstance(fresh.settings, dict):
+        return {}
+    return dict(fresh.settings)
+
+
+def _migrate_stored_settings() -> None:
+    """Discovery hook (Plugin.__init__): migrate before the plugins list is
+    served, so the modal opens on migrated settings. Never raises: a failed
+    migration leaves the legacy fallback in charge, which behaves identically,
+    so it is logged and retried on the next discovery."""
+    try:
+        _read_settings_migrating()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ranked_matchups] could not migrate saved settings: %s", e)
+
+
 class Plugin:
     name = "Ranked Matchups (Top Games)"
     # The version the loader DISPLAYS: it prefers this class attr over
@@ -8179,7 +11262,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.33.2"
+    version = "1.34.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
@@ -8196,11 +11279,16 @@ class Plugin:
         #     leaked a DB connection per poll until max_connections was hit (the
         #     #82 lock-up). This early return is what prevents that churn.
         #   - The reload endpoint: the loader calls stop() FIRST (loader.py), which
-        #     clears reg.thread, so we fall through and start a fresh one; the old
-        #     thread was already signaled and releases its DB connection in
-        #     _scheduler_loop's finally, and the new one parks holding none.
-        # Either way no connection leaks. Code updates ship via container restart
-        # (fresh process -> fresh thread), so a kept thread never runs stale code.
+        #     signals the thread (and clears reg.thread once it has exited); a
+        #     signaled thread is not running (_thread_running), so we fall
+        #     through and start a fresh one. The old thread releases its DB
+        #     connection in _scheduler_loop's finally, and the new one parks
+        #     holding none; _MAX_RETIRING_THREADS bounds the stuck ones.
+        # Either way no connection leaks. A kept thread DOES run stale code after
+        # a deploy: only a container restart gives every process fresh threads.
+        # The reload endpoint restarts them in the one worker serving it, and
+        # the copies in the other workers keep their code until the process
+        # exits. See CLAUDE.md, "The run lock".
         # START THE REAPER FIRST, and unconditionally. It is a SEPARATE thread
         # with its own registry, so it must not sit behind the scheduler's
         # early return: on the common path (a discovery where the scheduler is
@@ -8214,8 +11302,39 @@ class Plugin:
         # fire a schedule or a handoff from inside a run.
         if os.environ.get(tasks.PIPELINE_CHILD_ENV) == "1":
             return
+        # Before the scheduler's early return for the same reason as the
+        # reaper: that return is the COMMON path, so anything after it would
+        # only run on a cold worker. Discovery runs before the plugins list is
+        # served, so the modal loads already-migrated settings.
+        _migrate_stored_settings()
+        # ONLY PROCESSES THAT SERVE PLUGIN REQUESTS RUN THE THREADS (#252):
+        # uwsgi workers, not Celery or daphne or a manage.py exec. See
+        # _thread_host for why an unplaceable process starts them anyway.
+        start, certain = _thread_host()
+        where = _process_label()
+        if not start:
+            # A long-lived process that runs no scheduler checks that SOME
+            # process does: Celery children start throughout the day and their
+            # WARNING lines reach the log, so they report a scheduler missing
+            # everywhere. Not in the thread-running processes: their reaper
+            # tick checks instead. And NOT in a one-shot `manage.py` command:
+            # the AIO entrypoint runs `manage.py migrate` (its post_migrate
+            # discovery builds this Plugin) BEFORE uwsgi starts Redis, so the
+            # check there could only fail, on every container boot.
+            if _program_name(sys.argv or []) in _THREADLESS_PROGRAMS:
+                _warn_if_scheduler_stale(self.get_current_settings())
+            logger.info("[ranked_matchups] no scheduler or reaper in this process "
+                        "(pid=%s, %s): only the web workers run them", os.getpid(), where)
+            return
+        if not certain and not getattr(reg, "host_warned", False):
+            reg.host_warned = True
+            logger.warning(
+                "[ranked_matchups] cannot tell whether this process (pid=%s, %s) serves "
+                "Dispatcharr's web requests; starting the scheduler and reaper here "
+                "anyway, since a scheduler that runs nowhere is the worse failure",
+                os.getpid(), where)
         self._start_reaper()
-        if reg.thread is not None and reg.thread.is_alive():
+        if not _may_start(reg, "scheduler"):
             return
         stop_event = threading.Event()
         t = threading.Thread(target=_scheduler_loop, args=(self, stop_event), daemon=True,
@@ -8223,7 +11342,7 @@ class Plugin:
         t.start()
         reg.thread = t
         reg.stop_event = stop_event
-        logger.info("[ranked_matchups] scheduler thread started (pid=%s)", os.getpid())
+        logger.info("[ranked_matchups] scheduler thread started (pid=%s, %s)", os.getpid(), where)
 
     def _start_reaper(self):
         """Start the finished-game reaper (#196), idempotently.
@@ -8234,7 +11353,7 @@ class Plugin:
         churned a thread and leaked a DB connection per poll in #82.
         """
         reg = _reaper_registry()
-        if reg.thread is not None and reg.thread.is_alive():
+        if not _may_start(reg, "reaper"):
             return
         stop_event = threading.Event()
         t = threading.Thread(
@@ -8244,23 +11363,24 @@ class Plugin:
         t.start()
         reg.thread = t
         reg.stop_event = stop_event
-        logger.info("[ranked_matchups] reaper thread started (pid=%s)", os.getpid())
+        logger.info("[ranked_matchups] reaper thread started (pid=%s, %s)",
+                    os.getpid(), _process_label())
 
     def get_current_settings(self) -> Dict[str, Any]:
+        """The raw stored settings (no manifest defaults merged in), migrated
+        to the #208 layout on the way through; see _read_settings_migrating."""
         try:
-            from apps.plugins.models import PluginConfig
-            pc = PluginConfig.objects.filter(key=PLUGIN_KEY).first()
-            if pc and pc.settings:
-                return dict(pc.settings)
+            return _read_settings_migrating() or {}
         except Exception as e:
             logger.warning("[ranked_matchups] could not read settings from DB: %s", e)
         return {}
 
     def stop(self, context: Optional[Dict[str, Any]] = None) -> None:
         """Tear down the scheduler thread when the loader disables / deletes the
-        plugin. The loader calls stop() on disable/delete (NOT on reload, see
-        #110), so the reload-orphan reclaim lives in __init__; this path handles
-        the explicit-teardown case. Without it the thread keeps polling Postgres
+        plugin, and the reload endpoint calls it before rediscovering. The
+        other force_reload paths (install, repo update, other workers reacting
+        to the reload token) do NOT call it (#110), so the reload-stable
+        registry is what lets __init__ find a prior incarnation's thread. Without it the thread keeps polling Postgres
         on a 5-min loop, leaking a DB connection per worker until max_connections
         is hit and every API request 500s with "too many clients" (#82).
 

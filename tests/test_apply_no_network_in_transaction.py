@@ -49,13 +49,18 @@ def apply_fn():
 
 
 def _atomic_lineno(apply_fn):
-    """Line of the `with transaction.atomic():` statement inside _action_apply."""
+    """Line of apply's MAIN `with transaction.atomic():`, the one holding the
+    channel writes (it creates channels). Since #288 a smaller one ahead of
+    numbering holds only the auto-record cancellation, which makes no network
+    call (see test_the_cancellation_transaction_makes_no_network_call)."""
     for node in ast.walk(apply_fn):
         if isinstance(node, ast.With):
             for item in node.items:
                 call = item.context_expr
                 if (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
-                        and call.func.attr == "atomic"):
+                        and call.func.attr == "atomic"
+                        and any(isinstance(c, ast.Call) and _called_name(c) == "_autorecord_for_game"
+                                for c in ast.walk(node))):
                     return node.lineno
     return None
 
@@ -87,6 +92,33 @@ class TestNoNetworkInsideApplyTransaction:
             f"network I/O inside/after transaction.atomic() (line {atomic_line}): "
             f"{offenders} -- resolve these in the pre-pass before the transaction (#136)")
 
+    def test_the_cancellation_transaction_makes_no_network_call(self, apply_fn):
+        """Every other atomic block apply opens, its own and the auto-record
+        cancellation's (#288, in _autorecord_cancel_committed, which apply
+        calls), holds no network call either."""
+        tree = ast.parse(open(PLUGIN_PY, encoding="utf-8").read(), filename=PLUGIN_PY)
+        committed = next(n for n in tree.body
+                         if isinstance(n, ast.FunctionDef) and n.name == "_autorecord_cancel_committed")
+        assert any(isinstance(c, ast.Call) and _called_name(c) == "_autorecord_cancel_committed"
+                   for c in ast.walk(apply_fn)), "apply no longer cancels through it"
+        main = _atomic_lineno(apply_fn)
+
+        def atomics(fn):
+            return [
+                node for node in ast.walk(fn) if isinstance(node, ast.With)
+                and any(isinstance(i.context_expr, ast.Call)
+                        and isinstance(i.context_expr.func, ast.Attribute)
+                        and i.context_expr.func.attr == "atomic" for i in node.items)
+            ]
+
+        cancel_blocks = atomics(committed)
+        assert any(isinstance(c, ast.Call) and _called_name(c) == "_autorecord_cancel"
+                   for node in cancel_blocks for c in ast.walk(node)), (
+            "the cancellation's own transaction is gone")
+        for node in cancel_blocks + [n for n in atomics(apply_fn) if n.lineno != main]:
+            names = {_called_name(c) for c in ast.walk(node) if isinstance(c, ast.Call)}
+            assert not names & NETWORK_CALLS, (node.lineno, names & NETWORK_CALLS)
+
 
 class TestPrepContract:
     """The pre-pass produces a `prep_by_marker[...] = SimpleNamespace(...)` plan
@@ -96,22 +128,31 @@ class TestPrepContract:
     future edit that reads `prep.foo` without producing `foo` fails in CI."""
 
     def _prep_fields_produced(self, apply_fn):
-        """kwargs of the SimpleNamespace assigned into prep_by_marker[...]."""
+        """kwargs of the SimpleNamespace assigned into prep_by_marker[...], plus
+        every `prep.<attr> = ...` (the network half fills names, descriptions
+        and logos in after numbering, #288)."""
+        fields = None
         for node in ast.walk(apply_fn):
             if (isinstance(node, ast.Assign)
                     and isinstance(node.targets[0], ast.Subscript)
                     and isinstance(node.targets[0].value, ast.Name)
                     and node.targets[0].value.id == "prep_by_marker"
                     and isinstance(node.value, ast.Call)):
-                return {kw.arg for kw in node.value.keywords if kw.arg}
-        return None
+                fields = {kw.arg for kw in node.value.keywords if kw.arg}
+        if fields is None:
+            return None
+        for node in ast.walk(apply_fn):
+            if (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store)
+                    and isinstance(node.value, ast.Name) and node.value.id == "prep"):
+                fields.add(node.attr)
+        return fields
 
     def _prep_attrs_consumed(self, apply_fn):
         """every `prep.<attr>` read in _action_apply."""
         attrs = set()
         for node in ast.walk(apply_fn):
-            if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                    and node.value.id == "prep"):
+            if (isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)
+                    and isinstance(node.value, ast.Name) and node.value.id == "prep"):
                 attrs.add(node.attr)
         return attrs
 

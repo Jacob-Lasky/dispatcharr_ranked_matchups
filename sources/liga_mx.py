@@ -5,10 +5,14 @@ standings-based importance or Liguilla playoff bracket (#30).
 
 Liga MX runs two seasons per calendar year (Apertura ≈ Jul-Dec,
 Clausura ≈ Jan-May), each followed by a 12-team Liguilla playoff.
-Season slug values surface as `extra.season_slug`:
+Season slug values surface as `extra.season_slug` (measured 2026-10-11):
   - "torneo-apertura" : fall season
   - "torneo-clausura" : spring season
-  - "liguilla"        : playoff round (single-leg + two-leg ties)
+  - a per-round Liguilla slug: "apertura---7th-place-vs-8th-place",
+    "apertura---quarterfinals" .. "apertura---finals", and the same
+    under "clausura---" (some years "clausura-2025---"). There is no
+    single "liguilla" slug; plugin._is_postseason_extra treats any slug
+    outside _NON_POSTSEASON_SEASON_SLUGS as postseason (#257).
 
 Liga MX Odds API key: `soccer_mexico_ligamx`. ESPN slug: `soccer/mex.1`.
 Relevant for US viewers via Univision / Telemundo EPG entries.

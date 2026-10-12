@@ -5,6 +5,220 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.34.0] - 2026-10-12
+
+A large reliability release: every issue open when it started, plus the
+cross-PR defects a whole-batch review found. In short: games no longer drop off
+the guide when a sports feed has a bad moment, playoff games in six leagues and
+soccer knockouts rank on their stakes again, and one game's recording can no
+longer be cut short or cancelled to make room for a game with no channel.
+
+### Added
+
+- **Golf's FedEx Cup playoffs get their own tier.** The FedEx St. Jude
+  Championship, BMW Championship and TOUR Championship used to score as an
+  ordinary tour stop. They now rank between a regular week and a major, and
+  are labelled "Playoff". (#188)
+- **UEFA EURO group games now carry knockout leverage.** EURO 2028 is wired
+  to the same group -> knockout chain as the World Cup, using the round-of-16
+  pairings and third-placer table from UEFA's 2026-28 regulations, so a group
+  game that decides who faces whom in the knockouts scores for it. (#78)
+- **You can see what holds the run lock.** Show current state prints `Run
+  lock: held by ...` (kind of run, process, plugin version, how long), a
+  refused Apply names the holder, a skipped run says what it waited for, and
+  the log records every take, release and contended attempt. A scheduled run
+  given up because it was already too late to start says so. (#239)
+- **Show current state warns when no process started the latest scheduled
+  refresh**, and the log says so, so a scheduler that is not running anywhere
+  is no longer silent. (#252)
+- **Derbies:** the Black Country (Wolves v West Brom), South Wales (Cardiff v
+  Swansea) and Dockers (Millwall v West Ham) derbies.
+
+### Changed
+
+- **College poll ranks score against the size of the sport's field, not the
+  25-team list.** AP #25 used to read as the bottom of the scale (0.04); it is
+  25th of 138 FBS programmes and now reads 0.82. The same applies to NCAA
+  basketball, baseball, softball and soccer. League tables and unranked teams
+  score as before. The score breakdown names the scale (`#25 in a 25-deep
+  poll of 138 (strength 0.82)`). (#198)
+- **Shorter settings page: 101 fields down to 88.** Related leagues share one
+  dropdown (Off / either / both): NCAA Basketball, International Friendlies,
+  English cups, Tennis, NCAA Baseball & Softball, NCAA Soccer; NCAA Football's
+  on/off and divisions are one dropdown. The seven weight fields are one
+  **Scoring weights** line (`favorite=8, spread=1`; blank for the defaults).
+  Your saved settings carry over automatically. (#208)
+- **English cup ties earn the rivalry bonus**, including derbies between clubs
+  in different divisions that only a cup can produce. Club friendlies still
+  never do. (#192)
+- **Soccer knockouts stay on air 3 hours after kickoff** (World Cup, EURO and
+  Champions League knockouts, MLS Cup, NWSL and Liga MX playoffs, College Cup,
+  FA Cup and EFL Cup ties), so a tie decided on penalties is no longer cut off
+  before the shootout; league and group games keep 2.5 hours. NCAA soccer,
+  the English cups and friendlies use the soccer match window instead of the
+  football one, and NCAA soccer gets 3 hours. (#257)
+- **"Favorites only, but show all postseason/playoff games" also keeps NWSL
+  playoff and Liga MX Liguilla games.** (#257)
+- **EURO knockouts get the World Cup's round-by-round importance floor**, and
+  for both tournaments it is now a floor rather than a cap: a knockout whose
+  stakes are simulated keeps its higher score. (#250)
+- **Auto-record plans only the games that get a channel**, so a game without
+  a feed, or left out of a full compact range, no longer takes another game's
+  recording slot. (#291)
+- **The scheduler and the finished-game reaper run only in Dispatcharr's web
+  workers**, not in Celery or daphne, where stale copies ran old code after an
+  update and could run a scheduled refresh with no log line. With no saved
+  scheduled times, auto-refresh runs at the four default times the settings
+  show. (#252)
+- **A refresh does not run while Redis is unreachable.** It used to run
+  without the run lock and could replace the list while a reap or apply was
+  using it; nothing in the guide changes until Redis is back, and Show current
+  state says so. (#199)
+
+### Fixed
+
+- **NFL, NBA, NHL, MLB, WNBA and NCAA women's basketball playoff games rank
+  on their stakes again.** These sources never tagged their upcoming games
+  with the playoff round, and the bracket simulation needs the round to apply
+  a game's result. Without it the result was thrown away, so a League
+  Championship Series game scored almost no importance (about 0.15 instead of
+  about 3 on live MLB data). The plugin now looks each game up in the source's
+  own bracket. (#243)
+- **World Cup, EURO and Champions League final importance.** Football-Data
+  numbers these games by tournament day (or not at all), and the simulation
+  read that number as the leg of the tie, so a final or a World Cup knockout
+  game was filed as a second leg that never completed and scored no
+  importance. Knockout finals and second legs could also be simulated as
+  draws, with no extra time or penalties. Both now come from the bracket.
+  (#243)
+- **Favorites-only "show all postseason/playoff games" keeps those playoff
+  games**, which the missing round had made look like regular season, and no
+  longer keeps every Champions League league-phase game, which it had treated
+  as a knockout round. (#243)
+- **"BMW PGA Championship" and "Senior PGA Championship" are no longer
+  mistaken for the PGA Championship major.**
+- **The simulated World Cup / EURO bracket plays every round to the final.**
+  It used to stop one round after the entry round, so World Cup group games
+  never showed leverage beyond the round of 16. (#78)
+- **Group tables break ties on head-to-head first**, then overall goal
+  difference and goals scored, as the UEFA and FIFA regulations do; EURO's
+  best-third ranking also counts wins. (#78)
+- **The group -> knockout chain no longer switches off on a group stage's
+  final matchday** because football-data.org had already filled some knockout
+  fixtures. It runs while any group game is unplayed, and stays off for a
+  season whose groups do not match the published bracket. (#78)
+- **NCAA Women's Basketball tournament games get their stakes again.** From
+  the 2026 tournament ESPN titles the games "NCAA Women's Basketball
+  Championship - ..." instead of "NCAA Women's Championship - ...", and the
+  plugin no longer recognised the round, so every tournament game aired with
+  no bracket importance. Both wordings are now read; First Four play-in games
+  and other women's events (WNIT, conference tournaments) are still left out
+  of the bracket. (#268)
+
+**Sources and schedules**
+
+- **Games no longer drop off the guide when a sports feed fails for a
+  moment.** A day a schedule request lost, a failed rankings poll or league
+  table, or a season that could not be loaded whole now keeps the games
+  already on your guide as they were, and the refresh summary names the
+  league (a lost day is also shown in Show current state). This covers ESPN,
+  MLB, NHL, Football-Data, NCAA men's basketball, boxing and MLS. A day ESPN
+  fails to answer is asked for once more. A failed season read is scored from
+  the last complete read of the previous 36 hours instead, when there is one,
+  so new games still appear. (#261, #264, #282, #283, #289)
+- **Live games stay on air after an upgrade.** Dispatcharr's plugin import
+  replaces the plugin folder, `cache.json` with it, and the first refresh
+  after an upgrade used to delete a live or about-to-start game whose source
+  was failing or no longer listed it. Each published game is now recorded in
+  its own guide entry; channels published before this release are kept for as
+  long as their guide runs. A live game whose stream disappears keeps its
+  channel as a placeholder. (#264)
+- **Late games no longer disappear after 8pm Eastern.** US feeds file
+  tonight's games under the Eastern date; every league now reaches back a day,
+  as the soccer sources already did. Games that already finished today no
+  longer come back as upcoming. (#256)
+- **MLS East/West games and standings are back.** ESPN started rejecting the
+  date-range request; schedules are now fetched a day at a time, in parallel,
+  with `limit=1000` (busy days had silently lost games past the first 100:
+  225 women's college soccer games in 2026). If ESPN hangs, a schedule walk
+  gives up after about 30 seconds instead of stalling the refresh. (#182)
+- **Football-Data leagues pick up the last day of the lookahead window**
+  (its end date is exclusive: one Sunday was missing 28 of 29 matches), no
+  longer skip a day on a lookahead over 10 days, no longer list matches
+  cancelled today as upcoming, and keep late matches still being played after
+  midnight UTC. (#285)
+- **Racing, golf, tennis and UFC keep the last day of the lookahead window**
+  and tournaments already in progress; busy boxing weeks are no longer cut off
+  at 25 cards. (#182, #284)
+- **NCAA College Cup games show up again**, with their round, now that ESPN
+  no longer labels rounds on its game data; they are no longer listed as
+  regular-season games. (#235)
+- **NHL no longer lists games 13 days ahead on a 7-day lookahead; a postponed
+  MLB game no longer appears twice; College World Series games are no longer
+  dropped or filed in the wrong sub-bracket.** (#256)
+- **A sports feed that sends data very slowly can no longer stall a refresh**
+  until the 25-minute kill: every response has a hard time limit. Apply also
+  caps the time spent on previews and logos; past it, games keep the standard
+  description and logo until the next apply. (#271)
+- **Playoff brackets no longer keep a half-fetched bracket** for a whole
+  refresh; the refresh summary and Show current state say "<league> bracket
+  (stakes not simulated)". NBA,
+  NFL, WNBA and NCAA women's basketball playoff games get a real importance
+  score (they all scored 0), and WNBA semifinals count the stakes of reaching
+  the Finals. (#245, #249)
+
+**Channels and numbering**
+
+- **Kickoff channel numbers stay put** when your own lineup changes, when the
+  top of the slate changes, or when a same-minute game near a channel finishes
+  or collides. A game never takes a number one of your channels already uses
+  (including override, fractional and hand-added ones), and the recordings
+  archive channel never shares a number. (#219, #267, #278)
+- **The last game's channel is removed when it finishes**, and a refresh that
+  finds nothing to air clears the previous channels, but only when an outage
+  can be ruled out; otherwise the guide is left alone and Apply says why.
+  Apply no longer crashes on a damaged `cache.json`. (#241)
+- **Compact numbering with a full range** no longer holds a slot for a game
+  that lost its feed; a cancelled recording no longer holds its number.
+  (#288)
+- **Renaming the target group keeps a recording channel's guide entry.**
+  (#263)
+- **Renaming the target group or the recordings group can no longer leave
+  two channels on one number, a second recordings archive, deleted recordings
+  or deleted M3U group settings** when apply stops for time, is refused or
+  fails. The archive follows a renamed recordings group with its recordings.
+  A target group named like one of your own EPG sources that fetches a guide
+  is refused with a message (#263), and so is one the database cannot store,
+  with the length it may be.
+- **An invalid "Placeholder threshold" no longer makes apply fail partway.**
+  (#263)
+
+**Recording**
+
+- **A recording channel keeps its stream when its feed disappears from the
+  provider, keeps its number when its game moves and is left off the list
+  (#286), and keeps its logo (#288).** After a group rename, one whose old
+  number is taken moves to the next free number rather than a temporary one.
+  A planned handoff no longer stops a recording early when the game it handed
+  over to has moved or been benched.
+- **A recording kept through a source outage is cancelled if its channel has
+  nothing left to record from** (every stream in an excluded group), and
+  planned again when the game returns. A deleted recording stays deleted even
+  if its game drops off the list for a while. (#291, #297)
+- **A pipeline run that is short of time no longer starts Apply** and risks
+  being cut off midway; it applies again straight away with a fresh time
+  allowance, and recordings it cancelled can no longer be mistaken for ones
+  you deleted. (#271)
+
+**Other**
+
+- **Clearing a weight field no longer makes every refresh fail.** (#208)
+- **Reloading the plugin during a scheduled run keeps that worker's
+  scheduler**, and a damaged planned-stops file no longer stalls the reaper.
+  (#252)
+- **Logs never show an API key**, including a RapidAPI boxing key with a
+  stray space or newline (now trimmed). (#193)
+
 ## [1.33.2] - 2026-10-11
 
 ### Fixed

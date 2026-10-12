@@ -12,10 +12,13 @@ Two source classes:
     before R64 and only feed 4 of the 64 R64 slots).
 
 API patterns:
-  - /scoreboard?dates=YYYYMMDD for per-day games (range syntax caps at
-    25 events).
+  - /scoreboard?dates=YYYYMMDD&limit=1000 for per-day games, via
+    `_espn.fetch_scoreboard_day`. NOT `dates=YYYYMM`: for the 2025-26
+    season it returned 742 of the 1033 games the per-day walk found,
+    without reaching its limit (see `_espn.SCOREBOARD_EVENT_LIMIT`).
   - /rankings exposes AP Top 25 + Coaches Poll. Prefer AP.
-  - Tournament stage in competition.notes[0].headline, e.g.
+  - Tournament stage in competition.notes[0].headline, e.g. (2025 wording;
+    from 2026 ESPN writes "NCAA Women's Basketball Championship - ...", #268)
       "NCAA Women's Championship - Regional 2 in Birmingham - 1st Round"
       "NCAA Women's Championship - Regional 2 in Birmingham - Sweet 16"
       "NCAA Women's Championship - Final Four"
@@ -30,16 +33,25 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import GameRow
-from .bracket import BestOfNSeriesSource
+from .base import GameRow, attach_poll_ranks
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc
-from ._espn import fetch_days
+from .._util import parse_iso_utc, http_get_json
+from ._espn import (
+    dedupe_events,
+    event_identity,
+    fetch_espn_poll,
+    fetch_scoreboard_day,
+    fetch_scoreboard_days,
+    scoreboard_event_over,
+    scoreboard_events,
+    sweep_upcoming_events,
+)
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaaw_basketball")
 
@@ -55,15 +67,8 @@ SEASON_START_MONTH = 11  # November
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[ncaaw_basketball] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[ncaaw_basketball] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="ncaaw_basketball", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -85,13 +90,30 @@ def _default_season_end_year() -> int:
     return now.year + 1 if now.month >= SEASON_START_MONTH else now.year
 
 
-# Tournament-stage regex. Matches the round suffix on ESPN's headline.
-# The "Regional N in {City}" prefix only appears for R64..E8; F4 and NCG
-# have no regional prefix. Both formats handled here.
+# Tournament-stage regex over ESPN's whole headline. The "Regional N in
+# {City}" part only appears for R64..E8 (and the First Four, which is not a
+# bracket round and does not match); F4 and NCG have none.
+# The prefix has changed once already: "NCAA Women's Championship - ..."
+# through 2025, "NCAA Women's Basketball Championship - ..." from the 2026
+# tournament (#268). A headline that does not match drops the game from the
+# BRACKET (fetch_upcoming selects on season type 3 and never reads the
+# headline, so the game still airs, but with no stakes), and the bracket is
+# then cached short as if it were real; tests/test_ncaaw_headlines.py pins
+# every form ESPN has served.
+#
+# Anchored at BOTH ends on purpose: an unanchored search accepted a title
+# embedded in another one ("WNIT: NCAA Women's ... - Final Four") and a
+# longer round word ("Final Fourteen"), and a First Four play-in game must
+# not be filed as a first-round tie. The regional city is matched lazily up
+# to the next separator, not as `[^-]+`, so a hyphenated host city
+# ("Winston-Salem") still parses. ESPN's separator has always been " - ";
+# an en dash, a curly apostrophe and a trailing period are accepted too,
+# since each is one typography pass away and costs nothing to allow.
 _HEADLINE_RE = re.compile(
-    r"NCAA\s+Women'?s?\s+Championship\s*-\s*"
-    r"(?:Regional\s+\d+\s+in\s+[^-]+\s*-\s*)?"
-    r"(?P<round>1st\s+Round|2nd\s+Round|Sweet\s*16|Elite\s*8|Final\s+Four|National\s+Championship)",
+    r"^\s*NCAA\s+Women['\u2019]?s?\s+(?:Basketball\s+)?Championship\s*[-\u2013]\s*"
+    r"(?:Regional\s+\d+\s+in\s+.+?\s+[-\u2013]\s*)?"
+    r"(?P<round>1st\s+Round|2nd\s+Round|Sweet\s*16|Elite\s*8|Final\s+Four|National\s+Championship)"
+    r"\.?\s*$",
     re.IGNORECASE,
 )
 
@@ -145,13 +167,7 @@ def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not home_team or not away_team:
         return None
 
-    status_type = (comp.get("status") or {}).get("type") or {}
-    completed = bool(status_type.get("completed"))
-    state = (status_type.get("state") or "").lower()
-    if completed or state == "post":
-        status = "FINISHED"
-    else:
-        status = "SCHEDULED"
+    status = "FINISHED" if scoreboard_event_over(event) else "SCHEDULED"
 
     try:
         hp = int(home.get("score")) if status == "FINISHED" else None
@@ -194,6 +210,10 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
     """
 
     league_context_code = "NCAAW_BBALL"
+    # The AP Top 25 is drawn from Division I (#198): 362 programmes,
+    # measured 2026-10-11 from ESPN's women's college basketball
+    # `/teams?groups=50` (D1). See SportSource.rank_field_size.
+    rank_field_size = 362
     _DEFAULT_POINTS_FOR = _DEFAULT_POINTS_FOR
     _DEFAULT_POINTS_AGAINST = _DEFAULT_POINTS_AGAINST
 
@@ -210,84 +230,60 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
         return "NCAA Women's Basketball"
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Per-day scoreboard sweep + AP Top 25 attached as ranks."""
-        ranks = self._fetch_rankings()
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if not data:
-                continue
-            for event in data.get("events") or []:
-                rec = _extract_game_record(event)
-                if rec is None:
-                    continue
-                # Both regular-season AND tournament games surface here.
-                # Filtering by season.type isn't strictly necessary: we
-                # surface postseason games in fetch_upcoming so the user's
-                # guide picks them up; the playoff source covers the
-                # importance-cascade side separately.
-                eid = rec.get("id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                rank_home = ranks.get(rec["home"])
-                rank_away = ranks.get(rec["away"])
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=rec["home"],
-                    away=rec["away"],
-                    rank_home=rank_home,
-                    rank_away=rank_away,
-                    start_time=start,
-                    extra={
-                        "ncaaw_game_id": eid,
-                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                        "game_id": eid,
-                        "fd_competition_code": self.league_context_code,
-                    },
-                ))
-        return out
+        """Upcoming games with the AP Top 25 attached as ranks, through
+        `_espn.sweep_upcoming_events`, which owns the window (including the
+        US-Eastern lookback day, #256), the FINISHED and stale drops and the
+        dedupe. The poll is read after the sweep, only when it found a game
+        (`base.attach_poll_ranks`); a failed one raises (#283)."""
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
+            rec = _extract_game_record(event)
+            if rec is None:
+                return None
+            # Both regular-season AND tournament games surface here.
+            # Filtering by season.type isn't strictly necessary: we
+            # surface postseason games in fetch_upcoming so the user's
+            # guide picks them up; the playoff source covers the
+            # importance-cascade side separately.
+            start = rec.get("start_time")
+            if start is None:
+                return None
+            eid = rec.get("id")
+            return GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=rec["home"],
+                away=rec["away"],
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra={
+                    "ncaaw_game_id": eid,
+                    # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                    "game_id": event_identity(event),
+                    "fd_competition_code": self.league_context_code,
+                },
+            )
+        return attach_poll_ranks(
+            sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row),
+            self._fetch_rankings,
+        )
 
     def _fetch_rankings(self) -> Dict[str, int]:
-        """Return {team_location: rank} from ESPN's AP poll. Empty
-        dict if missing: rank-pair signal sits out the cycle."""
-        data = _http_get(f"{ESPN_BASE}/rankings")
-        if not data:
-            return {}
-        ranks_by_team: Dict[str, int] = {}
-        polls = data.get("rankings") or []
-        if not polls:
-            return ranks_by_team
-        # Prefer AP Top 25; fall back to first poll otherwise.
-        poll = next(
-            (p for p in polls if "ap" in (p.get("shortName") or "").lower()),
-            polls[0],
+        """{team_location: rank} from ESPN's AP poll, else the first poll
+        listed (the page also carries the Coaches Poll). Raises
+        `RankingsUnavailable` when it did not answer (#283; see
+        `_espn.fetch_espn_poll`)."""
+        return fetch_espn_poll(
+            _http_get, f"{ESPN_BASE}/rankings", _team_canonical_name,
+            prefer=lambda poll: "ap" in (poll.get("shortName") or "").lower(),
         )
-        for r in poll.get("ranks") or []:
-            team_obj = r.get("team") or {}
-            name = _team_canonical_name(team_obj)
-            try:
-                rank = int(r.get("current") or 0)
-            except (TypeError, ValueError):
-                continue
-            if name and rank > 0:
-                ranks_by_team[name] = rank
-        return ranks_by_team
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
-        """Walk every day from season start through min(today + 7d,
-        regular season end). Filter to regular-season games only
+        """Walk every day from season start through the regular season's
+        end (#229). Filter to regular-season games only
         (season.type == 2) so the tournament doesn't pollute the
         win-count importance signal: the playoff source has its own
         bracket-based importance."""
-        seen: Dict[Any, Dict[str, Any]] = {}
         # Season starts early-November of (end_year - 1).
         season_start = datetime(
             self.season_end_year - 1, SEASON_START_MONTH, 1, tzinfo=timezone.utc,
@@ -303,24 +299,19 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = regular_end
 
-        def day_board(day):
-            return _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
+        def keep(event: Dict[str, Any], key: Any) -> Optional[Dict[str, Any]]:
+            rec = _extract_game_record(event)
+            if rec is None or rec.get("season_type") != 2:
+                return None
+            game = {k: v for k, v in rec.items() if k not in ("season_type", "notes")}
+            game["id"] = key  # the event's identity, never None: see dedupe_events
+            return game
 
-        for _day, data in fetch_days(season_start, end, day_board):
-            if data:
-                for event in data.get("events") or []:
-                    rec = _extract_game_record(event)
-                    if rec is None or rec["id"] is None:
-                        continue
-                    if rec.get("season_type") != 2:
-                        continue
-                    if rec["id"] in seen:
-                        continue
-                    seen[rec["id"]] = {
-                        k: v for k, v in rec.items()
-                        if k not in ("season_type", "notes")
-                    }
-        return list(seen.values())
+        return dedupe_events(scoreboard_events(
+            data for _day, data in fetch_scoreboard_days(
+                _http_get, f"{ESPN_BASE}/scoreboard", season_start, end,
+            )
+        ), keep)
 
 
 # =====================================================================
@@ -328,7 +319,7 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
 # =====================================================================
 
 
-class NcaawBasketballPlayoffSource(BestOfNSeriesSource):
+class NcaawBasketballPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """NCAA Women's March Madness as a single-game-elim
     BestOfNSeriesSource with SERIES_LENGTH=1 per stage.
 
@@ -365,40 +356,34 @@ class NcaawBasketballPlayoffSource(BestOfNSeriesSource):
         return None
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if not data:
-                continue
-            for event in data.get("events") or []:
-                rec = _extract_game_record(event)
-                if rec is None or rec.get("season_type") != 3:
-                    continue
-                eid = rec.get("id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=rec["home"],
-                    away=rec["away"],
-                    rank_home=None,
-                    rank_away=None,
-                    start_time=start,
-                    extra={
-                        "ncaaw_game_id": eid,
-                        "game_id": eid,
-                        "fd_competition_code": self._league_context_code(),
-                    },
-                ))
-        return out
+        """Upcoming NCAA tournament games (season.type == 3)
+        through `_espn.sweep_upcoming_events`, which owns the window
+        (including the US-Eastern lookback day, #256), the FINISHED and stale
+        drops and the dedupe.
+        """
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
+            rec = _extract_game_record(event)
+            if rec is None or rec.get("season_type") != 3:
+                return None
+            start = rec.get("start_time")
+            if start is None:
+                return None
+            eid = rec.get("id")
+            return GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=rec["home"],
+                away=rec["away"],
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra={
+                    "ncaaw_game_id": eid,
+                    "game_id": event_identity(event),
+                    "fd_competition_code": self._league_context_code(),
+                },
+            )
+        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
 
     def estimate_strengths(self) -> Dict[str, Dict[str, float]]:
         if self._team_strengths_from_regular is not None:
@@ -426,43 +411,39 @@ class NcaawBasketballPlayoffSource(BestOfNSeriesSource):
         if self._bracket_games_cache is not None:
             return self._bracket_games_cache
 
-        out: List[Dict[str, Any]] = []
-        seen_ids: set = set()
         # Tournament window: March 15 - April 15 of season_end_year.
         start = datetime(self.season_end_year, 3, 15, tzinfo=timezone.utc).date()
         end = datetime(self.season_end_year, 4, 15, tzinfo=timezone.utc).date()
-        day = start
-        while day <= end:
-            data = _http_get(f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}")
-            if data:
-                for event in data.get("events") or []:
-                    rec = _extract_game_record(event)
-                    if rec is None or rec["id"] is None:
-                        continue
-                    if rec.get("season_type") != 3:
-                        continue
-                    if rec["id"] in seen_ids:
-                        continue
-                    headline = None
-                    notes = rec.get("notes") or []
-                    if notes:
-                        headline = (notes[0] or {}).get("headline")
-                    parsed = _parse_stage_from_headline(headline)
-                    if parsed is None:
-                        continue
-                    seen_ids.add(rec["id"])
-                    out.append({
-                        "game_id": rec["id"],
-                        "stage": parsed["stage"],
-                        "matchday": parsed["matchday"],
-                        "home": rec["home"],
-                        "away": rec["away"],
-                        "home_goals": rec["home_points"],
-                        "away_goals": rec["away_points"],
-                        "status": rec["status"],
-                        "start_time": rec["start_time"],
-                        "extra": {"headline": headline},
-                    })
-            day += timedelta(days=1)
-        self._bracket_games_cache = out
-        return out
+        payloads = self._sweep_bracket_days(
+            start, end,
+            lambda d: fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", d),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+
+        def keep(event: Dict[str, Any], key: Any) -> Optional[Dict[str, Any]]:
+            rec = _extract_game_record(event)
+            if rec is None or rec.get("season_type") != 3:
+                return None
+            headline = None
+            notes = rec.get("notes") or []
+            if notes:
+                headline = (notes[0] or {}).get("headline")
+            parsed = _parse_stage_from_headline(headline)
+            if parsed is None:
+                return None
+            return {
+                "game_id": key,  # the event's identity, never None: see dedupe_events
+                "stage": parsed["stage"],
+                "matchday": parsed["matchday"],
+                "home": rec["home"],
+                "away": rec["away"],
+                "home_goals": rec["home_points"],
+                "away_goals": rec["away_points"],
+                "status": rec["status"],
+                "start_time": rec["start_time"],
+                "extra": {"headline": headline},
+            }
+
+        return self._cache_bracket_games(dedupe_events(scoreboard_events(payloads), keep))

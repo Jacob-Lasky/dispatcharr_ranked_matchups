@@ -22,13 +22,15 @@ import json
 import logging
 import os
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from ._util import is_field_event, redact_secrets
+from ._http import urlopen_read
+from ._util import is_field_event, redact_secrets, write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,12 @@ _SEARCH_URL = "https://www.thesportsdb.com/api/v1/json/{key}/searchevents.php?e=
 
 _HTTP_TIMEOUT_S = 10.0
 _DOWNLOAD_TIMEOUT_S = 15.0
+# Largest image download_to_file accepts. The body is held in memory until it
+# is validated (#271), so an oversized or runaway response has to stop here
+# rather than in the pipeline child's memory. SportsDB's 960x540 thumbnails
+# and league badges are tens to hundreds of KB (a badge measured 58,687 bytes
+# 2026-10-11); 10 MiB is far above any real one.
+_MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024
 _USER_AGENT = "dispatcharr_ranked_matchups"
 
 # SportsDB returns a date string; allow ±2 days to absorb timezone wobble between
@@ -148,8 +156,14 @@ _SPORT_HINT: dict[str, str] = {
 #
 # Cup prefixes (UCL/WC/EURO) map to the competition itself, so their badge IS
 # the tournament badge. Prefixes deliberately left unmapped (the NCAA
-# sub-sports and the friendlies, whose SportsDB league could not be confirmed)
-# fall through to the source-channel logo rather than risk a wrong-sport badge.
+# sub-sports, the friendlies and the English domestic cups EFLCUP/FACUP, whose
+# SportsDB league has not been confirmed by the procedure above) fall through
+# to the source-channel logo rather than risk a wrong-sport badge.
+#
+# Every key here, in _SPORT_HINT and in SPORTSDB_TOURNAMENT_LEAGUE_IDS must be
+# a sport_prefix some source actually emits: tests/test_mapped_prefixes.py
+# builds every source through plugin._build_sources and fails on a dead key
+# (#183; five of them once sent #104 after work that could not be done).
 SPORTSDB_LEAGUE_IDS: dict[str, int] = {
     "CFB": 4479,            # NCAA Division 1 (American Football)
     "CBB": 4607,            # NCAA Division I Basketball Mens
@@ -178,10 +192,11 @@ SPORTSDB_LEAGUE_IDS: dict[str, int] = {
 # Optional tournament-specific override, consulted FIRST when a game carries a
 # `tournament_stage`, so a league source's postseason can show the competition
 # badge rather than the regular-season league badge (the "tournament -> sport
-# -> channel" order chosen for #102). Empty by default: cup SOURCES already map
-# their tournament badge directly via SPORTSDB_LEAGUE_IDS, so this only matters
-# for a league source that also runs a distinct postseason with its own
-# SportsDB league id. Add entries as those ids are confirmed.
+# -> channel" order chosen for #102). Empty by default: a cup SOURCE has its own
+# prefix and so maps its tournament badge directly via SPORTSDB_LEAGUE_IDS, so
+# this only matters for a league source that also runs a distinct postseason
+# with its own SportsDB league id. Add entries as those ids are confirmed, under
+# the same verification rule as SPORTSDB_LEAGUE_IDS.
 SPORTSDB_TOURNAMENT_LEAGUE_IDS: dict[str, int] = {}
 
 _LEAGUE_URL = "https://www.thesportsdb.com/api/v1/json/{key}/lookupleague.php?id={id}"
@@ -322,10 +337,10 @@ def _http_get_json(url: str, endpoint: str) -> Optional[dict]:
     """
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT_S) as resp:
-            if resp.status != 200:
-                return None
-            return json.load(resp)
+        status, body = urlopen_read(req, timeout=_HTTP_TIMEOUT_S)
+        if status != 200:
+            return None
+        return json.loads(body)
     except Exception as e:
         # The exception can embed the request URL (HTTPError stringifies it), so
         # it still goes through the redactor. See #156.
@@ -423,21 +438,17 @@ def download_to_file(
     if not url:
         return None, None
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-    tmp_path = f"{dest_path}.tmp.{os.getpid()}"
+    # Per-writer temp name, pid AND thread, for the reason in
+    # _util.write_json_atomic: two threads in one worker share a pid.
+    tmp_path = f"{dest_path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            if resp.status != 200:
-                return resp.status, None
-            first = b""
-            with open(tmp_path, "wb") as f:
-                while True:
-                    chunk = resp.read(64 * 1024)
-                    if not chunk:
-                        break
-                    if not first:
-                        first = chunk[:16]
-                    f.write(chunk)
-        if not _looks_like_image(first):
+        # The whole download is bounded by `timeout` (#271) and read before
+        # anything is written, so a transfer cut at the deadline never reaches
+        # the temp file, let alone the cache.
+        status, body = urlopen_read(req, timeout=timeout, max_bytes=_MAX_DOWNLOAD_BYTES)
+        if status != 200:
+            return status, None
+        if not _looks_like_image(body[:16]):
             # A 200 carrying non-image bytes (captive portal, proxy error page,
             # HTML 200 from a misconfigured reverse proxy) must NOT be written:
             # callers treat the file's existence as the cache, so a corrupt file
@@ -445,10 +456,11 @@ def download_to_file(
             # Reported as a transient failure, so the next apply retries.
             logger.warning(
                 "download %s returned 200 but not an image (%r); discarding",
-                redact_secrets(url), first[:8],
+                redact_secrets(url), body[:8],
             )
-            _unlink_quietly(tmp_path)
             return None, None
+        with open(tmp_path, "wb") as f:
+            f.write(body)
         os.replace(tmp_path, dest_path)
         return 200, None
     except urllib.error.HTTPError as e:
@@ -503,17 +515,10 @@ class ThumbCache:
             self._data = {}
 
     def save(self) -> None:
-        tmp = f"{self.cache_path}.tmp.{os.getpid()}"
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._data, f)
-            os.replace(tmp, self.cache_path)
+            write_json_atomic(self.cache_path, self._data)
         except Exception as e:
             logger.warning("sportsdb cache save failed: %s", e)
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
 
     def get(self, marker: str) -> tuple[bool, Optional[str]]:
         """Returns (fresh, url_or_None). fresh=False means caller should refetch."""
@@ -544,8 +549,15 @@ class ThumbCache:
         return len(stale)
 
 
-def sweep_stale_logo_files(live_markers: set[str], logo_dir: str = LOGO_DIR) -> int:
+def sweep_stale_logo_files(live_markers: set[str], logo_dir: str = LOGO_DIR, *,
+                           keep_filenames: frozenset = frozenset()) -> int:
     """Delete /data/logos/ranked_matchups_*.jpg files whose marker isn't live.
+
+    `keep_filenames` are file names a live channel's Logo still points at,
+    kept whatever their marker: a channel re-keyed (#217) but not rewritten
+    this apply (kept for its recording) still shows the file named after its
+    OLD marker. Keyword-only on purpose: the ORM harness swaps `logo_dir`
+    through `__defaults__`, which a second positional default would misalign.
 
     Called at the end of each apply pass. Returns number of files removed.
     Stale-detection is by filename hash: a file is live iff its name equals
@@ -573,7 +585,7 @@ def sweep_stale_logo_files(live_markers: set[str], logo_dir: str = LOGO_DIR) -> 
         # keyed by a live marker; never sweep them here.
         if name.startswith(BADGE_FILENAME_PREFIX):
             continue
-        if name in live_filenames:
+        if name in live_filenames or name in keep_filenames:
             continue
         path = os.path.join(logo_dir, name)
         try:

@@ -14,8 +14,8 @@ Two source classes:
 API quirks captured here:
   - `/api/v1/schedule?sportId=1&season=YYYY&gameType=R` returns the entire
     regular season in a single response (≈2430 games). No per-day or
-    per-team iteration needed: unlike ESPN unofficial endpoints where
-    multi-day ranges silently cap at 25 events.
+    per-team iteration needed, unlike the ESPN scoreboard, which has to be
+    walked one day at a time (see `_espn.SCOREBOARD_EVENT_LIMIT`).
   - `/api/v1/schedule/postseason?season=YYYY` returns every postseason
     game with `seriesDescription` ("AL Wild Card Series", "NL Division
     Series", "World Series", etc.) and `seriesGameNumber` (1..N) per game.
@@ -40,16 +40,16 @@ Off by default.
 from __future__ import annotations
 
 import logging
-import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult
-from .bracket import BestOfNSeriesSource
+from .base import GameRow, SeasonUnavailable, report_lost_day_range
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .._util import parse_iso_utc, http_get_json
+from ._espn import upcoming_window
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mlb")
 
@@ -102,19 +102,23 @@ _WS_TOP_SENTINEL = "LCS_AL_WINNER"
 _WS_BOT_SENTINEL = "LCS_NL_WINNER"
 
 
+def _is_schedule(data: Any) -> bool:
+    """Whether a statsapi `/schedule` body is a schedule: a `dates` list
+    (`[]` when nothing is scheduled, measured 2026-10-11) whose every entry
+    carries its `games` list. statsapi lists a date only for the games on
+    it, so a date entry without the list is a damaged answer, not a day off,
+    and reading it as one loses that day's games quietly."""
+    dates = data.get("dates") if isinstance(data, dict) else None
+    return isinstance(dates, list) and all(
+        isinstance(d, dict) and isinstance(d.get("games"), list) for d in dates)
+
+
 def _http_get(url: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
-    """Wrapper around requests.get with logging on non-2xx. Returns
-    the parsed JSON dict or None. Timeout is 20s (season schedule is
-    ~2MB JSON; default 15s sometimes flakes from pocket-dev's egress)."""
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[mlb] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[mlb] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`.
+
+    Timeout is 20s, not the usual 15: the season schedule is ~2MB of JSON
+    and 15s sometimes flaked from pocket-dev's egress."""
+    return http_get_json(requests, url, log=logger, tag="mlb", timeout=timeout)
 
 
 def _default_season() -> int:
@@ -169,34 +173,61 @@ class MlbRegularSource(PointsBasedSportSource):
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Pull the next-N-day regular-season schedule via the single
-        `/schedule` endpoint with a startDate/endDate filter. MLB's
-        schedule endpoint reliably honors date ranges (no silent cap
-        like ESPN's). Closeness signal is left None: there is no Odds
-        API integration for MLB in V1; structural importance carries.
+        """Upcoming regular-season games via the single `/schedule` endpoint
+        with a startDate/endDate filter over `_espn.upcoming_window`. MLB's
+        schedule endpoint reliably honors date ranges (no silent cap like
+        ESPN's). Closeness signal is left None: there is no Odds API
+        integration for MLB in V1; structural importance carries.
+
+        The window starts one day BEFORE today-UTC (#256) because statsapi
+        files a game under its US date, like ESPN: measured 2026-10-11,
+        Diamondbacks at Padres (2026-09-27T00:40Z) is listed under 2026-09-26,
+        and `startDate=2026-09-27` does not return it, so from 00:00Z every
+        late West Coast game vanished, BEFORE first pitch as well as during it.
+        The window's drops then apply: a FINISHED game (`abstractGameState`
+        "Final", which is also how a postponed or cancelled game reads) and a
+        stale one. A moved game is listed TWICE under one gamePk (29 such in
+        the 2026 season, measured 2026-10-11): the listing it moved away from
+        carries `rescheduleDate` (postponed, 28) or `resumeDate` (suspended, 1),
+        and the one it moved to carries `rescheduledFrom` / `resumedFrom`. The
+        moved-away listing is skipped by that marker, whatever its state says and
+        whichever date it sits under, because a game can move earlier as well as
+        later; DO NOT replace it with "first" or "last listing wins", which picks
+        the abandoned slot for one of the two directions.
         """
-        today = datetime.now(timezone.utc).date()
-        end = today.fromordinal(today.toordinal() + days_ahead)
+        window = upcoming_window(days_ahead)
         url = (
             f"{MLB_API_BASE}/schedule?sportId=1&gameType=R"
-            f"&startDate={today.isoformat()}&endDate={end.isoformat()}"
+            f"&startDate={window.first_day.isoformat()}&endDate={window.last_day.isoformat()}"
         )
         data = _http_get(url)
-        out: List[GameRow] = []
-        if not data:
-            return out
-        for date_entry in data.get("dates", []) or []:
-            for g in date_entry.get("games", []) or []:
+        if not _is_schedule(data):
+            # The ONE request for every day of the window failed (None) or
+            # answered something that is not a schedule: each of those days is
+            # lost, not quiet, so the refresh keeps the games it had published
+            # for them (#261, see base.report_lost_day_range). An answer with
+            # no games still carries the list, `"dates": []` (measured
+            # 2026-10-11 over 2026-12-20..23), and is a real empty slate.
+            report_lost_day_range(window.first_day, window.last_day)
+            return []
+        by_pk: Dict[Any, GameRow] = {}
+        for date_entry in data["dates"]:
+            for g in date_entry["games"]:
                 gid = g.get("gamePk")
-                if gid is None:
+                if gid is None or gid in by_pk:
                     continue
+                if g.get("rescheduleDate") or g.get("resumeDate"):
+                    continue  # the slot this game moved away from
                 teams = g.get("teams") or {}
                 home = ((teams.get("home") or {}).get("team") or {}).get("name")
                 away = ((teams.get("away") or {}).get("team") or {}).get("name")
                 start = parse_iso_utc(g.get("gameDate"))
-                if not home or not away or start is None:
+                if not home or not away:
                     continue
-                out.append(GameRow(
+                over = (g.get("status") or {}).get("abstractGameState") == "Final"
+                if not window.admits(start, over):
+                    continue
+                by_pk[gid] = GameRow(
                     sport_prefix=self.sport_prefix,
                     sport_label=self.sport_label,
                     home=home,
@@ -210,8 +241,8 @@ class MlbRegularSource(PointsBasedSportSource):
                         "game_id": gid,
                         "fd_competition_code": self.league_context_code,
                     },
-                ))
-        return out
+                )
+        return list(by_pk.values())
 
     # ---------- _fetch_full_season_games (importance side) ----------
 
@@ -225,10 +256,13 @@ class MlbRegularSource(PointsBasedSportSource):
         )
         data = _http_get(url)
         out: List[Dict[str, Any]] = []
-        if not data:
-            return out
-        for date_entry in data.get("dates", []) or []:
-            for g in date_entry.get("games", []) or []:
+        if not _is_schedule(data):
+            # Failed, or not a schedule: NOT an empty season (#289). A season
+            # with no games still answers `"dates": []` (measured 2026-10-11
+            # for season=2031).
+            raise SeasonUnavailable("regular-season schedule did not answer")
+        for date_entry in data["dates"]:
+            for g in date_entry["games"]:
                 gid = g.get("gamePk")
                 if gid is None:
                     continue
@@ -267,7 +301,7 @@ class MlbRegularSource(PointsBasedSportSource):
 # =====================================================================
 
 
-class MlbPlayoffSource(BestOfNSeriesSource):
+class MlbPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """MLB postseason as a per-stage variable-length BestOfNSeriesSource.
 
     Series lengths per stage:
@@ -331,15 +365,18 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         """
         out: List[GameRow] = []
         data = _http_get(f"{MLB_API_BASE}/schedule/postseason?season={self.season}")
-        if not data:
+        if not _is_schedule(data):
+            # Failed or damaged: the label comes back empty, which the refresh
+            # holds as an outage (#240), rather than parsing an error object
+            # as a postseason with no games in it.
             return out
         now = datetime.now(timezone.utc)
         # DO NOT use now.fromordinal(...): it is a classmethod that drops the
         # tzinfo, and comparing its naive result against the aware start_time
         # raised TypeError, so the whole postseason contributed nothing (#213).
         horizon = now + timedelta(days=days_ahead)
-        for date_entry in data.get("dates", []) or []:
-            for g in date_entry.get("games", []) or []:
+        for date_entry in data["dates"]:
+            for g in date_entry["games"]:
                 gid = g.get("gamePk")
                 if gid is None:
                     continue
@@ -395,31 +432,6 @@ class MlbPlayoffSource(BestOfNSeriesSource):
             "pa_per_game": _DEFAULT_RUNS_AGAINST,
         }
 
-    # ---------- sample_result (per-game Poisson with extra-innings) ----------
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        del state  # per-game classification only
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.1, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.1, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_runs = _poisson(lam_home, rng)
-        away_runs = _poisson(lam_away, rng)
-        # Extra innings: tied regulation always resolves (MLB postseason
-        # has no draws); coin-flip the winner of the extra-innings boost.
-        if home_runs == away_runs:
-            if rng.random() < 0.5:
-                home_runs += 1
-            else:
-                away_runs += 1
-        return MatchResult(home_goals=home_runs, away_goals=away_runs)
-
     # ---------- bracket fetch ----------
 
     def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
@@ -431,15 +443,22 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         """
         if self._bracket_games_cache is not None:
             return self._bracket_games_cache
-
-        data = _http_get(f"{MLB_API_BASE}/schedule/postseason?season={self.season}")
-        if not data:
-            self._bracket_games_cache = []
+        if self._bracket_fetch_given_up():
             return []
 
+        data = _http_get(f"{MLB_API_BASE}/schedule/postseason?season={self.season}")
+        if not _is_schedule(data):
+            # NOT cached: a failed request (or a 200 error object, which used
+            # to parse as a postseason with no games and be cached, #289's
+            # review) is not an empty postseason, and
+            # caching it would keep the scoring-time retry (#243) from ever
+            # seeing the bracket. Counted, so a refresh that gives up says so
+            # (#245; see BracketSportSource).
+            return self._bracket_fetch_failed("postseason schedule did not answer")
+
         out: List[Dict[str, Any]] = []
-        for date_entry in data.get("dates", []) or []:
-            for g in date_entry.get("games", []) or []:
+        for date_entry in data["dates"]:
+            for g in date_entry["games"]:
                 gid = g.get("gamePk")
                 if gid is None:
                     continue
@@ -497,8 +516,7 @@ class MlbPlayoffSource(BestOfNSeriesSource):
         if len(lcs_pair_set) == 2 and ws_emitted == 0:
             out.extend(self._synth_ws_placeholder_games())
 
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     # ---------- WS placeholder synthesis (#27) ----------
 

@@ -116,8 +116,8 @@ def fake_orm():
 
     Only the no-group early return is driven this way -- it is the branch the
     #170 reporter actually hit (fresh install, no group yet, dry_run defaulted
-    on), and everything it touches before returning is a get-or-none plus two
-    emptiable sweep queries. The queryset chains are given explicit terminal
+    on), and everything it touches before returning is two get-or-nones plus
+    two emptiable sweep queries. The queryset chains are given explicit terminal
     values because a bare MagicMock `.first()` is truthy, which would silently
     route the test down the create-the-group path instead.
     """
@@ -140,7 +140,15 @@ def fake_orm():
     models.ChannelGroup.objects.filter.return_value.first.return_value = None
     # No leftovers from a previous target name.
     models.ChannelGroup.objects.exclude.return_value.filter.return_value.distinct.return_value = []
-    epg_models.EPGSource.objects.exclude.return_value.filter.return_value.distinct.return_value = []
+    (epg_models.EPGSource.objects.exclude.return_value.filter.return_value
+     .filter.return_value.distinct.return_value) = []
+    # No fetching EPG source shares the group's name (#263 refusal).
+    epg_models.EPGSource.objects.filter.return_value.exclude.return_value.first.return_value = None
+    # Name limits as Dispatcharr's schema has them, read by apply's up-front
+    # name check (_setup_name_problem): a bare MagicMock is not a number.
+    models.ChannelGroup._meta.get_field.return_value.max_length = None  # TextField
+    models.Channel._meta.get_field.return_value.max_length = 512
+    epg_models.EPGSource._meta.get_field.return_value.max_length = 255
 
     saved = {name: sys.modules.get(name) for name in created}
     sys.modules.update(created)

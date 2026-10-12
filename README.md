@@ -63,18 +63,18 @@ implementation and testing are done by AI.
 ## Example output
 
 ```
-#5548720  EPL ★10.0 · Brentford at Manchester United · title / UCL race
+#5548720  EPL ★9.4 · Brentford at Manchester United · title / UCL race
           — both top-10 (#3 vs #9), title / UCL race, toss-up (line +0.5)
 
           Description (what TiviMate/Plex/Jellyfin show):
             Kickoff: Today 2:00 PM CDT 🔴 TODAY
             Matchup: Brentford FC @ Manchester United FC
             Sport: English Premier League
-            Score: 10.0/10  (raw 28.3)
+            Score: 9.4/10  (raw 28.23)
             Score breakdown:
-              rank_pair: +7.92
-              close_game: +3.38
-              importance: +17.0
+              rank_pair: +7.37
+              close_game: +2.89
+              importance: +17.97
             Source: Manchester United
 
 #5550642  EFL ⭐★10.0 · Middlesbrough at Wrexham · playoff / auto-promotion race
@@ -117,15 +117,19 @@ the **Test naming convention** action to preview a template before applying it.
 ### NCAA Football divisions
 
 CFBD's feed carries every NCAA division, not just Division I. The
-**NCAA Football divisions** setting selects what actually reaches the guide:
+**NCAA Football (CFBD)** setting both switches the league on and selects what
+actually reaches the guide (before #208 these were two settings, an on/off
+toggle and a divisions dropdown):
 
 | Setting | What is pulled |
 |---|---|
-| `D1 FBS only` (default) | Games where either side is FBS, including FBS-vs-FCS |
-| `D1 FBS + FCS` | The above, plus FCS-vs-FCS |
+| `Off` (default) | Nothing; NCAA Football is not fetched |
+| `D1 FBS only (recommended)` | Games where either side is FBS, including FBS-vs-FCS (and the rare FBS-vs-Division II) |
+| `D1 FBS + FCS` | Games where either side is FBS or FCS: the above, plus FCS-vs-FCS and FCS against a Division II or III opponent |
 
-Division II and III are never pulled under either setting. They are not
-merely uninteresting: the Monte Carlo importance simulation replays only the
+A game is kept when EITHER side is in the selected divisions, so a game
+between two Division II or III teams is never pulled under either setting.
+Those games are not merely uninteresting: the Monte Carlo importance simulation replays only the
 selected divisions' season, so a team outside it scores 0.00 every time while
 still being played out in every simulated season. Opening week 2026 returned
 157 games in a seven-day window of which 27 involved an FBS team, so the
@@ -138,7 +142,7 @@ an FCS game can still score on stakes alone. Under `D1 FBS + FCS` those
 stakes are measured with FBS win-count bands (6 wins = bowl eligible,
 10+ = playoff contender), which FCS's own postseason does not work that
 way — treat FCS importance as an approximation rather than a like-for-like
-comparison with FBS. This is why FBS-only is the default.
+comparison with FBS. This is why FBS-only is the recommended choice.
 
 
 Adding a sport is a new file in `sources/` implementing the `SportSource`
@@ -180,19 +184,24 @@ form will collect everything needed to scope it.
    '
    ```
 
-   Anthropic key is only needed if you set `weight_narrative > 0` OR want
+   Anthropic key is only needed if you set `narrative` above 0 in **Scoring
+   weights** OR want
    LLM-resolved EPG matching when the regex pre-filter is ambiguous. For
    regex-only matching it's optional.
 
 3. Open Dispatcharr → Plugins → enable **Ranked Matchups (Top Games)**, then
    in the plugin's settings:
-   - Toggle which sports you want under **Sport Sources**
+   - Toggle which sports you want under **Sport Sources** (related leagues,
+     such as men's and women's NCAA soccer or the ATP and WTA tours, share
+     one dropdown: Off, either one, or both)
    - Set your **Favorite teams** (comma-separated) under **Curation**
    - Optionally list **Recorded teams** to have their games recorded
      automatically (see [Recording your teams](#recording-your-teams))
    - Pick your **Local timezone** so "today" classification + EPG dates are
      right
-   - Tune signal **Weights** if any feel under/over-weighted
+   - Tune **Scoring weights** if a signal feels under/over-weighted (one
+     line of `name=number` entries, e.g. `favorite=8, spread=1`; blank keeps
+     the defaults, see [SCORING.md](SCORING.md#tuning))
 
 4. Turn off **Dry run on Apply** (on by default; it prevents channel creation),
    then run **Refresh + apply now** to populate.
@@ -208,7 +217,8 @@ form will collect everything needed to scope it.
    > exactly what that mode trades away.) Each channel's
    > *number* is derived from its kickoff time: `virtual_base + minutes-since-a-
    > fixed-origin × slots + a small per-game tiebreak`. So the list sorts
-   > strictly by day then start time (live/upcoming games first), and — crucially
+   > by day then start time (live/upcoming games first; a crowded minute can push
+   > its last game a number or two past the next minute's first), and — crucially
    > — a game keeps the **same number for as long as its kickoff time holds**.
    > Finished games drop off and new games slot into their time-position on their
    > own, which looks like "renumbering every refresh" but no existing game's
@@ -289,8 +299,17 @@ Its last line is always the verdict:
 - `RUNNING NOW: ... since <time>; the results above are from before it.` printed
   above the previous run's verdict, so the last line is never mistaken for an
   answer to the click you just made.
-- `NOTE: ... requested <time> did not run: another run held the lock, or Redis
-  was unreachable.` A *scheduled* run no longer gives up at the first busy
+- `Run lock: held by <what>, task <id>, pid <n> (<process>), plugin <version>,
+  held <how long>.` printed whenever a refresh, apply or reap is holding the
+  run lock, so you can see what a waiting run is waiting for. A holder described
+  as "a plugin version from before holder records" is a thread still running
+  old plugin code, which a container restart clears.
+- `WARNING: Redis is unreachable (<error>), so no refresh, apply or reap can run ...`
+  Every run needs the run lock, a plain Refresh included, so nothing changes in
+  the guide (or the curated list) until Redis is back.
+- `NOTE: ... requested <time> did not run: <why>.` The why names the run that
+  held the lock, says Redis was unreachable, or, for a scheduled run, says it
+  was already too late to start when the scheduler got to it. A *scheduled* run no longer gives up at the first busy
   moment: one worker takes ownership of that scheduled time and keeps waiting
   for the lock for up to half an hour (never into the next scheduled time), so
   this line means the lock stayed held the whole while, not that something else
@@ -305,11 +324,12 @@ The run is named by why it happened — `Refresh + apply` (the button),
 after an M3U update` (see [When a feed arrives after a
 refresh](#when-a-feed-arrives-after-a-refresh)), or `Refresh`.
 
-Above the verdict come warnings about the data itself, the two failures a run
+Above the verdict come warnings about the data itself, the failures a run
 can otherwise complete "ok" through: **sources that failed to fetch** (named,
-with the errors in the container log) and **a list where nothing is playable**,
-meaning no game matched a stream in your channels — run **Diagnose matching**
-for that one.
+with the errors in the container log), **sources that lost days of their
+schedule** (a day's request kept failing; games already published for that day
+stay on air), and **a list where nothing is playable**, meaning no game
+matched a stream in your channels — run **Diagnose matching** for that one.
 
 The verdict is kept in `last_run.json` beside `cache.json` in the plugin
 directory, so it survives a container restart. For more detail, the container
@@ -321,8 +341,12 @@ logs the tail of its own progress and names the step it reached.
 By default a game's channel stays in the group until the first scheduled
 refresh after its estimated end, which on a five-a-day schedule can be hours
 after the final whistle. A refresh never removes a game that is still on air,
-even when its sport's feed has already dropped it or that feed is down. Two
-settings change when a finished game goes, both off by default:
+even when its sport's feed has already dropped it, that feed is down, or the
+feed lost only the day the game is on. That holds after an upgrade too, when
+Dispatcharr replaces the plugin folder and `cache.json` with it: the plugin
+also records each published game in its own guide entry and reads it back
+from there. Two settings change when a finished game goes, both off by
+default:
 
 | Setting | Effect |
 |---|---|
@@ -331,7 +355,9 @@ settings change when a finished game goes, both off by default:
 
 The end of a game is **estimated**, because no feed publishes one: the plugin
 reuses the same per-sport window the EPG matcher uses, roughly 4 hours for
-gridiron and 2.5 for soccer. So `remove_finished_after_minutes = 30` means
+gridiron and 2.5 for soccer, or 3 for a soccer knockout or cup tie that can go
+to extra time and penalties (NCAA soccer gets 3 for every game, since its
+listings do not mark the conference tournaments, which can). So `remove_finished_after_minutes = 30` means
 about four and a half hours after a college football kickoff, not thirty
 minutes. A game whose start time cannot be parsed is never reaped.
 
@@ -514,7 +540,9 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
   default. Narrow that with "Channel Profiles to enable" (see below)
 
 If you rename the target group, the next apply detects the old group + its
-virtual channels (by tvg_id marker `ranked_matchups:`) and migrates them.
+virtual channels (by tvg_id marker `ranked_matchups:`) and migrates them, guide
+entries included, so a channel that is recording when you rename keeps showing
+its programme.
 
 ### Channel numbering
 
@@ -523,15 +551,34 @@ differs is what the numbers look like and how much of your lineup they need.
 
 **Kickoff time** (default) builds the number out of the game's start time:
 `starting number + minutes-since-a-fixed-origin × slots + a small per-game
-tiebreak`. Two consequences. The list sorts strictly by day then start time, and
+tiebreak`. Two consequences. The list sorts by day then start time (a crowded
+minute can push its last game a number or two past the next minute's first), and
 a game's number is fixed while its kickoff time holds, so a number is only ever
-handed on between games kicking off in the same minute. A rescheduled game moves
-to its new time slot on the same channel: channels are identified by the source's
+handed on between games kicking off in the same minute (or, once a game has
+been pushed past its minute's last number, to a game in a later minute).
+Two games in one minute that land on the same tiebreak get neighbouring
+numbers, and each keeps its number on later refreshes, even when another game
+joins that minute or one of them finishes and leaves first. That includes a
+game pushed past its minute's last number: the plugin remembers the start time
+each channel was numbered for (in `numbering_state.json`, beside the floor
+below), and a game whose start time has not changed keeps its number while no
+other channel holds that number. Without that file (the first refresh after upgrading,
+or if it is deleted), such a game keeps its number only while every number
+between its own tiebreak and it stays taken; if one of those games leaves first,
+it is placed again from its tiebreak and usually moves. A rescheduled game moves
+to its new time slot on the same channel (unless its old number already falls
+among its new minute's numbers, where it stays): channels are identified by the source's
 own event id (for every source that publishes one), not by kickoff time, so a
 reschedule does not create a second channel. The cost is that the numbers are
 large, around 7 digits, and the **Starting channel number** setting is only a
 floor: the time-based term is in the millions, so setting it to 400 lands you
-near 5,548,000 rather than at 400.
+near 5,548,000 rather than at 400. Left at 0 (auto), the floor is picked once,
+just above your highest existing channel, and then remembered, so adding or
+removing your own channels never renumbers the games. Upgrading (or losing that
+file) picks the floor that keeps the most of your channels on their numbers,
+normally all of them. If one of your other channels ever sits on a number a
+game would get, the game takes the next free number instead, because the guide
+identifies a channel by its number alone.
 
 **Compact range** keeps every channel inside a band you name. Set **Starting
 channel number** to 400 and the group runs 400, 401, 402 and up. **Compact range
@@ -616,7 +663,8 @@ does not have to be a Favorite, and listing it does not change its score.
   spare slots** and slots your recorded teams do not need go to the best games
   on the list, from **Leagues to record** (league codes as they appear at the
   start of channel names, e.g. `CFB, EPL, NFL`; blank means every league). A
-  ranked game is only recorded once a stream has been matched for it.
+  ranked game is only recorded once a stream has been matched for it and
+  attached to its channel.
 - **Who wins a slot.** Slots always fill in kickoff order. **Recording
   preference** decides what happens when a game kicks off and every slot is
   full:
@@ -639,7 +687,12 @@ does not have to be a Favorite, and listing it does not change its score.
     its slot instead.
 - **Outages do not cost recordings.** If a source briefly returns nothing and
   a game drops off the list, its recording is kept as long as the reason for
-  it (the team, or ranked recording for that league) still holds.
+  it (the team, or ranked recording for that league) still holds and its
+  channel still has a stream to record from (one not in an **Excluded
+  groups** group). Such a recording, for a game no longer on the list, that
+  has not started and that you have not edited, could capture nothing, so it
+  is cancelled rather than hold a slot another game needs; it is planned
+  again, if a slot is free, when the game comes back with a feed.
 - **Changing your mind.** Adding or removing a team takes effect on the next
   Apply (a team whose games are not on the list yet needs a Refresh to fetch
   them). Removing a team cancels its recordings that have not
@@ -689,6 +742,9 @@ needs `supports_importance=True` on the `SportSource` plus the 7-method
 Monte Carlo interface (`estimate_strengths`, `initial_state`,
 `remaining_matches`, `sample_result`, `apply_result`, `terminal_outcomes`,
 `outcome_labels`) — see `sources/soccer.py` for the canonical impl.
+A playoff source built on `BestOfNSeriesSource` or `DoubleEliminationSource`
+gets its `sample_result` by listing `ForcedWinnerPoissonSampler` (in
+`sources/bracket.py`) FIRST among its bases.
 
 Also set `shared_season_importance=True` if — and only if — your
 `sample_result` ignores the `state` argument. That lets every game of your
@@ -705,15 +761,15 @@ Every game's per-signal breakdown is in `cache.json`:
 {
   "home": "Manchester United FC",
   "away": "Brentford FC",
-  "score": 10.0,
-  "score_raw": 28.3,
+  "score": 9.43,
+  "score_raw": 28.23,
   "score_breakdown": {
-    "rank_pair": 7.92,
+    "rank_pair": 7.37,
     "close_game": 2.89,
-    "importance": 17.0
+    "importance": 17.97
   },
   "score_notes": [
-    "both ranked: #3 vs #9 (sum=12)",
+    "both ranked: #3 of 20 (strength 0.89) vs #9 of 20 (strength 0.58)",
     "implied coinflip-ness: 0.96",
     "importance: Manchester United UCL: 0.65 leverage × 4.0 = 2.60",
     "importance: Brentford Europa/Conference: 0.42 leverage × 2.0 = 0.84",

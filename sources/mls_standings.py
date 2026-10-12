@@ -40,9 +40,10 @@ ESPN endpoints used:
   - `/apis/v2/sports/soccer/usa.1/standings`: conference rosters +
     current standings points (3 W / 1 D / 0 L). Fetched once per
     refresh; the team→conference map is cached on the source instance.
-  - `/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=<range>&limit=`:
-    the Feb-Nov regular season, whole window in one call. See
-    SCOREBOARD_EVENT_LIMIT for why `limit` is not optional.
+  - `/apis/site/v2/sports/soccer/usa.1/scoreboard?dates=YYYYMMDD&limit=`:
+    one request per day of the Feb-Nov regular season, fetched
+    concurrently. See `_fetch_scoreboard_range` for why not one ranged
+    call.
 
 Remaining-fixtures coverage (#65, resolved 2026-08-15). This module used
 to carry a "known limitation" claiming ESPN publishes only ~1-2 weeks of
@@ -77,18 +78,24 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
 from ._odds import fetch_odds_events
-from .base import GameRow
+from .base import GameRow, SeasonUnavailable
 from .points_based import PointsBasedSportSource
 from .mls import (
     _h2h_to_closeness,
     _team_canonical_name,
 )
-from .._util import redact_secrets
-from ._espn import extract_espn_scoreboard_event
+from .._util import http_get_json
+from ._espn import (
+    dedupe_events,
+    event_identity,
+    extract_espn_scoreboard_event,
+    fetch_scoreboard_days,
+    sweep_upcoming_events,
+)
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_standings")
 
-ESPN_SCOREBOARD_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1"
+ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/usa.1/scoreboard"
 ESPN_STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/soccer/usa.1/standings"
 
 # MLS regular season runs late February through late October in the
@@ -96,23 +103,6 @@ ESPN_STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/soccer/usa.1/stan
 # either side of the bookend weekends.
 SEASON_START_MONTH = 2
 SEASON_END_MONTH = 11
-
-# ESPN's scoreboard accepts `dates=YYYYMMDD-YYYYMMDD`, but it PAGINATES
-# and truncates silently: without an explicit `limit` a range returns
-# only its first 100 events and says nothing about the rest. Passing
-# `limit` lifts the page size and the whole window arrives in one call.
-#
-# DO NOT drop this param and DO NOT go back to a per-day sweep to work
-# around a short result. Measured live 2026-08-15 against
-# `soccer/usa.1`, full 2026 season window (Feb 1 - Nov 30):
-#   dates=<range>                -> 100 events (silently truncated)
-#   dates=<range>&limit=1000     -> 511 events
-#   303 individual per-day calls -> 511 events
-# The range-with-limit and per-day event-ID sets were IDENTICAL, with
-# identical kickoff timestamps on every shared id. One call replaces
-# 303. `_fetch_scoreboard_range` warns if a response ever comes back at
-# the limit, which is the only symptom truncation would show.
-SCOREBOARD_EVENT_LIMIT = 1000
 
 # Per-team goal averages cluster around 1.4 goals/game in modern MLS
 # (slightly higher than NCAA soccer's 1.5/game prior because pro-level
@@ -122,56 +112,36 @@ _DEFAULT_GOALS_FOR = 1.4
 _DEFAULT_GOALS_AGAINST = 1.4
 
 
-def _http_get(url: str, timeout: float = 15.0, **params: Any) -> Optional[Any]:
-    """HTTP GET wrapper. Return type is Optional[Any] because the
-    callers hit two shapes: ESPN endpoints return dicts (standings,
-    scoreboard) while The Odds API returns a JSON list. Caller checks
-    via isinstance before iterating.
-    """
-    try:
-        r = requests.get(url, timeout=timeout, params=params or None)
-        if r.status_code >= 400:
-            logger.warning("[mls_standings] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        # redact_secrets on BOTH: odds calls pass apiKey as a query param, and a
-        # requests ConnectionError renders the full URL (params included) in its
-        # message even though `url` here is the bare base. See #156.
-        logger.warning("[mls_standings] %s failed: %s", redact_secrets(url), redact_secrets(exc))
-        return None
+def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="mls_standings", timeout=timeout)
 
 
 def _fetch_scoreboard_range(start: date, end: date) -> List[Dict[str, Any]]:
-    """Every ESPN MLS scoreboard event with a kickoff in [start, end].
+    """Every ESPN MLS scoreboard event in the day buckets [start, end],
+    in date order, ONE REQUEST PER DAY (fetched concurrently).
 
-    One HTTP call for the whole window (see SCOREBOARD_EVENT_LIMIT for
-    why the `limit` param is mandatory). Returns [] on any failure, which
-    the callers treat as "no games" rather than an error: a refresh that
-    can't reach ESPN emits nothing instead of a wrong signal.
+    DO NOT collapse this back into one `dates=<start>-<end>&limit=` call.
+    That form returned the whole 2026 season (511 events) on 2026-08-15
+    (#65), then began answering HTTP 400 "Failed to get events endpoint."
+    for every team sport; the live plugin log shows this function getting
+    400s since at least 2026-10-07 (the oldest retained log), which emptied MLS East/West (no upcoming rows and
+    an empty simulated season) with nothing but a WARNING to show for it.
+    Measured and explained at `_espn.SCOREBOARD_EVENT_LIMIT` (#182).
+
+    A day that fails is retried once when it is a blip (see
+    `_espn.SCOREBOARD_WALK_CHUNK_DAYS`); one still failing contributes
+    nothing and the rest still arrive. The walk reports the lost day
+    (`_espn.fetch_scoreboard_days`, #261), which is what lets the refresh
+    hold the games it had published for that day instead of reading the
+    shorter list as a quiet one.
     """
     if end < start:
         return []
-    window = f"{start.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
-    data = _http_get(
-        f"{ESPN_SCOREBOARD_BASE}/scoreboard",
-        timeout=30.0,
-        dates=window,
-        limit=SCOREBOARD_EVENT_LIMIT,
-    )
-    if not isinstance(data, dict):
-        return []
-    events = data.get("events") or []
-    if len(events) >= SCOREBOARD_EVENT_LIMIT:
-        # Only symptom ESPN gives for a truncated page. A full MLS season
-        # is ~511 events, so hitting the limit means either the window grew
-        # or ESPN changed its paging: say so rather than silently modeling
-        # a partial season.
-        logger.warning(
-            "[mls_standings] scoreboard dates=%s returned %d events, at the "
-            "requested limit of %d: the result may be truncated",
-            window, len(events), SCOREBOARD_EVENT_LIMIT,
-        )
+    events: List[Dict[str, Any]] = []
+    for _day, data in fetch_scoreboard_days(_http_get, ESPN_SCOREBOARD_URL, start, end):
+        if isinstance(data, dict):
+            events.extend(data.get("events") or [])
     return events
 
 
@@ -194,11 +164,13 @@ REGULAR_SEASON_SLUG = "regular-season"
 CONFERENCE_ABBREVIATIONS = ("East", "West")
 
 
-def _fetch_conference_map() -> Dict[str, str]:
+def _fetch_conference_map() -> Optional[Dict[str, str]]:
     """Pull the current MLS conference assignments from ESPN's /standings
-    endpoint. Returns {team_displayName: "East" | "West"}. Empty dict
-    on any failure: the source falls back to emitting zero games for
-    that conference (no spurious importance signal).
+    endpoint. Returns {team_displayName: "East" | "West"}, never a partial
+    map: None when the request FAILED or listed clubs for only one
+    conference (or none). The importance path then simulates nothing for
+    that conference (no spurious signal), and `fetch_upcoming` raises (see
+    there), because a quiet [] would read the conference's days as empty.
 
     The conference roster changes year over year (expansion teams). The
     map is rebuilt on every refresh rather than cached, so an expansion
@@ -206,10 +178,13 @@ def _fetch_conference_map() -> Dict[str, str]:
     routing without redeploy.
     """
     data = _http_get(ESPN_STANDINGS_URL)
-    if not isinstance(data, dict):
-        return {}
+    if not isinstance(data, dict) or not isinstance(data.get("children"), list):
+        # Every answer carries the conference tables as `children` (East and
+        # West, 15 clubs each, measured 2026-10-11); a body without them (an
+        # error object) is a failure.
+        return None
     out: Dict[str, str] = {}
-    for child in data.get("children") or []:
+    for child in data["children"]:
         conf_abbrev = (child.get("abbreviation") or "").strip()
         if conf_abbrev not in CONFERENCE_ABBREVIATIONS:
             continue
@@ -219,6 +194,17 @@ def _fetch_conference_map() -> Dict[str, str]:
             name = _team_canonical_name(team)
             if name:
                 out[name] = conf_abbrev
+    if set(out.values()) != set(CONFERENCE_ABBREVIATIONS):
+        # A conference with no clubs is not an MLS season; it is a partial or
+        # reshaped answer (a renamed abbreviation drops a whole conference).
+        # DO NOT return the half map: the missing conference's source would
+        # read its days as quiet while the other kept the shared "MLS" label
+        # non-empty, and the refresh would drop its published games (#261).
+        logger.warning(
+            "[mls_standings] /standings listed clubs for %s only; treating "
+            "it as a failed request", sorted(set(out.values())) or "no conference",
+        )
+        return None
     return out
 
 
@@ -272,6 +258,7 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
             else (now.year if now.month >= SEASON_START_MONTH else now.year - 1)
         )
         self._conference_map_cache: Optional[Dict[str, str]] = None
+        self._conference_map_fetched = False
         self._closeness_cache: Optional[Dict[Tuple[str, str], float]] = None
 
     @property
@@ -285,16 +272,27 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         # the league_context_code, not the display label.
         return "MLS"
 
-    # ---------- conference map (shared across instances per-refresh) ----------
+    # ---------- conference map (cached per instance, so once per refresh) ----------
 
-    def _conference_map(self) -> Dict[str, str]:
-        if self._conference_map_cache is not None:
-            return self._conference_map_cache
-        self._conference_map_cache = _fetch_conference_map()
+    def _conference_map(self) -> Optional[Dict[str, str]]:
+        """The conference map, or None when its request failed. Fetched ONCE
+        per source, a failure included. DO NOT retry a failure here: the
+        strength estimate reads the season through this map when the source
+        is BUILT, before `fetch_upcoming`, and the season read is not retried
+        either (`points_based._fetch_games_cached`), so a retry that recovered
+        would let `fetch_upcoming` list games whose season had already failed.
+        Failing both, `fetch_upcoming` raises and the refresh holds the games
+        it had (and since #289 a failed season would hold them anyway)."""
+        if not self._conference_map_fetched:
+            self._conference_map_cache = _fetch_conference_map()
+            self._conference_map_fetched = True
         return self._conference_map_cache
 
-    def _own_conf_teams(self) -> Set[str]:
+    def _own_conf_teams(self) -> Optional[Set[str]]:
+        """This conference's clubs, or None when the standings request failed."""
         cmap = self._conference_map()
+        if cmap is None:
+            return None
         return {name for name, conf in cmap.items() if conf == self._conference}
 
     # ---------- closeness (carried over from V1 MlsSource) ----------
@@ -368,39 +366,46 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Emit upcoming games where the HOME team is in this conference.
         Cross-conf away games surface via the home team's source so the
-        UI emit doesn't double-count.
+        UI emit doesn't double-count. Swept through
+        `_espn.sweep_upcoming_events`, which owns the window (including the
+        US-Eastern lookback day, #256), the FINISHED and stale drops and the
+        dedupe.
         """
         own_conf = self._own_conf_teams()
+        if own_conf is None:
+            # Raise, DO NOT return []: both conference sources share the label
+            # "MLS", so when only one conference's standings request failed
+            # the label still had games, a quiet [] read that conference's
+            # days as having none, and the refresh dropped the games it had
+            # published for them. A raise is the outage the refresh holds the
+            # previous games for (#240, #261).
+            raise RuntimeError(
+                "ESPN MLS standings unavailable, so games cannot be routed "
+                f"to the {self._conference} conference"
+            )
         if not own_conf:
             return []
         closeness_map = self._fetch_closeness()
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: Set[Any] = set()
-        for event in _fetch_scoreboard_range(
-            today, today + timedelta(days=days_ahead),
-        ):
+
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
             rec = _extract_game_record(event)
             if rec is None:
-                continue
-            eid = rec.get("id")
-            if eid in seen_ids:
-                continue
+                return None
             home = rec["home"]
             if home not in own_conf:
-                continue
+                return None
             # Skip non-regular-season games for V1. MLS Cup playoff
             # bracket is filed under issue #30 part B; until it lands,
             # postseason MLS games should not be emitted here: they
             # would get importance computed against regular-season
             # bands, inflating their score.
             if rec.get("season_slug") != REGULAR_SEASON_SLUG:
-                continue
-            seen_ids.add(eid)
+                return None
             start = rec.get("start_time")
             if start is None:
-                continue
-            out.append(GameRow(
+                return None
+            eid = rec.get("id")
+            return GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
                 home=home,
@@ -413,7 +418,8 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
                 ),
                 extra={
                     "espn_event_id": eid,
-                    # Same ESPN event id under the key the importance
+                    # The event's identity (its ESPN id when it has one,
+                    # `_espn.event_identity`) under the key the importance
                     # simulator uses for match identity. DO NOT drop
                     # this in favour of `espn_event_id` alone:
                     # `PointsBasedSportSource.apply_result` records
@@ -424,12 +430,12 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
                     # season the moment the fixture pool holds a
                     # date-less row (#65). `espn_event_id` stays for
                     # the cache.json consumers already reading it.
-                    "game_id": eid,
+                    "game_id": event_identity(event),
                     "fd_competition_code": self.league_context_code,
                     "season_slug": rec.get("season_slug"),
                 },
-            ))
-        return out
+            )
+        return sweep_upcoming_events(_http_get, ESPN_SCOREBOARD_URL, days_ahead, to_row)
 
     # ---------- _fetch_full_season_games (importance side) ----------
 
@@ -461,8 +467,10 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         """
         own_conf = self._own_conf_teams()
         if not own_conf:
-            return []
-        seen: Dict[Any, Dict[str, Any]] = {}
+            # The conference map failed (see `_fetch_conference_map`), so the
+            # season cannot be cut to this conference: a failed season, not
+            # an empty one (#289).
+            raise SeasonUnavailable("standings conference map unavailable")
         season_start = datetime(
             self.season_year, SEASON_START_MONTH, 1, tzinfo=timezone.utc
         ).date()
@@ -470,21 +478,22 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         season_end = (datetime(
             self.season_year, SEASON_END_MONTH + 1, 1, tzinfo=timezone.utc
         ).date()) - timedelta(days=1)
-        for event in _fetch_scoreboard_range(season_start, season_end):
+
+        def keep(event: Dict[str, Any], key: Any) -> Optional[Dict[str, Any]]:
             rec = _extract_game_record(event)
-            if rec is None or rec["id"] is None:
-                continue
-            if rec["id"] in seen:
-                continue
+            if rec is None:
+                return None
             # Intra-conference regular season only.
             if rec.get("season_slug") != REGULAR_SEASON_SLUG:
-                continue
+                return None
             if rec["home"] not in own_conf:
-                continue
+                return None
             if rec["away"] not in own_conf:
-                continue
-            seen[rec["id"]] = rec
-        return list(seen.values())
+                return None
+            rec["id"] = key  # the event's identity, never None: see dedupe_events
+            return rec
+
+        return dedupe_events(_fetch_scoreboard_range(season_start, season_end), keep)
 
     # ---------- sample_result (allows draws: soccer rules) ----------
 

@@ -49,16 +49,22 @@ and resolves the series-clinch threshold (2 wins for best-of-3) via
 from __future__ import annotations
 
 import logging
-import random
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult
-from .bracket import BestOfNSeriesSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .base import GameRow
+from ._espn import (
+    dedupe_events,
+    event_identity,
+    fetch_scoreboard_day,
+    scoreboard_events,
+    sweep_upcoming_events,
+)
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
+from .._util import parse_iso_utc, http_get_json
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_cup")
 
@@ -110,15 +116,8 @@ SLUG_TO_STAGE: Dict[str, str] = {
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[mls_cup] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[mls_cup] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="mls_cup", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -142,7 +141,17 @@ def _default_season_year() -> int:
     return now.year if now.month >= PLAYOFF_START_MONTH else now.year - 1
 
 
-class MlsCupSource(BestOfNSeriesSource):
+def _event_slug(event: Dict[str, Any]) -> str:
+    """An event's `season.slug`, normalised the way SLUG_TO_STAGE is keyed."""
+    return ((event.get("season") or {}).get("slug") or "").strip().lower()
+
+
+def _event_stage(event: Dict[str, Any]) -> Optional[str]:
+    """The bracket stage an event's slug names, None outside the playoffs."""
+    return SLUG_TO_STAGE.get(_event_slug(event))
+
+
+class MlsCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """MLS Cup playoff bracket as a BestOfNSeriesSource with per-stage
     series lengths. R1 best-of-3, all other stages single-leg
     (SERIES_LENGTH=1). Bracket cascade flows:
@@ -158,6 +167,8 @@ class MlsCupSource(BestOfNSeriesSource):
     KO_STAGES = ("MLS_WC", "MLS_R1", "MLS_CSF", "MLS_CF", "MLS_CUP")
     SERIES_LENGTH = 1  # fallback when a stage slips out of _MLS_SERIES_LENGTHS
     supports_importance = True
+    # Goals, not points: see ForcedWinnerPoissonSampler.LAMBDA_FLOOR.
+    LAMBDA_FLOOR = 0.05
 
     def __init__(self, season_year: Optional[int] = None) -> None:
         self.season_year = season_year or _default_season_year()
@@ -220,85 +231,42 @@ class MlsCupSource(BestOfNSeriesSource):
             "pa_per_game": _DEFAULT_GOALS_AGAINST,
         }
 
-    # ---------- sample_result (force a winner: bracket games) ----------
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        """Bracket games CANNOT end in draws: MLS postseason goes to
-        OT then PKs if needed. Same shape as NcaaSoccerCupSource's
-        sample_result and distinct from the regular-season
-        MlsStandingsSourceBase sample_result which allows draws (1
-        standings point each). DO NOT borrow the regular-season
-        sampler here; bracket cascades require deterministic winners.
-        """
-        del state  # interface-required, per-game classification only
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.05, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.05, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_goals = _poisson(lam_home, rng)
-        away_goals = _poisson(lam_away, rng)
-        if home_goals == away_goals:
-            # PK shootouts are roughly coin-flips at the MLS level:
-            # no additional bias beyond the Poisson means.
-            if rng.random() < 0.5:
-                home_goals += 1
-            else:
-                away_goals += 1
-        return MatchResult(home_goals=home_goals, away_goals=away_goals)
-
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Emit upcoming playoff bracket games. Per-day sweep with the
-        same slug filter that `_fetch_bracket_games` uses: only events
-        whose `season.slug` is in `SLUG_TO_STAGE` surface here, so
-        regular-season games (filtered out earlier in `MlsEastSource` /
-        `MlsWestSource`) don't reappear via this source.
+        """Emit upcoming playoff bracket games through
+        `_espn.sweep_upcoming_events` (window, lookback day, FINISHED and
+        stale drops, dedupe; #256), with the same slug filter that
+        `_fetch_bracket_games` uses: only events whose `season.slug` is in
+        `SLUG_TO_STAGE` surface here, so regular-season games (filtered out
+        earlier in `MlsEastSource` / `MlsWestSource`) don't reappear via this
+        source.
         """
-        today = datetime.now(timezone.utc).date()
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(
-                f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}"
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
+            rec = self._extract_bracket_record(event, matchday=1)
+            if rec is None:
+                return None
+            start = rec.get("start_time")
+            if start is None:
+                return None
+            eid = event.get("id")
+            return GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=rec["home"],
+                away=rec["away"],
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra={
+                    "espn_event_id": eid,
+                    # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                    "game_id": event_identity(event),
+                    "fd_competition_code": self._league_context_code(),
+                    "stage": rec.get("stage"),
+                },
             )
-            if not isinstance(data, dict):
-                continue
-            for event in data.get("events") or []:
-                rec = self._extract_bracket_record(event, matchday=1)
-                if rec is None:
-                    continue
-                eid = rec.get("game_id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=rec["home"],
-                    away=rec["away"],
-                    rank_home=None,
-                    rank_away=None,
-                    start_time=start,
-                    extra={
-                        "espn_event_id": eid,
-                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                        "game_id": eid,
-                        "fd_competition_code": self._league_context_code(),
-                        "stage": rec.get("stage"),
-                    },
-                ))
-        return out
+        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
 
     # ---------- _fetch_bracket_games (importance side) ----------
 
@@ -328,8 +296,6 @@ class MlsCupSource(BestOfNSeriesSource):
 
         # First pass: collect all candidate records in chronological
         # order. Walk Oct 1 - Dec 15 of season_year.
-        candidates: List[Dict[str, Any]] = []
-        seen_ids: set = set()
         start = datetime(
             self.season_year, PLAYOFF_START_MONTH, 1, tzinfo=timezone.utc,
         ).date()
@@ -337,29 +303,26 @@ class MlsCupSource(BestOfNSeriesSource):
             self.season_year, PLAYOFF_END_MONTH, PLAYOFF_END_DAY,
             tzinfo=timezone.utc,
         ).date()
-        day = start
-        while day <= end:
-            data = _http_get(
-                f"{ESPN_BASE}/scoreboard?dates={day.strftime('%Y%m%d')}"
-            )
-            if isinstance(data, dict):
-                for event in data.get("events") or []:
-                    # Pass matchday=None: the inference loop below
-                    # assigns it per (stage, participants) tuple.
-                    rec = self._extract_bracket_record(event, matchday=None)
-                    if rec is None or rec["game_id"] is None:
-                        continue
-                    if rec["game_id"] in seen_ids:
-                        continue
-                    seen_ids.add(rec["game_id"])
-                    candidates.append(rec)
-            day += timedelta(days=1)
+        payloads = self._sweep_bracket_days(
+            start, end,
+            lambda d: fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", d),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
+
+        def keep(event: Dict[str, Any], _key: Any) -> Optional[Dict[str, Any]]:
+            # Pass matchday=None: the inference loop below
+            # assigns it per (stage, participants) tuple. The record's
+            # game_id is already the event's identity.
+            return self._extract_bracket_record(event, matchday=None)
+
+        candidates = dedupe_events(scoreboard_events(payloads), keep, _sweep_identity)
 
         # Second pass: matchday inference for best-of-3 series + PK
         # dedup for single-leg stages.
         out = _assign_matchdays_and_dedupe(candidates, _MLS_SERIES_LENGTHS)
-        self._bracket_games_cache = out
-        return out
+        return self._cache_bracket_games(out)
 
     @staticmethod
     def _extract_bracket_record(
@@ -375,8 +338,7 @@ class MlsCupSource(BestOfNSeriesSource):
         we pass None and infer matchday from chronological order in
         `_assign_matchdays_and_dedupe`.
         """
-        season = event.get("season") or {}
-        slug = (season.get("slug") or "").strip().lower()
+        slug = _event_slug(event)
         stage = SLUG_TO_STAGE.get(slug)
         if stage is None:
             return None
@@ -431,7 +393,7 @@ class MlsCupSource(BestOfNSeriesSource):
             ag = None
 
         return {
-            "game_id": event.get("id"),
+            "game_id": event_identity(event),  # never None: see _espn.dedupe_events
             "stage": stage,
             "matchday": matchday,  # may be None: inference assigns later
             "home": home_team,
@@ -450,8 +412,18 @@ class MlsCupSource(BestOfNSeriesSource):
 # `_dedupe_pk_shootout_pairs` in this module still find it.
 from ._soccer_bracket_helpers import (
     dedupe_pk_shootout_pairs as _dedupe_pk_shootout_pairs,
-    pick_decisive_event as _pick_decisive_event,
+    pk_pair_identity,
 )
+
+
+def _sweep_identity(event: Dict[str, Any]) -> Any:
+    """The bracket sweep's dedupe key. A single-leg stage's records go
+    through the PK-pair selector, which must see both records of an id-less
+    pair (`pk_pair_identity`); a best-of-N stage's do not, and a second copy
+    there would be counted as another game of the series."""
+    if _MLS_SERIES_LENGTHS.get(_event_stage(event) or "", 1) > 1:
+        return event_identity(event)
+    return pk_pair_identity(event)
 
 
 def _assign_matchdays_and_dedupe(

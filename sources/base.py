@@ -14,9 +14,113 @@ from __future__ import annotations
 
 import random
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Dict, FrozenSet, List, Optional, TypedDict
+from datetime import date, datetime, timedelta
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, TypedDict
+
+
+# ---------- partial-fetch accounting (#261) ----------
+#
+# A per-day sweep (ESPN's scoreboard, NHL's schedule) that loses a day still
+# returns the other days' games, so its result looks like a clean, shorter
+# slate. The refresh's on-air hold (#240) reads "this source returned nothing"
+# as an outage and keeps the previous games; a source that lost ONE day is
+# not empty, so without this record the games of that day were dropped and
+# their channels deleted. A sweep reports every day it asked for and did not
+# get (failed after its retry, or never requested because the walk was
+# abandoned), and the refresh holds previously published games dated on one.
+# A RANGED request (one call for several days: statsapi startDate/endDate,
+# Football-Data dateFrom/dateTo chunks, CollegeBasketballData
+# startDateRange/endDateRange, the boxing `days=` schedule) loses every day it
+# covered at once, and reports them with `report_lost_day_range`. Exactly the
+# days that request covered, never the whole window: a chunk that answered
+# vouches for its days. An answer with no games is a quiet day, not a lost one.
+#
+# A ContextVar, not a return value: fifteen fetch_upcoming implementations
+# walk days through the two shared walks, and threading a second result
+# through each is fifteen chances to drop it. The refresh opens the record
+# around ONE source's fetch_upcoming at a time (sources are fetched one after
+# another, and the walks report from the calling thread, never from their
+# pool threads), so a day lands on the source that lost it. Outside a record
+# (full-season walks during scoring, tests) reporting is a no-op.
+_LOST_DAYS: ContextVar[Optional[Set[date]]] = ContextVar("ranked_matchups_lost_days", default=None)
+
+
+def report_lost_days(days: Iterable[date]) -> None:
+    """Record calendar days this fetch asked for and got no answer for."""
+    sink = _LOST_DAYS.get()
+    if sink is not None:
+        sink.update(days)
+
+
+def report_lost_day_range(first: date, last: date) -> None:
+    """Record every day from `first` through `last` (inclusive) as lost: the
+    days one ranged request covered when it got no answer."""
+    report_lost_days(first + timedelta(days=i) for i in range((last - first).days + 1))
+
+
+@contextmanager
+def recording_lost_days() -> Iterator[Set[date]]:
+    """Collect the days `report_lost_days` is told about inside the block."""
+    sink: Set[date] = set()
+    token = _LOST_DAYS.set(sink)
+    try:
+        yield sink
+    finally:
+        _LOST_DAYS.reset(token)
+
+
+# ---------- rankings polls (#283) ----------
+#
+# A college source ranks its games from a poll it fetches separately. A FAILED
+# poll request used to read as "no poll": every game went out unranked, its
+# rank-pair signal fell away and ranked matchups dropped down or off the slate,
+# with nothing in the refresh summary. A failed poll now RAISES
+# `RankingsUnavailable` out of `fetch_upcoming`, so the refresh counts the
+# source as an outage (#240) and keeps the games it published last time,
+# scored against the last poll it had, instead of republishing them flattened.
+# An answered poll with no rankings in it (preseason) is not a failure.
+
+
+class FeedUnavailable(RuntimeError):
+    """A feed a source depends on did not answer, or answered something that
+    is not its answer. The two kinds below say which feed."""
+
+
+class RankingsUnavailable(FeedUnavailable):
+    """A source's rankings poll did not answer: raised out of
+    `fetch_upcoming` so the refresh holds the source's previous games."""
+
+
+class SeasonUnavailable(FeedUnavailable):
+    """A points-based source's full-season list could not be fetched whole
+    (#289): raised out of `_fetch_full_season_games`, where
+    `PointsBasedSportSource._fetch_games_cached` turns it into a reported
+    season failure instead of a silently partial season."""
+
+
+def attach_poll_ranks(
+    rows: List["GameRow"], fetch_ranks: Callable[[], Dict[str, int]],
+) -> List["GameRow"]:
+    """`rows` with `rank_home` / `rank_away` read from `fetch_ranks()`, which
+    returns {team: rank} and RAISES when the poll did not answer.
+
+    The poll is asked for only when there is a game to rank. That is not just
+    a saved request: ESPN's college baseball and softball `/rankings` answer
+    HTTP 404 all offseason ("Unable to get sport data", measured 2026-10-11,
+    when neither scoreboard lists a game from the end of June to February), so
+    asking with nothing to rank would report an outage on every offseason
+    refresh. DO NOT hoist the fetch above the sweep for that reason.
+    """
+    if not rows:
+        return rows
+    ranks = fetch_ranks()
+    for row in rows:
+        row.rank_home = ranks.get(row.home)
+        row.rank_away = ranks.get(row.away)
+    return rows
 
 
 class SoccerTeamRow(TypedDict):
@@ -151,6 +255,24 @@ class SportSource(ABC):
     # single source of truth for it, and a second copy in this file would be
     # free to drift with nothing to report the divergence.
     rank_pool_size: Optional[int] = None
+
+    # How many teams a POLL source's ranks are drawn from (#198): the
+    # sport's whole eligible field, e.g. the 138 FBS programmes the AP
+    # football poll picks its 25 from. scoring._rank_strength reads a poll
+    # rank as a position in this field, so AP #25 is ~0.82 (25th of 138)
+    # instead of 0.04 (last of a 25-team list).
+    #
+    # Declare it on poll sources only. A LEAGUE source must leave it None:
+    # its standings table is exhaustive, so the table already IS the field,
+    # and plugin.py does not forward a field for an exhaustive pool at all.
+    #
+    # None means "not declared" and keeps the pre-#198 behaviour (the
+    # published pool stands in for the field). The value drifts by a
+    # programme or two a year as schools reclassify; that is deliberate
+    # tolerance, not a bug: a field of 136 vs 138 moves AP #25 from 0.822 to
+    # 0.825. Getting the ORDER of magnitude right (25 of ~140, not 25 of 25)
+    # is what matters, so DO NOT fetch it per refresh from an API.
+    rank_field_size: Optional[int] = None
 
     @property
     @abstractmethod

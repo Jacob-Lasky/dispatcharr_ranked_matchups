@@ -29,8 +29,10 @@ AU/FR/Arabic, ESPN Brasil, Nova Sport CZ) and absent from Top Matchups,
 because no cup fixture had ever entered the pipeline for the matcher to look
 for.
 
-ROUNDS. ESPN publishes the round on each event as `season.slug`, the same
-mechanism `ncaa_soccer_cup.py` keys on. Both cups expose exactly 8 ordered
+ROUNDS. ESPN publishes the round on each event as `season.slug`. (It stopped
+doing so for the NCAA College Cup in 2025, which is why `ncaa_soccer_cup.py`
+also reads the round calendar (#235); both English cups still carried it on
+every 2025-26 event checked on 2026-10-11.) Both cups expose exactly 8 ordered
 rounds, enumerated live from
 `sports.core.api.espn.com/v2/sports/soccer/leagues/<slug>/seasons/<year>/types`
 on 2026-08-26:
@@ -88,6 +90,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from .._util import http_get_json
 from .base import GameRow, SportSource
 from ._espn import sweep_upcoming_scoreboard
 
@@ -147,34 +150,8 @@ FA_CUP_ROUNDS: Tuple[Tuple[str, str], ...] = (
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    """DELIBERATELY a per-module copy, not a shared helper.
-
-    Seventeen sources define a near-identical `_http_get`, and the similarity is
-    textual rather than shared knowledge: these copies do not have to agree for
-    anything to be correct, and two things make the duplication load-bearing.
-
-      - The logger name. Each source logs under its own
-        `plugins.dispatcharr_ranked_matchups.<source>` channel, which is how a
-        failing feed is attributed in the Dispatcharr log.
-      - The patch point. Every source's tests stub `<module>.requests.get`, so
-        the module needs its OWN `requests` symbol. Routing through a shared
-        getter would make those stubs silent no-ops that hit the real network
-        instead of failing, which is the worst kind of test regression.
-
-    `sweep_upcoming_scoreboard` therefore takes `http_get` INJECTED rather than
-    calling requests itself. The genuinely shared knowledge (the sweep window
-    and its filters) lives there; this stays local. Repo-wide consolidation of
-    all seventeen is tracked separately.
-    """
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[english_cup] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[english_cup] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="english_cup", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
@@ -308,9 +285,11 @@ class EflCupSource(_EnglishDomesticCupBase):
     @property
     def sport_prefix(self) -> str:
         # NOT "EFL": that prefix is already the EFL CHAMPIONSHIP (see
-        # soccer.py::COMPETITIONS["championship"]), and rivalries.json plus
-        # logos.SPORTSDB_TOURNAMENT_LEAGUE_IDS are keyed on sport_prefix, so
-        # reusing it would cross-wire the league and the cup.
+        # soccer.py::COMPETITIONS["championship"]), and the logos.py maps
+        # and the marker key are keyed on sport_prefix, so reusing it would
+        # cross-wire the league and the cup. rivalries.json is the one table
+        # where the two DO share data, and it does so explicitly: both
+        # prefixes name the ENGLISH_CLUBS pool (#192).
         return "EFLCUP"
 
     @property

@@ -236,6 +236,15 @@ class TestEligibility:
         assert not plugin._ranked_eligible({"sport_prefix": "NFL", "stream_ids": [1]}, leagues)
         assert plugin._ranked_eligible({"sport_prefix": "NFL", "stream_ids": [1]}, [])  # blank = all
 
+    def test_apply_judges_the_stream_by_what_the_pre_pass_attached(self, plugin):
+        """#291 review: given the markers apply attached streams to, a cached
+        match does not make a game eligible, and a missing one does not stop it."""
+        cached = {"sport_prefix": "EPL", "channel_id": 5, "extra": {"fd_id": 7}}
+        bare = {"sport_prefix": "EPL", "extra": {"fd_id": 8}}
+        streamed = {plugin._build_marker_key(bare)}
+        assert not plugin._ranked_eligible(cached, [], streamed)
+        assert plugin._ranked_eligible(bare, [], streamed)
+
     def test_apply_rematches_recorded_teams_from_the_current_setting(self, plugin):
         games = [{"home": "NC State", "away": "Duke", "recorded_matched": []},
                  {"home": "Arsenal", "away": "Chelsea", "recorded_matched": ["Arsenal"]}]
@@ -264,12 +273,13 @@ class TestWiring:
 
     def test_rematch_runs_before_the_plan(self, src):
         body = self._body(src, "_action_apply")
-        assert body.index("_rematch_recorded_teams(games, settings)") < body.index("_autorecord_prepare(games, settings")
+        assert body.index("_rematch_recorded_teams(games, settings)") < body.index(
+            "decided_games, settings, bench=")
 
     def test_prepare_passes_the_preference_and_ranked_eligibility(self, src):
         body = self._body(src, "_autorecord_prepare")
         assert "preference=" in body and "RECORDING_PREFERENCE_SETTING" in body
-        assert "_ranked_eligible(g, leagues)" in body
+        assert "_ranked_eligible(g, leagues, streamed)" in body
         assert "sched_end=live_end" in body
 
     def test_guide_line_names_the_handoff(self, src):

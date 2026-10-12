@@ -31,8 +31,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow
+from .base import GameRow, RankingsUnavailable, SeasonUnavailable
 from .points_based import PointsBasedSportSource
+from .._http import get_within_deadline
 from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaaf")
@@ -62,6 +63,13 @@ DEFAULT_DIVISIONS = "fbs"
 
 class NcaafSource(PointsBasedSportSource):
     league_context_code = "CFB"
+
+    # The AP Top 25 is drawn from FBS (#198). 138 FBS programmes for 2026,
+    # measured 2026-10-11 from CFBD `/teams/fbs?year=2026` (136 for 2025).
+    # It stays the FBS count under the "fbs_fcs" divisions setting too: the
+    # poll ranks FBS teams only, so FBS is the field its ranks come from.
+    # See SportSource.rank_field_size.
+    rank_field_size = 138
 
     # CFB per-team average scoring is ~28 points/game. Cold-start fallback
     # for teams with no FINISHED games in the current season (weeks 1-2,
@@ -127,15 +135,16 @@ class NcaafSource(PointsBasedSportSource):
             logger.warning("[ncaaf] no CFBD API key configured; returning []")
             return []
 
-        season_year = self._current_season_year()
+        season_year = self._season()
+        # RAISES RankingsUnavailable for a failed request (#283), so the
+        # refresh reports NCAAF as errored and holds its previous games
+        # (#240). None is a poll that is not published yet, logged at INFO by
+        # _fetch_rankings. DO NOT re-log that as "offseason", and DO NOT catch
+        # the raise back into []: a transient CFBD failure in September once
+        # zeroed the whole slate, and calling it an offseason sent a real
+        # 2026-08-28 outage to the wrong diagnosis for a full day.
         rank_by_team = self._fetch_rankings(season_year)
         if rank_by_team is None:
-            # _fetch_rankings already logged the specific cause at the
-            # right level (ERROR for a failed request, INFO for a poll
-            # that simply is not published yet). DO NOT re-log this as
-            # "offseason": a transient CFBD failure in September zeroes
-            # the whole slate, and calling that an offseason sent a real
-            # 2026-08-28 outage to the wrong diagnosis for a full day.
             return []
 
         games = self._fetch_games(season_year, days_ahead)
@@ -214,24 +223,42 @@ class NcaafSource(PointsBasedSportSource):
         now = datetime.now(timezone.utc)
         return now.year if now.month >= 8 else now.year - 1
 
+    def _season(self) -> int:
+        """`_current_season_year()`, read ONCE per source (one refresh). The
+        upcoming fetch, the season read and the key its complete read is
+        kept under (`points_based.season_store_key`) must name the same
+        season; three clock reads could straddle the season boundary and
+        file one season's games under the other's key."""
+        if getattr(self, "_season_memo", None) is None:
+            self._season_memo = self._current_season_year()
+        return self._season_memo
+
     def _fetch_rankings(self, year: int) -> Optional[Dict[str, int]]:
         """Return {team_name → rank} for the latest snapshot, or None if no
-        poll has been published yet (preseason)."""
+        poll has been published yet (preseason). RAISES `RankingsUnavailable`
+        when the request failed or did not answer with a list of weekly
+        snapshots (#283)."""
         try:
-            r = requests.get(
-                f"{CFBD_BASE}/rankings",
+            r = get_within_deadline(
+                requests, f"{CFBD_BASE}/rankings",
                 headers=self._headers,
                 params={"year": year},
                 timeout=15,
             )
             r.raise_for_status()
             data = r.json()
+            if not isinstance(data, list) or (data and not (
+                    isinstance(data[-1], dict) and isinstance(data[-1].get("polls"), list))):
+                # /rankings is a list of weekly snapshots, each with a `polls`
+                # list, `[]` before the first poll; anything else (an error
+                # object, null) is a failure, not a preseason.
+                raise ValueError(f"/rankings answered {str(data)[:80]!r}, not a list of snapshots")
         except Exception as e:
             logger.error(
-                "[ncaaf] /rankings request failed (%s); NCAAF contributes "
-                "0 games to this refresh", e,
+                "[ncaaf] /rankings request failed (%s); NCAAF's previous games "
+                "are held this refresh", e,
             )
-            return None
+            raise RankingsUnavailable(f"/rankings failed: {e}") from e
         if not data:
             logger.info(
                 "[ncaaf] no %s snapshot published for %d yet (preseason); "
@@ -239,15 +266,37 @@ class NcaafSource(PointsBasedSportSource):
             )
             return None
         latest = data[-1]
-        for p in latest.get("polls", []):
+        if not all(isinstance(p, dict) for p in latest["polls"]):
+            raise RankingsUnavailable("/rankings: a listed poll is not an object")
+        for p in latest["polls"]:
             if p.get("poll") == self.poll_name:
-                return {r["school"]: r["rank"] for r in p.get("ranks", [])}
+                ranks = p.get("ranks")
+                if not isinstance(ranks, list):
+                    raise RankingsUnavailable(f"/rankings: {self.poll_name} has no ranks list")
+                out: Dict[str, int] = {}
+                for r in ranks:
+                    try:
+                        if isinstance(r, dict) and r.get("school"):
+                            out[r["school"]] = int(r["rank"])
+                    except (KeyError, TypeError, ValueError):
+                        continue   # a row without a usable rank ("NR", null)
+                if ranks and not out:
+                    # Rows listed, none readable: a changed row shape, not an
+                    # empty poll.
+                    raise RankingsUnavailable(f"/rankings: {self.poll_name} has no readable rank")
+                return out
         logger.info(
             "[ncaaf] poll %r absent from the latest snapshot (polls present: "
             "%s); skipping", self.poll_name,
-            ", ".join(str(p.get("poll")) for p in latest.get("polls", [])) or "none",
+            ", ".join(str(p.get("poll")) for p in latest["polls"]) or "none",
         )
         return None
+
+    def _season_store_id(self) -> Optional[str]:
+        """The season AND the division selection: the stored population is
+        cut to the selected divisions, so another selection is another
+        season (`points_based.season_store_key`)."""
+        return f"{self._season()}|{','.join(sorted(self._allowed_classifications))}"
 
     def _fetch_raw_season(self, year: int) -> List[Dict]:
         """One CFBD /games call per season year, cached for this instance.
@@ -264,19 +313,28 @@ class NcaafSource(PointsBasedSportSource):
         if cached is not None:
             return cached
         try:
-            r = requests.get(
-                f"{CFBD_BASE}/games",
+            r = get_within_deadline(
+                requests, f"{CFBD_BASE}/games",
                 headers=self._headers,
                 params={"year": year, "seasonType": "regular"},
                 timeout=60,
             )
             r.raise_for_status()
-            data = r.json() or []
+            data = r.json()
+            if not isinstance(data, list):
+                # /games answers with a list of games, `[]` included; an
+                # error object or null is a failure, not an empty season.
+                raise ValueError(f"/games answered {str(data)[:80]!r}, not a list")
         except Exception as e:
             logger.error("[ncaaf] /games failed: %s", e)
             # DO NOT cache a failure: a transient error must not freeze an
-            # empty season for the life of the source instance.
-            return []
+            # empty season for the life of the source instance. And DO NOT
+            # return [] for it either (#289): `fetch_upcoming` read that as
+            # no games, and the season walk as an empty season, so NCAAF's
+            # stakes went to zero with nothing in the summary. Raised, it is
+            # an outage the refresh holds the label for (#240) and a season
+            # failure the refresh reports.
+            raise SeasonUnavailable(f"/games failed: {e}") from e
         self._raw_season_cache[year] = data
         return data
 
@@ -364,8 +422,8 @@ class NcaafSource(PointsBasedSportSource):
         out: Dict[int, float] = {}
         for week in weeks:
             try:
-                r = requests.get(
-                    f"{CFBD_BASE}/lines",
+                r = get_within_deadline(
+                    requests, f"{CFBD_BASE}/lines",
                     headers=self._headers,
                     params={"year": year, "week": week, "seasonType": "regular"},
                     timeout=15,
@@ -411,17 +469,24 @@ class NcaafSource(PointsBasedSportSource):
         keeps both facts true at once: the FBS team's record still includes
         the cupcake win, and nobody is measured against a league they are
         not in.
+
+        Read off the simulated population itself (each record carries both
+        sides' classification), not the raw CFBD season: the population is
+        what the simulator replays, including a last complete read standing
+        in for a failed one (`points_based._fetch_games_cached`), and asking
+        CFBD again from here during an outage would cost a 60 s timeout per
+        importance call. Equivalent to reading the raw season: a team whose
+        own classification is selected has every one of its games in the
+        population, by the either-side game filter above.
         """
-        raw = self._fetch_raw_season(self._current_season_year())
         allowed = self._allowed_classifications
         eligible = set()
-        for g in raw:
-            home = g.get("homeTeam") or g.get("home_team")
-            away = g.get("awayTeam") or g.get("away_team")
-            if home and g.get("homeClassification") in allowed:
-                eligible.add(home)
-            if away and g.get("awayClassification") in allowed:
-                eligible.add(away)
+        for g in self._fetch_games_cached():
+            classes = g.get("extra") or {}
+            if g.get("home") and classes.get("home_classification") in allowed:
+                eligible.add(g["home"])
+            if g.get("away") and classes.get("away_classification") in allowed:
+                eligible.add(g["away"])
         return frozenset(eligible)
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
@@ -445,7 +510,7 @@ class NcaafSource(PointsBasedSportSource):
         """
         if not self.api_key:
             return []
-        raw = self._fetch_raw_season(self._current_season_year())
+        raw = self._fetch_raw_season(self._season())
         out: List[Dict[str, Any]] = []
         for g in raw:
             if not self._in_selected_divisions(g):
@@ -465,5 +530,8 @@ class NcaafSource(PointsBasedSportSource):
                 "away_points": ap if completed else None,
                 "status": "FINISHED" if completed else "SCHEDULED",
                 "start_time": parse_iso_utc(g.get("startDate")),
+                # For `outcome_eligible_teams`, which reads the population.
+                "extra": {"home_classification": g.get("homeClassification"),
+                          "away_classification": g.get("awayClassification")},
             })
         return out

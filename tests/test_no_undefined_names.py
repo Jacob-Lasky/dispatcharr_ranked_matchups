@@ -45,14 +45,14 @@ def _production_files():
 
 @pytest.fixture(scope="module")
 def pyflakes_available():
-    try:
-        import pyflakes  # noqa: F401
-    except ImportError:
-        pytest.skip(
+    pytest.importorskip(
+        "pyflakes",
+        reason=(
             "pyflakes not installed; add it to the test-run deps so this gate "
             "actually runs (see the module docstring for the outage it exists "
             "to prevent)"
-        )
+        ),
+    )
     return True
 
 

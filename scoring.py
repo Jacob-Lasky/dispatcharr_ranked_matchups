@@ -1,14 +1,16 @@
 """Transparent interestingness scoring with per-signal breakdown + helpers.
 
-Design principle: the score MUST show its work. Every game's final score is the
-sum of per-signal contributions, each visible in the cache. When the user says
+Design principle: the score MUST show its work. Every game's raw score is the
+sum of per-signal contributions, each visible in the cache, and the final 0-10
+score is that raw sum compressed (_compress_to_10 / adaptive_compress). When the user says
 "this game should be ranked higher", they can see exactly which signal needs
 to be tuned.
 
 Signals:
   - rank_pair / one_ranked: mean of the two teams' percentile strength within
-    their own ranked pool (a 20-club league table, a 25-deep poll), scaled to
-    RANK_SCALE. One formula; the key just records whether both sides ranked.
+    the field they are ranked in (a 20-club league table; a 25-deep poll read
+    against its sport's eligible field, #198), scaled to RANK_SCALE. One
+    formula; the key just records whether both sides ranked.
   - favorite: at least one favorite team involved → flat boost
   - close_game: tight betting spread → score inversely proportional to spread
   - rivalry: known rivalry game → flat boost
@@ -99,6 +101,13 @@ class GameSignals:
     # whether last place bottoms out at 0.0 or stays above unranked.
     # Defaults False because an undeclared pool is the poll case.
     rank_pool_exhaustive: bool = False
+    # How many teams the POLL is drawn from (#198): 138 FBS programmes for the
+    # AP football poll, 365 Division I men's basketball programmes, and so on.
+    # Read only for a SELECTIVE pool, where it turns "#25 of a 25-deep poll"
+    # into "25th of 138". None means the published pool is treated as the
+    # whole field, which is exactly right for a league table and is the
+    # pre-#198 behaviour for an undeclared poll. See _rank_strength.
+    rank_field_size: Optional[int] = None
     team_a: str = ""
     team_b: str = ""
     favorite_match: List[str] = field(default_factory=list)  # which favorites match
@@ -166,8 +175,9 @@ class LeagueContext:
     boundary_summary: str = ""   # e.g. "Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation"
     format: str = "league"       # "league" | "knockout" | "win_count" | "points_count"
     # Only meaningful for format="group_advance" (WC_GS / EC_GS). N > 0 means
-    # the top N third-place teams across ALL groups also advance via the FIFA
-    # tiebreaker chain (points → goal_diff → goals_for → alphabetical fallback).
+    # the top N third-place teams across ALL groups also advance, ranked by
+    # points → goal_diff → goals_for (→ wins for EURO, UEFA Article 19.04) →
+    # alphabetical fallback; see GroupStageSoccerSource._compute_group_standings.
     # Default 0 = strict top-2-per-group, no third-place advancement. See #52.
     #   WC 2026: 12 groups, top 2 + 8 best 3rds = 32 advancing → best_third_place_count=8
     #   EURO 2024: 6 groups, top 2 + 4 best 3rds = 16 advancing → best_third_place_count=4
@@ -286,13 +296,45 @@ _WC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
 ]
 
 
-# FIFA World Cup knockout importance premium (pre-weight importance_points),
-# keyed by the UPPER-cased tournament stage. A knockout game is win-or-go-home:
-# maximal stakes. But compute_match_importance returns 0 for it (there is no
-# standings distribution to Monte-Carlo: the outcome is binary), so without this
-# a marquee Round-of-32 tie (e.g. France vs Sweden) scored only its tournament-
-# stage band (raw 1.5 -> ~0.95/10) and ranked BELOW a random regular-season game
-# AND below placeholder_min_score, so it never even got a placeholder channel.
+# UEFA EURO knockout cascade thresholds, shared by EC (the knockout source's
+# own context) and EC_GS (the group stage, which inherits them so the #78
+# cross-source chain can attribute knockout leverage to group games). Same
+# reason as _WC_KNOCKOUT_THRESHOLDS above: one constant, so the two contexts
+# cannot drift apart. EURO's entry round is LAST_16, so `round_of_16` is held
+# by exactly the teams that `advance` (as WC's `last_32` is); its 1.0 weight
+# rides on top of the group stage's own `advance` band.
+_EC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
+    ("LAST_16",        "round_of_16",   1.0),
+    ("QUARTER_FINALS", "quarterfinal",  2.5),
+    ("SEMI_FINALS",    "semifinal",     4.0),
+    ("FINAL",          "final",         6.0),
+    ("WINNER",         "winner",       10.0),
+]
+
+# International-tournament knockout importance FLOOR (pre-weight
+# importance_points), keyed by the UPPER-cased tournament stage. A knockout
+# game is win-or-go-home: maximal stakes. compute_match_importance scores it
+# from the simulated bracket once the row is placed in it (#243), and then it
+# is usually far ABOVE these values: EURO 2024's knockouts replayed through the
+# real KnockoutSoccerSource scored round of 16 6.5-13.1, quarter-finals
+# 10.7-16.9 and the final 18.4 (measured 2026-10-12). But when the game cannot
+# be placed (the bracket fetch gave up, the fixture's teams are not in the
+# simulated bracket yet, no chain) it scores 0, and without a floor a marquee
+# World Cup Round-of-32 tie (e.g. France vs Sweden) scored only its
+# tournament-stage band (raw 1.5 -> ~0.95/10), BELOW a random regular-season
+# game AND below placeholder_min_score, so it never even got a placeholder
+# channel. EURO knockouts had no floor at all until #250.
+#
+# A FLOOR, never an override: plugin.py applies it only when it beats the
+# simulated value. DO NOT turn it back into an override; that cut a placed
+# EURO final from 18.4 to 6.0 (displayed 10.0 -> 9.2) and threw away its
+# explanation (#250 review).
+#
+# ONE map for every competition granted the premium
+# (`_KNOCKOUT_PREMIUM_COMPETITIONS`): a round is worth the same in any of them,
+# and a competition simply never emits the rounds it does not have (the EURO has
+# no LAST_32 and no THIRD_PLACE). DO NOT add a per-competition table; the next
+# tournament is one line in `_KNOCKOUT_PREMIUM_COMPETITIONS`.
 #
 # DO NOT move this into the shared `stage_score` tournament ladder in score_game:
 # that ladder caps at a FINAL (5.0 x tournament weight 1.5 = 7.5 raw -> 4.37/10,
@@ -301,16 +343,15 @@ _WC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
 # would silently boost those sports too. The importance channel is the design's
 # top-priority signal (see the ScoringWeights docstring: "importance > rank >
 # favorites > tournament"), is uncapped, and is applied per-competition in
-# plugin.py's scoring loop scoped to fd_competition_code == "WC", so only the
-# World Cup is affected.
+# plugin.py's scoring loop, so only the competitions named below are affected.
 #
-# Values chosen so that, at the default weight_importance (3.0) plus each stage's
+# Values chosen so that, at the default `importance` scoring weight (3.0) plus each stage's
 # tournament band, the displayed 0-10 score escalates R32~5.5 -> R16~6.5 ->
 # QF~7.6 -> SF~8.3 -> FINAL~9.2, all clearing placeholder_min_score's 5.0 default.
 # THIRD_PLACE has no tournament band, so its premium is set to still clear 5.0.
-# If weight_importance is retuned, these displayed targets shift proportionally,
+# If the importance weight is retuned, these displayed targets shift proportionally,
 # which is the intended, coherent behavior of an importance weight.
-_WC_KNOCKOUT_IMPORTANCE: Dict[str, float] = {
+_KNOCKOUT_IMPORTANCE: Dict[str, float] = {
     "LAST_32":        2.8,
     "LAST_16":        3.4,
     "QUARTER_FINALS": 4.0,
@@ -319,32 +360,47 @@ _WC_KNOCKOUT_IMPORTANCE: Dict[str, float] = {
     "THIRD_PLACE":    3.4,
 }
 
-# FD.org competition code for the FIFA World Cup. Matches the fd_code on the WC
-# SoccerCompetitionConfig and the LEAGUE_CONTEXTS key; named here so the scoring
-# gate below and any future WC-scoped logic compare against one symbol instead
-# of a bare "WC" literal scattered across modules.
-WC_COMPETITION_CODE = "WC"
+# The competitions whose knockout games get `_KNOCKOUT_IMPORTANCE`, by FD.org
+# competition code (the `fd_competition_code` a row carries and the
+# LEAGUE_CONTEXTS key), with the name the score note uses. International
+# tournaments only: club and domestic cups (CL, the English cups) emit the same
+# stage labels but keep their Monte Carlo importance, which is what the
+# original World-Cup-only scoping protected. EURO reuses the World Cup's values
+# (#250, a decided call: the alternative was scaling them to the lower EURO
+# band weights). `tests/test_knockout_premium.py` fails a competition whose
+# knockout bracket chain is wired (`soccer._CHAIN_BRACKETS`) and is missing here.
+_KNOCKOUT_PREMIUM_COMPETITIONS: Dict[str, str] = {
+    "WC": "World Cup",
+    "EC": "EURO",
+}
 
 
-def wc_knockout_importance(
+def knockout_importance(
     comp_code: Optional[str], stage: Optional[str]
 ) -> Optional[float]:
-    """Importance-points premium for a FIFA World Cup knockout game, or None.
+    """Importance-points premium for an international-tournament knockout
+    game, or None.
 
-    Pure gate for the WC knockout premium so plugin.py's `_action_refresh`
+    Pure gate for the knockout premium so plugin.py's `_action_refresh`
     scoring loop stays a thin caller and this runtime string match (competition
-    code + stage label) is unit-testable in isolation — a silent drift in the
-    `fd_competition_code` value or the stage casing would otherwise regress WC
-    games back to their bare ~0.9 tournament-band score with no test to catch it.
+    code + stage label) is unit-testable in isolation: a silent drift in the
+    `fd_competition_code` value or the stage casing would otherwise regress
+    knockout games back to their bare ~0.9 tournament-band score with no test
+    to catch it.
 
-    Returns None for anything that is NOT a World Cup knockout game (a different
-    competition, or a WC group-stage game, whose importance is left to the Monte
-    Carlo simulation). See _WC_KNOCKOUT_IMPORTANCE for the why and the calibrated
-    displayed-score targets.
+    Returns None for anything that is NOT such a game (a competition not in
+    `_KNOCKOUT_PREMIUM_COMPETITIONS`, or a group-stage game, whose importance
+    is left to the Monte Carlo simulation). See _KNOCKOUT_IMPORTANCE for the
+    why and the calibrated displayed-score targets.
     """
-    if comp_code != WC_COMPETITION_CODE:
+    if comp_code not in _KNOCKOUT_PREMIUM_COMPETITIONS:
         return None
-    return _WC_KNOCKOUT_IMPORTANCE.get((stage or "").upper())
+    return _KNOCKOUT_IMPORTANCE.get((stage or "").upper())
+
+
+def knockout_premium_note(comp_code: str) -> str:
+    """The score note for a game `knockout_importance` gave a premium."""
+    return f"{_KNOCKOUT_PREMIUM_COMPETITIONS[comp_code]} knockout: win or go home"
 
 
 LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
@@ -493,13 +549,7 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     "EC": LeagueContext(
         code="EC", matchdays_total=0, format="knockout",
-        thresholds=[
-            ("LAST_16",        "round_of_16",   1.0),
-            ("QUARTER_FINALS", "quarterfinal",  2.5),
-            ("SEMI_FINALS",    "semifinal",     4.0),
-            ("FINAL",          "final",         6.0),
-            ("WINNER",         "winner",       10.0),
-        ],
+        thresholds=list(_EC_KNOCKOUT_THRESHOLDS),
         boundary_summary="R16 → QF → SF → Final → Champion (UEFA EURO)",
     ),
     # Group-stage advancement contexts for the two international
@@ -538,9 +588,15 @@ LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {
     ),
     "EC_GS": LeagueContext(
         code="EC_GS", matchdays_total=3, format="group_advance",
-        thresholds=[
-            (_GROUP_ADVANCE_SENTINEL, "advance", 3.0),
-        ],
+        # `advance` plus the EURO knockout cascade, mirroring WC_GS: the
+        # #78 cross-source chain attributes R16+ leverage to group games
+        # through these labels. DO NOT drop the cascade: importance sums
+        # only over this list, so a working chain with `advance` alone
+        # would change nothing user-visible.
+        thresholds=(
+            [(_GROUP_ADVANCE_SENTINEL, "advance", 3.0)]
+            + list(_EC_KNOCKOUT_THRESHOLDS)
+        ),
         # EURO 2016/2020/2024 format: 6 groups × 4 teams, top 2 + 4 best
         # 3rd-place = 16 advancing → LAST_16. EURO has used this format
         # since 2016; the older 16-team / 8-team formats had no 3rd-place
@@ -1118,11 +1174,14 @@ def match_favorites(home: str, away: str, favorites: List[str]) -> List[str]:
     return matched
 
 
-def _rank_strength(rank: Optional[int], pool: int, exhaustive: bool) -> float:
-    """Team quality in [0, 1] as a share of its OWN ranked pool.
+def _rank_strength(
+    rank: Optional[int], pool: int, exhaustive: bool,
+    field: Optional[int] = None,
+) -> float:
+    """Team quality in [0, 1]: its percentile within the field it is ranked in.
 
-    A rank only means something relative to how many teams carry one. Before
-    this normalization the scorer read a poll rank and a league-table
+    A rank only means something relative to how many teams it was drawn
+    from. Before #194 the scorer read a poll rank and a league-table
     position as the same quantity, which they are not:
 
       * a LEAGUE table ranks every club, so every fixture had two ranks and
@@ -1133,55 +1192,111 @@ def _rank_strength(rank: Optional[int], pool: int, exhaustive: bool) -> float:
 
     The measured consequence (2026-08-29): any league fixture whose ranks
     summed to 30 or less outscored `#1 vs unranked` on this signal. Ranks
-    summing to 30 is a 14th-vs-16th place game. It was also backwards on the
-    merits, since being ranked #1 of 136 is a stronger claim than 1st of 20.
+    summing to 30 is a 14th-vs-16th place game.
 
-    Percentile fixes both at once, and does it surgically: for a 25-deep
-    pool the output is within ~0.4 raw points of the old formula, so poll
-    sports barely move. What changes is (a) league tables, which are no
-    longer scored as if they were 25 deep, and (b) the unranked side, which
-    now costs a team its own share rather than collapsing the whole game
-    into a lower-capped branch.
+    THREE CASES, and the distinction between them is load-bearing:
 
-    EXHAUSTIVE AND SELECTIVE POOLS ARE NORMALIZED DIFFERENTLY, and the
-    distinction is load-bearing rather than fussy:
+      * EXHAUSTIVE pool (a league table ranks every club): the pool IS the
+        field. Last place really is the worst team and bottoms out at 0.0:
+            (pool - rank) / (pool - 1)
+      * SELECTIVE pool with a declared FIELD (#198: the AP football poll's
+        25 drawn from 138 FBS programmes): the rank is a position in the
+        field, so #25 is about the 82nd percentile, not the bottom:
+            (field - rank) / (field - 1)
+      * SELECTIVE pool with NO declared field (a poll whose source has not
+        said how many teams it ranks among): the published pool stands in
+        for the field, and its last entry stays strictly above unranked:
+            (pool + 1 - rank) / pool
 
-      * an EXHAUSTIVE pool (a league table) ranks every eligible club, so
-        last place really is the worst team and must bottom out at 0.0;
-      * a SELECTIVE pool (a 25-deep poll drawn from ~136 FBS teams) ranks
-        only the elite, so its LAST entry is still a top-20% team and must
-        stay strictly above an unranked side.
+    Before #198 every poll took the third case, so AP #25 read as 0.04 when
+    it is really a top-18% FBS team, and "#12 vs #6" of 215 NCAA men's
+    soccer programmes scored 6.80, the same as 4th vs 10th of a 20-club
+    league table (6.84).
 
-    Collapsing both to 0.0 made `#25 vs unranked` score identically to
-    `unranked vs unranked`, which is plainly wrong and was a regression this
-    function introduced before the distinction existed.
+    UNRANKED STAYS 0.0, DELIBERATELY. DO NOT "FIX" IT TO THE MIDPOINT OF THE
+    UNRANKED TAIL WITHOUT FIRST GIVING THE UNRANKED SPORTS A RANK. The
+    tail's expected position is mid-field (an unranked FBS team is on
+    average about 82nd of 138, strength ~0.41), and #198 floated that as
+    the honest default. Measured on the live slate of 2026-10-11 (the #198
+    PR): it hands every one of the 195 unranked-vs-unranked college games
+    4.1-4.4 raw points that no NFL, NHL, NBA or MLB game can earn, because
+    those sources carry no ranks at all. That put Jacksonville State v FIU
+    (no ranked team) above Cagliari v Juventus, and moved NCAA men's soccer
+    from 6 to 11 of the 25 slots on a slate without college football. 0.0
+    means "no evidence of quality", which is what a team in an unranked
+    sport also gets, so the signal stays comparable across sports.
 
-    Unranked scores 0.0 rather than the UNRANKED=26 sentinel: outside a
-    selective poll a team's true position is unknown, and 0 says "no
-    evidence of quality" without inventing a number.
-
-    KNOWN LIMITATION: this is a percentile within the PUBLISHED pool, not
-    within the sport's full eligible population, so a poll's #1 and a
-    league's #1 both read as 1.0. Modelling the unranked tail properly needs
-    a field size per sport; see the follow-up issue referenced in SCORING.md.
+    A field no larger than the pool carries no extra information and falls
+    back to the third case rather than inventing one.
     """
     if rank is None:
         return 0.0
-    if pool <= 1:
-        # A one-team (or empty) pool carries no ordering information, so the
-        # percentile is undefined rather than 0 or 1. Fall back to the poll
-        # depth instead of dividing by zero.
-        pool = RANK_POOL_DEFAULT
-        exhaustive = False
-    # Clamp defensively: a source emitting a rank outside its own pool is a
-    # bug, but it must not produce a negative or >1 strength that would then
-    # be scaled into the total.
-    rank = max(1, min(int(rank), pool))
+    pool, exhaustive, field = _rank_scale(pool, exhaustive, field)
+    rank = _scored_rank(rank, pool, field)
     if exhaustive:
         # first -> 1.0, last -> 0.0
         return (pool - rank) / (pool - 1)
+    if field is not None:
+        # first -> 1.0, last of the poll -> (field - pool) / (field - 1)
+        return (field - rank) / (field - 1)
     # first -> 1.0, last -> 1/pool (still ahead of unranked)
     return (pool + 1 - rank) / pool
+
+
+def _rank_scale(
+    pool: Optional[int], exhaustive: bool, field: Optional[int],
+) -> Tuple[int, bool, Optional[int]]:
+    """The (pool, exhaustive, field) a rank is actually scored against.
+
+    ONE place, because the score and the note that explains it must describe
+    the same scale: an earlier cut normalized inside the scorer only, so a
+    1-deep pool scored as a 25-deep poll while its note still said "1-deep".
+    """
+    if not pool or pool <= 1:
+        # A one-team (or empty, or undeclared) pool carries no ordering
+        # information, so the percentile is undefined rather than 0 or 1.
+        # Fall back to the poll depth instead of dividing by zero.
+        # A table that claimed to be exhaustive keeps refusing a field:
+        # dropping to the poll formula must not also start reading one.
+        if exhaustive:
+            field = None
+        pool = RANK_POOL_DEFAULT
+        exhaustive = False
+    if exhaustive or field is None or field <= pool:
+        # A league table IS its field; a field no bigger than the poll adds
+        # nothing. Either way the published pool is the scale.
+        field = None
+    return pool, exhaustive, field
+
+
+def _scored_rank(rank: int, pool: int, field: Optional[int]) -> int:
+    """The rank clamped into the scale it is scored on.
+
+    Clamped defensively: a source emitting a rank outside its own scale is a
+    bug, but it must not produce a negative or >1 strength. Against a FIELD
+    the ceiling is the field, not the poll depth: the rank is a position in
+    the field, so a 26 from a deeper-than-declared poll scores as 26th of
+    215 rather than being silently promoted to 25th. (A tie at the cutoff is
+    different and needs nothing: ESPN's men's soccer poll of 2026-10-11 had
+    26 entries because two teams shared #25, and both carry rank 25.)"""
+    return max(1, min(int(rank), field if field is not None else pool))
+
+
+def _rank_note(rank: int, strength: float, pool: int, field: Optional[int],
+               exhaustive: bool) -> str:
+    """One team's rank, as the score note states it. Takes the scale and the
+    rank AFTER _rank_scale / _scored_rank, so it names what was scored.
+
+    Says WHICH scale the strength came from, because a "#7" means different
+    things in a 20-club table and a 25-deep poll of 215 teams. The strength
+    is written as a plain number in [0, 1]; an earlier note printed it as
+    "top 96%", which reads as the opposite of what it meant (0.96 strength
+    is the top 4%, not the top 96%)."""
+    if field is not None and not exhaustive:
+        scale = f"in a {pool}-deep poll of {field}"
+    else:
+        scale = f"of {pool}"
+    return f"#{rank} {scale} (strength {strength:.2f})"
 
 
 def score_game(signals: GameSignals, weights: Weights) -> GameScore:
@@ -1195,10 +1310,13 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
         # different maxima (10.0 paired vs 4.17 one-ranked) and both hard-coded
         # a 25-team pool, which made a poll rank and a league-table position
         # incomparable. See _rank_strength for the measured consequence.
-        pool = signals.rank_pool_size or RANK_POOL_DEFAULT
-        exhaustive = bool(signals.rank_pool_exhaustive)
-        sa = _rank_strength(ra, pool, exhaustive)
-        sb = _rank_strength(rb, pool, exhaustive)
+        # A league table is its own field; only a poll reads the field size.
+        pool, exhaustive, field = _rank_scale(
+            signals.rank_pool_size, bool(signals.rank_pool_exhaustive),
+            signals.rank_field_size,
+        )
+        sa = _rank_strength(ra, pool, exhaustive, field)
+        sb = _rank_strength(rb, pool, exhaustive, field)
         # Mean, not sum: preserves the old formulation's semantics (it scored
         # on ra+rb, so #1-vs-#25 and #13-vs-#13 already tied) while making the
         # result a share of the pool rather than of a fixed 25.
@@ -1210,13 +1328,16 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             breakdown["rank_pair" if both else "one_ranked"] = round(rank_pts, 2)
             if both:
                 notes.append(
-                    f"both ranked: #{ra} vs #{rb} (top {sa:.0%} / {sb:.0%} "
-                    f"of a {pool}-team pool)"
+                    f"both ranked: "
+                    f"{_rank_note(_scored_rank(ra, pool, field), sa, pool, field, exhaustive)} "
+                    f"vs {_rank_note(_scored_rank(rb, pool, field), sb, pool, field, exhaustive)}"
                 )
             else:
-                rank = ra if ra is not None else rb
+                rank, strength = (ra, sa) if ra is not None else (rb, sb)
                 notes.append(
-                    f"one ranked: #{rank} of {pool} vs unranked"
+                    f"one ranked: "
+                    f"{_rank_note(_scored_rank(rank, pool, field), strength, pool, field, exhaustive)} "
+                    f"vs unranked"
                 )
 
     if signals.favorite_match:
@@ -1254,7 +1375,11 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             # them into the guide at all. "MAJOR" is for golf's four
             # majors (Masters / PGA / US Open / British Open) and
             # marquee racing events the source flags as MAJOR.
+            # "TOUR_PLAYOFF" is golf's FedEx Cup playoffs (#188): it sits
+            # halfway between a regular week and a major, so a playoff event
+            # outranks the former and never the latter.
             "EVENT": 1.5,
+            "TOUR_PLAYOFF": 3.0,
             "MAJOR": 4.5,
             # Domestic-cup early rounds; the QF/SF/Final rounds of those cups
             # reuse the knockout labels above. See _CUP_ROUND_STAGE_SCORES.
@@ -1288,9 +1413,9 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
 
     # Monte Carlo importance (Lahvička). Already pre-weighted by
     # consequence inside compute_match_importance; multiply only by the
-    # user's weight_importance tunable here. Gating BOTH the points AND
+    # user's `importance` scoring weight here. Gating BOTH the points AND
     # the weight keeps the breakdown clean when the user disables the
-    # signal via weight_importance=0: no 0.0 stub entries.
+    # signal via importance=0: no 0.0 stub entries.
     if signals.importance_points > 0 and weights.importance > 0:
         imp_pts = signals.importance_points * weights.importance
         breakdown["importance"] = round(imp_pts, 2)
@@ -1350,8 +1475,8 @@ def compute_match_importance(
     queries = importance_queries(match, league_ctx, favorites_in_league)
 
     # Chain routing (#53): if the source declares a cross-source chain
-    # AND that chain is currently active (pre-tournament FD.org state
-    # for WC group games), route through the chain simulator so the
+    # AND that chain is currently active (a WC / EURO group stage still
+    # in progress), route through the chain simulator so the
     # downstream knockout-cascade labels in league_ctx.thresholds get
     # real leverage values. When the chain is inactive (or absent),
     # the single-source path returns 0 on those labels, which is the
@@ -1523,6 +1648,7 @@ _TOURNAMENT_STAGE_LABELS: Dict[str, str] = {
     "ROUND_OF_32": "Round of 32", "LAST_32": "Round of 32",
     "PLAYOFF_ROUND": "Playoff", "PLAYOFFS": "Playoff",
     "EVENT": "Event",
+    "TOUR_PLAYOFF": "Playoff",
     "MAJOR": "Major",
     # Domestic-cup early rounds (sources/english_cup.py). Rendered as the
     # round name a viewer would recognise from a broadcast caption.

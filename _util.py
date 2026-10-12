@@ -3,12 +3,52 @@ and `sources/*.py` can import without circulars."""
 
 from __future__ import annotations
 
+import gzip
 import hashlib
+import json
 import math
+import os
 import re
 import random
+import threading
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
+
+from ._http import get_within_deadline
+
+
+def write_json_atomic(path: str, data: Any, *, compress: bool = False, **dump_kwargs: Any) -> None:
+    """Write `data` as JSON to `path` so a reader never sees a half-written file.
+    `compress` writes it gzipped (read it back with ``gzip.open(path, "rt")``),
+    for a state file large enough to matter on disk (`sources/_season_store`).
+
+    The ONE implementation of the plugin's state-file write; DO NOT hand-roll
+    another. Two rules, both learned the hard way:
+
+    - The temp name is unique PER WRITER (pid AND thread), never a fixed
+      ``path + ".tmp"``. A uwsgi worker, the scheduler's pipeline subprocess and
+      the reaper can all write the same file at once, and a shared temp path
+      lets one truncate the file another is still writing, so the atomic
+      ``os.replace`` would publish a half-written file. A pid alone is not
+      enough: two threads in one worker share it.
+    - The temp file is removed on ANY failure (a full disk, or a value json
+      cannot encode), or every failed write leaves litter beside the file.
+
+    Raises what the open, dump or replace raised; callers that must never fail
+    catch it themselves. `dump_kwargs` go to ``json.dump`` unchanged.
+    """
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        opener = gzip.open if compress else open
+        with opener(tmp, "wt", encoding="utf-8") as f:
+            json.dump(data, f, **dump_kwargs)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 def parse_iso_utc(s: Optional[str]) -> Optional[datetime]:
@@ -21,7 +61,9 @@ def parse_iso_utc(s: Optional[str]) -> Optional[datetime]:
         return None
     try:
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
+    except (AttributeError, TypeError, ValueError):
+        # AttributeError: a non-string (a number read back from a JSON file or
+        # a Redis value) has no .replace; the docstring promises None for it.
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -50,8 +92,14 @@ CHANNEL_NUMBER_ORIGIN = date(2026, 1, 1)
 # minute get distinct, stable numbers as long as their hashes differ mod this.
 # 16 keeps numbers compact while making same-minute hash collisions uncommon
 # (~6% per simultaneous pair); the rare residual is resolved by the deterministic
-# nudge in plugin._assign_channel_numbers. Because the value is < the per-minute
-# stride, it never reorders games across minute boundaries.
+# +1 nudge in plugin._place_kickoff_numbers, which also holds a nudged channel on
+# its number on later applies, even past its minute's block, while its number is
+# free: when numbering_state.json records it was numbered for its game's current
+# kickoff (#278), or, with no record, as long as every number the nudge walked
+# over is still taken by a channel kept this apply or a reserved number (#267;
+# see the DO NOT there). Raising this renumbers every published channel once.
+# Because the value is < the per-minute stride, the hash term never reorders
+# games across minute boundaries (a nudge past a block can, see above).
 CHANNEL_NUMBER_TIEBREAK_SLOTS = 16
 
 
@@ -63,8 +111,9 @@ def stable_channel_number(
     PURE FUNCTION of the game's kickoff time and its `marker`: the SAME game
     maps to the SAME integer for as long as its kickoff holds, regardless of how
     the slate is ranked or which other games are present. (A rescheduled game
-    gets its new minute's number; `_assign_channel_numbers` also keeps a slot a
-    channel already holds within its minute, see #217.) That stability is
+    gets its new minute's number; `_place_kickoff_numbers` also keeps a slot a
+    channel already holds within its minute, see #217, and one an upward nudge
+    from this number reached, see #267 and #278.) That stability is
     the whole point. Both Dispatcharr's default M3U/XMLTV output AND the Xtream
     Codes API bind the EPG to a channel BY its (integer) channel number, so a
     number that MOVES pairs the wrong programme with a channel after the slate
@@ -76,7 +125,9 @@ def stable_channel_number(
              + (stable hash of marker) % TIEBREAK_SLOTS
 
     The number increases monotonically with kickoff time, so the channel list
-    sorts strictly by day then start time (today's/soonest games first) — which
+    sorts by day then start time (today's/soonest games first; the same-minute
+    collision nudge in plugin._place_kickoff_numbers can lift a crowded
+    minute's last game a few numbers past the next minute's first) — which
     is exactly the "renumber every refresh, by start time" behaviour, achieved
     WITHOUT any game's number ever changing: finished games drop off and new
     games slot into their time-position on their own. The per-minute tiebreak
@@ -148,8 +199,9 @@ def allocate_compact_numbers(
     the settings help text says so.
 
     `reserved` is EVERY channel number already used by a channel we do not own,
-    and skipping those is not optional. The database's unique constraint is on
-    ``(channel_group, channel_number)``, so nothing stops our channel 401 from
+    and skipping those is not optional. Dispatcharr checks channel-number
+    uniqueness only per group, and only in ``Channel.clean()`` (no database
+    constraint, verified against Postgres 2026-10-11), so nothing stops our channel 401 from
     coexisting with the user's channel 401 in another group. But the M3U, XMLTV
     and Xtream Codes outputs all key the guide on the channel number ALONE, with
     no group in it, so two channels sharing a number collapse into one
@@ -316,7 +368,8 @@ def field_event_extra(
     above and sources/field_event.py.
 
     `stage` is "MAJOR" (marquee: golf majors, tennis Slams, UFC PPVs, world-
-    title boxing) or "EVENT" (regular tour stop / fight night).
+    title boxing), "TOUR_PLAYOFF" (golf's FedEx Cup playoffs) or "EVENT"
+    (regular tour stop / fight night).
     """
     return {
         "is_field_event": True,
@@ -552,6 +605,102 @@ def redact_secrets(value: Any) -> str:
     text = _SECRET_QUERY_PARAM_RE.sub(r"\1***", text)
     text = _SECRET_PATH_SEGMENT_RE.sub(r"\1***", text)
     return text
+
+
+def http_get_json(
+    requests_mod: Any,
+    url: str,
+    *,
+    log: Any,
+    tag: str,
+    timeout: float = 15.0,
+    params: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
+) -> Optional[Any]:
+    """GET `url` and return its parsed JSON, or None after logging a WARNING.
+
+    The ONE body behind every source module's `_http_get` (#193). A status of
+    400 or above, any `requests` exception, a response still incomplete after
+    `timeout` seconds in total (#271, see `_http.get_within_deadline`) and an
+    unparseable body all come back as None, which every caller already reads
+    as "no data from this feed". Both log lines go through `redact_secrets`, on
+    the URL AND on the exception text, because `requests` renders the full URL
+    (query string included) into its exception messages and no caller can
+    sanitise those.
+
+    DO NOT import `requests` in this module, and DO NOT "simplify" the
+    per-module `_http_get` wrappers away. Each source keeps a thin
+    `_http_get` that passes ITS OWN module-level `requests` symbol and logger:
+
+      - The `requests` symbol is the patch point. Source tests replace
+        `<module>._http_get`, `<module>.requests` itself, or the transport
+        (`tests/conftest.py::stub_requests_get`), and a source that stopped
+        resolving its own symbol at call time would turn a test stub into a
+        live call against ESPN / NHL / MLB that the suite cannot see.
+        `requests_mod.Session` is looked up per call (`_http.get_within_deadline`),
+        so a stub installed after import is honoured.
+        `tests/test_sources_http.py` pins this for every wrapper.
+      - The logger and `tag` keep each failing feed attributed to its own
+        `plugins.dispatcharr_ranked_matchups.<source>` channel.
+
+    `params` and `headers` are forwarded only when given, so a wrapper that
+    never took them makes the same `GET url, timeout=...` call it always did.
+    """
+    kwargs: Dict[str, Any] = {}
+    if params is not None:
+        kwargs["params"] = params
+    if headers is not None:
+        kwargs["headers"] = headers
+    try:
+        r = get_within_deadline(requests_mod, url, timeout=timeout, **kwargs)
+        if r.status_code >= 400:
+            log.warning("[%s] %s -> %d", tag, redact_secrets(url), r.status_code)
+            return None
+        return r.json()
+    except (requests_mod.RequestException, ValueError) as exc:
+        log.warning(
+            "[%s] %s failed: %s", tag, redact_secrets(url),
+            _redact_header_values(redact_secrets(exc), headers),
+        )
+        return None
+
+
+_SECRET_HEADER_NAME_RE = re.compile(r"key|token|secret|auth|pass", re.IGNORECASE)
+
+
+def _redact_header_values(text: str, headers: Optional[Dict[str, Any]]) -> str:
+    """Mask the value of every credential-named header that appears in `text`.
+
+    `requests` puts a malformed header value in its exception message
+    verbatim (`InvalidHeader: ... in header value: ' <key>'`, measured with a
+    RapidAPI key pasted with a leading space), and a header is where boxing's
+    key travels, so the key-shape regexes in `redact_secrets` never see it.
+    The raw value and its `repr` body are both masked, because the message
+    quotes the value with `!r` (a trailing newline arrives as a literal
+    backslash-n); a bytes value is masked in both its decoded and its
+    `b'...'` repr forms.
+
+    Values shorter than _MIN_MASKED_HEADER_VALUE are left alone: masking is a
+    plain substring replace, and a one-letter "key" would shred every word of
+    the message it appears in. No real credential is that short.
+    """
+    for name, value in (headers or {}).items():
+        if not _SECRET_HEADER_NAME_RE.search(str(name)):
+            continue  # e.g. x-rapidapi-host: the host name helps diagnose, and is public
+        if isinstance(value, bytes):
+            forms = (repr(value)[2:-1], value.decode("latin-1"))
+        elif isinstance(value, str):
+            forms = (repr(value)[1:-1], value)
+        else:
+            continue
+        for form in forms:
+            for variant in (form, form.strip()):
+                if len(variant) >= _MIN_MASKED_HEADER_VALUE:
+                    text = text.replace(variant, "***")
+    return text
+
+
+_MIN_MASKED_HEADER_VALUE = 8
 
 
 _ORDINAL_SUFFIXES = ("th", "st", "nd", "rd")

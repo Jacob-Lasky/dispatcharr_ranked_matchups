@@ -57,15 +57,19 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
+
+from ._util import write_json_atomic
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.tasks")
 
@@ -88,6 +92,24 @@ _INFLIGHT_TTL_SECONDS = 30 * 60
 # runs django.setup(), which discovers plugins and builds a Plugin; with this
 # set, Plugin.__init__ starts no scheduler or reaper thread in the child.
 PIPELINE_CHILD_ENV = "RANKED_MATCHUPS_PIPELINE_CHILD"
+
+# Also set in the child's environment: the time.monotonic() reading at which
+# run_pipeline_subprocess kills it. Monotonic, NOT wall clock: subprocess.run
+# times its timeout on the monotonic clock, so a wall-clock step (NTP, a manual
+# change) would put the two out of step. On Linux time.monotonic() is
+# CLOCK_MONOTONIC, one clock for every process on the host: measured in the
+# Dispatcharr container 2026-10-11, a child read 0.013s past its parent. Read
+# through pipeline_child_seconds_left(), which apply uses to keep its network
+# pre-pass inside the child's life (#271).
+PIPELINE_DEADLINE_ENV = "RANKED_MATCHUPS_PIPELINE_DEADLINE"
+
+# Result key a pipeline child sets when apply STOPPED because the child had too
+# little life left to finish it (plugin._apply_time_short). Nothing was
+# cancelled or published, so run_pipeline_subprocess runs the follow-up below
+# in a FRESH child (a full _SUBPROCESS_TIMEOUT_SECONDS) right away, instead of
+# leaving the refreshed cache unapplied until the next scheduled run (an M3U
+# rematch could otherwise miss the live game it was triggered for).
+APPLY_STOPPED_FOR_TIME = "apply_stopped_for_time"
 
 # Sentinel prefixing the single stdout line the subprocess emits with its
 # JSON result. Reserving a marker (rather than parsing all of stdout) means a
@@ -211,23 +233,23 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
     so a lock that frees up a minute later does not leave a stale "did not
     run" note behind (and the per-attempt line drops to INFO)."""
     # Lazy import: keeps tasks.py importable without Django configured.
-    from .plugin import _try_acquire_scheduler_lock, _release_scheduler_lock
+    from .plugin import (
+        _release_scheduler_lock,
+        _run_lock_unavailable_reason,
+        _try_acquire_scheduler_lock,
+    )
 
-    # Whether this run WRITES. auto_pipeline chains refresh + apply, so it
-    # deletes Channels / ProgramData and renumbers the guide; a bare refresh
-    # only reads upstream APIs and rewrites cache.json. The flag decides what
-    # happens when Redis is unreachable: destructive work refuses to run
-    # unserialized, non-destructive work proceeds. See _try_acquire_scheduler_lock.
-    destructive = kind != "refresh"
-
-    lock_token = _try_acquire_scheduler_lock(destructive=destructive)
+    # EVERY kind takes the lock and fails closed, a bare refresh included
+    # (#199): refresh publishes cache.json, which apply and reap delete by. See
+    # _try_acquire_scheduler_lock for why "refresh is non-destructive" was the
+    # wrong reason to let it run unlocked.
+    lock_token = _try_acquire_scheduler_lock(kind, task_id)
     if not lock_token:
+        reason = _run_lock_unavailable_reason()
         logger.log(
             logging.WARNING if record_skip else logging.INFO,
-            "[ranked_matchups.tasks] %s task %s: scheduler lock unavailable; "
-            "%s (another refresh / auto_pipeline is in flight, or Redis is "
-            "unreachable and this action writes)",
-            kind, task_id, "skipping" if record_skip else "will retry",
+            "[ranked_matchups.tasks] %s task %s did not get the run lock; %s (%s)",
+            kind, task_id, "skipping" if record_skip else "will retry", reason,
         )
         if not record_skip:
             return False
@@ -236,7 +258,7 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
         # previous run's verdict as if it answered this click. Recorded beside
         # that verdict, never over it: the previous outcome is still the truth
         # about the last run that actually ran.
-        record_skipped_run(kind)
+        record_skipped_run(kind, reason)
         return False
     started = datetime.now(timezone.utc)
     result: Dict[str, Any] = {"status": "error", "message": "crashed before returning a result"}
@@ -287,14 +309,11 @@ def _as_int(value: Any) -> int:
 
 
 def _write_last_run(record: Dict[str, Any]) -> None:
-    """Atomic replace through a writer-unique temp file. Refresh runs WITHOUT
-    the lock when Redis is unreachable (it fails open), so two workers can
-    write at once; a shared temp name would let one replace the other's
-    half-written file."""
-    tmp = f"{LAST_RUN_PATH}.{os.getpid()}.{threading.get_ident()}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(record, f)
-    os.replace(tmp, LAST_RUN_PATH)
+    """Atomic replace through a writer-unique temp file. A skip note is
+    written by a caller that did NOT get the lock (record_skipped_run), so it
+    can race the holder's verdict or another worker's skip; a shared temp
+    name would let one replace the other's half-written file."""
+    write_json_atomic(LAST_RUN_PATH, record)
 
 
 def _record_last_run(kind: str, task_id: str, started: datetime, result: Dict[str, Any]) -> None:
@@ -324,25 +343,47 @@ def _record_last_run(kind: str, task_id: str, started: datetime, result: Dict[st
         logger.warning("[ranked_matchups.tasks] could not record run outcome to %s: %s", LAST_RUN_PATH, e)
 
 
-def record_skipped_run(kind: str) -> None:
+def record_skipped_run(kind: str, reason: Optional[str] = None) -> None:
     """Note that a requested run was skipped (lock held or Redis down) on the
-    existing record, without touching that record's verdict. Never raises."""
+    existing record, without touching that record's verdict. `reason` is the
+    sentence-ending text from plugin._run_lock_unavailable_reason, naming the
+    holder (#239); Show current state prints it. Never raises."""
     try:
         record = read_last_run() or {}
         record["skipped_kind"] = kind
         record["skipped_at"] = datetime.now(timezone.utc).isoformat()
+        # The reason carries the skip it belongs to. Code from before #239
+        # updates skipped_kind/skipped_at and leaves any older reason in place,
+        # so a reason whose stamp does not match skipped_at is not this skip's
+        # (plugin._run_health_lines checks the stamp).
+        if reason:
+            record["skipped_reason"] = reason
+            record["skipped_reason_at"] = record["skipped_at"]
+        else:
+            record.pop("skipped_reason", None)
+            record.pop("skipped_reason_at", None)
         _write_last_run(record)
     except Exception as e:  # noqa: BLE001 - caller is a daemon thread
         logger.warning("[ranked_matchups.tasks] could not record skipped run: %s", e)
 
 
 # User-facing names for the run kinds _run_under_lock records. Show current
-# state prints these, so a toast never shows an internal id.
+# state prints these, so a toast never shows an internal id. "apply" and
+# "reap" never reach last_run.json (they do not run through _run_under_lock);
+# they are here because they also take the run lock, and the lock's holder
+# record (#239) is described with these names.
+# The kind a scheduled slot's run records and holds the lock under. Read back
+# by name (plugin._scheduler_staleness treats a lock held by one as a busy
+# scheduler), so it is one constant, not a literal at each end.
+SCHEDULED_RUN_KIND = "scheduled_auto_pipeline"
+
 RUN_KIND_LABELS = {
     "auto_pipeline": "Refresh + apply",
-    "scheduled_auto_pipeline": "Scheduled refresh + apply",
+    SCHEDULED_RUN_KIND: "Scheduled refresh + apply",
     "m3u_rematch": "Refresh + apply after an M3U update",
     "refresh": "Refresh",
+    "apply": "Apply",
+    "reap": "Reap finished games",
 }
 
 
@@ -439,7 +480,60 @@ def _last_child_step(lines: List[str]) -> Optional[str]:
     return None
 
 
+def pipeline_child_seconds_left() -> Optional[float]:
+    """Seconds until this pipeline child is killed, or None outside a child
+    (or if the variable is unreadable or not a finite number, which then
+    imposes no limit: `min(x, nan)` would silently be x)."""
+    raw = os.environ.get(PIPELINE_DEADLINE_ENV)
+    if not raw:
+        return None
+    try:
+        deadline = float(raw)
+    except ValueError:
+        return None
+    if not math.isfinite(deadline):
+        return None
+    return deadline - time.monotonic()
+
+
 def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+    """`_run_pipeline_child`, plus ONE apply in a fresh child when an
+    auto_pipeline's apply stopped for lack of time (APPLY_STOPPED_FOR_TIME).
+    Only one: the fresh child starts with its whole life, so its apply cannot
+    run short, and a follow-up of a follow-up would hide a real fault. The
+    caller holds the scheduler lock across both (its TTL, 90 min, covers two
+    children).
+
+    ONLY auto_pipeline, where refresh shares the child and can legitimately
+    leave apply seconds. DO NOT extend it to apply or reap: their child starts
+    with its whole life and a whole apply takes under 40s (12 live runs,
+    2026-10-11), so running short there means something is wedged, and both
+    have synchronous HTTP callers (Apply, Reap now) that would wait past the
+    browser's timeout for a second child. A reap whose apply stopped is
+    finished by reap's own pending path on its next run."""
+    result = _run_pipeline_child(action, settings)
+    follow_up = ACTION_APPLY
+    if action != ACTION_AUTO_PIPELINE or not result.get(APPLY_STOPPED_FOR_TIME):
+        return result
+    logger.warning(
+        "[ranked_matchups] %s: apply ran short of time in its pipeline child; "
+        "running %s now in a fresh one", action, follow_up,
+    )
+    # Renews the inflight key's TTL (30 min, one child's worth), or the
+    # follow-up would outlive it and show_status would stop saying RUNNING NOW.
+    _update_inflight_phase(f"{follow_up} (fresh child)")
+    again = _run_pipeline_child(follow_up, settings)
+    out = dict(again)
+    # The follow-up's outcome FIRST: show_status cuts the message at 240
+    # characters, and a long refresh summary first would hide why it failed.
+    out["message"] = (
+        f"{follow_up} in a fresh child: {again.get('message', '')} "
+        f"| first run: {result.get('message', '')}"
+    )
+    return out
+
+
+def _run_pipeline_child(action: str, settings: Dict[str, Any]) -> Dict[str, Any]:
     """Run a heavy pipeline action ('refresh' / 'apply' / 'auto_pipeline') in
     a SEPARATE PROCESS and return its result dict.
 
@@ -468,6 +562,7 @@ def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, 
     # django.setup() in the child runs plugin discovery, which used to start a
     # second scheduler and reaper inside every pipeline subprocess.
     env[PIPELINE_CHILD_ENV] = "1"
+    env[PIPELINE_DEADLINE_ENV] = repr(time.monotonic() + _SUBPROCESS_TIMEOUT_SECONDS)
     forwarded = os.pathsep.join(p for p in sys.path if p)
     env["PYTHONPATH"] = (
         forwarded + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -573,7 +668,7 @@ def run_scheduled_pipeline(settings: Dict[str, Any], *, record_skip: bool = True
     The kind/task_id mark this as a scheduled run so show_status can tell it
     apart from an HTTP-queued one. Returns _run_under_lock's ran flag."""
     return _run_under_lock(
-        "scheduled_auto_pipeline",
+        SCHEDULED_RUN_KIND,
         f"scheduler-{os.getpid()}",
         partial(run_pipeline_subprocess, ACTION_AUTO_PIPELINE),
         settings,

@@ -36,6 +36,7 @@ from datetime import date, datetime
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
+from ._http import urlopen_read
 from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS, is_field_event
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.matcher")
@@ -570,8 +571,8 @@ def _post_claude(
     )
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8")
+        _status, body = urlopen_read(req, timeout=timeout)
+        raw = body.decode("utf-8")
     except Exception as e:
         logger.error("[matcher] Claude call failed: %s", e)
         return None

@@ -90,6 +90,28 @@ class TestActionRefreshClearsFdCaches:
         )
 
 
+class TestNumericSettings:
+    """A number setting never raises, whatever was saved: apply reads them
+    after the group-rename cleanup has committed (#263), so a raise there
+    failed the action half done. Literal defaults, not the plugin's."""
+
+    @pytest.mark.parametrize("raw", [
+        "", None, "five", pytest.param(10 ** 1000, id="int-past-1e308"), [], {},
+        "nan", "inf", "-inf", "1e400",
+    ])
+    def test_float_setting_falls_back(self, plugin, raw):
+        assert plugin._float_setting({"x": raw}, "x", 5.0) == 5.0
+
+    @pytest.mark.parametrize("raw", ["", None, "five", "inf", pytest.param(10 ** 1000, id="int-past-1e308"), "1e400"])
+    def test_int_setting_falls_back(self, plugin, raw):
+        assert plugin._int_setting({"x": raw}, "x", 7) == 7
+
+    def test_valid_values_parse(self, plugin):
+        assert plugin._float_setting({"x": "6.5"}, "x", 5.0) == 6.5
+        assert plugin._float_setting({}, "x", 5.0) == 5.0
+        assert plugin._int_setting({"x": "3.9"}, "x", 7) == 3
+
+
 class TestParseScheduledTimes:
     def test_simple_csv(self, plugin):
         out = plugin._parse_scheduled_times("0400,1000,1600,2200")
@@ -327,6 +349,38 @@ class TestIsPostseasonGame:
         assert plugin._is_postseason_game(self._game("group_stage")) is False
         assert plugin._is_postseason_game(self._game("final")) is True
 
+    def test_a_stageless_espn_playoff_slug_is_postseason(self, plugin):
+        """NWSL and Liga MX rows carry only ESPN's `season_slug` (sources/
+        mls.py), so their playoff games were invisible to the 'postseason'
+        favorites gate and got league soccer's 2.5 h window (#257). Slugs as
+        ESPN returned them on 2026-10-11."""
+        def slug(s):
+            return types.SimpleNamespace(home="A", away="B", extra={"season_slug": s})
+        for s in ("playoffs---quarterfinals", "playoffs---championship",
+                  "apertura---8th-seed-game", "apertura---finals"):
+            assert plugin._is_postseason_game(slug(s)) is True, s
+        for s in ("regular-season", "torneo-apertura", "torneo-clausura", "preseason", "", None):
+            assert plugin._is_postseason_game(slug(s)) is False, s
+
+    def test_an_all_star_slug_is_not_postseason(self, plugin):
+        """Preventive guard. ESPN's soccer slug for an All-Star exhibition is
+        "all-star-game" (measured on usa.1, 2025-07-23). The MLS sources drop
+        it upstream (East/West keep only "regular-season", MLS Cup only its
+        round map), but NWSL and Liga MX go through MlsSource, which passes
+        every slug through, and on their stage-less rows the slug rule would
+        call it a playoff round: rescued past the 'postseason' favorites gate
+        and given the knockout window. Its stage-side twin, ALLSTAR, is
+        already excluded."""
+        g = types.SimpleNamespace(home="A", away="B", extra={"season_slug": "all-star-game"})
+        assert plugin._is_postseason_game(g) is False
+        assert plugin._epg_match_window("NWSL", {"season_slug": "all-star-game"}) == (5, 2.5)
+
+    def test_a_stage_outranks_the_slug(self, plugin):
+        """An MLS Cup row carries both; a WC group row with a playoff-looking
+        slug would still be a group game."""
+        g = types.SimpleNamespace(extra={"stage": "GROUP_STAGE", "season_slug": "playoffs"})
+        assert plugin._is_postseason_game(g) is False
+
 
 class TestFilterFavoritesOnly:
     """`_filter_favorites_only` is the curation gate. It filters games and
@@ -388,6 +442,14 @@ class TestFilterFavoritesOnly:
         )
         assert kept == [usa_group, wc_final, nfl_playoff]
         assert dropped == 2  # bra_group (WC group) + nfl_regular
+
+    def test_postseason_rescues_an_nwsl_playoff_game_by_its_slug(self, plugin):
+        playoff = types.SimpleNamespace(home="Spirit", away="Gotham",
+                                        extra={"season_slug": "playoffs---quarterfinals"})
+        regular = types.SimpleNamespace(home="Pride", away="Courage",
+                                        extra={"season_slug": "regular-season"})
+        kept, dropped = self._run(plugin, [playoff, regular], ["United States"], "postseason")
+        assert kept == [playoff] and dropped == 1
 
 
 class TestManifestFavoritesOnlyMatchesCode:
@@ -485,35 +547,142 @@ class TestRankPoolSizeWiring:
         assert undeclared == 3.8
 
 
+class TestRankFieldSizeWiring:
+    """#198: a poll's field size only changes a score if plugin.py carries it
+    from the source to the scorer, onto the cache row and back. Every
+    scoring-level test passes with that wiring missing, in which case every
+    poll rank silently scores against its 25-entry list again."""
+
+    def test_refresh_forwards_the_sources_field_for_a_poll_only(self, plugin):
+        import inspect
+        src = inspect.getsource(plugin._action_refresh)
+        assert '"rank_field_size", None' in src, (
+            "refresh no longer reads the source's rank_field_size"
+        )
+        assert "rank_field = None if rank_pool_exhaustive else" in src, (
+            "a league table must never be scored against a field"
+        )
+        assert "rank_field_size=rank_field" in src, (
+            "the field is not being passed into GameSignals"
+        )
+
+    def test_field_is_persisted_to_the_cache_row(self, plugin):
+        import inspect
+        src = inspect.getsource(plugin._action_refresh)
+        assert '"rank_field_size": signals.rank_field_size' in src
+
+    def test_cache_replay_reads_the_field_back(self, plugin):
+        """The row a refresh wrote comes back carrying its field, and a
+        pre-#198 row (no key) comes back as None. Replay does NOT re-score
+        (it returns the cached score and breakdown), so this pins only the
+        reconstructed signals, which feed the tagline; a pre-#198 row keeps
+        its old rank points until the next refresh rewrites it."""
+        row = {"home": "SMU", "away": "Virginia", "rank_home": 24,
+               "rank_away": None, "rank_pool_size": None,
+               "rank_pool_exhaustive": False, "rank_field_size": 138}
+        signals, _score = plugin._build_signals_score_from_payload(row)
+        assert signals.rank_field_size == 138
+        del row["rank_field_size"]
+        signals, _score = plugin._build_signals_score_from_payload(row)
+        assert signals.rank_field_size is None
+
+    def test_a_real_refresh_scores_a_poll_against_its_field(self, refresh_env, monkeypatch):
+        """End to end through _action_refresh (scoring, cache write) with
+        REAL source instances, so the chain is proven by behaviour rather
+        than by the source text the three pins above read. Only each
+        source's fetch_upcoming is stubbed, to one row: this pins the field's
+        path from source to cache row, not which sources a setting enables.
+        NcaaSoccerSource matters on purpose: it sets its field in __init__ (it
+        depends on gender), so a class-level read would miss it while every
+        text pin stayed green (mutation-checked).
+
+        The league row carries an exhaustive standings table AND a source
+        that (wrongly) declares a field: the table must win.
+          poll:   #25 vs unranked of 215 -> (190 / 214) / 2 * 10 = 4.44
+                  (pre-#198: (25 + 1 - 25) / 25 / 2 * 10 = 0.20)
+          league: 15th of 20 vs unranked -> (5 / 19) / 2 * 10 = 1.32
+        """
+        from datetime import datetime, timedelta
+        from dispatcharr_ranked_matchups.sources.base import GameRow
+        from dispatcharr_ranked_matchups.sources.ncaa_soccer import NcaaSoccerSource
+        from dispatcharr_ranked_matchups.sources.soccer import SoccerSource
+        start = datetime.now(timezone.utc) + timedelta(hours=3)
+        poll_src = NcaaSoccerSource(gender="m")
+        poll_game = GameRow(
+            sport_prefix="NCAAMSOC", sport_label="NCAA Men's Soccer",
+            home="Syracuse", away="Wake Forest", rank_home=25, rank_away=None,
+            start_time=start, extra={"game_id": 9001},
+        )
+        league_src = SoccerSource("epl", fd_api_key="x")
+        league_src.rank_field_size = 138  # wrong on purpose: must be ignored
+        # The shape soccer._serialize_table puts on the row.
+        table = [
+            {"name": f"Club {i}", "position": i, "points": 40 - i, "played": 10,
+             "goal_difference": 10 - i}
+            for i in range(1, 21)
+        ]
+        league_game = GameRow(
+            sport_prefix="EPL", sport_label="English Premier League",
+            home="Club 15", away="Visitor", rank_home=15, rank_away=None,
+            start_time=start, extra={"game_id": 9002, "standings_table": table},
+        )
+        monkeypatch.setattr(poll_src, "fetch_upcoming", lambda days_ahead=7: [poll_game])
+        monkeypatch.setattr(league_src, "fetch_upcoming", lambda days_ahead=7: [league_game])
+
+        _write_prior, run, read = refresh_env
+        result = run([poll_src, league_src])
+        assert result["status"] == "ok", result
+        cache = read()
+        rows = {r["sport_prefix"]: r for r in cache["games"] + cache.get("bench", [])}
+
+        poll = rows["NCAAMSOC"]
+        assert poll["rank_field_size"] == 215
+        assert poll["rank_pool_exhaustive"] is False
+        assert poll["score_breakdown"]["one_ranked"] == 4.44
+        assert poll["score_notes"][0] == (
+            "one ranked: #25 in a 25-deep poll of 215 (strength 0.89) vs unranked"
+        )
+
+        league = rows["EPL"]
+        assert league["rank_field_size"] is None
+        assert league["rank_pool_size"] == 20
+        assert league["rank_pool_exhaustive"] is True
+        assert league["score_breakdown"]["one_ranked"] == 1.32
+
+
 class TestManifestNcaafDivisionsMatchesCode:
-    """plugin.json's ncaaf_divisions option values must equal the source's
-    DIVISION_SETS keys, mirroring TestManifestFavoritesOnlyMatchesCode. A
-    manifest value the source does not recognise silently degrades to the
-    default, so the UI would offer a setting that does nothing."""
+    """plugin.json's `ncaaf` select (#208: the enable toggle and the divisions
+    select merged) must offer Off plus exactly the source's DIVISION_SETS
+    keys, mirroring TestManifestFavoritesOnlyMatchesCode. A manifest value the
+    source does not recognise silently degrades to the default, so the UI
+    would offer a setting that does nothing."""
 
     def test_options_match_source_constants(self):
+        import json
+        from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
+        from dispatcharr_ranked_matchups import merged_settings
+
+        with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
+            manifest = json.load(f)
+        field = next(
+            x for x in manifest["fields"] if x["id"] == merged_settings.NCAAF_SETTING
+        )
+        assert field["type"] == "select"
+        values = [o["value"] for o in field["options"]]
+        assert values[0] == "off"
+        assert set(values) - {"off"} == set(ncaaf_mod.DIVISION_SETS)
+        # Off by default, like every other league.
+        assert field["default"] == "off"
+
+    def test_the_recommended_division_is_the_source_default(self):
         import json
         from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
 
         with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
             manifest = json.load(f)
-        field = next(
-            x for x in manifest["fields"] if x["id"] == "ncaaf_divisions"
-        )
-        assert field["type"] == "select"
-        values = [o["value"] for o in field["options"]]
-        assert set(values) == set(ncaaf_mod.DIVISION_SETS)
-        assert field["default"] == ncaaf_mod.DEFAULT_DIVISIONS
-        assert field["default"] in values
-
-    def test_sits_next_to_its_toggle(self):
-        """The divisions select is meaningless without enable_ncaaf, so it
-        must render adjacent to it rather than elsewhere in an 86-field form."""
-        import json
-        with open(os.path.join(REPO_ROOT, "plugin.json")) as f:
-            manifest = json.load(f)
-        ids = [x["id"] for x in manifest["fields"]]
-        assert ids.index("ncaaf_divisions") == ids.index("enable_ncaaf") + 1
+        field = next(x for x in manifest["fields"] if x["id"] == "ncaaf")
+        recommended = [o["value"] for o in field["options"] if "recommended" in o["label"]]
+        assert recommended == [ncaaf_mod.DEFAULT_DIVISIONS]
 
 
 class TestEmptyRefreshResult:
@@ -524,11 +693,45 @@ class TestEmptyRefreshResult:
     def test_returns_ok_and_persists_empty_cache(self, plugin, monkeypatch):
         captured = {}
         monkeypatch.setattr(plugin, "_write_cache", lambda c: captured.update(c))
-        out = plugin._empty_refresh_result("nothing here", ["NFL: 0 games"])
+        out = plugin._empty_refresh_result("nothing here", ["NFL: 0 games"], True)
         assert out == {"status": "ok", "message": "nothing here"}
         assert captured["games"] == []
         assert captured["summary"] == ["NFL: 0 games"]
         assert "refreshed_at" in captured
+        assert captured["empty_slate_known"] is True
+        assert plugin._cache_has_slate(captured) is True
+
+    def test_an_unvouched_empty_cache_is_not_a_slate(self, plugin, monkeypatch):
+        """#241: apply must not publish this one; see _cache_has_slate."""
+        captured = {}
+        monkeypatch.setattr(plugin, "_write_cache", lambda c: captured.update(c))
+        plugin._empty_refresh_result("nothing here", [], False)
+        assert captured["empty_slate_known"] is False
+        assert plugin._cache_has_slate(captured) is False
+
+
+class TestSlateKnown:
+    """When a refresh may vouch for an empty result (#241)."""
+
+    PRIOR = {"games": [{"sport_prefix": "CFB"}], "refreshed_at": "2026-10-11T12:00:00+00:00"}
+
+    def test_read_the_previous_slate(self, plugin):
+        assert plugin._slate_known(self.PRIOR, {"NCAA Football"}) is True
+
+    def test_every_source_answered(self, plugin):
+        assert plugin._slate_known({"games": [], "refreshed_at": None}, set()) is True
+
+    def test_lost_cache_and_a_source_failed(self, plugin):
+        assert plugin._slate_known({"games": [], "refreshed_at": None}, {"NCAA Football"}) is False
+
+    def test_doubt_travels_with_a_non_empty_unvouched_slate(self, plugin):
+        prior = {**self.PRIOR, "empty_slate_known": False}
+        assert plugin._cache_has_slate(prior) is True
+        assert plugin._slate_known(prior, {"NCAA Football"}) is False
+
+    def test_pre_marker_caches(self, plugin):
+        assert plugin._cache_vouched(self.PRIOR) is True
+        assert plugin._cache_vouched({"games": [], "refreshed_at": "2026-10-11T12:00:00+00:00"}) is False
 
 
 class TestBuildMarkerKey:
@@ -636,46 +839,55 @@ class TestBuildWeights:
         assert not hasattr(w, "stakes")
         assert not hasattr(w, "impact_favorite")
 
-    def test_plugin_json_defaults_match_dataclass(self, plugin):
-        # The Dispatcharr loader reads plugin.json WITHOUT executing
-        # plugin code, so the manifest's per-field "default" values are
-        # a third source of truth alongside scoring.Weights and
-        # _build_weights. All three must agree, otherwise the UI shows
-        # one number while the runtime computes with another.
-        #
-        # If someone bumps the dataclass without bumping plugin.json,
-        # new installs surface the wrong default in the form. Saved
-        # settings would then override with stale UI defaults the user
-        # didn't change. This test catches the divergence at CI time.
+    def test_manifest_help_text_states_the_dataclass_defaults(self, plugin):
+        # The Dispatcharr loader reads plugin.json WITHOUT executing plugin
+        # code. Since #208 the weights are one "Scoring weights" text field
+        # whose default is blank (= every Weights default), so the only place
+        # the UI tells a user what each default IS is that field's help text.
+        # It must name every weight with the dataclass's value, or the form
+        # documents one number while the runtime computes with another.
         import json
         import os
+        import re
         from dispatcharr_ranked_matchups.scoring import Weights
+        from dispatcharr_ranked_matchups import merged_settings
         defaults = Weights()
         manifest_path = os.path.join(
             os.path.dirname(os.path.abspath(plugin.__file__)), "plugin.json"
         )
         with open(manifest_path) as fh:
             manifest = json.load(fh)
-        field_defaults = {
-            f["id"]: f.get("default")
-            for f in manifest.get("fields", [])
-            if f["id"].startswith("weight_")
+        field = next(
+            f for f in manifest["fields"]
+            if f["id"] == merged_settings.SCORING_WEIGHTS_SETTING
+        )
+        assert field["type"] == "string"
+        assert field["default"] == ""
+        stated = {
+            name: float(value)
+            for name, value in re.findall(r"\b([a-z]+)=([0-9.]+)", field["help_text"])
         }
-        # weight_<name> in plugin.json must match Weights.<name>.
-        weight_field_names = [
-            "rank", "spread", "favorite", "rivalry",
-            "tournament", "narrative", "importance",
-        ]
-        for name in weight_field_names:
-            assert f"weight_{name}" in field_defaults, (
-                f"plugin.json missing weight_{name} field"
-            )
-            assert field_defaults[f"weight_{name}"] == getattr(defaults, name), (
-                f"plugin.json weight_{name} default "
-                f"({field_defaults[f'weight_{name}']}) disagrees with "
-                f"Weights.{name} default ({getattr(defaults, name)}). "
-                f"Bump both together."
-            )
+        expected = {
+            "rank": 1.0, "spread": 3.0, "favorite": 6.0, "rivalry": 2.0,
+            "tournament": 1.5, "importance": 3.0, "narrative": 0.0,
+        }
+        assert stated == expected
+        assert {n: getattr(defaults, n) for n in merged_settings.WEIGHT_NAMES} == expected, (
+            "Weights defaults changed: update the Scoring weights help text "
+            "in plugin.json AND this test's literal together."
+        )
+
+    def test_no_weight_number_fields_remain(self, plugin):
+        """#208 retired the seven weight_<name> fields. A field re-added under
+        the old id would render a second, competing control for one weight."""
+        import json
+        import os
+        manifest_path = os.path.join(
+            os.path.dirname(os.path.abspath(plugin.__file__)), "plugin.json"
+        )
+        with open(manifest_path) as fh:
+            ids = [f["id"] for f in json.load(fh)["fields"]]
+        assert [i for i in ids if i.startswith("weight_")] == []
 
 
 class TestResolveKey:
@@ -885,10 +1097,11 @@ class TestAssignChannelNumbers:
         assert plugin._build_marker_key(games[2]) not in markers
 
     def test_collisions_resolved_to_unique_values(self, plugin, monkeypatch):
-        # Force every game onto the SAME raw number; the resolver must still
+        # Force every game onto the SAME raw number (offset 0 from the floor,
+        # as the real function's base + offset); the resolver must still
         # hand back all-distinct numbers (nudge path) and stay deterministic.
         monkeypatch.setattr(plugin, "stable_channel_number",
-                            lambda base, start, marker, tz: 1000)
+                            lambda base, start, marker, tz: base)
         games = [self._game(i, "2026-06-13T16:00:00Z") for i in range(5)]
         assigned = plugin._assign_channel_numbers(games, 1000, timezone.utc)
         assert len(assigned) == 5
@@ -3222,10 +3435,11 @@ class TestBuildSourcesEnglishCups:
         for s in srcs:
             assert not hasattr(s, "favorites_only")
 
-    def test_manifest_cup_fields_match_code(self, plugin):
-        # plugin.json must declare both toggles with default False, or the
-        # settings _build_sources reads would never appear in the UI and the
-        # sources could not be switched on at all. Mirrors
+    def test_manifest_cup_field_matches_code(self, plugin):
+        # plugin.json must declare the English cups select (#208 merged the
+        # two cup toggles into it) offering exactly Off, each cup, and both,
+        # default Off, or the leagues _build_sources reads could never be
+        # switched on from the UI. Mirrors
         # test_manifest_club_friendlies_field_matches_code.
         import json
         import os
@@ -3233,14 +3447,14 @@ class TestBuildSourcesEnglishCups:
         manifest = json.load(
             open(os.path.join(repo, "plugin.json"), encoding="utf-8")
         )
-        for fid in ("enable_efl_cup", "enable_fa_cup"):
-            field = next(
-                (f for f in manifest["fields"] if f["id"] == fid), None,
-            )
-            assert field is not None, f"{fid} missing from plugin.json"
-            assert field["type"] == "boolean"
-            assert field["default"] is False
-            assert field.get("help_text"), f"{fid} has no help_text"
+        field = next(
+            (f for f in manifest["fields"] if f["id"] == "english_cups"), None,
+        )
+        assert field is not None, "english_cups missing from plugin.json"
+        assert field["type"] == "select"
+        assert field["default"] == "off"
+        assert [o["value"] for o in field["options"]] == ["off", "efl", "fa", "both"]
+        assert field.get("help_text"), "english_cups has no help_text"
 
     def test_manifest_help_text_records_why_espn_not_football_data(self, plugin):
         """The 403 is the whole reason this source exists rather than a
@@ -3252,11 +3466,11 @@ class TestBuildSourcesEnglishCups:
         manifest = json.load(
             open(os.path.join(repo, "plugin.json"), encoding="utf-8")
         )
-        for fid in ("enable_efl_cup", "enable_fa_cup"):
-            field = next(f for f in manifest["fields"] if f["id"] == fid)
-            help_text = field["help_text"]
-            assert "ESPN" in help_text
-            assert "Football-Data.org" in help_text
+        field = next(f for f in manifest["fields"] if f["id"] == "english_cups")
+        help_text = field["help_text"]
+        assert "ESPN" in help_text
+        assert "Football-Data.org" in help_text
+        assert "403" in help_text
 
 
 def _stream_stub(sid, name, group_id=None, stats=None):
@@ -3598,8 +3812,9 @@ class TestPlaceholderDecisionUsesTheRealPool:
 
     def test_the_placeholder_decision_is_above_the_seen_marker_line(self):
         src = self._src()
+        # A game is seen exactly when it has a plan (#288).
         add = min(m.start() for m in re.finditer(
-            r"^[ \t]*seen_markers\.add\(marker\)[ \t]*$", src, re.M))
+            r"^[ \t]*prep_by_marker\[marker\] = SimpleNamespace\($", src, re.M))
         assert src.index("if not source_streams:") < add
 
     def test_the_decision_keys_on_the_pool_not_on_named_candidates(self):
@@ -3871,8 +4086,8 @@ class TestKeptForRecordingChannelsHonourExclusion:
 
     def test_membership_is_stripped_from_kept_channels(self):
         src = self._src()
-        assert "if kept_for_recording and excluded_ids:" in src
-        i = src.index("if kept_for_recording and excluded_ids:")
+        assert "if kept_stale and excluded_ids:" in src
+        i = src.index("if kept_stale and excluded_ids:")
         block = src[i:i + 500]
         assert "ChannelStream.objects.filter(" in block
         assert "stream_id__in=excluded_ids" in block
@@ -3881,7 +4096,7 @@ class TestKeptForRecordingChannelsHonourExclusion:
         """The channel is kept ON PURPOSE. Deleting it, or the Recording, would
         destroy the thing #146 exists to protect."""
         src = self._src()
-        i = src.index("if kept_for_recording and excluded_ids:")
+        i = src.index("if kept_stale and excluded_ids:")
         block = src[i:src.index("# Restore kept channels", i)]
         assert "Channel.objects" not in block
         assert "Recording.objects" not in block
@@ -3889,7 +4104,7 @@ class TestKeptForRecordingChannelsHonourExclusion:
     def test_the_strip_runs_only_when_a_policy_exists(self):
         # `excluded_ids` empty must not issue a query, let alone a delete.
         src = self._src()
-        assert "if kept_for_recording and excluded_ids:" in src
+        assert "if kept_stale and excluded_ids:" in src
 
 
 

@@ -9,11 +9,13 @@ Design:
   - Emit one GameRow per scheduled event, with `home = event_name`
     (e.g., "Heineken Chinese GP", "The Masters") and `away = "Field"`
     as a sentinel.
-  - Tag with `tournament_stage = "EVENT"` (regular tour stop) or
-    `"MAJOR"` (golf majors / marquee racing events the source flags
-    as MAJOR). The scoring layer's `tournament` signal handles the
-    rest; both labels map to non-zero stage_score so field events
-    always surface in the guide when toggled on.
+  - Tag with `tournament_stage = "EVENT"` (regular tour stop),
+    `"TOUR_PLAYOFF"` (a tour's own playoff events, between the two:
+    golf's FedEx Cup playoffs, #188) or `"MAJOR"` (golf majors /
+    marquee racing events the source flags as MAJOR). The scoring
+    layer's `tournament` signal handles the rest; every label maps to
+    a non-zero stage_score so field events always surface in the guide
+    when toggled on.
   - No importance simulation, no closeness, no rank: the rarity of
     these events (~1/week) means just-show-it-up is the right product.
     The matcher fuzzy-matches the event name against EPG titles.
@@ -21,22 +23,21 @@ Design:
 Subclasses parameterize the league via class attrs (ESPN_SLUG,
 SPORT_PREFIX, SPORT_LABEL, MAJOR_REGEX). The base does all the work.
 
-ESPN doesn't enforce a 25-event range cap on these endpoints because
-volumes are low (F1: 24 GPs/year, NASCAR: 36 races/year, PGA: ~45
-tour events/year). Range queries are safe.
+Fetched one scoreboard day at a time like every other ESPN source; see
+`FieldEventSource.fetch_upcoming` for why the range form is not used.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional, Pattern
+from typing import Any, Dict, List, Optional, Pattern
 
 import requests
 
 from .base import GameRow, SportSource
-from .._util import FIELD_AWAY_SENTINEL, field_event_extra, parse_iso_utc
+from ._espn import sweep_upcoming_events
+from .._util import FIELD_AWAY_SENTINEL, field_event_extra, http_get_json, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.field_event")
 
@@ -54,6 +55,8 @@ class FieldEventSource(SportSource):
       - `MAJOR_REGEX`: optional compiled regex; when an event name
         matches, the event is tagged tournament_stage="MAJOR"
         (otherwise "EVENT"). Default None means everything is "EVENT".
+      - `PLAYOFF_REGEX`: optional compiled regex for the tour's playoff
+        events, tagged "TOUR_PLAYOFF". MAJOR wins when both match.
     """
 
     # supports_importance left at the SportSource default (False).
@@ -64,6 +67,7 @@ class FieldEventSource(SportSource):
     SPORT_LABEL: str = ""
     FD_COMPETITION_CODE: str = ""
     MAJOR_REGEX: Optional[Pattern[str]] = None
+    PLAYOFF_REGEX: Optional[Pattern[str]] = None
 
     @property
     def sport_prefix(self) -> str:
@@ -77,41 +81,45 @@ class FieldEventSource(SportSource):
         return f"https://site.api.espn.com/apis/site/v2/sports/{self.ESPN_SLUG}"
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Pull events scheduled in the next N days via the ESPN
-        scoreboard range endpoint. Field-event sports have low enough
-        volume that range queries (which silently cap at 25 for team
-        sports) work fine: ESPN returns the whole window unfiltered.
+        """Pull events in the day buckets of `_espn.upcoming_window`, one
+        scoreboard request per day (`_espn.fetch_scoreboard_day`), through
+        `_espn.sweep_upcoming_events(field_events=True)`.
+
+        The window starts one day BEFORE today-UTC (#256): ESPN files a
+        UFC main card or a NASCAR night race under its US Eastern date, so
+        from 00:00Z the event in progress sits in yesterday's bucket. Only
+        that lookback bucket is filtered (over and stale events dropped,
+        by event-level status); the forward buckets keep
+        every event as they always have. `_espn._field_event_current` has
+        the measurements behind both halves.
+
+        DO NOT go back to one `dates=<today>-<end>` range call. It is the
+        form ESPN now rejects with HTTP 400 for every team sport, and on
+        these feeds, where it still answers, it EXCLUDES the window's last
+        day: measured 2026-10-11, `racing/nascar-premier` 20261011-20261018
+        returned the Charlotte race but not Phoenix on Oct 18, which the
+        per-day walk finds (#182; see `_espn.SCOREBOARD_EVENT_LIMIT`). A
+        multi-day event (a golf or tennis tournament) appears in every day's
+        bucket it spans, so the sweep's dedupe keeps its first kept copy.
         """
-        today = datetime.now(timezone.utc).date()
-        end = today + timedelta(days=days_ahead)
-        url = (
-            f"{self._espn_base()}/scoreboard"
-            f"?dates={today.strftime('%Y%m%d')}-{end.strftime('%Y%m%d')}"
-        )
-        data = _http_get(url)
-        if not isinstance(data, dict):
-            return []
-        out: List[GameRow] = []
-        seen_ids: set = set()
-        for event in data.get("events") or []:
-            eid = event.get("id")
-            if eid in seen_ids:
-                continue
+        def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
             name = (event.get("name") or "").strip()
             short_name = (event.get("shortName") or "").strip()
             display_name = name or short_name
             if not display_name:
-                continue
+                return None
             start = parse_iso_utc(event.get("date"))
             if start is None:
-                continue
-            seen_ids.add(eid)
+                return None
             # Detect majors so the score gets bumped to the MAJOR tier
-            # (e.g., golf's Masters / PGA / US Open / British Open).
+            # (e.g., golf's Masters / PGA / US Open / British Open), then the
+            # tour's playoff events (golf's FedEx Cup playoffs).
             stage = "EVENT"
             if self.MAJOR_REGEX is not None and self.MAJOR_REGEX.search(display_name):
                 stage = "MAJOR"
-            out.append(GameRow(
+            elif self.PLAYOFF_REGEX is not None and self.PLAYOFF_REGEX.search(display_name):
+                stage = "TOUR_PLAYOFF"
+            return GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
                 home=display_name,
@@ -123,24 +131,18 @@ class FieldEventSource(SportSource):
                     self.FD_COMPETITION_CODE,
                     stage,
                     short_name,
-                    espn_event_id=eid,
+                    espn_event_id=event.get("id"),
                 ),
-            ))
-        return out
+            )
+        return sweep_upcoming_events(
+            _http_get, f"{self._espn_base()}/scoreboard", days_ahead, to_row,
+            field_events=True,
+        )
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
-    """ESPN unofficial API wrapper. Returns parsed JSON or None on
-    any error. Shared across all field-event subclasses."""
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[field_event] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[field_event] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="field_event", timeout=timeout)
 
 
 # =====================================================================
@@ -179,25 +181,48 @@ class NascarSource(FieldEventSource):
 # tournament event whose name contains the major name. Regex is
 # liberal in word ordering to cover ESPN's stylings ("The Masters",
 # "Masters Tournament", "U.S. Open Championship", "The Open
-# Championship", "PGA Championship").
+# Championship", "PGA Championship"). "PGA Championship" must not be the
+# tail of a longer name: the DP World Tour's "BMW PGA Championship" and the
+# "Senior PGA Championship" are not majors.
 _GOLF_MAJOR_RE: Pattern[str] = re.compile(
-    r"\b(masters|pga\s+championship|u\.?s\.?\s+open|"
+    r"\b(masters|(?<!bmw\s)(?<!senior\s)pga\s+championship|u\.?s\.?\s+open|"
     r"the\s+open(?:\s+championship)?|british\s+open)\b",
+    re.IGNORECASE,
+)
+
+
+# The FedEx Cup playoffs (#188): three events in August that decide the
+# season-long title, so they rank above a regular week and below the majors.
+# Names as ESPN publishes them (checked 2025 and 2026): "FedEx St. Jude
+# Championship", "BMW Championship", "TOUR Championship". Each alternative is
+# narrow on purpose:
+#   - "st. jude CHAMPIONSHIP", not "st. jude": the pre-2022 "FedEx St. Jude
+#     Classic" was an ordinary tour stop.
+#   - "bmw championship" does not match the DP World Tour's "BMW PGA
+#     Championship" (and that one is not on this feed).
+#   - "tour championship" is anchored to the start of the name, so it cannot
+#     match some "<sponsor> Tour Championship" on another tour, and "PGA TOUR
+#     Q-School" does not contain it.
+_GOLF_PLAYOFF_RE: Pattern[str] = re.compile(
+    r"\bst\.?\s+jude\s+championship\b|\bbmw\s+championship\b|"
+    r"^\s*(?:the\s+)?tour\s+championship\b",
     re.IGNORECASE,
 )
 
 
 class GolfSource(FieldEventSource):
     """PGA Tour: ~45 tournaments per year. Four majors get the
-    MAJOR tier; everything else is EVENT-tier. The MAJOR_REGEX
-    intentionally catches both "The Open" and "British Open"
-    framings; ESPN has inconsistently used both."""
+    MAJOR tier, the three FedEx Cup playoff events the TOUR_PLAYOFF
+    tier, everything else EVENT. The MAJOR_REGEX intentionally catches
+    both "The Open" and "British Open" framings; ESPN has
+    inconsistently used both."""
 
     ESPN_SLUG = "golf/pga"
     SPORT_PREFIX = "PGA"
     SPORT_LABEL = "PGA Tour"
     FD_COMPETITION_CODE = "PGA"
     MAJOR_REGEX = _GOLF_MAJOR_RE
+    PLAYOFF_REGEX = _GOLF_PLAYOFF_RE
 
 
 # UFC PPV detection. ESPN names PPV events "UFC <number>: <headline>"

@@ -59,6 +59,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+from .._util import http_get_json
 from .base import GameRow, SportSource
 from ._espn import sweep_upcoming_scoreboard
 
@@ -73,15 +74,8 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.friendlies")
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[friendlies] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[friendlies] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="friendlies", timeout=timeout)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:

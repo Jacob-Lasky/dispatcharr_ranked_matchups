@@ -15,11 +15,12 @@ the slot number they will need.
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from ._util import write_json_atomic
 
 # Key the plugin stamps into Recording.custom_properties on every recording it
 # creates. It is the ONLY provenance test for "ours": every update, cancel and
@@ -114,26 +115,14 @@ def load_state(path: str) -> Dict[str, Dict[str, Any]]:
 
 
 def save_state(path: str, state: Dict[str, Dict[str, Any]]) -> None:
-    """Atomic write, per-writer temp name (same reasoning as plugin._write_cache:
-    a shared temp path lets two writers publish a half-written file).
+    """Atomic write (_util.write_json_atomic).
 
     Load-modify-save is only safe because every caller runs inside apply, which
     holds the cross-worker scheduler lock (#155; the reaper takes the same one).
     DO NOT write this file from anywhere that does not hold that lock: two
     writers would each replace the whole file and one's tombstones would be
     lost, re-creating a recording the user deleted."""
-    import threading
-    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2, sort_keys=True)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
+    write_json_atomic(path, state, indent=2, sort_keys=True)
 
 
 def prune_state(state: Dict[str, Dict[str, Any]], live_markers: Iterable[str], now: datetime) -> Dict[str, Dict[str, Any]]:
@@ -622,7 +611,8 @@ def cancellable(ours_by_marker: Dict[str, Any], plan: Plan,
     """Our not-yet-started recordings that are no longer wanted.
 
     A game that is IN the slate (the whole cache: applied games and bench) but
-    no longer planned is cancelled: the team was removed or it lost its slot.
+    no longer planned is cancelled: the team was removed, it lost its slot, or
+    apply gives it no channel this time (#291).
     A game MISSING from the slate is cancelled only when ``reason_holds`` says
     its stored reason no longer holds. DO NOT treat "missing from the slate" as
     "not wanted": a one-off source failure (measured 2026-09-26, CFBD returned
@@ -672,7 +662,7 @@ def stop_entries(plan: Plan, ours_by_marker: Dict[str, Any], names: Dict[str, st
     return out
 
 
-def _entry_at(entry: Dict[str, Any]) -> Optional[datetime]:
+def entry_at(entry: Dict[str, Any]) -> Optional[datetime]:
     try:
         return _aware(datetime.fromisoformat(str(entry.get("at"))))
     except ValueError:
@@ -685,7 +675,7 @@ def due_stops(entries: Dict[str, Dict[str, Any]], now: datetime) -> List[Tuple[s
     now = _aware(now)
     out = []
     for rid, e in entries.items():
-        at = _entry_at(e)
+        at = entry_at(e)
         if at is not None and now - STOP_GRACE <= at <= now:
             out.append((rid, e))
     return sorted(out, key=lambda kv: (kv[1].get("at"), kv[0]))
@@ -703,7 +693,7 @@ def next_stop_delay(entries: Dict[str, Dict[str, Any]], now: datetime) -> Option
     STOP_RETRY while any stop is still inside its grace window. None when
     there is nothing to wait for."""
     now = _aware(now)
-    ats = [at for at in (_entry_at(e) for e in entries.values()) if at is not None]
+    ats = [at for at in (entry_at(e) for e in entries.values()) if at is not None]
     future = [at for at in ats if at > now]
     delays = [(min(future) - now).total_seconds()] if future else []
     if any(now - STOP_GRACE <= at <= now for at in ats):

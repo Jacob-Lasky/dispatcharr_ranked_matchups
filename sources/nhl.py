@@ -37,15 +37,16 @@ from __future__ import annotations
 
 import logging
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult, SportSource
-from .bracket import BestOfNSeriesSource
+from .base import GameRow, MatchResult, SeasonUnavailable, report_lost_days
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .._util import parse_iso_utc, poisson_sample as _poisson, http_get_json
+from ._espn import upcoming_window
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.nhl")
 
@@ -93,17 +94,78 @@ def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
 
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
-    """Wrapper around requests.get with logging on non-2xx and a single
-    retry on connection errors. Returns the parsed JSON dict or None.
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="nhl", timeout=timeout)
+
+
+def _upcoming_schedule_games(days_ahead: int) -> List[Dict[str, Any]]:
+    """Every api-web game in `_espn.upcoming_window(days_ahead)` that is
+    still upcoming or live, deduped by id, in date order. Shared by both
+    NHL sources' `fetch_upcoming`, which filter on `gameType`.
+
+    api-web buckets its schedule by US EASTERN date exactly as ESPN does
+    (#256): measured 2026-10-11, `schedule/2026-10-10` lists ANA at CGY
+    (2026-10-11T02:00Z) under its 2026-10-10 day, and `schedule/2026-10-11`
+    starts at 2026-10-11, so a sweep starting at today-UTC dropped every
+    late game from 00:00Z on. Hence the window's lookback day, and the
+    window's FINISHED (`_FINAL_GAME_STATES`) and stale drops.
+
+    `schedule/{date}` answers with a whole `gameWeek` (seven days from
+    `date`, measured the same day), so the walk asks again only for the
+    first day past the run of days that came back, rather than once per day: the old
+    per-day loop made `days_ahead + 1` requests for one or two weeks of
+    data, and kept every game of every week it got back, up to 13 days out
+    on a 7-day lookahead. Days outside the window are skipped now.
     """
+    window = upcoming_window(days_ahead)
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    day = window.first_day
+    while day <= window.last_day:
+        data = _http_get(f"{NHL_API_BASE}/schedule/{day.isoformat()}")
+        if not (isinstance(data, dict) and isinstance(data.get("gameWeek"), list)):
+            # A lost day, not a quiet one: the refresh holds the games it
+            # had published for it (#261, see base.report_lost_days). Every
+            # answer carries `gameWeek`, a quiet July day included (measured
+            # 2026-10-11), so a body without one (an error object) failed.
+            report_lost_days([day])
+            data = None
+        weeks: Dict[date, List[Dict[str, Any]]] = {}
+        for week in (data or {}).get("gameWeek", []) or []:
+            week_day = _parse_week_date(week.get("date"))
+            if week_day is not None:  # a date listed twice: keep both lists
+                weeks.setdefault(week_day, []).extend(week.get("games", []) or [])
+        # Only the run of days contiguous from the one requested counts as
+        # answered: a short or gapped gameWeek (a failed request, a week
+        # starting later than asked) must neither skip the days it left out
+        # nor hand in a later day early, whose own request (made next) may
+        # carry a corrected kickoff that the dedupe would then discard.
+        run = []
+        while day in weeks:
+            run.append(day)
+            day += timedelta(days=1)
+        if not run:
+            day += timedelta(days=1)
+        for week_day in run:
+            if not (window.first_day <= week_day <= window.last_day):
+                continue
+            for g in weeks[week_day]:
+                gid = g.get("id")
+                if gid is None or gid in seen:
+                    continue
+                start = parse_iso_utc(g.get("startTimeUTC"))
+                if not window.admits(start, g.get("gameState") in _FINAL_GAME_STATES):
+                    continue
+                seen.add(gid)
+                out.append(g)
+    return out
+
+
+def _parse_week_date(raw: Any) -> Optional[date]:
+    """A `gameWeek[].date` ("YYYY-MM-DD") as a date, or None."""
     try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[nhl] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[nhl] %s failed: %s", url, exc)
+        return date.fromisoformat(str(raw))
+    except ValueError:
         return None
 
 
@@ -163,47 +225,36 @@ class NhlRegularSource(PointsBasedSportSource):
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Pull next-N-day schedule via `/v1/schedule/{date}` and emit
-        GameRows. Closeness is left None: there is no Odds API
-        integration for NHL in V1. The structural importance signal
-        carries the score on its own.
+        """Upcoming regular-season games from `_upcoming_schedule_games`
+        (the shared window with its US-Eastern lookback day, #256). Closeness
+        is left None: there is no Odds API integration for NHL in V1. The
+        structural importance signal carries the score on its own.
         """
         out: List[GameRow] = []
-        seen_ids: set = set()
-        today = datetime.now(timezone.utc).date()
-        for offset in range(days_ahead + 1):
-            d = today + timedelta(days=offset)
-            data = _http_get(f"{NHL_API_BASE}/schedule/{d.isoformat()}")
-            if not data:
+        for g in _upcoming_schedule_games(days_ahead):
+            if g.get("gameType") != 2:
+                continue  # regular season only here
+            home = _team_canonical_name(g.get("homeTeam") or {})
+            away = _team_canonical_name(g.get("awayTeam") or {})
+            start = parse_iso_utc(g.get("startTimeUTC"))
+            if not home or not away or start is None:
                 continue
-            for week in data.get("gameWeek", []) or []:
-                for g in week.get("games", []) or []:
-                    if g.get("gameType") != 2:
-                        continue  # regular season only here
-                    gid = g.get("id")
-                    if gid in seen_ids:
-                        continue
-                    seen_ids.add(gid)
-                    home = _team_canonical_name(g.get("homeTeam") or {})
-                    away = _team_canonical_name(g.get("awayTeam") or {})
-                    start = parse_iso_utc(g.get("startTimeUTC"))
-                    if not home or not away or start is None:
-                        continue
-                    out.append(GameRow(
-                        sport_prefix=self.sport_prefix,
-                        sport_label=self.sport_label,
-                        home=home,
-                        away=away,
-                        rank_home=None,
-                        rank_away=None,
-                        start_time=start,
-                        extra={
-                            "nhl_game_id": gid,
-                            # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                            "game_id": gid,
-                            "fd_competition_code": self.league_context_code,
-                        },
-                    ))
+            gid = g.get("id")
+            out.append(GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=home,
+                away=away,
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra={
+                    "nhl_game_id": gid,
+                    # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                    "game_id": gid,
+                    "fd_competition_code": self.league_context_code,
+                },
+            ))
         return out
 
     # ---------- _fetch_full_season_games (importance side) ----------
@@ -218,9 +269,14 @@ class NhlRegularSource(PointsBasedSportSource):
             data = _http_get(
                 f"{NHL_API_BASE}/club-schedule-season/{abbrev}/{self.season}"
             )
-            if not data:
-                continue
-            for g in data.get("games", []) or []:
+            if not (isinstance(data, dict) and isinstance(data.get("games"), list)):
+                # A club whose schedule did not answer is a hole in the
+                # season, not a club with no games: skipping it (as this did)
+                # dropped its results and fixtures from every simulation
+                # (#289). All 32 answer with a `games` list (measured
+                # 2026-10-11 for 20262027).
+                raise SeasonUnavailable(f"club-schedule-season/{abbrev} did not answer")
+            for g in data["games"]:
                 if g.get("gameType") != 2:
                     continue
                 gid = g.get("id")
@@ -367,7 +423,7 @@ _CUP_FINAL_TOP_SENTINEL = "CF_A_WINNER"
 _CUP_FINAL_BOT_SENTINEL = "CF_B_WINNER"
 
 
-class NhlPlayoffSource(BestOfNSeriesSource):
+class NhlPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """Stanley Cup Playoffs as a best-of-7 BracketSportSource.
 
     Series resolve at 4 wins (`SERIES_LENGTH = 7` → clinching at ceil(7/2) = 4).
@@ -413,6 +469,9 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         # the per-series schedule endpoint once. Populated lazily, only for
         # series that are already underway (see _series_from_status).
         self._series_results_cache: Dict[str, List[Dict[str, Any]]] = {}
+        # Series of no games played whose schedule did not answer on an
+        # earlier bracket fetch this refresh (#245); see _fetch_bracket_games.
+        self._unanswered_unplayed_series: set = set()
 
     @property
     def sport_prefix(self) -> str:
@@ -434,50 +493,42 @@ class NhlPlayoffSource(BestOfNSeriesSource):
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
+        """Upcoming playoff games from `_upcoming_schedule_games` (the shared
+        window with its US-Eastern lookback day, #256)."""
         out: List[GameRow] = []
-        seen: set = set()
-        today = datetime.now(timezone.utc).date()
-        for offset in range(days_ahead + 1):
-            d = today + timedelta(days=offset)
-            data = _http_get(f"{NHL_API_BASE}/schedule/{d.isoformat()}")
-            if not data:
+        for g in _upcoming_schedule_games(days_ahead):
+            if g.get("gameType") != 3:
+                continue  # playoffs only here
+            home = _team_canonical_name(g.get("homeTeam") or {})
+            away = _team_canonical_name(g.get("awayTeam") or {})
+            start = parse_iso_utc(g.get("startTimeUTC"))
+            if not home or not away or start is None:
                 continue
-            for week in data.get("gameWeek", []) or []:
-                for g in week.get("games", []) or []:
-                    if g.get("gameType") != 3:
-                        continue  # playoffs only here
-                    gid = g.get("id")
-                    if gid in seen:
-                        continue
-                    seen.add(gid)
-                    home = _team_canonical_name(g.get("homeTeam") or {})
-                    away = _team_canonical_name(g.get("awayTeam") or {})
-                    start = parse_iso_utc(g.get("startTimeUTC"))
-                    if not home or not away or start is None:
-                        continue
-                    extra = {
-                        "nhl_game_id": gid,
-                        "fd_competition_code": self._league_context_code(),
-                    }
-                    # Series grounding for the EPG description / LLM context.
-                    # The daily-schedule game already carries a `seriesStatus`
-                    # block (game number, best-of length, per-seed win counts),
-                    # so this costs no extra call for the record line: only the
-                    # completed-game recap hits the per-series schedule, and
-                    # only once a series is underway.
-                    series = self._series_from_status(g)
-                    if series:
-                        extra["series"] = series
-                    out.append(GameRow(
-                        sport_prefix=self.sport_prefix,
-                        sport_label=self.sport_label,
-                        home=home,
-                        away=away,
-                        rank_home=None,
-                        rank_away=None,
-                        start_time=start,
-                        extra=extra,
-                    ))
+            gid = g.get("id")
+            extra = {
+                "nhl_game_id": gid,
+                "game_id": gid,
+                "fd_competition_code": self._league_context_code(),
+            }
+            # Series grounding for the EPG description / LLM context.
+            # The daily-schedule game already carries a `seriesStatus`
+            # block (game number, best-of length, per-seed win counts),
+            # so this costs no extra call for the record line: only the
+            # completed-game recap hits the per-series schedule, and
+            # only once a series is underway.
+            series = self._series_from_status(g)
+            if series:
+                extra["series"] = series
+            out.append(GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=home,
+                away=away,
+                rank_home=None,
+                rank_away=None,
+                start_time=start,
+                extra=extra,
+            ))
         return out
 
     def _series_schedule_url(self, series_letter: str) -> str:
@@ -619,33 +670,6 @@ class NhlPlayoffSource(BestOfNSeriesSource):
             "pa_per_game": _DEFAULT_GOALS_AGAINST,
         }
 
-    # ---------- sample_result (per-game Poisson with OT) ----------
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        del state  # series-state lookup not needed; per-game classification only
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.1, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.1, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_goals = _poisson(lam_home, rng)
-        away_goals = _poisson(lam_away, rng)
-        # Playoff OT is sudden-death continuous (no SO), so a tied
-        # regulation always resolves in OT. We still need a winner:
-        # add +1 to a coin-flipped side (slight bias by strength? skip
-        # for V1; pen-shootout variance dominates the calibration).
-        if home_goals == away_goals:
-            if rng.random() < 0.5:
-                home_goals += 1
-            else:
-                away_goals += 1
-        return MatchResult(home_goals=home_goals, away_goals=away_goals)
-
     # ---------- bracket fetch ----------
 
     def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
@@ -660,15 +684,19 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         """
         if self._bracket_games_cache is not None:
             return self._bracket_games_cache
+        if self._bracket_fetch_given_up():
+            return []
 
         bracket_data = _http_get(
             f"{NHL_API_BASE}/playoff-bracket/{self._season_end_year}"
         )
         if not bracket_data:
-            self._bracket_games_cache = []
-            return []
+            # NOT cached: a failed request is not an empty postseason (see
+            # MlbPlayoffSource._fetch_bracket_games).
+            return self._bracket_fetch_failed("playoff bracket did not answer")
 
         out: List[Dict[str, Any]] = []
+        failed_series: List[Tuple[str, bool]] = []
         for series in bracket_data.get("series", []) or []:
             playoff_round = series.get("playoffRound")
             stage = _NHL_ROUND_TO_STAGE.get(playoff_round or 0)
@@ -686,6 +714,23 @@ class NhlPlayoffSource(BestOfNSeriesSource):
             # full-8-digit-season vs end-year season-convention gotcha lives in
             # _series_schedule_url (the single source of truth for this URL).
             sched = _http_get(self._series_schedule_url(series_letter))
+            if not isinstance(sched, dict):
+                # A failed schedule is not cached (#245). With games played
+                # (the bracket counts the wins) their records are missing and
+                # the series score is wrong. With none played the schedule
+                # may simply not be published yet: the endpoint answers 404
+                # for a series it does not know, and _http_get cannot tell
+                # that from a 503. Such a series is let through with no games,
+                # as before, only once it has failed on an EARLIER fetch too,
+                # so a transient failure still gets its retry and an
+                # unpublished one does not void the bracket. The loop goes on
+                # past a failure so every series gets that first look.
+                played = (series.get("topSeedWins") or 0) + (series.get("bottomSeedWins") or 0)
+                if played or series_letter not in self._unanswered_unplayed_series:
+                    failed_series.append((series_letter, bool(played)))
+                continue
+            # It answered: a later failure is a fresh one, owed its own retry.
+            self._unanswered_unplayed_series.discard(series_letter)
             games = (sched or {}).get("games", []) or []
 
             for g in games:
@@ -745,8 +790,13 @@ class NhlPlayoffSource(BestOfNSeriesSource):
         if cf_series_with_teams == 2 and cup_emitted == 0:
             out.extend(self._synth_cup_final_placeholder_games())
 
-        self._bracket_games_cache = out
-        return out
+        if failed_series:
+            self._unanswered_unplayed_series.update(
+                letter for letter, played in failed_series if not played
+            )
+            letters = ", ".join(letter or "?" for letter, _ in failed_series)
+            return self._bracket_fetch_failed(f"schedule for series {letters} did not answer")
+        return self._cache_bracket_games(out)
 
     # ---------- CUP_FINAL placeholder synthesis (#17) ----------
 

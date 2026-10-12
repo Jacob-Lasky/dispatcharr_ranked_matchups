@@ -155,8 +155,9 @@ class TestApplyCallsTheAllocator:
             and n.func.id == "_assign_channel_numbers"
         ]
         assert len(calls) == 1, "expected exactly one numbering call site in _action_apply"
-        kwargs = {kw.arg for kw in calls[0].keywords}
-        assert {"mode", "band_size", "existing_numbers"} <= kwargs, kwargs
+        for call in calls:
+            kwargs = {kw.arg for kw in call.keywords}
+            assert {"mode", "band_size", "existing_numbers"} <= kwargs, kwargs
 
     def test_the_write_loop_tolerates_a_missing_marker(self):
         """A narrow band legitimately omits a game. Subscripting would raise
@@ -223,25 +224,29 @@ class TestApplyPassesTheReservedNumbers:
 class TestUnplaceableGamesAreDroppedBeforeThePrePass:
     """WITNESS for the stranding defect found live on 2026-08-29.
 
-    seen_markers is populated by the pre-pass, so a game that reaches the
-    pre-pass and is skipped in the write loop is neither renumbered nor reaped:
-    it keeps the phase-0 parking number. That left 22 live channels sitting at
-    1400-1421 with no test complaining.
-    """
+    A game marked seen and then skipped in the write loop is neither
+    renumbered nor reaped: it keeps the phase-0 parking number. That left 22
+    live channels sitting at 1400-1421 with no test complaining. Numbering now
+    runs after the pre-pass (#288), so an unplaced game must lose its plan
+    BEFORE seen_markers is built from the plans."""
 
     def test_games_are_filtered_before_the_park_base_is_resolved(self):
         """Order matters: the filter has to run before _resolve_park_base, which
         is the first thing that depends on the final slate."""
         src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
-        filt = src.index("placeable = [g for g in games if _build_marker_key(g) in chnum_by_marker]")
-        park = src.index("park_base = _resolve_park_base(max_target)")
+        filt = src.index("placeable = [g for g in decided_games if _build_marker_key(g) in chnum_by_marker]")
+        park = src.index("park_base = _resolve_park_base(max_target, highest_in_group)")
         assert filt < park, "the placeable filter must precede park_base resolution"
 
     def test_the_filter_reassigns_games(self):
+        """Filtering without acting on it does nothing: an unplaced game's plan
+        is dropped, and only then is seen_markers built from the plans."""
         src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
-        i = src.index("placeable = [g for g in games")
+        i = src.index("placeable = [g for g in decided_games")
         j = src.index("park_base = _resolve_park_base", i)
-        assert "games = placeable" in src[i:j], "filtering without rebinding does nothing"
+        drop = src.index("del prep_by_marker[marker]", i)
+        seen = src.index("seen_markers = set(prep_by_marker)", i)
+        assert i < drop < seen < j
 
     def test_a_completely_full_band_aborts_instead_of_reaping_the_group(self):
         """Publishing nothing would make every existing channel stale and reap
@@ -251,7 +256,7 @@ class TestUnplaceableGamesAreDroppedBeforeThePrePass:
             open(os.path.join(REPO_ROOT, "plugin.py")).read(), fn
         )
         i = src.index("if not placeable:")
-        j = src.index("games = placeable")
+        j = src.index("seen_markers = set(prep_by_marker)")
         block = src[i:j]
         assert "return" in block, "must return early, not fall through to the writes"
         assert '"status": "error"' in block
@@ -259,7 +264,7 @@ class TestUnplaceableGamesAreDroppedBeforeThePrePass:
     def test_the_abort_names_the_setting_to_change(self):
         src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
         i = src.index("if not placeable:")
-        j = src.index("games = placeable", i)
+        j = src.index("seen_markers = set(prep_by_marker)", i)
         block = src[i:j]
         assert "Starting channel number" in block
         assert "Compact range size" in block
@@ -268,7 +273,7 @@ class TestUnplaceableGamesAreDroppedBeforeThePrePass:
         """The filter is compact-only; kickoff numbers cannot fail to allocate,
         and running it there would change behaviour for every existing user."""
         src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
-        i = src.index("placeable = [g for g in games")
+        i = src.index("placeable = [g for g in decided_games")
         head = src[:i]
         guard = head[head.rindex("if numbering_mode"):]
         assert "NUMBERING_MODE_COMPACT" in guard
@@ -281,13 +286,17 @@ class TestReviewFindings:
     def test_reserved_numbers_use_effective_not_raw_values(self):
         """A ChannelOverride can renumber a channel without touching
         Channel.channel_number, and every output path resolves the override
-        first. Reading the raw column misses a channel overridden INTO the band."""
-        fn = _function(_plugin_ast(), "_reserved_channel_numbers")
-        src = ast.get_source_segment(
-            open(os.path.join(REPO_ROOT, "plugin.py")).read(), fn
-        )
+        first. Reading the raw column misses a channel overridden INTO the band.
+        The read lives in _published_numbers (shared with the archive channel's
+        placement since #219); _reserved_channel_numbers must delegate to it."""
+        plugin_src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
+        src = ast.get_source_segment(plugin_src, _function(_plugin_ast(), "_published_numbers"))
         assert "with_effective_values" in src
         assert "effective_channel_number" in src
+        reserved = ast.get_source_segment(
+            plugin_src, _function(_plugin_ast(), "_reserved_channel_numbers"),
+        )
+        assert "_published_numbers(" in reserved
 
     def test_the_reserved_query_keeps_the_recordings_archive_reserved(self):
         """ARCHIVE_TVG_ID carries TVG_ID_PREFIX, so a bare _owned_tvg_id_q()
@@ -312,29 +321,39 @@ class TestReviewFindings:
         """
         src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
         guard = src.index('logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)')
-        statements = [
+        # A game is seen exactly when it has a plan (#288: seen_markers is
+        # built from prep_by_marker after numbering), so the plan entry is
+        # what must come after the guard.
+        plans = [
             m.start() for m in re.finditer(
-                r"^[ \t]*seen_markers\.add\(marker\)[ \t]*$", src, re.M)
+                r"^[ \t]*prep_by_marker\[marker\] = SimpleNamespace\($", src, re.M)
         ]
-        assert statements, "the seen_markers.add(marker) statement has gone missing"
-        assert min(statements) > guard, (
-            "seen_markers.add must come after the start-time guard; found at "
-            f"{statements} vs guard at {guard}"
+        assert len(plans) == 1, "the prep_by_marker[marker] statement has gone missing"
+        assert plans[0] > guard, (
+            "the plan must come after the start-time guard; found at "
+            f"{plans} vs guard at {guard}"
         )
+        seen = [m.start() for m in re.finditer(
+            r"^[ \t]*seen_markers = set\(prep_by_marker\)[ \t]*$", src, re.M)]
+        assert len(seen) == 1 and seen[0] > plans[0]
+        assert not re.search(r"^[ \t]*seen_markers\.add\(", src, re.M)
 
-    def test_the_restore_uses_written_numbers_not_the_plan(self):
+    def test_the_restore_reads_the_numbers_channels_carry_not_the_plan(self):
         """chnum_by_marker keeps entries for games that were filtered out or
         skipped. Treating those as occupied refuses a kept-for-recording
-        channel its own original number and leaves it at park_base."""
+        channel its own original number and leaves it at park_base. The
+        restore reads back what the group's other channels carry instead,
+        which also covers a channel that is not ours (the rename scenario
+        a_kept_channel_is_not_restored_onto_a_strangers_number)."""
         src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
-        assert "assigned_now = written_numbers" in src
-        assert "assigned_now = set(chnum_by_marker.values())" not in src
-
-    def test_written_numbers_is_populated_where_a_channel_is_actually_numbered(self):
-        src = open(os.path.join(REPO_ROOT, "plugin.py")).read()
-        i = src.index("target_chnum = chnum_by_marker.get(marker)")
-        j = src.index("prog_start, prog_end = _live_window(g, start_dt)", i)
-        assert "written_numbers.add(target_chnum)" in src[i:j]
+        i = src.index("# Restore kept channels (recording, or guide) to their pre-park number")
+        j = src.index("Channel.objects.bulk_update(restore", i)
+        block = "\n".join(
+            line for line in src[i:j].splitlines() if not line.lstrip().startswith("#")
+        )
+        assert "Channel.objects.filter(channel_group=target_group)" in block
+        assert ".exclude(id__in=kept_ids)" in block
+        assert "chnum_by_marker" not in block
 
     def test_the_full_band_error_does_not_claim_nothing_changed(self):
         """By that point apply may already have created the target group,

@@ -283,14 +283,54 @@ class TestApplyWiring:
         return src[i:j]
 
     def test_prepare_runs_after_dedupe_and_before_the_prepass(self, src):
+        """After dedupe, and (since #291) after the pre-pass's deciding half:
+        the plan covers only the games apply decided to write, and is ready
+        before the network half writes the 🔴 into channel names."""
         body = self._body(src, "_action_apply")
-        assert body.index("_unique_by_marker(") < body.index("autorec = _autorecord_prepare(games, settings") \
-            < body.index("seen_markers.add(marker)")
+        assert body.index("_unique_by_marker(") \
+            < body.index("prep_by_marker[marker] = SimpleNamespace(") \
+            < body.index("autorec = _autorecord_prepare(\n        decided_games, settings") \
+            < body.index("seen_markers = set(prep_by_marker)") \
+            < body.index("recording=autorec.will_record(marker),")
 
     def test_cancel_runs_inside_the_transaction_before_the_stale_reap(self, src):
+        """In a transaction of its own (its re-check locks the row), in two
+        steps: the channels apply will not write BEFORE the numbers held for
+        kept channels are read (#288 review: read first and cancelled later, an
+        unwanted recording held a slot a full compact band then refused a new
+        game), the rest after numbering, by the plan over the placed games
+        (#291), before the network half writes the plan into channel names,
+        and both before the stale reap."""
+        import ast
+        tree = ast.parse(src)
+        committed = next(n for n in tree.body
+                         if isinstance(n, ast.FunctionDef) and n.name == "_autorecord_cancel_committed")
+        holders = [
+            w for w in ast.walk(committed) if isinstance(w, ast.With)
+            and ast.unparse(w.items[0].context_expr) == "transaction.atomic()"
+        ]
+        assert len(holders) == 1, "its own transaction"
+        inside = [ast.unparse(c) for c in ast.walk(holders[0]) if isinstance(c, ast.Call)]
+        assert "_autorecord_cancel(ar, dry_run, markers)" in inside
+        # Write-ahead (#271 follow-up): the state file is saved INSIDE the
+        # transaction, so a kill before the commit rolls the deletion back
+        # rather than leaving a stale "created" entry that tombstones the game.
+        saves = [c for c in ast.walk(committed) if isinstance(c, ast.Call)
+                 and ast.unparse(c.func) == "recording_policy.save_state"]
+        assert saves and all(ast.unparse(c) in inside for c in saves), (
+            "the state save must sit inside the cancellation's transaction"
+        )
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_action_apply")
+        assert not any(isinstance(c, ast.Call) and ast.unparse(c.func) == "_autorecord_cancel"
+                       for c in ast.walk(fn)), "apply cancels only through the committed helper"
         body = self._body(src, "_action_apply")
-        atomic = body.index("with transaction.atomic():")
-        assert atomic < body.index("_autorecord_cancel(autorec, dry_run)") < body.index("stale = [ch for marker")
+        first = body.index("_autorecord_cancel_committed(\n        autorec, dry_run,\n        markers=")
+        second = body.index("_autorecord_cancel_committed(autorec, dry_run)")
+        assert first < body.index("held_for_recordings = _numbers_held_for_recordings(") < body.index(
+            "chnum_by_marker = _assign_channel_numbers(") < second
+        assert second < body.index("recording=autorec.will_record(marker),") < body.index(
+            "stale = _unwritten_channels(existing_virtuals, seen_markers)")
 
     def test_game_write_precedes_the_dot_read(self, src):
         body = self._body(src, "_action_apply")
@@ -298,7 +338,7 @@ class TestApplyWiring:
         assert 'recording=rec_dot)' in body
 
     def test_recorded_team_always_gets_a_placeholder(self, src):
-        assert 'if score_val >= placeholder_threshold or g.get("recorded_matched"):' in src
+        assert 'if score_val >= placeholder_threshold or g.get("recorded_matched") or on_air:' in src
 
     def test_channel_name_uses_the_plan(self, src):
         assert "recording=autorec.will_record(marker)," in src

@@ -4,6 +4,7 @@ doesn't ship silently."""
 
 from typing import Any, Dict, List, Tuple
 
+import itertools
 import random
 from datetime import date, datetime, timedelta, timezone
 
@@ -22,6 +23,7 @@ from dispatcharr_ranked_matchups.sources import (
 )
 from dispatcharr_ranked_matchups.sources.base import MatchResult, SportSource
 from dispatcharr_ranked_matchups.sources import soccer as soccer_mod
+from tests.conftest import stub_requests_get
 
 
 class TestNcaafConstants:
@@ -149,7 +151,7 @@ class TestNcaafFetchGamesAppliesFilter:
             def json():
                 return list(payload)
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResp())
         src = ncaaf_mod.NcaafSource(api_key="x", divisions=divisions)
         return {g["id"] for g in src._fetch_games(2026, days_ahead=7)}
 
@@ -184,7 +186,7 @@ class TestNcaafFetchGamesAppliesFilter:
             def json():
                 return list(payload)
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResp())
         src = ncaaf_mod.NcaafSource(api_key="x")
         assert src._fetch_games(2026, days_ahead=7) == []
 
@@ -222,7 +224,7 @@ class TestNcaafSimulatedUniverseMatchesEmitted:
             def json():
                 return list(TestNcaafSimulatedUniverseMatchesEmitted._RAW)
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResp())
         src = ncaaf_mod.NcaafSource(api_key="x", divisions=divisions)
         return {m["id"] for m in src._fetch_full_season_games()}
 
@@ -313,7 +315,7 @@ class TestNcaafEmittedTeamsAreSimulated:
             def json():
                 return list(payload)
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResp())
 
         # No `divisions` kwarg: this must construct on the broken revision too.
         src = ncaaf_mod.NcaafSource(api_key="x")
@@ -367,7 +369,7 @@ class TestNcaafOutcomeEligibility:
             def json():
                 return list(TestNcaafOutcomeEligibility._RAW)
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", lambda *a, **k: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResp())
         return ncaaf_mod.NcaafSource(api_key="x", divisions=divisions)
 
     def test_fbs_excludes_the_fcs_opponent(self, monkeypatch):
@@ -443,7 +445,7 @@ class TestNcaafSeasonFetchIsSharedAndCached:
             calls.append(url)
             return FakeResp()
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         src = ncaaf_mod.NcaafSource(api_key="x")
         year = src._current_season_year()
         src._fetch_games(year, days_ahead=7)
@@ -453,7 +455,8 @@ class TestNcaafSeasonFetchIsSharedAndCached:
 
     def test_a_failed_fetch_is_not_cached(self, monkeypatch):
         """A transient error must not freeze an empty season for the life of
-        the instance, which would silently zero NCAAF until a restart."""
+        the instance, which would silently zero NCAAF until a restart. Nor
+        is it an empty season this time (#289): it raises."""
         from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
         payload = self._payload()
         state = {"fail": True}
@@ -473,9 +476,11 @@ class TestNcaafSeasonFetchIsSharedAndCached:
                 raise RuntimeError("boom")
             return FakeResp()
 
-        monkeypatch.setattr(ncaaf_mod.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
+        from dispatcharr_ranked_matchups.sources.base import SeasonUnavailable
         src = ncaaf_mod.NcaafSource(api_key="x")
-        assert src._fetch_raw_season(2026) == []
+        with pytest.raises(SeasonUnavailable, match="boom"):
+            src._fetch_raw_season(2026)
         assert len(src._fetch_raw_season(2026)) == 1
 
 
@@ -612,7 +617,6 @@ class TestNcaamRankingsShape:
     AP poll out correctly without falling back to early-season weeks."""
 
     def test_latest_week_wins(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         class FakeResp:
             status_code = 200
@@ -632,31 +636,29 @@ class TestNcaamRankingsShape:
             # Different poll type: should be ignored
             {"week": 15, "pollType": "Coaches Poll", "team": "Other", "ranking": 1},
         ]
-        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp(payload))
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp(payload))
 
         src = NcaamSource(api_key="x")
         ranks = src._fetch_rankings(2026)
         assert ranks == {"Latest #1": 1, "Latest #2": 2}
 
     def test_empty_response_returns_none(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         class FakeResp:
             def raise_for_status(self): pass
             def json(self): return []
 
-        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp())
         assert NcaamSource(api_key="x")._fetch_rankings(2026) is None
 
     def test_unknown_poll_type_returns_none(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         class FakeResp:
             def raise_for_status(self): pass
             def json(self):
                 return [{"week": 1, "pollType": "Coaches Poll", "team": "X", "ranking": 1}]
 
-        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp())
         # We default to AP Top 25: Coaches Poll doesn't match.
         assert NcaamSource(api_key="x")._fetch_rankings(2026) is None
 
@@ -665,7 +667,6 @@ class TestNcaamGamesShape:
     """CBB /games has no `week` field, uses startDateRange/endDateRange."""
 
     def test_uses_date_range_params(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         captured = {}
 
@@ -678,7 +679,7 @@ class TestNcaamGamesShape:
             captured["params"] = params
             return FakeResp()
 
-        monkeypatch.setattr(ncaam_mod.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
 
         src = NcaamSource(api_key="x")
         start = datetime(2025, 2, 1, tzinfo=timezone.utc)
@@ -700,7 +701,6 @@ class TestNcaamSpreadsShape:
     """CBB /lines is keyed by gameId, not id. Use date-range, not week."""
 
     def test_keyed_by_game_id(self, monkeypatch):
-        from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         payload = [
             {"gameId": 100, "lines": [{"provider": "ESPN BET", "spread": 3.5}]},
@@ -714,7 +714,7 @@ class TestNcaamSpreadsShape:
             def raise_for_status(self): pass
             def json(self): return payload
 
-        monkeypatch.setattr(ncaam_mod.requests, "get", lambda *a, **kw: FakeResp())
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp())
 
         src = NcaamSource(api_key="x")
         start = datetime(2025, 2, 1, tzinfo=timezone.utc)
@@ -2137,8 +2137,7 @@ class TestNcaafFullSeasonFilter:
                 "startDate": "2026-01-01T20:00:00.000Z",
             },
         ]
-        monkeypatch.setattr(ncaaf_mod.requests, "get",
-                            lambda *a, **kw: FakeResp(payload))
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp(payload))
         src = ncaaf_mod.NcaafSource(api_key="fake")
         games = src._fetch_full_season_games()
         ids = {g["id"] for g in games}
@@ -2160,8 +2159,7 @@ class TestNcaamFullSeasonFilter:
         src = ncaam_mod.NcaamSource(api_key="fake")
         monkeypatch.setattr(src, "_fetch_rankings", lambda _season: None)
         called = []
-        monkeypatch.setattr(ncaam_mod.requests, "get",
-                            lambda *a, **kw: called.append(1))
+        stub_requests_get(monkeypatch, lambda *a, **kw: called.append(1))
         out = src._fetch_full_season_games()
         assert out == []
         assert called == []  # never hit /games
@@ -2202,8 +2200,7 @@ class TestNcaamFullSeasonFilter:
                 "startDate": "2025-11-25T19:00:00.000Z",
             },
         ]
-        monkeypatch.setattr(ncaam_mod.requests, "get",
-                            lambda *a, **kw: FakeResp(payload))
+        stub_requests_get(monkeypatch, lambda *a, **kw: FakeResp(payload))
         games = src._fetch_full_season_games()
         ids = [g["id"] for g in games]
         assert 101 in ids
@@ -2234,7 +2231,7 @@ class TestNcaamFullSeasonFilter:
         src = ncaam_mod.NcaamSource(api_key="fake")
         monkeypatch.setattr(src, "_current_season_year", lambda: 2026)
         monkeypatch.setattr(src, "_fetch_rankings", lambda _season: {"Duke": 1})
-        monkeypatch.setattr(ncaam_mod.requests, "get", capture_get)
+        stub_requests_get(monkeypatch, capture_get)
         src._fetch_full_season_games()
         assert len(captured) == 3
         # Chunk boundaries: end of chunk N + 1 day = start of chunk N+1.
@@ -4806,7 +4803,7 @@ class TestMlsFetchUpcomingShape:
         espn_response = {
             "events": [{
                 "id": "401123",
-                "date": "2026-04-10T23:00Z",
+                "date": (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%MZ"),  # relative: the sweep drops games past MAX_AGE_AFTER_KICKOFF (#256)
                 "season": {"year": 2026, "type": 2, "slug": "regular-season"},
                 "competitions": [{
                     "competitors": [
@@ -4846,9 +4843,9 @@ class TestMlsFetchUpcomingShape:
         src = mls_mod.MlsSource(odds_api_key="stubkey")
         games = src.fetch_upcoming(days_ahead=1)
 
-        # ESPN is called twice (days_ahead=1 -> today + tomorrow) and
-        # both return the same stub event; dedupe by event_id keeps
-        # the count at 1.
+        # ESPN is called three times (days_ahead=1 -> the lookback day,
+        # today and tomorrow, #256) and every call returns the same stub
+        # event; dedupe by event_id keeps the count at 1.
         assert len(games) == 1
         g = games[0]
         assert g.home == "LA Galaxy"
@@ -4868,7 +4865,7 @@ class TestMlsFetchUpcomingShape:
         espn_response = {
             "events": [{
                 "id": "401124",
-                "date": "2026-04-11T23:00Z",
+                "date": (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%MZ"),  # relative: the sweep drops games past MAX_AGE_AFTER_KICKOFF (#256)
                 "season": {"year": 2026, "type": 2, "slug": "regular-season"},
                 "competitions": [{
                     "competitors": [
@@ -5072,7 +5069,8 @@ class TestWnbaPlayoffSource:
         src = self._make_source()
         assert src._winner_advance_label("FINALS") == "WNBA_WINNER"
         assert src._winner_advance_label("R1") is None
-        assert src._winner_advance_label("SF") is None
+        # SF is depth 1 and FINALS 3: the winner jumps to FINALS, not 2 (#249).
+        assert src._winner_advance_label("SF") == "FINALS"
 
     def test_outcome_labels(self):
         labels = self._make_source().outcome_labels
@@ -5325,6 +5323,10 @@ class TestNcaaSoccerCupSource:
         )
         src = NcaaSoccerCupSource(gender=gender, season_year=2024)
         src._bracket_games_cache = bracket_games or []
+        # No season calendar: these tests pin the event's OWN round slug
+        # (signal 1) and must never reach the network for the calendar.
+        # Calendar routing is pinned in tests/test_college_cup_routing.py.
+        src._season_windows_by_year = {2024: None}
         return src
 
     # ---------- identity + parametrization ----------
@@ -5404,9 +5406,6 @@ class TestNcaaSoccerCupSource:
         assert SLUG_TO_STAGE["college-cup"] == "NCG"
 
     def test_extract_bracket_record_filters_non_tournament_slugs(self):
-        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
-            NcaaSoccerCupSource,
-        )
         # Regular-season game with the regular-season slug should be
         # filtered out entirely (return None), not silently coerced
         # into a bracket stage.
@@ -5422,16 +5421,13 @@ class TestNcaaSoccerCupSource:
                 ],
             }],
         }
-        assert NcaaSoccerCupSource._extract_bracket_record(event) is None
+        assert self._make()._extract_bracket_record(event) is None
 
     def test_extract_bracket_record_routes_third_round_to_s16(self):
         """ESPN's 'third-round' slug is what humans call Sweet 16:
         confirm the routing so a label mismatch surfaces here, not via
         an importance-band silently misfiring on production data.
         """
-        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
-            NcaaSoccerCupSource,
-        )
         event = {
             "id": "s16-1",
             "date": "2024-11-30T19:00:00Z",
@@ -5444,7 +5440,7 @@ class TestNcaaSoccerCupSource:
                 ],
             }],
         }
-        rec = NcaaSoccerCupSource._extract_bracket_record(event)
+        rec = self._make()._extract_bracket_record(event)
         assert rec is not None
         assert rec["stage"] == "S16"
         assert rec["home"] == "Stanford"
@@ -5455,9 +5451,6 @@ class TestNcaaSoccerCupSource:
         assert rec["matchday"] == 1  # SERIES_LENGTH=1 means single game per "tie"
 
     def test_extract_bracket_record_scheduled_has_no_score(self):
-        from dispatcharr_ranked_matchups.sources.ncaa_soccer_cup import (
-            NcaaSoccerCupSource,
-        )
         event = {
             "id": "qf-1",
             "date": "2030-12-07T19:00:00Z",
@@ -5470,7 +5463,7 @@ class TestNcaaSoccerCupSource:
                 ],
             }],
         }
-        rec = NcaaSoccerCupSource._extract_bracket_record(event)
+        rec = self._make()._extract_bracket_record(event)
         assert rec is not None
         assert rec["stage"] == "E8"
         assert rec["status"] == "SCHEDULED"
@@ -5752,10 +5745,19 @@ class TestNcaaSoccerCupSource:
         )
         # Two events: one tournament (third-round) and one regular-season.
         # Only the tournament event should be emitted.
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if "/seasons/" in url:
+                # ESPN's season calendar (#235): one regular-season phase
+                # covering the board, so the untagged event is placed in it
+                # and filtered as not-a-round.
+                return {"types": {"count": 1, "items": [{
+                    "slug": "regular", "type": 1,
+                    "startDate": "2030-08-01T04:00Z", "endDate": "2030-12-31T04:59Z",
+                }]}}
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 {"id": "tournament-event", "date": "2030-11-30T19:00:00Z",
@@ -6466,10 +6468,11 @@ class TestMlsStandingsConferenceFilter:
             mod, "_fetch_conference_map",
             lambda: {"A": "East", "B": "East", "C": "West", "D": "West"},
         )
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_, **__):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 # (1) A vs B: intra-East, should appear
@@ -6791,14 +6794,15 @@ class TestMlsStandingsConferenceFilter:
 
     def test_conference_map_returns_empty_on_endpoint_failure(self, monkeypatch):
         """When _http_get returns None (ESPN down / network error /
-        4xx), the conference map MUST be empty rather than partial.
-        An empty map cascades to 0 emitted games: graceful degradation
-        rather than misclassified teams getting the wrong conference's
-        threshold bands.
+        4xx), the conference map MUST be empty rather than partial:
+        None, no map at all, rather than misclassified teams getting the
+        wrong conference's threshold bands. None and not {}, so the
+        upcoming fetch can tell the outage from an answer with no clubs
+        and raise instead of reading the conference as quiet (#261).
         """
         from dispatcharr_ranked_matchups.sources import mls_standings as mod
         monkeypatch.setattr(mod, "_http_get", lambda *_a, **_k: None)
-        assert mod._fetch_conference_map() == {}
+        assert mod._fetch_conference_map() is None
 
     def test_filters_out_non_regular_season(self, monkeypatch):
         """Playoff games (season.slug != 'regular-season') must be filtered
@@ -6812,10 +6816,11 @@ class TestMlsStandingsConferenceFilter:
             mod, "_fetch_conference_map",
             lambda: {"A": "East", "B": "East"},
         )
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_, **__):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 {"id": 100, "date": "2025-04-01T19:00:00Z",
@@ -6875,19 +6880,16 @@ class TestMlsStandingsFixtureWindow:
         calls = self._capture_calls(monkeypatch, mod, [])
         # season_year in the past so "now" cannot influence the window.
         MlsEastSource(season_year=2025)._fetch_full_season_games()
-        assert len(calls) == 1, (
-            f"expected ONE range call for the whole season, got {len(calls)}"
-        )
-        _, params = calls[0]
-        assert params["dates"] == "20250201-20251130", (
-            "importance sweep must span the full Feb-Nov season window, "
-            f"got dates={params['dates']!r}"
-        )
+        days = sorted(url.split("dates=")[1][:8] for url, _ in calls)
+        # Literals: Feb 1 - Nov 30 2025 is 303 days, one request each (#182).
+        assert (days[0], days[-1], len(days), len(set(days))) == (
+            "20250201", "20251130", 303, 303,
+        ), "importance sweep must request every day of the Feb-Nov season"
 
     def test_season_fetch_passes_the_paging_limit(self, monkeypatch):
-        """Without `limit` ESPN silently returns only the first page of a
-        date range, which would truncate the season back to a partial
-        fixture list -- the same starvation, harder to spot."""
+        """Without `limit` ESPN pages a scoreboard silently (100 events per
+        day), which would truncate the season back to a partial fixture
+        list -- the same starvation, harder to spot."""
         from dispatcharr_ranked_matchups.sources.mls_standings import (
             MlsEastSource,
         )
@@ -6897,10 +6899,44 @@ class TestMlsStandingsFixtureWindow:
         )
         calls = self._capture_calls(monkeypatch, mod, [])
         MlsEastSource(season_year=2025)._fetch_full_season_games()
-        _, params = calls[0]
-        assert params.get("limit") == mod.SCOREBOARD_EVENT_LIMIT, (
-            f"scoreboard range call must pass limit, got params={params!r}"
+        assert calls and all(url.endswith("&limit=1000") for url, _ in calls), (
+            f"every scoreboard call must pass limit=1000, got {calls[:2]!r}"
         )
+
+    def test_season_fetch_survives_espn_rejecting_the_range_form(
+        self, monkeypatch,
+    ):
+        """WITNESS for the live outage (#182): ESPN answers the
+        `dates=<start>-<end>` form with HTTP 400 for team sports (measured
+        2026-10-11; the plugin log shows it from 2026-10-07), and the old
+        single ranged call turned that into an EMPTY MLS season. Emulate
+        ESPN exactly: range URL -> None (what `_http_get` returns on a 400),
+        one-day URL -> that day's events."""
+        from dispatcharr_ranked_matchups.sources.mls_standings import (
+            MlsEastSource,
+        )
+        from dispatcharr_ranked_matchups.sources import mls_standings as mod
+        monkeypatch.setattr(
+            mod, "_fetch_conference_map", lambda: {"A": "East", "B": "East"},
+        )
+        fixture = {"id": "S9", "date": "2025-10-25T19:00:00Z",
+                   "season": {"slug": "regular-season"},
+                   "competitions": [{
+                       "status": {"type": {"completed": False, "state": "pre"}},
+                       "competitors": [
+                           {"homeAway": "home", "team": {"displayName": "A"}},
+                           {"homeAway": "away", "team": {"displayName": "B"}},
+                       ],
+                   }]}
+
+        def espn(url, *_a, **params):
+            dates = params.get("dates") or url.split("dates=")[1].split("&")[0]
+            if "-" in dates:
+                return None
+            return {"events": [fixture] if dates == "20251025" else []}
+        monkeypatch.setattr(mod, "_http_get", espn)
+        games = MlsEastSource(season_year=2025)._fetch_full_season_games()
+        assert [g["id"] for g in games] == ["S9"]
 
     def test_far_future_fixture_reaches_remaining_matches(self, monkeypatch):
         """End-to-end pin on the behaviour #65 is about: a fixture months
@@ -6940,28 +6976,6 @@ class TestMlsStandingsFixtureWindow:
         ids = {(m.extra or {}).get("game_id") for m in remaining}
         assert ids == {"S1"}, (
             f"far-future fixture must survive into remaining_matches, got {ids}"
-        )
-
-    def test_range_helper_warns_when_response_hits_the_limit(
-        self, monkeypatch, caplog,
-    ):
-        """A response exactly at the limit is the only symptom ESPN gives
-        for a truncated page: it must not pass silently."""
-        import logging
-        from dispatcharr_ranked_matchups.sources import mls_standings as mod
-        monkeypatch.setattr(mod, "SCOREBOARD_EVENT_LIMIT", 3)
-        monkeypatch.setattr(
-            mod, "_http_get",
-            lambda *_a, **_k: {"events": [{"id": 1}, {"id": 2}, {"id": 3}]},
-        )
-        with caplog.at_level(logging.WARNING, logger=mod.logger.name):
-            events = mod._fetch_scoreboard_range(
-                date(2025, 2, 1), date(2025, 11, 30),
-            )
-        assert len(events) == 3
-        messages = [r.getMessage() for r in caplog.records]
-        assert any("truncated" in m for m in messages), (
-            f"expected a truncation warning, got {messages}"
         )
 
     def test_range_helper_returns_empty_for_inverted_window(self):
@@ -7366,10 +7380,11 @@ class TestMlsCupFetchUpcoming:
     def test_fetch_upcoming_emits_only_bracket_games(self, monkeypatch):
         from dispatcharr_ranked_matchups.sources import mls_cup as mod
         from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 # Scheduled bracket game: should emit.
@@ -7409,10 +7424,11 @@ class TestMlsCupFetchUpcoming:
         don't appear in the user's Top Matchups guide either."""
         from dispatcharr_ranked_matchups.sources import mls_cup as mod
         from dispatcharr_ranked_matchups.sources.mls_cup import MlsCupSource
-        calls = {"n": 0}
+        # itertools.count, not a dict counter: the days are fetched concurrently,
+        # and next() is atomic where `n += 1` then a read is not.
+        first_call = itertools.count()
         def fake_get(url, *_a, **_kw):
-            calls["n"] += 1
-            if calls["n"] != 1:
+            if next(first_call) != 0:
                 return {"events": []}
             return {"events": [
                 # Phantom game-3: state=post, completed=False, 0-0.
@@ -7571,7 +7587,7 @@ class TestLigaMxSource:
         espn_response = {
             "events": [{
                 "id": "401900001",
-                "date": "2026-02-15T03:00Z",
+                "date": (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%Y-%m-%dT%H:%MZ"),  # relative: the sweep drops games past MAX_AGE_AFTER_KICKOFF (#256)
                 "season": {"year": 2026, "type": 2, "slug": "torneo-clausura"},
                 "competitions": [{
                     "competitors": [
@@ -9110,6 +9126,33 @@ class TestKnockoutSoccerSourceSeedFromChain:
         assert len(all_ids) == len(set(all_ids)), "duplicate synthetic game_ids"
 
 
+def _wc2026_group_fixtures(status: str = "SCHEDULED") -> List[Dict[str, Any]]:
+    """Synthetic WC 2026 group stage in FD.org's match shape: 12 groups
+    (A-L) of 4 teams, 6 round-robin games each, every game `status`."""
+    fixtures: List[Dict[str, Any]] = []
+    fid = 0
+    for gi in range(12):
+        letter = chr(ord("A") + gi)
+        grp = f"GROUP_{letter}"
+        teams = [f"G{letter}{n}" for n in (1, 2, 3, 4)]
+        pairs = [(0, 1), (2, 3), (0, 2), (1, 3), (0, 3), (1, 2)]
+        for pi, (a, b) in enumerate(pairs):
+            fid += 1
+            fixtures.append({
+                "id": fid,
+                "stage": "GROUP_STAGE",
+                "group": grp,
+                "matchday": pi % 3 + 1,
+                "homeTeam": {"name": teams[a]},
+                "awayTeam": {"name": teams[b]},
+                "status": status,
+                "utcDate": "2026-06-11T19:00:00Z",
+                "score": ({"fullTime": {"home": 1, "away": 0}}
+                          if status == "FINISHED" else {}),
+            })
+    return fixtures
+
+
 class TestGroupStageSoccerSourceChainWiring:
     """`set_paired_knockout_source` + `cross_source_chain` together
     expose the toggle that scoring.py:compute_match_importance reads
@@ -9117,12 +9160,15 @@ class TestGroupStageSoccerSourceChainWiring:
     """
 
     @staticmethod
-    def _wc_pair():
+    def _wc_pair(fixtures=None):
         from dispatcharr_ranked_matchups.sources.soccer import (
             GroupStageSoccerSource, KnockoutSoccerSource,
         )
         groups = GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
         knockout = KnockoutSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
+        if fixtures is not None:
+            groups._all_matches_cache = fixtures
+            knockout._all_matches_cache = fixtures
         return groups, knockout
 
     def test_unwired_returns_none(self):
@@ -9131,10 +9177,9 @@ class TestGroupStageSoccerSourceChainWiring:
         assert groups.cross_source_chain() is None
 
     def test_wired_with_empty_bracket_returns_chain(self):
-        # Pre-tournament state: knockout's _fetch_bracket_games returns
-        # empty (FD.org publishes placeholders with null team names).
-        # The chain should activate.
-        groups, knockout = self._wc_pair()
+        # Pre-tournament state: FD.org publishes knockout placeholders with
+        # null team names and every group game is still to play.
+        groups, knockout = self._wc_pair(_wc2026_group_fixtures())
         knockout._fetch_bracket_games = lambda: []  # type: ignore[method-assign]
         groups.set_paired_knockout_source(knockout)
         result = groups.cross_source_chain()
@@ -9144,17 +9189,23 @@ class TestGroupStageSoccerSourceChainWiring:
         # seed_fn is the bracket seed builder.
         assert callable(seed_fn)
 
-    def test_wired_with_populated_bracket_returns_none(self):
-        # Mid-tournament toggle: once FD.org has real teams in the
-        # knockout bracket, the chain steps aside and lets the
-        # existing single-source path take over.
-        groups, knockout = self._wc_pair()
+    def test_partly_filled_bracket_keeps_chain_while_groups_play(self):
+        # #78: FD.org fills a knockout fixture's teams once its feeder
+        # groups finish, while other groups still have games left. Those
+        # remaining group games must keep their knockout leverage.
+        groups, knockout = self._wc_pair(_wc2026_group_fixtures())
         knockout._fetch_bracket_games = lambda: [  # type: ignore[method-assign]
             {"game_id": 1, "stage": "LAST_32", "matchday": 1,
-             "home": "Mexico", "away": "Norway",
+             "home": "GA2", "away": "GB2",
              "home_goals": None, "away_goals": None,
              "status": "SCHEDULED", "start_time": None, "extra": {}},
         ]
+        groups.set_paired_knockout_source(knockout)
+        assert groups.cross_source_chain() is not None
+
+    def test_finished_group_stage_returns_none(self):
+        # No group game left to score: the knockout source owns importance.
+        groups, knockout = self._wc_pair(_wc2026_group_fixtures("FINISHED"))
         groups.set_paired_knockout_source(knockout)
         assert groups.cross_source_chain() is None
 
@@ -9162,8 +9213,8 @@ class TestGroupStageSoccerSourceChainWiring:
 class TestBuildBracketSeedWC2026:
     """`_build_bracket_seed` maps a 12-group primary_state to the WC 2026
     bracket structure per FIFA's published M73-M103 schedule. The
-    LAST_32 pairings are exact; best-3rd-place slot assignment is a
-    constraint-respecting greedy approximation of FIFA's Annex C.
+    LAST_32 pairings are exact; best-3rd-place slots come from FIFA's
+    Annex C table (test_annex_c_table.py checks the table itself).
     """
 
     @staticmethod
@@ -9358,27 +9409,7 @@ class TestWC2026ChainEndToEnd:
         groups_src = GroupStageSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
         knockout_src = KnockoutSoccerSource("world_cup", fd_api_key="x", odds_api_key="")
 
-        fixtures: List[Dict[str, Any]] = []
-        fid = 0
-        for gi in range(12):
-            letter = chr(ord("A") + gi)
-            grp = f"GROUP_{letter}"
-            teams = [f"G{letter}{n}" for n in (1, 2, 3, 4)]
-            # Round-robin 6 games per group.
-            pairs = [(0, 1), (2, 3), (0, 2), (1, 3), (0, 3), (1, 2)]
-            for pi, (a, b) in enumerate(pairs):
-                fid += 1
-                fixtures.append({
-                    "id": fid,
-                    "stage": "GROUP_STAGE",
-                    "group": grp,
-                    "matchday": pi % 3 + 1,
-                    "homeTeam": {"name": teams[a]},
-                    "awayTeam": {"name": teams[b]},
-                    "status": "SCHEDULED",
-                    "utcDate": "2026-06-11T19:00:00Z",
-                    "score": {},
-                })
+        fixtures = _wc2026_group_fixtures()
         groups_src._all_matches_cache = fixtures
         knockout_src._all_matches_cache = fixtures  # the knockout filters down
 
@@ -9397,8 +9428,9 @@ class TestWC2026ChainEndToEnd:
         groups_src.estimate_strengths = lambda: strengths  # type: ignore[method-assign]
         knockout_src.estimate_strengths = lambda: strengths  # type: ignore[method-assign]
 
-        # Knockout source's bracket fetcher returns empty (pre-tournament
-        # state). Without this the chain toggles off.
+        # Pre-tournament state: no knockout fixture carries real teams yet.
+        # Not what gates the chain (an unfinished group stage does), but it
+        # keeps the knockout source off the network.
         knockout_src._fetch_bracket_games = lambda: []  # type: ignore[method-assign]
 
         groups_src.set_paired_knockout_source(knockout_src)
@@ -10150,18 +10182,25 @@ class TestComputeGroupStandings:
         )
         assert standings.n_best_third_advance == 0
 
-    def test_fifa_tiebreaker_key_is_descending_on_all_three_axes(self):
+    def test_overall_record_key_is_descending_on_all_three_axes(self):
         # Pin the chain: higher points sort earlier; ties broken by GD,
         # then GF. Test directly on the static helper so changes to
         # caller code don't accidentally invert one axis (-pts vs +pts).
         from dispatcharr_ranked_matchups.sources.soccer import GroupStageSoccerSource
-        k = GroupStageSoccerSource._fifa_tiebreaker_key
+        k = GroupStageSoccerSource._overall_record_key
         a = {"points": 6, "gf": 5, "ga": 2}  # gd=+3
         b = {"points": 6, "gf": 4, "ga": 1}  # gd=+3, lower gf -> ranks below a
         c = {"points": 6, "gf": 5, "ga": 3}  # gd=+2, lower gd -> ranks below a
         d = {"points": 3, "gf": 9, "ga": 0}  # lower points -> ranks below all
         rows = sorted([a, b, c, d], key=k)
         assert rows == [a, b, c, d]
+
+
+def _fd_kickoff_tomorrow() -> str:
+    """A Football-Data `utcDate` a day ahead of the real clock: the tier fetch
+    keeps only upcoming or live matches (`_espn.UpcomingWindow.admits`, #285),
+    so a fixture without one, or one already played, is dropped there."""
+    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class TestFdCacheBatching:
@@ -10221,7 +10260,7 @@ class TestFdCacheBatching:
                 {"competition": {"code": "PL"}, "id": 6},
             ]})
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
 
         # Each source independently asks for its own fixtures.
         for comp in ("epl", "championship", "bundesliga", "la_liga", "serie_a"):
@@ -10241,19 +10280,22 @@ class TestFdCacheBatching:
         # competition.code matches self.config.fd_code.
         from dispatcharr_ranked_matchups.sources import soccer
 
+        kickoff = _fd_kickoff_tomorrow()
         payload = {"matches": [
             {"competition": {"code": "PL"},  "id": 11, "homeTeam": {"name": "Wrexham AFC"}},
             {"competition": {"code": "ELC"}, "id": 12},
             {"competition": {"code": "BL1"}, "id": 13},
             {"competition": {"code": "PL"},  "id": 14, "homeTeam": {"name": "Hull City"}},
         ]}
+        for m in payload["matches"]:
+            m.update(utcDate=kickoff, status="TIMED")
 
         class FakeResponse:
             status_code = 200  # _fd_get checks this before raise_for_status
             def raise_for_status(self): pass
             def json(self): return payload
 
-        monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: FakeResponse())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResponse())
 
         pl_src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
         elc_src = soccer.SoccerSource("championship", fd_api_key="testkey", odds_api_key="")
@@ -10270,20 +10312,21 @@ class TestFdCacheBatching:
         # build, and that match must not silently route to the wrong
         # source.
         from dispatcharr_ranked_matchups.sources import soccer
+        kickoff = _fd_kickoff_tomorrow()
 
         class FakeResponse:
             status_code = 200  # _fd_get checks this before raise_for_status
             def raise_for_status(self): pass
             def json(self):
                 return {"matches": [
-                    {"competition": {"code": "PL"}, "id": 21},
-                    {"competition": {},             "id": 22},   # missing code
-                    {"id": 23},                                    # missing competition entirely
-                    {"competition": {"code": None}, "id": 24},   # explicit null
-                    {"competition": {"code": "PL"}, "id": 25},
+                    {"competition": {"code": "PL"}, "id": 21, "utcDate": kickoff},
+                    {"competition": {},             "id": 22, "utcDate": kickoff},   # missing code
+                    {"id": 23, "utcDate": kickoff},              # missing competition entirely
+                    {"competition": {"code": None}, "id": 24, "utcDate": kickoff},   # explicit null
+                    {"competition": {"code": "PL"}, "id": 25, "utcDate": kickoff},
                 ]}
 
-        monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: FakeResponse())
+        stub_requests_get(monkeypatch, lambda *a, **k: FakeResponse())
 
         src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
         out = src._fetch_fixtures(days_ahead=7)
@@ -10298,7 +10341,7 @@ class TestFdCacheBatching:
         def raising_get(*a, **k):
             raise soccer.requests.RequestException("boom")
 
-        monkeypatch.setattr(soccer.requests, "get", raising_get)
+        stub_requests_get(monkeypatch, raising_get)
 
         src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
         assert src._fetch_fixtures(days_ahead=7) == []
@@ -10308,7 +10351,7 @@ class TestFdCacheBatching:
         from dispatcharr_ranked_matchups.sources import soccer
 
         calls = []
-        monkeypatch.setattr(soccer.requests, "get", lambda *a, **k: calls.append(1) or None)
+        stub_requests_get(monkeypatch, lambda *a, **k: calls.append(1) or None)
 
         src = soccer.SoccerSource("epl", fd_api_key="", odds_api_key="")
         assert src._fetch_fixtures(days_ahead=7) == []
@@ -10339,7 +10382,7 @@ class TestFdCacheBatching:
             call_log.append(url)
             return FakeResponse()
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
 
         groups = soccer.GroupStageSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
         knockout = soccer.KnockoutSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
@@ -10371,7 +10414,7 @@ class TestFdCacheBatching:
                     {"competition": {"code": "PL"}, "id": 50},
                 ]}
 
-        monkeypatch.setattr(soccer.requests, "get", lambda url, **k: (call_log.append(url), FakeResponse())[1])
+        stub_requests_get(monkeypatch, lambda url, **k: (call_log.append(url), FakeResponse())[1])
 
         src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
 
@@ -10399,7 +10442,7 @@ class TestFdCacheBatching:
         def boom_get(*a, **k):
             raise AssertionError("HTTP should never be called when instance cache is set")
 
-        monkeypatch.setattr(soccer.requests, "get", boom_get)
+        stub_requests_get(monkeypatch, boom_get)
 
         src = soccer.GroupStageSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
         injected = [{"id": 999, "stage": "GROUP_STAGE"}]
@@ -10430,7 +10473,7 @@ class TestFdCacheBatching:
                 return FakeResponse("EC")
             raise AssertionError(f"unexpected URL: {url}")
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
 
         wc = soccer.GroupStageSoccerSource("world_cup", fd_api_key="testkey", odds_api_key="")
         ec = soccer.GroupStageSoccerSource("euros", fd_api_key="testkey", odds_api_key="")
@@ -10486,7 +10529,7 @@ class TestTierFixturesChunkingForLongWindows:
             call_log.append(kwargs.get("params"))
             return FakeResponse()
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         src = soccer.SoccerSource("epl", fd_api_key="testkey", odds_api_key="")
         src._fetch_fixtures(days_ahead=7)
         assert len(call_log) == 1, "7-day window should be one call, not chunked"
@@ -10505,7 +10548,8 @@ class TestTierFixturesChunkingForLongWindows:
             def raise_for_status(self): pass
             def json(self):
                 return {"matches": [
-                    {"competition": {"code": self._code_prefix}, "id": len(call_log)},
+                    {"competition": {"code": self._code_prefix}, "id": len(call_log),
+                     "utcDate": _fd_kickoff_tomorrow()},
                 ]}
 
         def fake_get(url, **kwargs):
@@ -10516,24 +10560,21 @@ class TestTierFixturesChunkingForLongWindows:
             code = f"CHUNK_{len(call_log)}"
             return FakeResponse(code)
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
 
         out = soccer._fetch_tier_fixtures("testkey", days_ahead=17)
-        # Two chunks: [today, today+10] and [today+11, today+17].
+        # The window is today-1 .. today+17, asked as dateFrom=today-1 up to
+        # the EXCLUSIVE dateTo=today+18 (#285): two chunks, [today-1,
+        # today+9) and [today+9, today+18).
         assert len(call_log) == 2
         # Both chunks' matches present in the merged result.
         assert "CHUNK_1" in out
         assert "CHUNK_2" in out
-        # No overlap on the boundary day: chunk2.dateFrom must be
-        # AFTER chunk1.dateTo, not equal to it.
-        from datetime import datetime as _dt
-        chunk1_to = _dt.strptime(call_log[0]["dateTo"], "%Y-%m-%d")
-        chunk2_from = _dt.strptime(call_log[1]["dateFrom"], "%Y-%m-%d")
-        assert chunk2_from > chunk1_to, (
-            f"chunk2 starts {chunk2_from.date()} but chunk1 ended "
-            f"{chunk1_to.date()}: boundary overlap would double-fetch "
-            "the boundary day"
-        )
+        # chunk2 starts ON chunk1's dateTo. dateTo is exclusive (measured
+        # 2026-10-11: dateFrom=2026-09-19&dateTo=2026-09-20 returned none of
+        # the 20th's matches but the one at 00:00Z), so starting the day
+        # after it, as this asserted before #285, never asked for that day.
+        assert call_log[1]["dateFrom"] == call_log[0]["dateTo"]
 
     def test_chunk_size_respects_max_window_days(self, monkeypatch):
         # Each chunk's window must be <= _FD_TIER_MAX_WINDOW_DAYS.
@@ -10552,7 +10593,7 @@ class TestTierFixturesChunkingForLongWindows:
             call_log.append(kwargs.get("params") or {})
             return FakeResponse()
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         soccer._fetch_tier_fixtures("testkey", days_ahead=25)
 
         for params in call_log:
@@ -10581,7 +10622,8 @@ class TestTierFixturesChunkingForLongWindows:
             def raise_for_status(self): pass
             def json(self):
                 return {"matches": [
-                    {"competition": {"code": "PL"}, "id": call_count["n"]},
+                    {"competition": {"code": "PL"}, "id": call_count["n"],
+                     "utcDate": _fd_kickoff_tomorrow()},
                 ]}
 
         def fake_get(url, **kwargs):
@@ -10592,8 +10634,10 @@ class TestTierFixturesChunkingForLongWindows:
             # quota when it does not return a clean 429.
             raise soccer.requests.RequestException("simulated 429")
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
-        out = soccer._fetch_tier_fixtures("testkey", days_ahead=20)
+        stub_requests_get(monkeypatch, fake_get)
+        # 15 days ahead is a 17-day request (lookback day, exclusive dateTo):
+        # two chunks.
+        out = soccer._fetch_tier_fixtures("testkey", days_ahead=15)
 
         assert call_count["n"] == 1 + soccer._FD_MAX_ATTEMPTS
         # First chunk's data survives the second chunk's failure.
@@ -10613,7 +10657,8 @@ class TestTierFixturesChunkingForLongWindows:
             status_code = 200
             def raise_for_status(self): pass
             def json(self):
-                return {"matches": [{"competition": {"code": "PL"}, "id": 1}]}
+                return {"matches": [{"competition": {"code": "PL"}, "id": 1,
+                                     "utcDate": _fd_kickoff_tomorrow()}]}
 
         def fake_get(url, **kwargs):
             calls["n"] += 1
@@ -10621,7 +10666,7 @@ class TestTierFixturesChunkingForLongWindows:
                 raise soccer.requests.RequestException("transient drop")
             return FakeResponse()
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         out = soccer._fetch_tier_fixtures("testkey", days_ahead=0)
 
         assert calls["n"] == 2          # failed once, succeeded on retry
@@ -10659,7 +10704,7 @@ class TestFdRequestPacing:
                 return Resp(item[0], item[1])
             return Resp(item)
 
-        monkeypatch.setattr(soccer.requests, "get", fake_get)
+        stub_requests_get(monkeypatch, fake_get)
         return slept
 
     def test_paces_between_consecutive_calls(self, monkeypatch):
@@ -10727,7 +10772,11 @@ class TestFdRequestPacing:
         code = "\n".join(
             ln for ln in src.split("\n") if not ln.lstrip().startswith("#")
         )
-        bare = re.findall(r"requests\.get\(\s*\n?\s*f?\"\{FD_BASE\}", code)
+        # get_within_deadline (#271) is the only other way to make the call,
+        # and it bounds the response without pacing it.
+        bare = re.findall(
+            r"(?:requests\.get|get_within_deadline)\(\s*(?:requests,\s*)?f?\"\{FD_BASE\}", code,
+        )
         assert not bare, (
             f"{len(bare)} bare requests.get against FD_BASE; route them through "
             "_fd_get so they are paced and retried (#159)"
@@ -10771,10 +10820,9 @@ def _friendly_event(eid, home, away, *, hours_from_now=2.0, completed=False):
 
 
 def _patch_friendlies_http(monkeypatch, events):
-    """Stub the friendlies module's requests.get to serve `events` for every
+    """Stub the requests transport to serve `events` for every
     date bucket. Returns the list of `dates=` values the sweep asked for, so a
     caller can assert on the window as well as on the rows."""
-    from dispatcharr_ranked_matchups.sources import friendlies as friendlies_mod
 
     requested_dates = []
 
@@ -10783,10 +10831,10 @@ def _patch_friendlies_http(monkeypatch, events):
         def json(self): return {"events": events}
 
     def _get(url, *a, **kw):
-        requested_dates.append(url.split("dates=")[1])
+        requested_dates.append(url.split("dates=")[1][:8])
         return FakeResp()
 
-    monkeypatch.setattr(friendlies_mod.requests, "get", _get)
+    stub_requests_get(monkeypatch, _get)
     return requested_dates
 
 
@@ -11127,17 +11175,33 @@ def _cup_event(eid, home, away, season_slug, *, hours_from_now=2.0,
 
 
 def _patch_cup_http_per_bucket(monkeypatch, buckets):
-    """Stub english_cup's requests.get so each successive `dates=` bucket gets
-    its OWN payload, rather than every bucket receiving the same events.
+    """Stub the requests transport so each `dates=` bucket gets its OWN
+    payload, rather than every bucket receiving the same events.
 
     Needed because the interesting dedupe defects are about DISAGREEMENT
     between two buckets carrying the same event, which a stub that serves one
     identical response to every date cannot express. `buckets` is a list of
-    event-lists, applied in sweep order; requests past the end get [].
-    """
-    from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
+    event-lists, one per day in sweep order starting at the lookback day;
+    days past the end get [].
 
-    calls = {"n": 0}
+    Keyed by the requested DATE, not by arrival order: the sweep fetches its
+    days concurrently, so arrival order is not date order, and a stub that
+    handed out payloads by arrival could give the stale copy to the later
+    bucket and pass without testing the premise.
+    """
+    from dispatcharr_ranked_matchups.sources import _espn
+
+    # Pin the sweep's clock to the instant the buckets are laid out, so a run
+    # straddling UTC midnight cannot shift the sweep's first day past ours.
+    now = datetime.now(timezone.utc)
+
+    class _PinnedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is not None else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(_espn, "datetime", _PinnedDatetime)
+    first = now.date() - timedelta(days=_espn.SCOREBOARD_LOOKBACK_DAYS)
 
     class FakeResp:
         def __init__(self, events): self._events = events
@@ -11145,19 +11209,17 @@ def _patch_cup_http_per_bucket(monkeypatch, buckets):
         def json(self): return {"events": self._events}
 
     def _get(url, *a, **kw):
-        i = calls["n"]
-        calls["n"] += 1
-        return FakeResp(buckets[i] if i < len(buckets) else [])
+        day = datetime.strptime(url.split("dates=")[1][:8], "%Y%m%d").date()
+        i = (day - first).days
+        return FakeResp(buckets[i] if 0 <= i < len(buckets) else [])
 
-    monkeypatch.setattr(cup_mod.requests, "get", _get)
-    return calls
+    stub_requests_get(monkeypatch, _get)
 
 
 def _patch_cup_http(monkeypatch, events):
-    """Stub english_cup's requests.get to serve `events` for every date bucket.
+    """Stub the requests transport to serve `events` for every date bucket.
     Returns the list of `dates=` values asked for, so a caller can assert on
     the sweep window as well as on the rows."""
-    from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
 
     requested_dates = []
 
@@ -11166,10 +11228,10 @@ def _patch_cup_http(monkeypatch, events):
         def json(self): return {"events": events}
 
     def _get(url, *a, **kw):
-        requested_dates.append(url.split("dates=")[1])
+        requested_dates.append(url.split("dates=")[1][:8])
         return FakeResp()
 
-    monkeypatch.setattr(cup_mod.requests, "get", _get)
+    stub_requests_get(monkeypatch, _get)
     return requested_dates
 
 
@@ -11194,8 +11256,10 @@ class TestEnglishCupSourcesShape:
 
     def test_efl_cup_prefix_is_not_the_championship_prefix(self):
         """Regression guard. "EFL" is already the EFL CHAMPIONSHIP's prefix,
-        and rivalries.json plus logos.SPORTSDB_TOURNAMENT_LEAGUE_IDS are keyed
-        on sport_prefix, so reusing it would cross-wire the league and the cup.
+        and the logos.py maps and the marker key are keyed on sport_prefix, so
+        reusing it would cross-wire the league and the cup. (rivalries.json
+        shares data between the two on purpose, through the ENGLISH_CLUBS
+        pool, #192.)
         """
         champ = SOCCER_COMPETITIONS["championship"].sport_prefix
         assert champ == "EFL"
@@ -11373,7 +11437,8 @@ class TestEnglishCupFetch:
         yesterday = (datetime.now(timezone.utc).date()
                      - timedelta(days=1)).strftime("%Y%m%d")
         today = datetime.now(timezone.utc).date().strftime("%Y%m%d")
-        assert dates == [yesterday, today]
+        # sorted: the days are fetched concurrently, so arrival order is not date order.
+        assert sorted(dates) == [yesterday, today]
 
     def test_dedupes_an_event_seen_in_two_buckets(self, monkeypatch):
         """The lookback bucket overlaps the first forward bucket, and the stub
@@ -11447,13 +11512,12 @@ class TestEnglishCupFetch:
         """A refresh must survive ESPN being down: _build_sources runs every
         source in one loop and an exception here would be caught, but the cup
         would report `error (...)` in the summary instead of 0 games."""
-        from dispatcharr_ranked_matchups.sources import english_cup as cup_mod
         import requests as _rq
 
         def _boom(url, *a, **kw):
             raise _rq.RequestException("connection reset")
 
-        monkeypatch.setattr(cup_mod.requests, "get", _boom)
+        stub_requests_get(monkeypatch, _boom)
         assert EflCupSource().fetch_upcoming(days_ahead=1) == []
 
 
@@ -11541,6 +11605,87 @@ class TestEnglishCupStageLabelsAreScored:
                 weights,
             ).breakdown.get("tournament_stage", 0.0)
             assert early < qf, f"{stage} scores {early} >= QF {qf}"
+
+
+class TestCupRivalryThroughRefresh:
+    """#192 end to end: rows built by the REAL cup and club-friendly sources
+    from stubbed ESPN payloads, scored by the real `_action_refresh`, read back
+    from the cache it writes. This is the production path the rivalry bonus
+    takes (`rivalry_name(g.home, g.away, g.sport_prefix)` inside the refresh),
+    so it catches a cup prefix that never reaches the rivalry lookup as well
+    as a missing pair."""
+
+    @staticmethod
+    def _serve(monkeypatch, by_slug):
+        """One transport stub for all three sources. The stub is global
+        (`requests.Session.get`), so stubbing per source would leave only the
+        last one in place."""
+
+        class FakeResp:
+            status_code = 200
+
+            def __init__(self, events):
+                self._events = events
+
+            def json(self):
+                return {"events": self._events}
+
+        def _get(url, *a, **kw):
+            for slug, events in by_slug.items():
+                if f"/soccer/{slug}/scoreboard" in url:
+                    return FakeResp(events)
+            return FakeResp([])
+
+        stub_requests_get(monkeypatch, _get)
+
+    def test_a_cup_derby_scores_the_bonus_and_a_club_friendly_does_not(
+            self, refresh_env, monkeypatch):
+        _write_prior, run, read = refresh_env
+        self._serve(monkeypatch, {
+            "eng.league_cup": [
+                _cup_event("c1", "Arsenal", "Tottenham Hotspur", "quarterfinals"),
+                _cup_event("c2", "Tottenham Hotspur", "Charlton Athletic",
+                           "quarterfinals", hours_from_now=3.0),
+            ],
+            "eng.fa": [
+                _cup_event("f1", "Sheffield Wednesday", "Sheffield United",
+                           "third-round", hours_from_now=4.0),
+            ],
+            "club.friendly": [
+                _friendly_event("x1", "Arsenal", "Tottenham Hotspur",
+                                hours_from_now=5.0),
+            ],
+        })
+        result = run([
+            EflCupSource(), FaCupSource(),
+            ClubFriendliesSource(favorites=[], favorites_only=False),
+        ])
+        assert result["status"] == "ok", result
+        games = {(g["sport_prefix"], g["home"], g["away"]): g
+                 for g in read()["games"]}
+        assert len(games) == 4, sorted(games)
+
+        derby = games[("EFLCUP", "Arsenal", "Tottenham Hotspur")]
+        assert derby["is_rivalry"] is True
+        assert derby["score_breakdown"]["rivalry"] == 2.0
+        assert derby["extra"]["rivalry_trophy"] == "the North London derby"
+
+        # Cross-tier: no league list could hold this pair on its own.
+        steel = games[("FACUP", "Sheffield Wednesday", "Sheffield United")]
+        assert steel["is_rivalry"] is True
+        assert steel["score_breakdown"]["rivalry"] == 2.0
+        assert steel["extra"]["rivalry_trophy"] == "the Steel City derby"
+
+        # A cup tie that is not a derby gets nothing.
+        plain = games[("EFLCUP", "Tottenham Hotspur", "Charlton Athletic")]
+        assert plain["is_rivalry"] is False
+        assert "rivalry" not in plain["score_breakdown"]
+
+        # The friendlies constraint holds: same two clubs, no bonus.
+        friendly = games[("CLUBFRIENDLY", "Arsenal", "Tottenham Hotspur")]
+        assert friendly["is_rivalry"] is False
+        assert "rivalry" not in friendly["score_breakdown"]
+        assert "rivalry_trophy" not in friendly["extra"]
 
 
 # ---------------------------------------------------------------------------

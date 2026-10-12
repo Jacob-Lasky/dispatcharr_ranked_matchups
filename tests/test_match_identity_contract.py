@@ -72,12 +72,22 @@ def _extra_dicts_with_a_sport_specific_id(path):
     tree = ast.parse(src, filename=os.path.basename(path))
     for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
         for node in ast.walk(fn):
-            if not isinstance(node, ast.keyword) or node.arg != "extra":
+            # Both spellings: `GameRow(..., extra={...})`, and `extra = {...}`
+            # built first and passed as `extra=extra`. The keyword-only walk
+            # missed the second, which is how NhlPlayoffSource.fetch_upcoming
+            # shipped without game_id (#243).
+            if isinstance(node, ast.keyword) and node.arg == "extra":
+                value = node.value
+            elif isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "extra" for t in node.targets
+            ):
+                value = node.value
+            else:
                 continue
-            if not isinstance(node.value, ast.Dict):
+            if not isinstance(value, ast.Dict):
                 continue
             keys = [
-                k.value for k in node.value.keys
+                k.value for k in value.keys
                 if isinstance(k, ast.Constant) and isinstance(k.value, str)
             ]
             if any(
@@ -214,8 +224,8 @@ class TestTheScopeItselfIsRight:
 class TestSharedSweepDoesNotOwnTheHttpCall:
     """`_espn.sweep_upcoming_scoreboard` must take its getter INJECTED.
 
-    Every ESPN-backed source's tests stub `<module>.requests.get`. If the
-    shared sweep ever called `requests.get` itself, all of those stubs would
+    Every ESPN-backed source's tests stub `<module>._http_get` or the requests
+    transport. If the shared sweep ever made the call itself, those stubs would
     become silent no-ops that reach the REAL ESPN API instead of failing, and a
     test asserting "no fixtures returns empty" would then be asserting against
     whatever ESPN happens to be serving. That is the worst shape of test
@@ -242,7 +252,7 @@ class TestSharedSweepDoesNotOwnTheHttpCall:
         sig = src[i:src.index(") -> ", i)]
         assert "http_get" in sig, (
             "sweep_upcoming_scoreboard no longer takes an injected http_get; "
-            "every source's requests.get stub is now a silent no-op"
+            "every source's HTTP stub is now a silent no-op"
         )
 
     def test_espn_module_never_imports_or_calls_requests(self):

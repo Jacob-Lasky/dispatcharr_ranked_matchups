@@ -55,14 +55,72 @@ Bracket data shape (returned by `_fetch_bracket_games`):
 
 from __future__ import annotations
 
+import logging
 from abc import abstractmethod
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .base import GameRow, SportSource
+from .base import GameRow, MatchResult, SportSource
+from ._espn import _SEASON_WALK_WORKERS, fetch_days
+from .._util import poisson_sample
+
+logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.bracket")
 
 
 _SENTINEL_START = datetime(2099, 1, 1, tzinfo=timezone.utc)
+
+
+def _game_index(extra: Dict[str, Any]) -> Any:
+    """The game's position in its tie: the bracket's own index when
+    place_upcoming stamped one (a fetched row's `matchday` is the source's,
+    not a leg number; see place_upcoming), else `matchday` as before."""
+    idx = extra.get("bracket_game_index")
+    return idx if isinstance(idx, int) else extra.get("matchday", 1)
+
+
+class ForcedWinnerPoissonSampler:
+    """`sample_result` for a playoff game that cannot end level: Poisson
+    points (goals, runs) for each side from the two teams' strengths, and a
+    tied regulation result resolved by a coin-flipped +1 (overtime, extra
+    innings, a shootout or penalties). Strength asymmetry already biased the
+    means, so the tiebreak adds none. The ONE copy of this model for every
+    playoff source (#249): MLB, NHL, NBA, NFL, WNBA, NCAAW, NCAA baseball,
+    softball and soccer cups, MLS Cup. The regular-season sampler in
+    points_based.py is the same model on purpose.
+
+    DO NOT swap in a sport's regular-season sampler (MLS, NCAA soccer and
+    NHL regular season allow draws or award OT points): a bracket cascade
+    needs every game to have a winner.
+
+    The class needs `_strength_for(strengths, team)` returning
+    `{"pf_per_game", "pa_per_game"}`. Put it BEFORE the bracket base in the
+    bases, or SportSource's NotImplementedError sample_result wins the MRO.
+    """
+
+    # Lowest scoring rate a side is sampled at. Soccer sides set 0.05: a
+    # 0.1 floor would lift two blanking defences' expected goals noticeably.
+    LAMBDA_FLOOR: float = 0.1
+
+    def sample_result(
+        self,
+        state: Dict[str, Any],
+        match: GameRow,
+        strengths: Dict[str, Dict[str, float]],
+        rng: Any,
+    ) -> MatchResult:
+        del state  # per-game classification only
+        h = self._strength_for(strengths, match.home)
+        a = self._strength_for(strengths, match.away)
+        lam_home = max(self.LAMBDA_FLOOR, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
+        lam_away = max(self.LAMBDA_FLOOR, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
+        home = poisson_sample(lam_home, rng)
+        away = poisson_sample(lam_away, rng)
+        if home == away:
+            if rng.random() < 0.5:
+                home += 1
+            else:
+                away += 1
+        return MatchResult(home_goals=home, away_goals=away)
 
 
 class BracketSportSource(SportSource):
@@ -96,6 +154,145 @@ class BracketSportSource(SportSource):
     # SoccerSource heritage share the same attr; if a subclass doesn't
     # initialize it in __init__, the class-level None default applies.
     _initial_state_cache: Optional[Dict[str, Any]] = None
+
+    # ---------- bracket-fetch failure accounting (#245) ----------
+    #
+    # A bracket assembled from a fetch in which ANY request failed is not the
+    # bracket. A missing day of an ESPN day sweep is missing games, so a
+    # series reads 2-1 when it is 3-1 (importance computed against the wrong
+    # series); every day failing is an empty postseason. DO NOT cache either
+    # in `_bracket_games_cache`: the scoring-time placement (#243) and
+    # initial_state() read the bracket again after allow_bracket_scoring_retry,
+    # and a cached failure is what they would get instead of the retry.
+    #
+    # "Never cache a failure" is not "retry forever" (#228, the soccer
+    # season fetch): the failure COUNT is remembered, the result is not.
+    # BRACKET_FETCH_MAX_ATTEMPTS per refresh (sources are built fresh per
+    # refresh, so this is per-instance state), scoring is guaranteed one of
+    # them, and a source that gave up is reported by bracket_fetch_failure()
+    # so the missing stakes are loud in the refresh summary and Show current
+    # state. Once given up, _fetch_bracket_games returns [] with no network:
+    # a partial bracket would file results into wrong ties, which is worse
+    # than no bracket importance (place_upcoming's rule).
+    BRACKET_FETCH_MAX_ATTEMPTS: int = 2
+    # Class defaults; the methods below assign per instance. The day memo is
+    # created per instance (a mutable class default would be shared).
+    _bracket_fetch_attempts: int = 0
+    _bracket_fetch_error: Optional[str] = None
+    _bracket_sweep_memo: Optional[Dict[date, Dict[str, Any]]] = None
+
+    def _bracket_fetch_given_up(self) -> bool:
+        return self._bracket_fetch_attempts >= self.BRACKET_FETCH_MAX_ATTEMPTS
+
+    def _bracket_fetch_failed(self, error: str) -> List[Dict[str, Any]]:
+        """Record one failed bracket fetch and return the [] the caller hands
+        back UNCACHED. Never assign the result of a failed fetch to
+        `_bracket_games_cache`."""
+        self._bracket_fetch_attempts += 1
+        self._bracket_fetch_error = error
+        logger.warning(
+            "[%s] bracket fetch failed (attempt %d of %d this refresh): %s",
+            self.sport_label, self._bracket_fetch_attempts,
+            self.BRACKET_FETCH_MAX_ATTEMPTS, error,
+        )
+        return []
+
+    def _bracket_fetch_retry_pending(self) -> bool:
+        """The last bracket fetch failed and another attempt is allowed. A
+        state built from it must not be cached either: initial_state() is the
+        bracket importance reads, and caching it would pin the failure past
+        the retry exactly as caching the games did."""
+        return self._bracket_fetch_error is not None and not self._bracket_fetch_given_up()
+
+    def _cache_bracket_games(self, games: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Cache a COMPLETE bracket fetch, and forget earlier failed attempts:
+        a fetch that recovered is not reported as having given up."""
+        self._bracket_games_cache = games
+        self._bracket_fetch_attempts = 0
+        self._bracket_fetch_error = None
+        return games
+
+    def allow_bracket_scoring_retry(self) -> None:
+        """Guarantee scoring one more bracket fetch however many failed
+        before it; plugin._action_refresh calls this as scoring begins, the
+        bracket counterpart of soccer.allow_scoring_retry. A state that
+        initial_state() cached from the failed fetch (it caches once the
+        budget is spent) is dropped too, or scoring would read it instead of
+        making the attempt this grants."""
+        if self._bracket_fetch_error is None:
+            return
+        self._bracket_fetch_attempts = min(
+            self._bracket_fetch_attempts, self.BRACKET_FETCH_MAX_ATTEMPTS - 1,
+        )
+        self._initial_state_cache = None
+
+    def bracket_fetch_failure(self) -> Optional[str]:
+        """The last error, when this refresh gave up on the bracket fetch;
+        None otherwise (never failed, recovered, or still retryable). The
+        source's games then carry no bracket stakes, so the refresh reports
+        it like a failed source rather than letting a zero pass as real."""
+        return self._bracket_fetch_error if self._bracket_fetch_given_up() else None
+
+    def _sweep_bracket_days(
+        self,
+        start: date,
+        end: date,
+        fetch_day: Callable[[date], Any],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """The payload of every day of [start, end], in date order (MLS Cup
+        numbers series games by it); or None when a day's request failed
+        (recorded through _bracket_fetch_failed, so the caller just returns
+        []).
+
+        `fetch_day(day)` returns the parsed payload, or anything that is not
+        a dict for a failed request. Every caller fetches through
+        `_espn.fetch_scoreboard_day`, which already turns a body without an
+        `events` list into None (#282), so any dict here is an answer, and
+        `{"events": []}` is a day with no games.
+
+        Fetched in date-ordered batches of `_SEASON_WALK_WORKERS` days, each
+        batch concurrently (`_espn.fetch_days`): a healthy 92-day playoff
+        window costs ~12 round trips instead of 92, and a hanging endpoint
+        costs one batch, one request timeout, the same as a sequential walk
+        that stops at its first failure. Stops after the FIRST batch with a
+        failed day: the sweep is discarded either way, and against an ESPN
+        outage every further batch is another timeout. Days BEFORE the first
+        failure are kept on the instance until the sweep completes, so the
+        retry asks only from the failed day on, not the whole window again.
+        Injected `fetch_day` keeps each source's own patchable `_http_get`."""
+        if self._bracket_fetch_given_up():
+            return None
+        if self._bracket_sweep_memo is None:
+            self._bracket_sweep_memo = {}
+        memo = self._bracket_sweep_memo
+        total = (end - start).days + 1
+        batch_start = start
+        while batch_start <= end:
+            batch_end = min(end, batch_start + timedelta(days=_SEASON_WALK_WORKERS - 1))
+            batch = fetch_days(
+                batch_start, batch_end,
+                lambda d: memo[d] if d in memo else fetch_day(d),
+            )
+            failed = None
+            for day, data in batch:  # date order
+                if not isinstance(data, dict):
+                    failed = day
+                    break
+                memo[day] = data
+            # Days AFTER the first failure are NOT memoised even when they
+            # answered: the retry re-asks them, exactly as a sequential walk
+            # that stopped at the failure would, so a game ESPN adds to one of
+            # those days between the attempts is not lost to a stale page.
+            if failed is not None:
+                self._bracket_fetch_failed(
+                    f"scoreboard for {failed.isoformat()} did not answer, "
+                    f"day {(failed - start).days + 1} of {total}"
+                )
+                return None
+            batch_start = batch_end + timedelta(days=1)
+        days = [start + timedelta(days=i) for i in range(total)]
+        self._bracket_sweep_memo = None  # complete: the caller caches the result
+        return [memo[d] for d in days]
 
     # ---------- subclass hooks ----------
 
@@ -149,6 +346,20 @@ class BracketSportSource(SportSource):
         downstream ties when an upstream counterfactual changed the
         winner). Returns [] when the tie is complete."""
 
+    def _sim_extra(self, tie_meta: Dict[str, Any], game: Dict[str, Any]) -> Dict[str, Any]:
+        """The `extra` the simulator needs on a row for this bracket game. The
+        ONE builder for it: _emit_remaining_games_for_tie uses it for the rows
+        the bracket replays, and place_upcoming for the fetched row the
+        simulator starts from, so the two cannot disagree. Each tie shape
+        adds what its sample_result / apply_result read."""
+        extra: Dict[str, Any] = {
+            "game_id": game["game_id"],
+            "stage": tie_meta["stage"],
+            "matchday": game.get("matchday") or 1,
+        }
+        extra.update(game.get("extra", {}) or {})
+        return extra
+
     # ---------- public importance interface ----------
 
     @property
@@ -162,6 +373,113 @@ class BracketSportSource(SportSource):
     @abstractmethod
     def _league_context_code(self) -> str:
         """LEAGUE_CONTEXTS key for this bracket (e.g., 'CL', 'NHL_PO')."""
+
+    # True for sources whose every row is a playoff game (series, double
+    # elimination). False here because a soccer knockout source also lists its
+    # league phase. Read by place_upcoming.
+    ALL_ROWS_POSTSEASON: bool = False
+
+    def _unplaced_row_reaches_a_tie(
+        self, row: GameRow, bracket: Dict[str, List[Dict[str, Any]]],
+    ) -> bool:
+        """Whether a row place_upcoming could not match by id can still have
+        its sampled result filed into a tie by `apply_result`. What the
+        "not found in the bracket" warning counts. Here: it has a stage,
+        the rule every tie shape's apply_result needs first;
+        DoubleEliminationSource answers with its real tie lookup."""
+        return isinstance(row.extra.get("stage"), str)
+
+    def place_upcoming(self, games: List[GameRow], *, for_scoring: bool = False) -> int:
+        """Give each upcoming row its bracket identity, from this source's own
+        bracket records (#243). Mutates the rows; returns how many could not be
+        placed.
+
+        The importance simulator's TARGET is the row fetch_upcoming built, not
+        the one the bracket emits, and `apply_result` keys on three fields of
+        it. Each was missing or wrong on real rows, and each failed SILENTLY:
+
+        - `stage`: the tie is found only when it is a string. The NFL/NBA/NHL/
+          MLB/WNBA/NCAAW playoff rows had none, so the sampled result was
+          dropped; live MLB LCS games scored ~0.15 importance instead of ~3.
+          `plugin._is_postseason_game` reads it too.
+        - the game index: read from `matchday`, which on a soccer row is
+          Football-Data's, not a leg number. FD gives a UCL final 0 or None,
+          every 2026 World Cup knockout None, EURO 2024 knockouts 4-7, and
+          anything but 1 is filed as leg 2, so a single-leg tie never
+          completes: 0.0 importance. The bracket's index is stamped as
+          `bracket_game_index`, which apply_result prefers, rather than
+          overwriting `matchday`, which the EPG text renders.
+
+        - the rest of what `_sim_extra` gives the bracket's own rows, above
+          all `is_decisive_leg`: without it sample_result plays a final, a
+          second leg or a series game with no extra time or penalties, so it
+          can end level.
+
+        Everything comes from `_sim_extra` on the bracket's tie, the same
+        builder the replayed rows use, and overrides what the row had: once
+        matched, the bracket is authoritative for the simulator's keys. It is
+        matched on the row's own id (`game_id`, else `fd_id`), compared
+        exactly (simulation compares exactly too, so a "123" row is not 123),
+        and only when the team pair agrees and the id names one bracket game:
+        a wrong placement files the result into the wrong tie, which is worse
+        than none.
+
+        Rows of an ALL_ROWS_POSTSEASON source are flagged `postseason` first,
+        so a failed bracket fetch cannot make them look like regular season.
+        """
+        if self.ALL_ROWS_POSTSEASON:
+            for g in games:
+                g.extra["postseason"] = True
+        # Index every game the bracket knows, with its tie, by id. At scoring
+        # this is initial_state()'s bracket, the one importance will use, so
+        # the two cannot disagree about whether the bracket exists. Before
+        # scoring it is a throwaway build: initial_state() caches, and a
+        # season fetch failing that early would pin an empty bracket for the
+        # whole run and defeat the scoring-time retry
+        # (soccer.allow_scoring_retry).
+        bracket = (
+            self.initial_state().get("_bracket", {}) if for_scoring
+            else self._build_bracket(self._fetch_bracket_games())
+        )
+        by_id: Dict[Any, Optional[Tuple[Dict[str, Any], Dict[str, Any]]]] = {}
+        for ties in bracket.values():
+            for tie_meta in ties:
+                for game in tie_meta.get("games") or []:
+                    gid = game.get("game_id")
+                    if gid is None:
+                        continue
+                    # The same id twice is ambiguous: place neither.
+                    by_id[gid] = None if gid in by_id else (tie_meta, game)
+        unplaced = 0
+        for g in games:
+            extra = g.extra
+            gid = extra.get("game_id")
+            if gid is None:
+                gid = extra.get("fd_id")
+            hit = by_id.get(gid) if gid is not None else None
+            if hit is None or (
+                frozenset((hit[1].get("home"), hit[1].get("away")))
+                != frozenset((g.home, g.away))
+            ):
+                if not self._unplaced_row_reaches_a_tie(g, bracket):
+                    unplaced += 1
+                continue
+            tie_meta, game = hit
+            # The keys the tie shape itself sets (built without the record's
+            # pass-through extra) are what the simulator reads, and the
+            # bracket is authoritative for them on a game matched by id and
+            # teams: a fetched stage can be None or stale, and a fetched
+            # grouping_key can name the wrong sub-bracket (the upcoming sweep
+            # classifies against its own window, not opening day). The
+            # record's pass-through metadata only fills gaps.
+            own = self._sim_extra(tie_meta, {**game, "extra": {}})
+            extra["bracket_game_index"] = own.pop("matchday")
+            extra.update(own)
+            for key, value in (game.get("extra") or {}).items():
+                extra.setdefault(key, value)
+            # The fetched matchday is left alone: the EPG text renders it.
+            extra.setdefault("matchday", extra["bracket_game_index"])
+        return unplaced
 
     def initial_state(self) -> Dict[str, Any]:
         if self._initial_state_cache is not None:
@@ -200,7 +518,8 @@ class BracketSportSource(SportSource):
             "_bracket": bracket,
             "_round_reached": round_reached,
         }
-        self._initial_state_cache = state
+        if not self._bracket_fetch_retry_pending():
+            self._initial_state_cache = state
         return state
 
     def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
@@ -233,7 +552,7 @@ class BracketSportSource(SportSource):
         extra = match.extra if isinstance(match.extra, dict) else {}
         stage = extra.get("stage")
         game_id = extra.get("game_id")
-        game_index = extra.get("matchday", 1)
+        game_index = _game_index(extra)
 
         # tie_key uses the simulator's actual participants (match.home / .away),
         # which may differ from the source-published draw when an upstream
@@ -241,8 +560,16 @@ class BracketSportSource(SportSource):
         if isinstance(stage, str):
             tk = (stage, frozenset({match.home, match.away}))
             prior_tie = new_tie_results.get(tk)
+            # A tie with no record yet (a downstream tie whose participants
+            # the simulation just decided) is built from the game's own
+            # `legs_in_tie`, which `_emit_remaining_games_for_tie` copied from
+            # the bracket. DO NOT drop it: without it AggregateLegSource
+            # assumes two legs, a single-leg WC / EURO knockout tie never
+            # completes, and the simulated bracket stops one round after the
+            # entry round (#78).
             new_tie = self._copy_tie_record(prior_tie) if prior_tie else self._new_tie_record({
                 "stage": stage, "teams": frozenset({match.home, match.away}),
+                "legs_in_tie": extra.get("legs_in_tie"),
             })
             prior_winner = (prior_tie or {}).get("winner")
             self._record_game_into_tie(
@@ -482,8 +809,10 @@ class AggregateLegSource(BracketSportSource):
         # of truth: count the games FD.org publishes for the tie. DO NOT
         # branch on `stage == KO_STAGES[-1]`: that misclassifies single-leg
         # non-finals (WC LAST_16, EURO QF, etc.) as incomplete forever and
-        # the round_reached cascade never fires.
-        games_in_tie = len(tie_meta.get("games") or [])
+        # the round_reached cascade never fires. A tie created mid-simulation
+        # has no published games, so `apply_result` passes the game's own
+        # `legs_in_tie` instead.
+        games_in_tie = len(tie_meta.get("games") or []) or tie_meta.get("legs_in_tie")
         return {
             "stage": tie_meta.get("stage"),
             "teams": tie_meta.get("teams"),
@@ -544,14 +873,28 @@ class AggregateLegSource(BracketSportSource):
         del tie  # decisive-leg classification depends only on game index vs tie length
         return game_index == games_in_tie
 
+    def _sim_extra(self, tie_meta: Dict[str, Any], game: Dict[str, Any]) -> Dict[str, Any]:
+        legs_in_tie = len(tie_meta.get("games") or [])
+        matchday = game.get("matchday") or 1
+        extra: Dict[str, Any] = {
+            "game_id": game["game_id"],
+            "stage": tie_meta["stage"],
+            "matchday": matchday,
+            "leg_index": matchday,
+            "legs_in_tie": legs_in_tie,
+            # Drives extra time and penalties in sample_result; without it a
+            # final or a second leg is sampled as a game that can end level.
+            "is_decisive_leg": matchday == legs_in_tie,
+        }
+        extra.update(game.get("extra", {}) or {})
+        return extra
+
     def _emit_remaining_games_for_tie(
         self, tie, tie_meta, applied, team_a, team_b,
     ) -> List[GameRow]:
         del tie  # AggregateLegSource emits based on tie_meta.games; tie state not needed
         out: List[GameRow] = []
-        games = tie_meta.get("games") or []
-        legs_in_tie = len(games)
-        for g in games:
+        for g in tie_meta.get("games") or []:
             if g["game_id"] in applied:
                 continue
             matchday = g.get("matchday") or 1
@@ -561,15 +904,7 @@ class AggregateLegSource(BracketSportSource):
             else:
                 home, away = team_b, team_a
             start = g.get("start_time") or _SENTINEL_START
-            extra: Dict[str, Any] = {
-                "game_id": g["game_id"],
-                "stage": tie_meta["stage"],
-                "matchday": matchday,
-                "leg_index": matchday,
-                "legs_in_tie": legs_in_tie,
-                "is_decisive_leg": matchday == legs_in_tie,
-            }
-            extra.update(g.get("extra", {}) or {})
+            extra = self._sim_extra(tie_meta, g)
             out.append(GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
@@ -608,6 +943,8 @@ class BestOfNSeriesSource(BracketSportSource):
     listed in the tie_meta's games[] are emitted. Subclasses generate
     those records (with home/away pattern) in `_fetch_bracket_games`.
     """
+
+    ALL_ROWS_POSTSEASON = True
 
     SERIES_LENGTH: int = 7   # subclass overrides as needed (uniform-length sports)
 
@@ -684,6 +1021,19 @@ class BestOfNSeriesSource(BracketSportSource):
         del tie, game_index, games_in_tie
         return True
 
+    def _sim_extra(self, tie_meta: Dict[str, Any], game: Dict[str, Any]) -> Dict[str, Any]:
+        matchday = game.get("matchday") or 1
+        extra: Dict[str, Any] = {
+            "game_id": game["game_id"],
+            "stage": tie_meta["stage"],
+            "matchday": matchday,
+            "game_index": matchday,
+            "games_in_series": self._series_length_for_stage(tie_meta.get("stage") or ""),
+            "is_decisive_leg": True,  # every series game can go to OT
+        }
+        extra.update(game.get("extra", {}) or {})
+        return extra
+
     def _emit_remaining_games_for_tie(
         self, tie, tie_meta, applied, team_a, team_b,
     ) -> List[GameRow]:
@@ -695,7 +1045,6 @@ class BestOfNSeriesSource(BracketSportSource):
         wins_b = (tie.get("series_wins") or {}).get(team_b, 0)
         stage = tie_meta.get("stage") or ""
         target = self._clinching_wins_for_stage(stage)
-        series_length = self._series_length_for_stage(stage)
         # Walk source-published games in order; only emit ones not yet
         # applied AND that the series is still alive long enough to reach.
         # We model this by emitting games[i] only when wins_a < target AND
@@ -732,15 +1081,7 @@ class BestOfNSeriesSource(BracketSportSource):
                 else:
                     home, away = team_b, team_a
             start = g.get("start_time") or _SENTINEL_START
-            extra: Dict[str, Any] = {
-                "game_id": g["game_id"],
-                "stage": tie_meta["stage"],
-                "matchday": matchday,
-                "game_index": matchday,
-                "games_in_series": series_length,
-                "is_decisive_leg": True,  # every series game can go to OT
-            }
-            extra.update(g.get("extra", {}) or {})
+            extra = self._sim_extra(tie_meta, g)
             out.append(GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
@@ -813,6 +1154,8 @@ class DoubleEliminationSource(BracketSportSource):
     `_tie_grouping_key(game)` (new). Set `KO_STAGES` and
     `_league_context_code` as for any BracketSportSource.
     """
+
+    ALL_ROWS_POSTSEASON = True
 
     ELIMINATION_LOSS_COUNT: int = 2
 
@@ -979,7 +1322,8 @@ class DoubleEliminationSource(BracketSportSource):
             "_bracket": bracket,
             "_round_reached": round_reached,
         }
-        self._initial_state_cache = state
+        if not self._bracket_fetch_retry_pending():
+            self._initial_state_cache = state
         return state
 
     def remaining_matches(self, state: Dict[str, Any]) -> List[GameRow]:
@@ -1000,6 +1344,17 @@ class DoubleEliminationSource(BracketSportSource):
                 ))
         return out
 
+    def _sim_extra(self, tie_meta: Dict[str, Any], game: Dict[str, Any]) -> Dict[str, Any]:
+        extra: Dict[str, Any] = {
+            "game_id": game["game_id"],
+            "stage": tie_meta["stage"],
+            "matchday": game.get("matchday") or 1,
+            "grouping_key": tie_meta.get("grouping_key"),
+            "is_decisive_leg": True,  # any game can be a tie-ending game
+        }
+        extra.update(game.get("extra", {}) or {})
+        return extra
+
     def _emit_remaining_games_for_tie(
         self, tie, tie_meta, applied, team_a, team_b,
     ) -> List[GameRow]:
@@ -1015,14 +1370,7 @@ class DoubleEliminationSource(BracketSportSource):
             if not home or not away:
                 continue
             start = g.get("start_time") or _SENTINEL_START
-            extra: Dict[str, Any] = {
-                "game_id": g["game_id"],
-                "stage": tie_meta["stage"],
-                "matchday": g.get("matchday") or 1,
-                "grouping_key": tie_meta.get("grouping_key"),
-                "is_decisive_leg": True,  # any game can be a tie-ending game
-            }
-            extra.update(g.get("extra", {}) or {})
+            extra = self._sim_extra(tie_meta, g)
             out.append(GameRow(
                 sport_prefix=self.sport_prefix,
                 sport_label=self.sport_label,
@@ -1042,7 +1390,7 @@ class DoubleEliminationSource(BracketSportSource):
         extra = match.extra if isinstance(match.extra, dict) else {}
         stage_raw = extra.get("stage")
         game_id = extra.get("game_id")
-        game_index = extra.get("matchday", 1)
+        game_index = _game_index(extra)
         grouping_key = extra.get("grouping_key")
         bracket = state.get("_bracket", {})
 
@@ -1080,6 +1428,20 @@ class DoubleEliminationSource(BracketSportSource):
         return new_state
 
     # ---------- helpers ----------
+
+    def _unplaced_row_reaches_a_tie(
+        self, row: GameRow, bracket: Dict[str, List[Dict[str, Any]]],
+    ) -> bool:
+        """The lookup apply_result itself uses (`_find_tie_meta`, by key then
+        by team set), so the count says exactly whether the row can score: a
+        College World Series row leaves fetch with no sub-bracket (#256) and
+        is still scorable when its teams are in a tie, while a Regional row
+        whose tie is missing (an empty bracket) is not, whatever its key."""
+        extra = row.extra
+        stage = extra.get("stage")
+        return isinstance(stage, str) and self._find_tie_meta(
+            stage, extra.get("grouping_key"), row.home, row.away, bracket,
+        ) is not None
 
     def _find_tie_meta(
         self,

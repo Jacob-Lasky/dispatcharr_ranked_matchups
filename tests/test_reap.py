@@ -582,7 +582,7 @@ class TestLockBusyBackoff:
         """An overdue game pins the next delay to its 1s floor, so without a
         flag the loop asks Redis for the lock once a second from every worker
         for the whole of a long refresh."""
-        monkeypatch.setattr(plugin, "_try_acquire_scheduler_lock", lambda destructive=True: None)
+        monkeypatch.setattr(plugin, "_try_acquire_scheduler_lock", lambda kind, task_id="": None)
         r = plugin._action_reap_locked({"remove_finished_after_minutes": 30})
         assert r.get("lock_busy") is True
 

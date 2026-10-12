@@ -73,55 +73,100 @@ For sports with a ranking (top-25 polls in NCAAF / NCAAM / NCAA
 Baseball; standings position in soccer leagues; etc.) this signal
 rewards games featuring ranked teams.
 
-**A rank only means something relative to how many teams carry one.** A
-league table ranks every club, so every fixture has two ranks; a poll
-ranks the top 25 of a much larger field, so most games have one rank or
-none. Scoring is therefore done on each team's PERCENTILE within its own
-ranked pool:
-
-**Exhaustive and selective pools normalize differently**, and the
-difference matters at the bottom of the pool:
+**A rank only means something relative to the field it was drawn from.**
+A league table ranks every club, so every fixture has two ranks; a poll
+ranks the top 25 of a much larger field (138 FBS programmes, 365 Division
+I men's basketball programmes), so most games have one rank or none.
+Scoring is therefore done on each team's PERCENTILE within its field:
 
 ```python
-# EXHAUSTIVE (a league table ranks every club):
-strength = (pool - rank) / (pool - 1)      # 1st → 1.0, last → 0.0
+# EXHAUSTIVE (a league table ranks every club, so the table IS the field):
+strength = (pool - rank) / (pool - 1)      # 1st -> 1.0, last -> 0.0
 
-# SELECTIVE (a poll ranks the top N of a larger field):
-strength = (pool + 1 - rank) / pool        # 1st → 1.0, last → 1/pool
+# SELECTIVE with a declared field (#198; every college poll source):
+strength = (field - rank) / (field - 1)    # #1 -> 1.0, #25 of 138 -> 0.82
 
-# either way:
+# SELECTIVE with no declared field (the published list stands in):
+strength = (pool + 1 - rank) / pool        # 1st -> 1.0, last -> 1/pool
+
+# in every case:
 unranked = 0.0
 rank_pts = mean(strength_home, strength_away) * 10 * weights.rank
 ```
 
-Last place in a league really is the worst team available, so it bottoms
-out at zero. The last entry in a 25-deep poll is still a top-20% team, so
-it must stay strictly above an unranked opponent — otherwise `#25 vs
-unranked` scores the same as `unranked vs unranked`.
-
 `pool` is the number of teams carrying a rank: the length of the
-standings table for a league source, or 25 for a poll source. The
-breakdown key is `rank_pair` when both sides are ranked and `one_ranked`
-when only one is; the arithmetic is identical either way.
+standings table for a league source, or 25 for a poll source. `field` is
+`SportSource.rank_field_size`, declared on each poll source:
 
-| Example | pool | kind | pts |
-|---|---|---|---|
-| #1 vs #2 | 25 | poll | 9.80 |
-| #4 vs #7 | 25 | poll | 8.20 |
-| #1 vs unranked | 25 | poll | 5.00 |
-| #7 vs unranked | 25 | poll | 3.80 |
-| #25 vs unranked | 25 | poll | 0.20 |
-| 1st vs 2nd | 20 | table | 9.74 |
-| 14th vs 16th | 20 | table | 2.63 |
-| 19th vs 20th | 20 | table | 0.26 |
+| Source | Poll | Field |
+|---|---|---|
+| NCAA Football | AP Top 25 | 138 (FBS, 2026) |
+| NCAA Men's Basketball | AP Top 25 | 365 |
+| NCAA Women's Basketball | AP Top 25 | 362 |
+| NCAA Baseball | D1Baseball Top 25 | 304 |
+| NCAA Softball | Top 25 | 309 |
+| NCAA Men's / Women's Soccer | United Soccer Coaches Top 25 | 215 / 351 |
+
+A field drifts by a programme or two a year as schools reclassify, and
+that barely matters: 136 vs 138 moves AP #25 from 0.822 to 0.825. Getting
+the order of magnitude right is what counts.
+
+The breakdown key is `rank_pair` when both sides are ranked and
+`one_ranked` when only one is; the arithmetic is identical either way.
+A game whose rank points come to 0 (last vs last of a league table, or
+last vs unranked) emits no key and no note.
+
+| Example | pool | field | kind | pts |
+|---|---|---|---|---|
+| #1 vs #2 | 25 | 138 | poll | 9.96 |
+| #10 vs #10 | 25 | 138 | poll | 9.34 |
+| #12 vs #6 | 25 | 215 | poll | 9.63 |
+| #1 vs unranked | 25 | any | poll | 5.00 |
+| #4 vs unranked | 25 | 215 | poll | 4.93 |
+| #25 vs unranked | 25 | 138 | poll | 4.12 |
+| #7 vs unranked | 25 | none | poll | 3.80 |
+| 1st vs 2nd | 20 | (table) | table | 9.74 |
+| 14th vs 16th | 20 | (table) | table | 2.63 |
+| 19th vs 20th | 20 | (table) | table | 0.26 |
 
 Unranked vs unranked: signal contributes 0 and no key is emitted.
 
-**Known limitation.** This is a percentile within the PUBLISHED pool, not
-within the sport's full eligible population, so a poll's #1 and a league's
-#1 both read as 1.0 even though being #1 of 136 FBS teams is a stronger
-claim than being 1st of 20. Modelling the unranked tail properly needs a
-per-sport field size; tracked as a follow-up issue.
+#### Why the unranked tail scores 0, not its midpoint (#198)
+
+An unranked FBS team's expected position is the middle of the 113-team
+tail (about 82nd of 138, strength 0.41), and #198 floated that as the
+honest default. It was measured on the live slate of 2026-10-11 and
+rejected: it hands every unranked-vs-unranked college game 4.1 to 4.4 raw
+points that no NFL, NHL, NBA or MLB game can earn, because those sources
+carry no ranks at all. On that slate it put Jacksonville State v FIU (no
+ranked team) above Cagliari v Juventus, and moved NCAA men's soccer from
+6 to 11 of the 25 slots on a weekend without college football. `0.0`
+means "no evidence of quality", which is what a team in an unranked sport
+also gets, so the signal stays comparable across sports. Crediting the
+tail needs the unranked sports to carry a rank first.
+
+#### What #198 changed on a real slate
+
+Replayed over the live slate of 2026-10-11 (the cached list plus a fresh
+capture of 62 FBS and 181 NCAA men's soccer games, importance from 2000
+shared seasons):
+
+| Game | rank pts before | after | raw before | after |
+|---|---|---|---|---|
+| CFB #15 Tennessee v #6 Alabama | 6.20 | 9.31 | 24.56 | 27.67 |
+| CFB #22 Houston v #18 Oklahoma State | 2.40 | 8.61 | 15.04 | 21.25 |
+| CFB #24 SMU v Virginia | 0.40 | 4.16 | 8.77 | 12.53 |
+| NCAAMSOC #20 Wisconsin v #21 UCLA | 2.20 | 9.09 | 6.60 | 13.49 |
+| NCAAMSOC #12 Akron v #6 Creighton | 6.80 | 9.63 | 10.33 | 13.16 |
+| NCAAMSOC NC State v #4 Kansas City | 4.40 | 4.93 | 11.71 | 12.24 |
+| any league fixture, any unranked sport | unchanged | | | |
+
+Top 25 with college football on the slate: 4 games in (SMU v Virginia
+and three ranked-vs-ranked NCAA men's soccer games), 4 out (Bahia v
+Mirassol, Wrexham v Preston, Army v FAU, and NC State v Kansas City,
+whose own score rose but less than the cut line did). Without college
+football: 2 in (Wisconsin v UCLA, #1 SMU v #13 Stanford), 2 out (Atlanta v
+Baltimore, Rutgers v #2 Indiana).
 
 #### Why this replaced the two-branch formula (#194)
 
@@ -142,15 +187,17 @@ entire NCAAF slate was capped at 4.17. It was also backwards on the
 merits: being ranked #1 of 136 is a stronger claim than 1st of 20.
 
 The second hard-coded assumption was just as wrong in the other
-direction: with a 20-club table the rank sum can never exceed 40, so
-`(50 - 40) / 4.8` gave a **last-vs-second-last fixture 2.08 points** for
-being in a small league.
+direction: with a 20-club table two different clubs' ranks sum to at most
+39, so `(50 - 39) / 4.8` gave a **last-vs-second-last fixture 2.29
+points** for being in a small league.
 
-The replacement is deliberately surgical. For a 25-deep pool it lands
-within a rounding step of the old numbers, so poll sports keep their
-magnitude; what changes is league tables (no longer scored as if 25 deep)
-and the unranked side (now costs a team its own share instead of
-collapsing the game into a lower-capped branch).
+The #194 replacement was deliberately surgical. For a 25-deep pool it
+landed within a rounding step of the old numbers, so poll sports kept
+their magnitude; what changed was league tables (no longer scored as if
+25 deep) and the unranked side (now costs a team its own share instead of
+collapsing the game into a lower-capped branch). #198 then deliberately
+DID move poll magnitudes, by reading a poll rank against its sport's field
+(AP #25 vs unranked: 0.20 before, 4.12 after); see the field table above.
 
 ### Signal: close_game
 
@@ -206,7 +253,8 @@ default 1.5):
 | `ROUND_OF_16` / `LAST_16` | 1.5 | 2.25 |
 | `ROUND_OF_32` / `LAST_32` | 1.0 | 1.5 |
 | `PLAYOFFS` (entry round) | 1.0 | 1.5 |
-| `MAJOR` (golf majors, F1 Monaco, etc) | 4.5 | 6.75 |
+| `MAJOR` (golf majors, tennis Slams, numbered UFC events, title boxing) | 4.5 | 6.75 |
+| `TOUR_PLAYOFF` (golf's FedEx Cup playoffs) | 3.0 | 4.5 |
 | `EVENT` (regular-season field events) | 1.5 | 2.25 |
 | `CUP_R5` (domestic cup 5th round) | 1.8 | 2.7 |
 | `CUP_R4` (domestic cup 4th round) | 1.4 | 2.1 |
@@ -235,12 +283,20 @@ minimum-score threshold that would drop them instead.
 ### Signal: rivalry
 
 Known rivalry games get a flat bonus equal to `weights.rivalry`
-(default 2.0). The shipped rivalry DB covers college football, EPL,
-NHL, and NBA matchups. New rivalries are added to `rivalries.json`.
+(default 2.0). The shipped rivalry DB (`rivalries.json`) is keyed on
+sport prefix and covers college football and basketball, the NFL, NBA,
+NHL and MLB, MLS and Liga MX, and the European soccer leagues. English
+club rivalries are one shared list that the Premier League, the
+Championship, the EFL Cup and the FA Cup all read, so a derby earns the
+bonus in a cup tie exactly as it does in the league, including
+cross-division derbies that only a cup can produce. Club friendlies
+deliberately get no rivalry bonus: a pre-season kickabout is not a
+derby. New rivalries are added to `rivalries.json`.
 
 ### Signal: narrative (off by default)
 
-If you enable the LLM narrative bonus (set `weight_narrative > 0` and
+If you enable the LLM narrative bonus (set `narrative` above 0 in
+**Scoring weights**, e.g. `narrative=1`, and
 provide an Anthropic API key), the plugin asks Claude to score a game
 0-10 based on backstory: recent form, rivalries the rivalry DB
 doesn't know about, ongoing storylines (manager firings, transfer
@@ -429,7 +485,7 @@ as `1 / sqrt(N)`; at 2000 the noise sits below the consequence-weight
 grid the rankings sort by.
 
 
-## Cross-source chains (the World Cup 2026 case)
+## Cross-source chains (World Cup 2026 and EURO 2028)
 
 The Monte Carlo importance algorithm above runs single-source: it
 samples the rest of THIS competition forward to its outcome bands.
@@ -467,15 +523,69 @@ right direction but possibly wrong magnitude because the simulated
 R16 opponent might not match the canonical one. With the lookup, the
 chain produces leverage that mirrors the real bracket.
 
-The same chain machinery is sport-agnostic and could serve UEFA EURO
-2028, but EURO is NOT wired to it today: `plugin.py`'s `euros` block
-creates the group and knockout sources without calling
-`set_paired_knockout_source`, so `cross_source_chain()` returns None and
-EURO group games take the single-source path. Wiring it needs the
-EURO 2028 R16 slot pairings (not published; they follow the 2027 final
-tournament draw) AND the knockout cascade appended to `EC_GS`, which
-today carries only the `advance` threshold — without that second half a
-working chain would attribute leverage to zero bands. Tracked in #78.
+UEFA EURO 2028 runs on the same chain (#78). Its format is 24 teams in
+six groups of four, with the top two plus the **four best third-placed
+teams** entering a round of 16, so the chain seeds `LAST_16` directly.
+The pairings and the 15-row third-placer table come from the
+[Regulations of the UEFA European Football Championship 2026-28, Article
+21](https://documents.uefa.com/r/Regulations-of-the-UEFA-European-Football-Championship-2026-28/Article-21-Match-system-final-tournament-knockout-stage-Online)
+(`_EURO2028_LAST_16_PAIRINGS`, `_EURO2028_THIRD_PLACER_SLOT_TABLE`).
+EURO 2024 used the identical structure, and seeding its real final
+group tables through the chain reproduces all eight of its round-of-16
+ties, home and away, as football-data.org records them, and its real
+winners then walk the real quarter-finals, semi-finals and final. `EC_GS` carries the
+EURO knockout cascade (`round_of_16` through `winner`) next to
+`advance`, the same way `WC_GS` carries the World Cup's: importance sums
+only over a context's bands, so the cascade is what makes the chain
+visible in the score.
+
+The knockout games themselves score from the simulated bracket once each
+is placed in it (#243): EURO 2024's knockouts replayed through the real
+knockout source scored round of 16 6.5-13.1, quarter-finals 10.7-16.9 and
+the final 18.4 importance points. A knockout game that cannot be placed
+(the bracket fetch gave up, its teams are not in the simulated bracket)
+scores 0 and, with only its tournament-stage band, would fall below the
+5.0 `placeholder_min_score` and get no channel when its stream is
+unmatched. World Cup and EURO knockout games therefore get a round-scaled
+importance FLOOR (`scoring._KNOCKOUT_IMPORTANCE`: round of 32 2.8, round
+of 16 3.4, quarter-final 4.0, semi-final 4.6, final 6.0, third place 3.4),
+one map for both, displayed about 5.5 / 6.5 / 7.5 / 8.3 / 9.2 at the
+default weights. It applies only when it beats the simulated value; an
+unplaced EURO 2024 quarter-final goes from 2.3 to 7.5 and the final from
+4.4 to 9.2 (#250).
+The competitions granted it are listed in
+`scoring._KNOCKOUT_PREMIUM_COMPETITIONS`; club and domestic cups use the
+same stage labels and are deliberately not in it. A tournament whose chain
+is wired must be listed there (`tests/test_knockout_premium.py`).
+
+Each competition's bracket lives in one `_CHAIN_BRACKETS` entry in
+`sources/soccer.py`. The chain stays off when a season's group letters
+are not that format's (an older World Cup, a draw not made yet), or
+when a group is missing one of its four named teams (a play-off place
+still TBD), so a bracket is never seeded from the wrong shape.
+
+The simulated bracket plays every round to the final. Until #78 it
+stopped one round after its entry round: a tie whose participants the
+simulation itself decided was recorded as a two-leg tie, so a single-leg
+quarter-final (WC: round of 16) never finished, and the World Cup chain
+only ever reached its `round_of_16` band. It runs for as long as any
+group game is unplayed, and does not wait for football-data.org to leave
+the knockout fixtures blank: their teams fill in as feeder groups
+finish, while other groups still have their decisive final matchday.
+
+Group positions follow the regulations' order: points, then the
+head-to-head record among the teams level on points (reapplied to any
+that are still level), then overall goal difference and goals scored
+(UEFA Article 20.01; FIFA's 2026 regulations also rank head-to-head
+first). EURO's best-third ranking adds wins after goals scored (Article
+19.04). Disciplinary points and the qualifiers ranking are not in
+football-data.org's free data, so teams level after every modelled
+criterion keep a fixed order. That is the one EURO 2024 difference:
+Denmark and Slovenia finished Group C level on everything but cards.
+EURO's Article 20.02 penalty shoot-out (two teams level on points and
+goals that draw their last group match against each other, with no
+third team on the same points) is not modelled either: the pair keeps
+the same fixed order rather than a 50/50 split.
 
 
 ## Stage 3: raw sum + compress to 0-10 ★
@@ -551,9 +661,9 @@ A typical description for a high-stakes game:
 Kickoff: Today 2:00 PM CDT 🔴 TODAY
 Matchup: Brentford FC @ Manchester United FC
 Sport: English Premier League
-Score: 8.4/10  (raw 21.8)
+Score: 8.7/10  (raw 21.2)
 Score breakdown:
-  rank_pair: +7.92
+  rank_pair: +7.37
   close_game: +2.16        (devigged coinflip-ness 0.72)
   importance: +11.7
 Importance notes (top 3):
@@ -563,8 +673,8 @@ Importance notes (top 3):
 Source: Manchester United
 ```
 
-- **Score: 8.4/10**: the final ★ rating after compression.
-- **(raw 21.8)**: pre-compression raw points, useful for debugging.
+- **Score: 8.7/10**: the final ★ rating after compression.
+- **(raw 21.2)**: pre-compression raw points, useful for debugging.
 - **Score breakdown**: each signal's contribution. Sum equals raw.
 - **Importance notes (top 3)**: the three (team, outcome) tuples with
   the highest leverage. Each line is `team outcome: leverage × weight
@@ -585,8 +695,10 @@ patterns:
   Carlo importance, or `weights.importance = 0`.
 - `importance` very small → both teams' outcomes are locked in (early
   September: nothing yet decided; late May: lots locked in).
-- `rank_pair` missing → at least one team is unranked or the sport
-  doesn't use rankings.
+- `rank_pair` missing → at least one team is unranked, the sport
+  doesn't use rankings, or the rank points came to 0 (last vs last of a
+  league table). `one_ranked` present instead means exactly one side is
+  ranked.
 - `close_game` missing → no spread / closeness data from the source.
 
 
@@ -618,9 +730,11 @@ doesn't capture:
   classification the bands cascade reads.
 - **Field events (F1, golf, NASCAR, UFC):** no two-team head-to-head
   structure, so rank / favorite / closeness signals don't fire. The
-  `tournament_stage` band (`EVENT` for regular weekly events, `MAJOR`
-  for golf majors / Monaco GP / etc) is what gets them onto the
-  guide at all.
+  `tournament_stage` band (`EVENT` for regular weekly events,
+  `TOUR_PLAYOFF` for golf's three FedEx Cup playoff events, `MAJOR` for
+  golf majors / tennis Slams / numbered UFC events / title fights) is
+  what gets them onto the guide at all. F1 and NASCAR have no major
+  tier: every race is `EVENT`.
 - **NCAA Women's Basketball / March Madness:** ESPN scoreboard for
   the regular season, dedicated `NcaawSource` knows the 6-round
   single-game elimination shape (R64 → R32 → S16 → E8 → F4 → NCG).
@@ -635,12 +749,12 @@ are two layers of control, and most people never leave the first:
 
 1. **Curation presets** (the `curation_preset` setting): one dropdown
    that bundles every weight plus `max_games`. Pick one and you are done.
-2. **Manual weights**: set `curation_preset` to `manual` and the nine
-   individual `weight_*` numbers (plus `max_games`) take over, so you can
-   nudge a single signal.
+2. **Manual weights**: set `curation_preset` to `manual` and the
+   **Scoring weights** setting (plus `max_games`) takes over, so you can
+   nudge a single signal by naming just that one, e.g. `favorite=8`.
 
-Picking any preset other than `manual` IGNORES the individual `weight_*`
-settings and `max_games`. If you have hand-tuned weights you want to keep,
+Picking any preset other than `manual` IGNORES the **Scoring weights**
+setting and `max_games`. If you have hand-tuned weights you want to keep,
 stay on `manual`.
 
 ### Recipes: "I want X, so I change Y"
@@ -652,11 +766,11 @@ or wait for the next scheduled refresh, to see the new ordering.
 | I want... | Change | Why it works |
 |---|---|---|
 | **Just my teams, short list** | set `favorites`, then `curation_preset` → `high_curation` | Favorites are always included regardless of score; `high_curation` caps the rest at ~10 so your teams sit at the top of a tight list. |
-| **My teams to outrank everything** (manual) | `weight_favorite` 6 → 12 | Each favorite game gains +6 raw (~+1 to +2 ★ depending on compression), enough to jump a favorite above all but the highest-stakes neutral games. |
-| **Nail-biters, I don't care about stakes** | `weight_spread` 3 → 8, `weight_importance` 3 → 0 | Close-game contribution is `closeness × weight`, so a coin-flip now adds up to 8 raw instead of 3; zeroing importance removes the season-stakes signal entirely. (Needs an Odds API key for the closeness data.) |
-| **Marquee names only, ignore standings context** | `weight_rank` 1 → 3, `weight_importance` 3 → 0 | A 1-vs-1 ranked pair jumps from 10 → 30 raw; with importance off, ranking is the dominant driver. Good for a "big names" guide. |
-| **Fewer random cup knockouts crowding the league** | `weight_tournament` 1.5 → 0.5 | A Final drops from 7.5 → 2.5 raw, a Round-of-16 from 2.25 → 0.75, so league games with real stakes stop getting pushed down by early-round cup ties. |
-| **Importance feels too dominant** | `weight_importance` 3 → 1 | The Monte Carlo signal scales linearly with this knob; thirding it lets rank, closeness, and favorites compete on a more even footing. |
+| **My teams to outrank everything** (manual) | Scoring weights: `favorite=12` (default 6) | Each favorite game gains +6 raw (~+1 to +2 ★ depending on compression), enough to jump a favorite above all but the highest-stakes neutral games. |
+| **Nail-biters, I don't care about stakes** | Scoring weights: `spread=8, importance=0` (defaults 3, 3) | Close-game contribution is `closeness × weight`, so a coin-flip now adds up to 8 raw instead of 3; zeroing importance removes the season-stakes signal entirely. (Needs an Odds API key for the closeness data.) |
+| **Marquee names only, ignore standings context** | Scoring weights: `rank=3, importance=0` (defaults 1, 3) | A 1-vs-1 ranked pair jumps from 10 → 30 raw; with importance off, ranking is the dominant driver. Good for a "big names" guide. |
+| **Fewer random cup knockouts crowding the league** | Scoring weights: `tournament=0.5` (default 1.5) | A Final drops from 7.5 → 2.5 raw, a Round-of-16 from 2.25 → 0.75, so league games with real stakes stop getting pushed down by early-round cup ties. |
+| **Importance feels too dominant** | Scoring weights: `importance=1` (default 3) | The Monte Carlo signal scales linearly with this knob; thirding it lets rank, closeness, and favorites compete on a more even footing. |
 | **Early-season weeks feel flat / late-season everything is ★10** | turn ON `adaptive_scoring` | Switches compression from a fixed curve to a per-refresh one keyed off the batch median, so the top games of any week always read as top games. |
 | **More games on the guide, including smaller stakes** | `curation_preset` → `high_coverage` (or on `manual`, raise `max_games`) | `high_coverage` widens the cap to ~50 and softens the weights so lower-leverage games clear the bar. |
 | **Same curation, just a different list length** | on `manual`, change only `max_games` | `max_games` is the only list-length lever; it trims from the bottom of the sorted list without changing how anything is scored. Games involving a favorite or a recorded team, and games already on air, are never trimmed, so the list can run slightly longer than the cap. |
@@ -685,25 +799,31 @@ opt-in regardless of preset. `high_curation` tilts toward stakes
 
 ### Knob reference
 
-The recipes above cover the common goals. For reference, each individual
-weight on `manual`:
+The recipes above cover the common goals. For reference, each weight on
+`manual`. All of them live in ONE setting, **Scoring weights**, written as
+`name=number` entries separated by commas (for example
+`favorite=8, spread=1`); leave it blank for every default, and name only the
+weights you want to change. An entry the plugin cannot read (an unknown name,
+a value that is not a number) is skipped and logged, never fatal. Before
+#208 these were seven separate `weight_<name>` fields; values saved there are
+carried into Scoring weights automatically on upgrade (#208).
 
-- **`weight_rank`** (default 1.0): multiplier on the rank-pair signal.
+- **`rank`** (default 1.0): multiplier on the rank-pair signal.
   Bump to 2.0 and top-25 matchups score ~2x.
-- **`weight_spread`** (default 3.0): multiplier on closeness `[0, 1]`. A
-  true pick'em adds `weight_spread` raw points.
-- **`weight_favorite`** (default 6.0): flat points added per favorite
+- **`spread`** (default 3.0): multiplier on closeness `[0, 1]`. A
+  true pick'em adds `spread` raw points.
+- **`favorite`** (default 6.0): flat points added per favorite
   game. Each +6 is roughly +1 to +2 ★ after compression.
-- **`weight_tournament`** (default 1.5): multiplier on the per-stage
+- **`tournament`** (default 1.5): multiplier on the per-stage
   scalar (Final 5.0, SF 3.5, QF 2.5, R16 1.5, ...).
-- **`weight_rivalry`** (default 2.0): flat bonus on rivalry games.
-- **`weight_importance`** (default 3.0): multiplier on the Monte Carlo
+- **`rivalry`** (default 2.0): flat bonus on rivalry games.
+- **`importance`** (default 3.0): multiplier on the Monte Carlo
   leverage. Set to 0 to disable stakes scoring entirely.
-- **`weight_narrative`** (default 0.0, off): multiplier on the LLM
+- **`narrative`** (default 0.0, off): multiplier on the LLM
   narrative score. Needs an Anthropic key; set > 0 to enable.
 
 The weights compose multiplicatively with the per-signal magnitudes,
-so a `weight_rank = 3.0, weight_importance = 0` config aggressively
+so a `rank=3, importance=0` config aggressively
 elevates rank-pair games while ignoring stakes leverage entirely:
 useful for purely "marquee matchup" guides without season-context
 sensitivity.
@@ -727,18 +847,26 @@ expected before judging the whole guide.
   `remaining_matches` list, the simulator can't propagate the season
   forward far enough to differentiate end-of-season outcomes. Signal
   sharpens as the season's end window narrows.
-- **UEFA EURO 2028 bracket leverage:** the cross-source chain
-  machinery that makes WC 2026 group games show R16+ leverage is
-  WC-specific. EURO 2028 needs analogous wiring once UEFA publishes
-  the bracket structure (~12-18 months pre-tournament).
-- **A failed season fetch zeroes importance for that competition**, for
-  the run. The simulator replays the competition's full fixture list, so
-  if football-data.org cannot be reached for it the games score no
-  standings stakes (other signals still count). The fetch is retried at
+- **Group tiebreakers stop before fair play** for WC and EURO group
+  stages: disciplinary points, the qualifiers / FIFA ranking and drawing
+  of lots are not in football-data.org's free data, so teams level on
+  every earlier criterion keep a fixed order. The same holds for EURO's
+  Article 20.02 penalty shoot-out between two level teams that draw
+  their last group match against each other (when no third team is on
+  the same points).
+- **A failed season fetch zeroes simulated importance for that
+  competition**, for the run. The simulator replays the competition's full
+  fixture list, so if football-data.org cannot be reached for it the games
+  score no simulated standings stakes (other signals still count, and a
+  World Cup or EURO knockout game still gets its round's floor). The fetch is retried at
   most twice per refresh rather than once per simulated season, and a
   competition that gives up is reported in the refresh summary as
   `<code> season fixtures (stakes not simulated)`, so the zero is visible
-  rather than passing for a real result.
+  rather than passing for a real result. Playoff brackets work the same
+  way: a bracket fetch in which any request failed (one missing day of a
+  scoreboard sweep is a wrong series score) is not used, is retried, and a
+  bracket that gives up is reported as `<label> bracket (stakes not
+  simulated)`.
 - **In-progress games** are treated as SCHEDULED (not FINISHED) for
   state-building so the simulator doesn't seed wins/losses from
   mid-game state. Once the game ends and the source's API updates,

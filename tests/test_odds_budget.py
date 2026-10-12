@@ -11,6 +11,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from tests.conftest import stub_requests_get
 
 UTC = timezone.utc
 NOW = datetime(2026, 10, 11, 3, 0, tzinfo=UTC)
@@ -43,7 +44,7 @@ def http(odds, monkeypatch):
         calls.append((url, dict(params or {})))
         return queue.pop(0) if queue else FakeResp()
 
-    monkeypatch.setattr(odds.requests, "get", get)
+    stub_requests_get(monkeypatch, get)
     return calls, queue
 
 
@@ -114,7 +115,7 @@ def test_network_error_serves_the_cached_line_and_redacts_the_key(odds, http, mo
     def boom(url, params=None, timeout=None):
         raise odds.requests.ConnectionError(f"failed {url}?apiKey={KEY}")
 
-    monkeypatch.setattr(odds.requests, "get", boom)
+    stub_requests_get(monkeypatch, boom)
     with caplog.at_level(logging.WARNING):
         assert _fetch(odds, now=NOW + timedelta(hours=30)) == EVENTS
     assert KEY not in caplog.text
@@ -183,8 +184,7 @@ def test_stale_fallback_drops_fixtures_already_played(odds, http, monkeypatch):
     """A week-old cached line for Liverpool v Man City must not be lent to
     their next meeting."""
     _fetch(odds)
-    monkeypatch.setattr(odds.requests, "get",
-                        lambda *a, **k: FakeResp(503, {}))
+    stub_requests_get(monkeypatch, lambda *a, **k: FakeResp(503, {}))
     assert _fetch(odds, now=NOW + timedelta(days=7)) == []
 
 

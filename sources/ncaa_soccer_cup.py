@@ -8,7 +8,7 @@ gender, mirroring NcaaSoccerSource (regular season): same pattern.
 
 Bracket shape (6 rounds, both genders):
 
-| ESPN season.slug                | Stage label | KNOCKOUT_ROUND_DEPTH |
+| ESPN round slug                 | Stage label | KNOCKOUT_ROUND_DEPTH |
 |---------------------------------|-------------|----------------------|
 | first-round                     | R64         | 0 (entry)            |
 | second-round                    | R32         | 1                    |
@@ -25,6 +25,17 @@ cup---semifinal" / "college-cup---championship"; W's uses "semifinals" /
 stage labels, which match `KNOCKOUT_ROUND_DEPTH` entries already in use
 by NCAA Women's Basketball March Madness (also a 6-round single-game
 elim bracket: the depth dict is shared and the cascade is identical).
+
+Round routing (#235): the round slug is NOT reliably on the event. ESPN
+tagged every 2024 tournament event with it (`event.season.slug`), but
+in 2025 it tagged 5 of 47 men's events and 3 of 63 women's; the rest
+carry the plain season slug, exactly like an October game. The rounds
+still exist in ESPN's season calendar as season types with UTC
+windows, so `_stage_for_event` reads, in order: the event's own round
+slug, the event's own round season-type id, then the round window its
+kickoff falls in (`_espn.fetch_season_type_windows`). DO NOT go back
+to slug-only routing: on 2025 data it finds 5 men's third-round games
+and nothing else, and the cascade reads that as the whole bracket.
 
 Field size note: Men's NCAA Soccer Tournament uses a 48-team field with
 16 byes (top 16 seeds play their first match in the second round), so
@@ -52,15 +63,29 @@ viewership of any D1 soccer game by an order of magnitude.
 from __future__ import annotations
 
 import logging
-import random
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import GameRow, MatchResult
-from .bracket import BestOfNSeriesSource
-from .._util import parse_iso_utc, poisson_sample as _poisson
+from .base import GameRow
+from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
+from ._espn import (
+    SeasonTypeWindow,
+    dedupe_events,
+    event_identity,
+    extract_espn_scoreboard_event,
+    fetch_scoreboard_day,
+    fetch_season_type_windows,
+    scoreboard_events,
+    season_type_at,
+    sweep_upcoming_scoreboard,
+)
+# ONE canonicalizer for both NCAA soccer sources, imported rather than
+# copied: the regular-season strength seed is keyed by the regular source's
+# team names and looked up by this source's, so the two MUST agree.
+from .ncaa_soccer import _team_canonical_name
+from .._util import parse_iso_utc, http_get_json
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaa_soccer_cup")
 
@@ -79,7 +104,10 @@ TOURNAMENT_END_MONTH = 12
 _DEFAULT_GOALS_FOR = 1.5
 _DEFAULT_GOALS_AGAINST = 1.5
 
-# Map ESPN's per-event `season.slug` to canonical bracket stage labels.
+# Map ESPN's round slug to canonical bracket stage labels. The same slugs
+# name the rounds whether they arrive on the event (`season.slug`) or on
+# the season calendar's round types (`SeasonTypeWindow.slug`); see
+# `NcaaSoccerCupSource._stage_for_event`.
 # Stage labels are reused from NCAAW Basketball (R64/R32/S16/E8/F4/NCG)
 # because the depth ordering in KNOCKOUT_ROUND_DEPTH already supports
 # them and the cascade behaves identically for single-game elim brackets.
@@ -99,45 +127,26 @@ SLUG_TO_STAGE: Dict[str, str] = {
 }
 
 
+class CalendarUnavailable(RuntimeError):
+    """ESPN's season calendar could not be read while tournament games may
+    be on the board. See `NcaaSoccerCupSource.fetch_upcoming`."""
+
+
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
-    """ESPN endpoints return dicts; the wrapper type is Optional[Any]
-    rather than Optional[Dict] to keep the contract honest about the
-    None failure path. Caller checks isinstance(data, dict)."""
-    try:
-        r = requests.get(url, timeout=timeout)
-        if r.status_code >= 400:
-            logger.warning("[ncaa_soccer_cup] %s -> %d", url, r.status_code)
-            return None
-        return r.json()
-    except (requests.RequestException, ValueError) as exc:
-        logger.warning("[ncaa_soccer_cup] %s failed: %s", url, exc)
-        return None
+    """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
+    return http_get_json(requests, url, log=logger, tag="ncaa_soccer_cup", timeout=timeout)
 
 
-# Bracket dedup helpers are shared with mls_cup -- canonical impls live
-# in _soccer_bracket_helpers. Re-export under the legacy names so any
-# tests / call sites grepping for `_dedupe_pk_shootout_pairs` in this
-# module still find it.
+# Bracket dedup helper shared with mls_cup -- the canonical impl lives in
+# _soccer_bracket_helpers. Imported under the legacy name, which tests
+# import from this module.
 from ._soccer_bracket_helpers import (
     dedupe_pk_shootout_pairs as _dedupe_pk_shootout_pairs,
-    pick_decisive_event as _pick_decisive_event,
+    pk_pair_identity,
 )
 
 
-def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
-    """Prefer `team.location` (school) over `team.name` (mascot): the
-    EPG side of the matcher uses school names like "Washington at
-    Stanford" rather than mascots like "Huskies at Cardinal". Same
-    canonicalizer as NcaaSoccerSource so the cross-source team-name
-    join (regular-season strength seed → College Cup teams) holds.
-    """
-    loc = (team_obj.get("location") or "").strip()
-    if loc:
-        return loc
-    return (team_obj.get("name") or team_obj.get("abbreviation") or "").strip()
-
-
-class NcaaSoccerCupSource(BestOfNSeriesSource):
+class NcaaSoccerCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
     """NCAA D1 soccer College Cup bracket, parametrized on gender.
 
     Six single-game elim rounds (R64 → R32 → S16 → E8 → F4 → NCG).
@@ -153,6 +162,8 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
     KO_STAGES = ("R64", "R32", "S16", "E8", "F4", "NCG")
     SERIES_LENGTH = 1
     supports_importance = True
+    # Goals, not points: see ForcedWinnerPoissonSampler.LAMBDA_FLOOR.
+    LAMBDA_FLOOR = 0.05
 
     def __init__(
         self,
@@ -175,6 +186,11 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
             else (now.year if now.month >= 8 else now.year - 1)
         )
         self._bracket_games_cache: Optional[List[Dict[str, Any]]] = None
+        # Round windows per season year, memoised for this instance (one
+        # refresh). A failed fetch is memoised too, as None, so a refresh
+        # makes one calendar request per year rather than one per event;
+        # the next refresh builds a new source and asks again.
+        self._season_windows_by_year: Dict[int, Optional[List[SeasonTypeWindow]]] = {}
         self._team_strengths_from_regular: Optional[
             Dict[str, Dict[str, float]]
         ] = None
@@ -236,87 +252,78 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
             "pa_per_game": _DEFAULT_GOALS_AGAINST,
         }
 
-    # ---------- sample_result (force a winner: bracket games) ----------
-
-    def sample_result(
-        self,
-        state: Dict[str, Any],
-        match: GameRow,
-        strengths: Dict[str, Dict[str, float]],
-        rng: random.Random,
-    ) -> MatchResult:
-        """Bracket games CANNOT end in a draw: NCAA postseason soccer
-        goes to OT then PKs if needed. Sample Poisson goals; on a tied
-        regulation result, coin-flip the +1 boost so the bracket
-        cascade gets a clean winner. Distinct from NcaaSoccerSource
-        regular-season sample_result which allows draws (1 standings
-        point each): bracket scenarios have no draw outcome at all.
-        """
-        del state  # interface-required, per-game classification only
-        h = self._strength_for(strengths, match.home)
-        a = self._strength_for(strengths, match.away)
-        lam_home = max(0.05, (h["pf_per_game"] + a["pa_per_game"]) / 2.0)
-        lam_away = max(0.05, (a["pf_per_game"] + h["pa_per_game"]) / 2.0)
-        home_goals = _poisson(lam_home, rng)
-        away_goals = _poisson(lam_away, rng)
-        if home_goals == away_goals:
-            # OT / PKs in real life; coin-flip the +1 here. Strength
-            # asymmetry already biased the Poisson means: no further
-            # bias added (PK shootouts are roughly coin-flips empirically
-            # at the NCAA level).
-            if rng.random() < 0.5:
-                home_goals += 1
-            else:
-                away_goals += 1
-        return MatchResult(home_goals=home_goals, away_goals=away_goals)
-
     # ---------- fetch_upcoming (EPG display side) ----------
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Emit upcoming tournament games (any stage). Per-day sweep:
-        ESPN's date-range syntax silently caps at 25 events, same trap
-        as ncaa_baseball.py / ncaa_soccer.py. Postseason games carry
-        a `season.slug` of one of the SLUG_TO_STAGE keys; non-tournament
-        games are filtered out so only bracket games surface here.
+        `_espn.sweep_upcoming_scoreboard`, one day at a time with
+        `_espn.SCOREBOARD_EVENT_LIMIT` (a date range is unreliable, #182). Only events
+        `_stage_for_event` places in a tournament round surface here;
+        regular-season games are filtered out.
+
+        RAISES `CalendarUnavailable` when the board holds an event in the
+        tournament months and ESPN's season calendar is unreachable.
+        Returning only the few events ESPN tags (1 of 25 on the 2025
+        women's Nov 14 board) would read as a real, shorter slate: the
+        refresh would not hold the channels already published and apply
+        could reap them. A raise is what the refresh treats as this
+        source's outage (it holds the previous rows, #240). Even a tagged
+        event is not published then, because the importance bracket needs
+        the calendar too. Before November nothing can be a tournament game,
+        so a missing calendar then costs nothing and is not an error.
         """
-        today = datetime.now(timezone.utc).date()
+        # The shared upcoming sweep owns the Eastern-bucket lookback, the
+        # FINISHED drop, the stale-SCHEDULED floor and the id dedupe (see
+        # _espn.sweep_upcoming_scoreboard). The bracket SWEEP below must not
+        # use it (it keeps finished games); this EPG path wants exactly it.
+        recs = sweep_upcoming_scoreboard(
+            slug=self._espn_slug,
+            days_ahead=days_ahead,
+            team_namer=_team_canonical_name,
+            http_get=_http_get,
+            extras_fn=lambda event: {
+                "_routed": self._stage_for_event(event),
+                "_season_year": self._event_season_year(event),
+                "_identity": event_identity(event),
+            },
+            base=ESPN_BASE,
+        )
         out: List[GameRow] = []
-        seen_ids: set = set()
-        for offset in range(days_ahead + 1):
-            day = today + timedelta(days=offset)
-            data = _http_get(
-                f"{ESPN_BASE}/{self._espn_slug}/scoreboard?"
-                f"dates={day.strftime('%Y%m%d')}"
-            )
-            if not isinstance(data, dict):
+        for rec in recs:
+            year = rec["_season_year"]
+            # Checked for EVERY tournament-month event, tagged ones too: the
+            # importance bracket (`_fetch_bracket_games`, which reads THIS
+            # source's season) is empty without the calendar, so a tagged
+            # row published now would be scored against no bracket at all.
+            # The event's own season is checked as well because routing
+            # reads that one.
+            if rec["start_time"].month >= TOURNAMENT_START_MONTH:
+                for needed in sorted({year, self.season_year}):
+                    if self._season_windows(needed) is None:
+                        raise CalendarUnavailable(
+                            f"ESPN {needed} season calendar for {self._espn_slug} "
+                            f"is unavailable, so tournament rounds cannot be placed"
+                        )
+            routed = rec.get("_routed")
+            if routed is None:
                 continue
-            for event in data.get("events") or []:
-                rec = self._extract_bracket_record(event)
-                if rec is None:
-                    continue
-                eid = rec.get("game_id")
-                if eid in seen_ids:
-                    continue
-                seen_ids.add(eid)
-                start = rec.get("start_time")
-                if start is None:
-                    continue
-                out.append(GameRow(
-                    sport_prefix=self.sport_prefix,
-                    sport_label=self.sport_label,
-                    home=rec["home"],
-                    away=rec["away"],
-                    rank_home=None,
-                    rank_away=None,
-                    start_time=start,
-                    extra={
-                        "espn_event_id": eid,
-                        # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                        "game_id": eid,
-                        "fd_competition_code": self._league_context_code(),
-                        "stage": rec.get("stage"),
-                    },
-                ))
+            eid = rec.get("id")
+            out.append(GameRow(
+                sport_prefix=self.sport_prefix,
+                sport_label=self.sport_label,
+                home=rec["home"],
+                away=rec["away"],
+                rank_home=None,
+                rank_away=None,
+                start_time=rec["start_time"],
+                extra={
+                    "espn_event_id": eid,
+                    # Identity key the simulator compares on; see GameRow.extra in base.py. #181
+                    "game_id": rec["_identity"],
+                    "fd_competition_code": self._league_context_code(),
+                    "stage": routed[0],
+                },
+            ))
         return out
 
     # ---------- _fetch_bracket_games (importance side) ----------
@@ -324,9 +331,15 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
     def _fetch_bracket_games(self) -> List[Dict[str, Any]]:
         """Pull the November-December tournament window and emit one
         canonical record per bracket game. Filters out non-tournament
-        events via SLUG_TO_STAGE membership: regular-season games
-        won't carry a slug like 'quarterfinals', so they fall out
-        naturally.
+        events via `_stage_for_event`: a regular-season game has no
+        round slug, no round type and a kickoff outside every round
+        window, so it falls out.
+
+        Without ESPN's round calendar this returns [] and does NOT cache
+        it. Slug-only routing would keep just the few events ESPN still
+        tags (3 of 63 in the 2025 women's bracket) and the cascade would
+        read every other team as never having advanced, which is a WRONG
+        importance signal rather than a missing one (#235).
 
         ESPN sometimes records two events for a single bracket game
         that goes to OT / PKs: one with the regulation 0-0 / X-X tie
@@ -342,9 +355,9 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
         """
         if self._bracket_games_cache is not None:
             return self._bracket_games_cache
+        if self._season_windows(self.season_year) is None:
+            return []
 
-        candidates: List[Dict[str, Any]] = []
-        seen_ids: set = set()
         # Tournament window: Nov 1 - Dec 31 of season_year.
         start = datetime(
             self.season_year, TOURNAMENT_START_MONTH, 1, tzinfo=timezone.utc,
@@ -354,92 +367,127 @@ class NcaaSoccerCupSource(BestOfNSeriesSource):
             datetime(self.season_year + 1, 1, 1, tzinfo=timezone.utc).date()
             - timedelta(days=1)
         )
-        day = start
-        while day <= end:
-            data = _http_get(
-                f"{ESPN_BASE}/{self._espn_slug}/scoreboard?"
-                f"dates={day.strftime('%Y%m%d')}"
-            )
-            if isinstance(data, dict):
-                for event in data.get("events") or []:
-                    rec = self._extract_bracket_record(event)
-                    if rec is None or rec["game_id"] is None:
-                        continue
-                    if rec["game_id"] in seen_ids:
-                        continue
-                    seen_ids.add(rec["game_id"])
-                    candidates.append(rec)
-            day += timedelta(days=1)
+        payloads = self._sweep_bracket_days(
+            start, end,
+            lambda d: fetch_scoreboard_day(
+                _http_get, f"{ESPN_BASE}/{self._espn_slug}/scoreboard", d,
+            ),
+        )
+        if payloads is None:
+            # A day failed: NOT cached (#245; see BracketSportSource).
+            return []
 
-        self._bracket_games_cache = _dedupe_pk_shootout_pairs(candidates)
-        return self._bracket_games_cache
+        # The record's game_id is already the event's identity. Every round
+        # is one game, so every record goes through the PK-pair selector,
+        # which must see an id-less pair's two records (pk_pair_identity).
+        candidates = dedupe_events(
+            scoreboard_events(payloads), lambda event, _key: self._extract_bracket_record(event),
+            pk_pair_identity,
+        )
+        return self._cache_bracket_games(_dedupe_pk_shootout_pairs(candidates))
 
-    @staticmethod
+    # ---------- round routing ----------
+
+    def _season_windows(self, year: int) -> Optional[List[SeasonTypeWindow]]:
+        """ESPN's season calendar for `year`, memoised per instance (see
+        `_season_windows_by_year`). Logs once per year when it is missing."""
+        if year not in self._season_windows_by_year:
+            windows = fetch_season_type_windows(self._espn_slug, year, _http_get)
+            if windows is None:
+                logger.warning(
+                    "[ncaa_soccer_cup] no %d season calendar for %s; %s",
+                    year, self._espn_slug,
+                    "the importance bracket is empty and a tournament-month "
+                    "board raises CalendarUnavailable"
+                    if year == self.season_year
+                    else "that season's untagged events cannot be placed in a round",
+                )
+            self._season_windows_by_year[year] = windows
+        return self._season_windows_by_year[year]
+
+    def _event_season_year(self, event: Dict[str, Any]) -> int:
+        """The event's own `season.year`, else this source's season."""
+        try:
+            return int((event.get("season") or {}).get("year") or self.season_year)
+        except (TypeError, ValueError):
+            return self.season_year
+
+    def _stage_for_event(
+        self, event: Dict[str, Any],
+    ) -> Optional[tuple[str, str, str]]:
+        """`(stage, round_slug, how)` for a tournament event, else None.
+
+        Three signals, strongest first, because ESPN fills them
+        inconsistently (#235; see the module docstring):
+
+          1. `event.season.slug` is a round slug (every 2024 event).
+          2. `event.season.type` is a round's season-type id.
+          3. The kickoff falls inside a round's window on ESPN's season
+             calendar (every untagged 2025 event).
+
+        Signal 3 is only consulted for an event of the calendar's own
+        season year, so a stray event from another season is never read
+        against the wrong year's windows.
+        """
+        season = event.get("season") or {}
+        slug = (season.get("slug") or "").strip().lower()
+        if slug in SLUG_TO_STAGE:
+            return SLUG_TO_STAGE[slug], slug, "slug"
+        windows = self._season_windows(self._event_season_year(event))
+        if not windows:
+            return None
+        try:
+            type_id: Optional[int] = int(season.get("type"))
+        except (TypeError, ValueError):
+            type_id = None
+        if type_id is not None:
+            for w in windows:
+                if w.type_id == type_id and w.slug in SLUG_TO_STAGE:
+                    return SLUG_TO_STAGE[w.slug], w.slug, "season_type"
+        w = season_type_at(windows, parse_iso_utc(event.get("date")))
+        if w is not None and w.slug in SLUG_TO_STAGE:
+            return SLUG_TO_STAGE[w.slug], w.slug, "round_window"
+        return None
+
     def _extract_bracket_record(
-        event: Dict[str, Any],
+        self, event: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """Convert one ESPN scoreboard event into the canonical
         BracketSportSource per-game record shape, OR None if the event
         isn't a tournament bracket game.
 
-        Stage routing: `event.season.slug` carries the round identifier
-        (e.g. 'first-round', 'college-cup---semifinal'). Non-tournament
-        games (regular-season) carry a different slug and are filtered
-        out via SLUG_TO_STAGE membership.
+        Stage routing is `_stage_for_event`; read it before assuming the
+        event names its own round (since 2025 it mostly does not).
         """
-        season = event.get("season") or {}
-        slug = (season.get("slug") or "").strip().lower()
-        stage = SLUG_TO_STAGE.get(slug)
-        if stage is None:
+        routed = self._stage_for_event(event)
+        if routed is None:
             return None
+        stage, round_slug, routed_by = routed
 
-        comps = event.get("competitions") or []
-        if not comps:
+        # The shared parser owns competitor, status and score handling,
+        # including the FINISHED-without-score demotion (see _espn).
+        rec = extract_espn_scoreboard_event(event, team_namer=_team_canonical_name)
+        if rec is None:
             return None
-        comp = comps[0]
-        competitors = comp.get("competitors") or []
-        if len(competitors) != 2:
-            return None
-        home = next((c for c in competitors if c.get("homeAway") == "home"), None)
-        away = next((c for c in competitors if c.get("homeAway") == "away"), None)
-        if home is None or away is None:
-            return None
-        home_team = _team_canonical_name(home.get("team") or {})
-        away_team = _team_canonical_name(away.get("team") or {})
-        if not home_team or not away_team:
-            return None
-
-        status_type = (comp.get("status") or {}).get("type") or {}
-        completed = bool(status_type.get("completed"))
-        state = (status_type.get("state") or "").lower()
-        is_final = completed or state == "post"
-        status = "FINISHED" if is_final else "SCHEDULED"
-
-        try:
-            hg = int(home.get("score")) if is_final else None
-        except (TypeError, ValueError):
-            hg = None
-        try:
-            ag = int(away.get("score")) if is_final else None
-        except (TypeError, ValueError):
-            ag = None
-
-        if is_final and (hg is None or ag is None):
-            status = "SCHEDULED"
-            hg = None
-            ag = None
 
         return {
-            "game_id": event.get("id"),
+            "game_id": event_identity(event),  # never None: see _espn.dedupe_events
             "stage": stage,
             # SERIES_LENGTH=1 means each game is its own one-game series.
             # matchday is always 1; BracketSportSource clinches at first win.
             "matchday": 1,
-            "home": home_team,
-            "away": away_team,
-            "home_goals": hg,
-            "away_goals": ag,
-            "status": status,
-            "start_time": parse_iso_utc(event.get("date")),
-            "extra": {"season_slug": slug},
+            "home": rec["home"],
+            "away": rec["away"],
+            "home_goals": rec["home_points"],
+            "away_goals": rec["away_points"],
+            "status": rec["status"],
+            "start_time": rec["start_time"],
+            # season_slug is what the EVENT said; round_slug is the round
+            # it was placed in and stage_routed_by which signal placed it,
+            # so a misrouted game can be traced from the cache.
+            "extra": {
+                "season_slug": (event.get("season") or {}).get("slug"),
+                "round_slug": round_slug,
+                "stage_routed_by": routed_by,
+            },
         }

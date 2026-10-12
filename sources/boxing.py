@@ -13,7 +13,7 @@ contract every field event uses:
     `extra["fd_competition_code"] = "BOXING"`.
 
 DO NOT subclass FieldEventSource. That base hardcodes the ESPN site API
-(ESPN_SLUG + scoreboard range query), and ESPN exposes NO boxing feed
+(ESPN_SLUG + the per-day scoreboard walk), and ESPN exposes NO boxing feed
 (verified 2026-07-10: site + core APIs both 404 for boxing, while mma/ufc
 works). Boxing's upstream is a DIFFERENT API (RapidAPI Boxing Data API),
 so this is a standalone SportSource that reuses the field-event OUTPUT
@@ -42,12 +42,13 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, List, Optional, Pattern
+from typing import Any, List, Optional, Pattern, Tuple
 
 import requests
 
-from .base import GameRow, SportSource
-from .._util import FIELD_AWAY_SENTINEL, field_event_extra, parse_iso_utc
+from ._espn import UpcomingWindow, upcoming_window
+from .base import GameRow, SportSource, report_lost_day_range
+from .._util import FIELD_AWAY_SENTINEL, field_event_extra, http_get_json, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.boxing")
 
@@ -59,6 +60,25 @@ _SCHEDULE_URL = f"https://{_RAPIDAPI_HOST}/v2/events/schedule"
 # Free-tier date-range cap. days>=14 returns DateOutOfRange (verified live
 # 2026-07-10). Raise this only after confirming a paid tier lifts the cap.
 _FREE_TIER_MAX_DAYS = 7
+
+# The schedule is PAGED (#284). boxing-data.com documents `page_size`
+# (default 25) and `page_num` (default 1) on /v2/events/schedule, and the
+# answer carries `pagination: {page, items, total_pages, total_items}` (as
+# the 2026-07-10 capture in tests/test_boxing.py does). One page of 25 used to be all
+# that was read, so a week with a 26th card lost it with nothing logged.
+# `_fetch_schedule` now reads every page. 25 stays the page size because it
+# is the size measured live; a larger one is undocumented, and an in-band
+# error on it would cost the whole source. A busy week costs one more request.
+#
+# NOT live-measured: no Boxing Data key was available to this change (none is
+# configured on Tower). The paging contract is the documented one; anything
+# that does not match it (no usable `pagination` on a full page, or a later
+# page answering for a different page number) is read as a truncated answer
+# and its days reported lost, never as a complete one.
+_PAGE_SIZE = 25
+# Pages read per refresh, at most. ~25 cards a week is a heavy week; 4 pages
+# is 100 cards, and a schedule claiming more is reported lost, not truncated.
+_MAX_PAGES = 4
 
 # Conservative MAJOR detection. The feed exposes no championship flag, so we
 # read the card title: an explicit belt (WBC/WBA/IBF/WBO/IBO/The Ring) or an
@@ -109,6 +129,49 @@ def _match_name(title: str) -> str:
     return title
 
 
+def _next_page(
+    data: dict, page: int, n_cards: int, n_read: int, promised: Optional[Tuple[Any, Any]],
+) -> Tuple[Optional[str], Optional[Tuple[Any, Any]]]:
+    """(why the schedule cannot be vouched for past `page`, or None; the
+    (total_pages, total_items) still to read up to, or None to stop), read
+    off the answer's `pagination`. `n_cards` is this page's card count,
+    `n_read` the distinct cards read so far, `promised` what page 1 gave
+    (None on page 1).
+
+    Page 1 with no usable paging (no integer `total_pages`, or an answer for
+    a different page than the one asked for): a short page is the whole
+    schedule, a full one cannot vouch for what comes after it. A later page
+    was asked for only because page 1 promised it, so it must answer as that
+    page of the SAME schedule: unusable paging there, or a page or card count
+    that differs from page 1's (a server ignoring `page_num`, or a schedule
+    that changed between the requests, which shifts cards across a page
+    boundary unseen), is a failure. So is a last page that leaves the cards
+    read short of `total_items`. More pages than `_MAX_PAGES`: the rest is not
+    read, and so not vouched for either.
+    """
+    paging = data.get("pagination")
+    paging = paging if isinstance(paging, dict) else {}
+    total, answered = paging.get("total_pages"), paging.get("page")
+    shape = (total, paging.get("total_items"))
+    usable = isinstance(total, int) and answered == page
+    if page > 1 and (not usable or shape != promised):
+        return (f"page {page} answered with pagination {paging!r}, but page 1 "
+                f"promised (pages, cards) {promised}"), None
+    if not usable:
+        if n_cards >= _PAGE_SIZE:
+            return f"page 1 is full and its pagination {paging!r} cannot say what follows", None
+        return None, None
+    if page >= total:
+        promised_cards = shape[1]
+        if isinstance(promised_cards, int) and n_read != promised_cards:
+            return (f"read {n_read} cards over {total} pages, but the schedule "
+                    f"lists {promised_cards}"), None
+        return None, None
+    if page >= _MAX_PAGES:
+        return f"{total} pages; only the first {_MAX_PAGES} were read", None
+    return None, shape
+
+
 class BoxingSource(SportSource):
     """Professional boxing cards from the Boxing Data API (RapidAPI).
 
@@ -121,7 +184,9 @@ class BoxingSource(SportSource):
     # golf / UFC / racing. No Monte Carlo importance.
 
     def __init__(self, api_key: str) -> None:
-        self.api_key = api_key
+        # Stripped: a key pasted with a leading space or trailing newline is
+        # an invalid header value, which `requests` rejects outright.
+        self.api_key = (api_key or "").strip()
 
     @property
     def sport_prefix(self) -> str:
@@ -139,31 +204,82 @@ class BoxingSource(SportSource):
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Pull upcoming boxing cards in the next `days_ahead` days (clamped to
-        the free-tier cap). Empty list on any error or when nothing is
-        scheduled; the caller does not filter by date."""
+        the free-tier cap), every page of them (`_fetch_schedule`). Returns
+        the cards that arrived: none when nothing is scheduled, those of the
+        pages before it when a page failed. The caller does not filter by
+        date.
+
+        A failed page (no JSON object back, an in-band `error`, or paging that
+        cannot vouch for the rest) is reported as losing every day the
+        schedule asked for, today-UTC through `days` after it (#261,
+        `base.report_lost_day_range`), so the refresh keeps the cards it had
+        published for them instead of reading a quiet week.
+        """
         if not self.api_key:
             logger.warning("[boxing] no Boxing Data API key; skipping")
             return []
         days = max(1, min(days_ahead, _FREE_TIER_MAX_DAYS))
-        params = {"days": days, "date_sort": "ASC", "page_size": 25}
-        data = self._http_get(_SCHEDULE_URL, params=params)
-        if not isinstance(data, dict):
-            return []
-        err = data.get("error")
-        if err:
-            # DateOutOfRange (or any subscription error) comes back in-band with
-            # HTTP 200 and an empty data list. Log and yield nothing rather than
-            # raising: a source that can't fetch should be a no-op, not a crash.
-            logger.warning("[boxing] API error: %s", err)
-            return []
-        events = data.get("data") or []
+        # Read BEFORE the request: a call failing across UTC midnight
+        # covered the days from the date it was sent on.
+        window = upcoming_window(days)
         out: List[GameRow] = []
-        for ev in events:
+        for ev in self._fetch_schedule(days, window):
             row = self._to_row(ev)
             if row is not None:
                 out.append(row)
         logger.info("[boxing] %d card(s) in next %dd", len(out), days)
         return out
+
+    def _fetch_schedule(self, days: int, window: UpcomingWindow) -> List[Any]:
+        """Every card of the `days`-day schedule, page by page (#284).
+
+        Stops at the first page that fails and returns the cards so far.
+        DateOutOfRange (or any subscription error) comes back in-band with
+        HTTP 200 and an empty data list; a page can also fail outright, or the
+        paging can stop vouching for the rest (`_next_page`). Logged, not
+        raised: the cards that did arrive are still published. The schedule's
+        days, from `window.today` (read BEFORE the first request), are
+        reported lost all the same, since the missing pages could hold a card
+        on any of them, so the refresh keeps what it had published (#261).
+
+        A card already seen on an earlier page is kept once and fails the
+        read, because it means the schedule shifted between two page
+        requests and another card may have moved past a page boundary. The
+        first request carries no `page_num`, which keeps it the request
+        measured live (page 1 is the default).
+        """
+        events: List[Any] = []
+        seen: set = set()
+        page = 1
+        promised: Optional[Tuple[Any, Any]] = None
+        while True:
+            params = {"days": days, "date_sort": "ASC", "page_size": _PAGE_SIZE}
+            if page > 1:
+                params["page_num"] = page
+            data = self._http_get(_SCHEDULE_URL, params=params)
+            page_events = data.get("data") if isinstance(data, dict) else None
+            err = (data.get("error") if isinstance(data, dict) else None) or (
+                None if isinstance(page_events, list) else "no data list in the response")
+            if not err:
+                for ev in page_events:
+                    eid = ev.get("id") if isinstance(ev, dict) else None
+                    if eid is not None:
+                        if eid in seen:
+                            # On two pages: the schedule moved between the
+                            # requests, so a card may have moved past one.
+                            err = f"card {eid!r} is on two pages"
+                            continue
+                        seen.add(eid)
+                    events.append(ev)
+            if not err:
+                err, promised = _next_page(data, page, len(page_events), len(events), promised)
+                if promised is not None:
+                    page += 1
+                    continue
+            if err:
+                logger.warning("[boxing] API error on page %d: %s", page, err)
+                report_lost_day_range(window.today, window.last_day)
+            return events
 
     def _to_row(self, ev: Any) -> Optional[GameRow]:
         if not isinstance(ev, dict):
@@ -215,12 +331,12 @@ class BoxingSource(SportSource):
         )
 
     def _http_get(self, url: str, params: dict, timeout: float = 15.0) -> Optional[Any]:
-        try:
-            r = requests.get(url, params=params, headers=self._headers(), timeout=timeout)
-            if r.status_code >= 400:
-                logger.warning("[boxing] %s -> %d", url, r.status_code)
-                return None
-            return r.json()
-        except (requests.RequestException, ValueError) as exc:
-            logger.warning("[boxing] %s failed: %s", url, exc)
-            return None
+        """Patch point for this module's HTTP; the body is `_util.http_get_json`.
+
+        A method rather than a module function because the RapidAPI key rides
+        in `self._headers()`; `http_get_json` masks header values in the one
+        log line that could echo them (a `requests` InvalidHeader message)."""
+        return http_get_json(
+            requests, url, log=logger, tag="boxing", timeout=timeout,
+            params=params, headers=self._headers(),
+        )
