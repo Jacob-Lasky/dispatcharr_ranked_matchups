@@ -458,16 +458,15 @@ def scenario_witness_an_archive_in_the_live_group_keeps_its_number(env):
     )
 
 
-def scenario_the_live_group_is_never_deleted_as_the_archives(env):
-    """Guard: a name this plugin creates makes an archive's group ours
-    (_archive_group_is_ours), but never the live group's own name. Reaping
-    the last game empties the live group while a stray archive sits in it;
-    folding the archive out must not delete the group apply is publishing to."""
+def _the_live_group_survives_the_archive_leaving(env, archive_name):
+    """Reaping the last game empties the live group while an archive named
+    `archive_name` sits in it; folding the archive out must not delete the
+    group apply is publishing to."""
     m = env.m
     user_ch, _ = _seed_source_channel(env)
     ours = _publish(env, [_row(401, _now() - timedelta(hours=10), user_ch.id)])[G401]
     live = ours.channel_group
-    _archive = m.Channel.objects.create(name="Matchups Recordings", channel_number=9999,
+    _archive = m.Channel.objects.create(name=archive_name, channel_number=9999,
                                         channel_group=live, tvg_id=env.plugin.ARCHIVE_TVG_ID)
     m.Recording.objects.create(
         channel=_archive, start_time=_now() - timedelta(days=2),
@@ -478,6 +477,19 @@ def scenario_the_live_group_is_never_deleted_as_the_archives(env):
     _archive.refresh_from_db()
     assert _archive.channel_group.name == "Matchups Recordings"
     assert m.ChannelGroup.objects.filter(pk=live.pk).exists(), "the live group was deleted"
+
+
+def scenario_the_live_group_is_never_deleted_as_the_archives(env):
+    """Guard: a name this plugin creates makes an archive's group ours
+    (_archive_group_is_ours), but never the live group's own name."""
+    _the_live_group_survives_the_archive_leaving(env, "Matchups Recordings")
+
+
+def scenario_witness_a_live_group_named_as_the_archive_is_kept(env):
+    """Codex review, round 11: an archive made when 'Recordings group name'
+    was Top Matchups carries that name; with the live group now Top Matchups,
+    _made_for_archive called the live group the archive's and deleted it."""
+    _the_live_group_survives_the_archive_leaving(env, OLD)
 
 
 def scenario_an_overridden_archive_in_the_live_group_keeps_its_raw_number(env):
