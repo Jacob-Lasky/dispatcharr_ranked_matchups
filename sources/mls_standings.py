@@ -78,7 +78,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
 from ._odds import fetch_odds_events
-from .base import GameRow
+from .base import GameRow, SeasonUnavailable
 from .points_based import PointsBasedSportSource
 from .mls import (
     _h2h_to_closeness,
@@ -466,7 +466,10 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         """
         own_conf = self._own_conf_teams()
         if not own_conf:
-            return []
+            # The conference map failed (see `_fetch_conference_map`), so the
+            # season cannot be cut to this conference: a failed season, not
+            # an empty one (#289).
+            raise SeasonUnavailable("standings conference map unavailable")
         season_start = datetime(
             self.season_year, SEASON_START_MONTH, 1, tzinfo=timezone.utc
         ).date()

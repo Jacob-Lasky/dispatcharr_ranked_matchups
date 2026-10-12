@@ -3307,6 +3307,7 @@ def _build_sources(settings: Dict[str, Any]):
             nfl_po.set_regular_season_strengths(nfl_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[nfl] could not seed playoff strengths: %s", exc)
+        _seeded_from([nfl_reg], nfl_po)
         sources.append(nfl_po)
 
     # NHL: no API key required (api-web.nhle.com is free). Pair the
@@ -3328,6 +3329,7 @@ def _build_sources(settings: Dict[str, Any]):
             # Don't let a strengths-seeding hiccup gate the playoff
             # source: it can still run on the default prior.
             logger.warning("[nhl] could not seed playoff strengths: %s", exc)
+        _seeded_from([nhl_reg], nhl_po)
         sources.append(nhl_po)
 
     # MLB: no API key required (statsapi.mlb.com is free). Same pair-and-
@@ -3343,6 +3345,7 @@ def _build_sources(settings: Dict[str, Any]):
             mlb_po.set_regular_season_strengths(mlb_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[mlb] could not seed playoff strengths: %s", exc)
+        _seeded_from([mlb_reg], mlb_po)
         sources.append(mlb_po)
 
     # NBA: no API key required. ESPN unofficial API is used (stats.nba.com
@@ -3360,6 +3363,7 @@ def _build_sources(settings: Dict[str, Any]):
             nba_po.set_regular_season_strengths(nba_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[nba] could not seed playoff strengths: %s", exc)
+        _seeded_from([nba_reg], nba_po)
         sources.append(nba_po)
 
     # MLS: issue #30 part A: register MlsEastSource + MlsWestSource
@@ -3390,6 +3394,7 @@ def _build_sources(settings: Dict[str, Any]):
             mls_cup.set_regular_season_strengths(merged_strengths)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[mls_cup] could not seed playoff strengths: %s", exc)
+        _seeded_from([mls_east, mls_west], mls_cup)
         sources.append(mls_cup)
 
     # NWSL: same V1 minimal pattern as MLS (schedule + closeness).
@@ -3452,6 +3457,7 @@ def _build_sources(settings: Dict[str, Any]):
             wnba_po.set_regular_season_strengths(wnba_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[wnba] could not seed playoff strengths: %s", exc)
+        _seeded_from([wnba_reg], wnba_po)
         sources.append(wnba_po)
 
     # NCAA Women's Basketball + March Madness: no API key required.
@@ -3465,6 +3471,7 @@ def _build_sources(settings: Dict[str, Any]):
             ncaaw_po.set_regular_season_strengths(ncaaw_reg.estimate_strengths())
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ncaaw_basketball] could not seed playoff strengths: %s", exc)
+        _seeded_from([ncaaw_reg], ncaaw_po)
         sources.append(ncaaw_po)
 
     # NCAA Division I baseball. Free ESPN unofficial API + D1Baseball
@@ -3492,6 +3499,7 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(ncbsb_po)
         ncbsb_br = NcaaBaseballPlayoffBracketSource()
         ncbsb_br.set_regular_season_strengths(ncbsb_strengths)
+        _seeded_from([ncbsb_reg], ncbsb_po, ncbsb_br)
         sources.append(ncbsb_br)
 
     # NCAA Division I softball. Same two-playoff-source fan-out as
@@ -3511,6 +3519,7 @@ def _build_sources(settings: Dict[str, Any]):
         sources.append(ncsbl_po)
         ncsbl_br = NcaaSoftballPlayoffBracketSource()
         ncsbl_br.set_regular_season_strengths(ncsbl_strengths)
+        _seeded_from([ncsbl_reg], ncsbl_po, ncsbl_br)
         sources.append(ncsbl_br)
 
     # NCAA D1 men's + women's soccer. One source class
@@ -3535,6 +3544,7 @@ def _build_sources(settings: Dict[str, Any]):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ncaa_mens_soccer] could not seed cup strengths: %s", exc)
+        _seeded_from([ncaa_msoc_reg], ncaa_msoc_cup)
         sources.append(ncaa_msoc_cup)
     if league_enabled(settings, "enable_ncaa_womens_soccer"):
         ncaa_wsoc_reg = NcaaSoccerSource(gender="w")
@@ -3546,6 +3556,7 @@ def _build_sources(settings: Dict[str, Any]):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ncaa_womens_soccer] could not seed cup strengths: %s", exc)
+        _seeded_from([ncaa_wsoc_reg], ncaa_wsoc_cup)
         sources.append(ncaa_wsoc_cup)
     return sources
 
@@ -4199,6 +4210,8 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 errs.append(err)
     for label, errs in bracket_failures.items():
         src_summary.append(_source_error_entry(f"{label} bracket (stakes not simulated)", "; ".join(errs)))
+    # Likewise a points-based season that could not be fetched whole (#289).
+    src_summary.extend(_season_failure_entries(sources, game_sources))
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
@@ -8280,6 +8293,45 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
 # (_slate_problems), so the warning cannot silently stop matching if the
 # summary wording changes. The summary is persisted in cache.json.
 _SOURCE_ERROR_MARK = ": error ("
+
+
+def _season_failure_entries(sources: List[Any], game_sources: List[Any]) -> List[str]:
+    """Summary entries for the points-based seasons this refresh could not
+    fetch whole (#289, `PointsBasedSportSource.season_fetch_failure`), one
+    per label: MLS East and West share "MLS", and one outage must not read
+    as two failed sources.
+
+    A season is reported when its games were scored (they got no standings
+    stakes instead of stakes from a season with holes in it), AND when a
+    scored playoff or bracket source took its team strengths from it
+    (`strength_sources`, recorded by `_seeded_from` while the sources were
+    built): that playoff model fell back to its prior, which a playoff-only
+    slate would otherwise never mention. A league with nothing on the slate
+    lost nothing to the failure, and is not reported.
+    """
+    affected = {id(s) for s in game_sources}
+    for s in game_sources:
+        affected.update(id(r) for r in getattr(s, "strength_sources", ()))
+    by_label: Dict[str, List[str]] = {}
+    for src in sources:
+        failure = getattr(src, "season_fetch_failure", None)
+        err = failure() if callable(failure) and id(src) in affected else None
+        if isinstance(err, str) and err:
+            errs = by_label.setdefault(src.sport_label, [])
+            if err not in errs:
+                errs.append(err)
+    return [_source_error_entry(f"{label} season (stakes not simulated)", "; ".join(errs))
+            for label, errs in by_label.items()]
+
+
+def _seeded_from(regulars: List[Any], *seeded: Any) -> None:
+    """Record on each playoff / bracket source in `seeded` the regular-season
+    sources its team strengths came from, so a regular season that failed is
+    reported when only the playoff games are on the slate
+    (`_season_failure_entries`, #289). Call it wherever
+    `set_regular_season_strengths` is fed from a regular source."""
+    for s in seeded:
+        s.strength_sources = tuple(regulars)
 
 
 def _source_error_entry(label: str, err: Any) -> str:

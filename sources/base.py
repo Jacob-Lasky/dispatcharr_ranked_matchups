@@ -84,9 +84,21 @@ def recording_lost_days() -> Iterator[Set[date]]:
 # An answered poll with no rankings in it (preseason) is not a failure.
 
 
-class RankingsUnavailable(RuntimeError):
+class FeedUnavailable(RuntimeError):
+    """A feed a source depends on did not answer, or answered something that
+    is not its answer. The two kinds below say which feed."""
+
+
+class RankingsUnavailable(FeedUnavailable):
     """A source's rankings poll did not answer: raised out of
     `fetch_upcoming` so the refresh holds the source's previous games."""
+
+
+class SeasonUnavailable(FeedUnavailable):
+    """A points-based source's full-season list could not be fetched whole
+    (#289): raised out of `_fetch_full_season_games`, where
+    `PointsBasedSportSource._fetch_games_cached` turns it into a reported
+    season failure instead of a silently partial season."""
 
 
 def attach_poll_ranks(
