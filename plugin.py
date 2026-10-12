@@ -253,8 +253,9 @@ def _streams_in_groups(group_names_cf: frozenset) -> set:
     1. It is two queries instead of an N+1 over a pool that can hold thousands
        of streams (`.only(...)` on the stream queryset defers the group join).
     2. It lets the EXCLUSION run early enough. The apply must drop excluded
-       streams BEFORE `seen_markers.add(marker)`, because a `continue` after
-       that point leaves an existing channel neither published nor reaped, and
+       streams BEFORE the pre-pass gives the game a plan (prep_by_marker), the
+       plans being what seen_markers is built from (#288): a game given a plan
+       and then skipped leaves an existing channel neither published nor reaped, and
        it then commits at the temporary parking number phase 0 gave it (measured
        live 2026-08-29: 22 channels stranded at 1400-1421). Working in ID sets
        makes the pre-pass able to ask "is every candidate stream excluded?"
@@ -811,16 +812,20 @@ def _unwritten_channels(existing_virtuals: Dict[str, Any], seen_markers) -> List
     return [ch for marker, ch in existing_virtuals.items() if marker not in seen_markers]
 
 
-def _numbers_held_for_recordings(stale, archive_enabled, keep_ids=frozenset()) -> set:
+def _numbers_held_for_recordings(stale, archive_enabled, keep_ids=frozenset(),
+                                 cancelling=frozenset()) -> set:
     """Channel numbers of stale channels this apply will KEEP, for a recording
     or because they are in `keep_ids` (kept by their guide, #264).
 
     Same policy as the reap step (_partition_stale_for_recordings), evaluated
-    so a new game is never handed a number a kept channel is about to be
-    restored to: before numbering for the games that left the slate, and again
-    after apply's pre-pass for every channel the write loop will not write
-    (#286). Fractional numbers are floored like every other reservation (Xtream
-    Codes floors them)."""
+    before numbering (which runs after apply's pre-pass, over every channel the
+    write loop will not write, #286) so a new game is never handed a number a
+    kept channel is about to be restored to. `cancelling` is the recordings
+    this apply's auto-record cancelled (_AutoRecord.cancelled_ids): already
+    deleted on a real run, and on a dry run the reap leaves them out too, so
+    they keep nothing here either.
+    Fractional numbers are floored like every other reservation (Xtream Codes
+    floors them)."""
     candidates = [ch for ch in stale if ch.channel_number is not None]
     if not candidates:
         return set()
@@ -828,12 +833,14 @@ def _numbers_held_for_recordings(stale, archive_enabled, keep_ids=frozenset()) -
 
     recs_by_channel: Dict[int, list] = {}
     for r in Recording.objects.filter(channel_id__in=[c.id for c in candidates]):
-        recs_by_channel.setdefault(r.channel_id, []).append(r)
+        if r.id not in cancelling:
+            recs_by_channel.setdefault(r.channel_id, []).append(r)
     _reapable, kept, _rehome = _partition_stale_for_recordings(
         candidates, recs_by_channel, datetime.now(timezone.utc), archive_enabled,
         keep_ids,
     )
     return {int(ch.channel_number) for ch in kept}
+
 
 
 def _guide_shows_on_air(programmes, now: datetime) -> bool:
@@ -6807,153 +6814,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # this game's channel. The DB write happens inside the transaction below.
     marker_renames = _rekey_legacy_virtuals(existing_virtuals, games)
 
-    # Resolve the virtual channel base. COMPACT auto slots in just after the
-    # user's highest real channel (excluding our own virtuals) so it doesn't
-    # squat on prime numbers like 1-100. KICKOFF must NOT re-derive it that way
-    # on every apply: its floor sits under a time term in the millions, so
-    # following the lineup bought nothing and renumbered every published game
-    # whenever the top of the lineup changed (#219). It reuses the floor it
-    # used last time, or the one its published channels were numbered from.
-    from django.db.models import Max as _Max
-    highest_other = (
-        Channel.objects.exclude(_owned_tvg_id_q())
-        .aggregate(m=_Max("channel_number"))["m"] or 0
-    )
-    numbering_mode = _resolve_numbering_mode(settings)
-    remembered_base = None
-    remembered_record: Dict[str, Tuple[int, int, int]] = {}
-    numbered_for: Dict[str, Tuple[int, int]] = {}
-    games_by_marker_all = {_build_marker_key(g): g for g in games}
-    leaving = [ch for m, ch in existing_virtuals.items() if m not in games_by_marker_all]
-    # A game that has left the slate but whose channel is still recording is
-    # KEPT this apply (#146) and goes back to its number after parking, unless
-    # a new game was handed that number, in which case it stays at a parking
-    # number and its published number changes mid-recording. Those numbers are
-    # held back from new games (review finding, #219). Collected BEFORE the
-    # floor because they do not depend on it, and the kickoff floor inference
-    # needs them to run the placement apply will run. A channel kept by its
-    # guide (guide_kept_ids, #264) is held back the same way. An in-slate game
-    # the write loop will skip is only known after the pre-pass, which places
-    # again if one of those is kept too (#286).
-    held_for_recordings = _numbers_held_for_recordings(
-        leaving, archive_enabled, guide_kept_ids,
-    )
-    band_size = _resolve_compact_band_size(settings, len(games))
-    # Per-game channel numbers (marker -> number). Computed once up front so
-    # collision resolution sees the whole slate and so park_base can be set above
-    # the true ceiling. In KICKOFF mode that ceiling is driven by how far ahead
-    # the slate reaches rather than by the game count; in COMPACT mode it is the
-    # top of the band. Existing numbers are passed so COMPACT can hold a
-    # published game on the slot it already has (see allocate_compact_numbers).
-    # Every number in use by a channel we do NOT own is reserved, in BOTH modes.
-    # Uniqueness is per-group at most (and only in Channel.clean(), see
-    # _PER_GROUP_NUMBER_NOTE), so nothing stops a collision, but the M3U,
-    # XMLTV and Xtream Codes outputs all key the guide on the bare channel number,
-    # so a shared number silently binds the wrong programme. Measured live on
-    # 2026-08-29 against a Peacock lineup occupying 400-499. Kickoff mode used to
-    # skip this because its floor followed the lineup; since #219 the floor is
-    # fixed, so a channel the user later adds in the millions is routed around
-    # here instead. No upper bound in kickoff mode: a nudge can walk past any.
-    if numbering_mode == NUMBERING_MODE_KICKOFF:
-        published = []
-        unpublished = []
-        for marker, g in games_by_marker_all.items():
-            ch = existing_virtuals.get(marker)
-            start_dt = parse_iso_utc(g.get("start_time_utc"))
-            if ch is None or ch.channel_number is None:
-                unpublished.append((start_dt, marker))
-            else:
-                published.append((ch.channel_number, start_dt, marker))
-        # Kickoff reserves from the lowest number this slate can take under ANY
-        # floor (a floor is at least 1), not from the floor itself: the floor is
-        # not known yet, and _infer_kickoff_base must judge each candidate with
-        # the same reservations the real placement will honour (review finding,
-        # #219: a stranger on a published slot made the inference pick a floor
-        # that then nudged a published game). Nothing below this can be assigned.
-        starts = [(start_dt, marker) for _n, start_dt, marker in published] + unpublished
-        lowest_kickoff = 1 + min(
-            (
-                stable_channel_number(0, start_dt, marker, apply_tz)
-                for start_dt, marker in starts if start_dt is not None
-            ),
-            default=0,
-        )
-        reserved_numbers = (
-            _reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings
-        )
-        remembered_base, remembered_record = _load_numbering_state()
-
-        def _kickoff_floor(reserved):
-            # The floor, judged with `reserved`, and what each channel was
-            # numbered for from it (#278). A closure because apply judges it
-            # twice: an inferred floor must be judged with every number the
-            # placement will hold back, and the pre-pass can add some (#286).
-            base = _resolve_kickoff_base(
-                settings, highest_other, remembered_base, published, apply_tz,
-                unpublished=unpublished, reserved=reserved,
-            )
-            return base, _numbered_for_floor(remembered_record, base, marker_renames)
-
-        virtual_base, numbered_for = _kickoff_floor(reserved_numbers)
-    else:
-        virtual_base = _resolve_virtual_base(settings, highest_other)
-        reserved_numbers = _reserved_channel_numbers(
-            target_group, virtual_base, virtual_base + band_size - 1,
-        ) | held_for_recordings
-    existing_numbers = {
-        marker: int(ch.channel_number)
-        for marker, ch in existing_virtuals.items()
-        if ch.channel_number is not None
-    }
-    chnum_by_marker = _assign_channel_numbers(
-        games, virtual_base, apply_tz,
-        mode=numbering_mode,
-        band_size=band_size,
-        existing_numbers=existing_numbers,
-        reserved_numbers=reserved_numbers,
-        numbered_for=numbered_for,
-    )
-    if numbering_mode == NUMBERING_MODE_COMPACT and games:
-        # A game with no slot cannot be published: a null channel_number
-        # truncates the whole Xtream Codes feed. Drop it HERE, before the
-        # pre-pass, rather than skipping it in the write loop further down.
-        # seen_markers is populated by the pre-pass, so a game that reaches the
-        # pre-pass and is skipped afterwards is neither renumbered nor reaped: it
-        # keeps the temporary parking number it was given in phase 0 and is
-        # stranded there. Measured live on 2026-08-29, which left 22 channels
-        # sitting at 1400-1421. Dropping the game before the pre-pass hands its
-        # existing channel to the normal stale path, which preserves DVR
-        # recordings on the way out (#146).
-        placeable = [g for g in games if _build_marker_key(g) in chnum_by_marker]
-        if not placeable:
-            # Every slot in the band is taken. Publishing nothing would reap the
-            # entire group over what is almost certainly a mis-set range, so fail
-            # safe: touch nothing and tell the user which setting to move.
-            band_top = virtual_base + band_size - 1
-            # NOT "nothing was changed": by this point apply may already have
-            # created the target group, migrated channels into it after a rename,
-            # and created or upgraded the EPG source, all outside the transaction
-            # below. Claiming otherwise would send someone looking in the wrong
-            # place. What is true is that no channel was added, renumbered or
-            # removed, because every one of those happens after this return.
-            msg = (
-                f"Compact numbering found no free channel numbers in {virtual_base}-"
-                f"{band_top}: every number in that range is already used by another "
-                f"channel. No channels were added, renumbered or removed. Move "
-                f"'Starting channel number' to an empty stretch of your lineup, or "
-                f"raise 'Compact range size'."
-            )
-            logger.error("[ranked_matchups] %s", msg)
-            return {"status": "error", "message": msg}
-        if len(placeable) != len(games):
-            logger.warning(
-                "[ranked_matchups] compact: publishing %d of %d games; the rest have "
-                "no free number in %d-%d",
-                len(placeable), len(games), virtual_base, virtual_base + band_size - 1,
-            )
-        games = placeable
-
-
     created = 0
     updated = 0
     deleted_stale = 0
@@ -6961,7 +6821,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     rehomed_recordings = 0      # #146: recordings moved to the archive this run
     kept_stale_n = 0            # #146/#264: stale channels kept (recording, or guide)
     kept_by_guide_n = 0         # #264: of those, kept by their guide (_kept_by_guide)
-    seen_markers = set()
     # marker -> the number this run actually WROTE on its channel (not the plan
     # in chnum_by_marker, which also names games the write loop skipped): what
     # the kickoff record (#278) remembers each channel was numbered for.
@@ -6969,7 +6828,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     kept_numbered: Dict[str, Tuple[int, int, int]] = {}  # record entries of kept channels
 
     placeholder_threshold = _float_setting(settings, "placeholder_min_score", 5.0)
-    placeholder_channels_created = 0
 
     # Optional Claude-rewritten EPG descriptions. Default off; when on, prose
     # replaces the deterministic `_build_description` output for non-placeholder
@@ -7218,26 +7076,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # a 13.9s Postgres checkpoint right after an apply on a ~6.3k-channel box).
     # Both calls are cache-backed, so this pass moves them earlier, it does not
     # add work. Each surviving game's precomputed plan is stored by marker; the
-    # transaction then does nothing but writes. This pre-pass mirrors the skip /
+    # transaction then does nothing but writes. The pass runs in two halves:
+    # this loop DECIDES (stream pool, placeholder, start time: DB reads only),
+    # then numbering, then the network half (names, descriptions, logos) for
+    # the games numbering placed (#288). This pre-pass mirrors the skip /
     # placeholder / bad-start-time semantics of the write loop exactly (same
-    # marker key, same seen_markers set, same counters) so the two stay in lockstep.
+    # marker key, same counters; its plans are what numbering and seen_markers
+    # are built from, after it) so the two stay in lockstep.
     from types import SimpleNamespace
     from ._http import NetworkBudget
     from .matcher import _strong_team_keywords, select_streams_for_game
     from .scoring import pick_tagline
     prep_by_marker: Dict[str, Any] = {}
-    # ONE wall-clock allowance for every cosmetic fetch below (#271), see
-    # APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME. DO NOT gate anything on it that
-    # decides WHICH channels publish or what streams they carry: the stream
-    # pool and the placeholder decision make no network call, and must never
-    # start to depend on one that can be skipped.
-    prepass_allowance = APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME * len(games)
-    child_seconds_left = tasks.pipeline_child_seconds_left()
-    if child_seconds_left is not None:
-        prepass_allowance = max(
-            0.0, min(prepass_allowance, child_seconds_left - APPLY_WRITE_RESERVE_SECONDS),
-        )
-    prepass_budget = NetworkBudget(prepass_allowance)
     prepass_now = datetime.now(timezone.utc)
     recording_channel_ids = {
         r.channel_id for r in Recording.objects.filter(
@@ -7273,12 +7123,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # decision, and let that decision key on whether anything is actually
         # attachable. Two reasons it has to be here and not lower down:
         #
-        #  - The decision below sits above `seen_markers.add(marker)`, and the
-        #    comment on that line is explicit that every `continue` must stay
-        #    above it: a marker added and then skipped leaves its existing
-        #    channel neither published nor reaped, so it commits at phase 0's
-        #    temporary parking number (measured live 2026-08-29, 22 channels
-        #    stranded at 1400-1421).
+        #  - The decision below sits above the game's prep_by_marker entry,
+        #    and every `continue` must stay above that: a game given a plan and
+        #    then skipped is marked seen, so its existing channel is neither
+        #    published nor reaped and commits at phase 0's temporary parking
+        #    number (measured live 2026-08-29, 22 channels stranded at
+        #    1400-1421).
         #  - Asking "would this source donate anything?" is the only question
         #    that cannot disagree with what the pool later does. A cheaper
         #    proxy ("does it own a non-excluded stream?") was tried and was
@@ -7343,7 +7193,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             )
             if score_val >= placeholder_threshold or g.get("recorded_matched") or on_air:
                 placeholder = True
-                placeholder_channels_created += 1
             else:
                 skipped_unmatched += 1
                 continue
@@ -7373,23 +7222,239 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             logger.warning("[ranked_matchups] bad start_time_utc on %s", marker)
             continue
 
-        # ONLY NOW is the game genuinely seen. seen_markers drives stale
-        # detection, so a marker added before a later `continue` leaves its
-        # existing channel neither published nor reaped: it keeps the temporary
-        # parking number phase 0 gave it and commits there permanently. This
-        # line used to sit above the start-time parse, which stranded any
-        # channel whose cached start_time_utc had gone malformed, in BOTH
-        # numbering modes. Every `continue` above this point must stay above it.
-        seen_markers.add(marker)
+        # Past this point the game is DECIDED: it gets a plan in prep_by_marker
+        # below, and only a decided game is numbered, marked seen and given its
+        # name, description and logo (all after this pass). A game left out of
+        # prep_by_marker goes down the stale path. This used to mark the game
+        # seen right here, below the start-time parse, which once sat above it
+        # and stranded any channel whose cached start_time_utc had gone
+        # malformed, in BOTH numbering modes. Every `continue` must stay above
+        # the prep_by_marker entry.
 
+        prep_by_marker[marker] = SimpleNamespace(
+            g=g,
+            source=source,
+            signals=signals,
+            score=score,
+            rank_source=rank_source,
+            tagline=tagline,
+            source_streams=source_streams,
+            start_dt=start_dt,
+            placeholder=placeholder,
+        )
+
+    # Resolve the virtual channel base. COMPACT auto slots in just after the
+    # user's highest real channel (excluding our own virtuals) so it doesn't
+    # squat on prime numbers like 1-100. KICKOFF must NOT re-derive it that way
+    # on every apply: its floor sits under a time term in the millions, so
+    # following the lineup bought nothing and renumbered every published game
+    # whenever the top of the lineup changed (#219). It reuses the floor it
+    # used last time, or the one its published channels were numbered from.
+    from django.db.models import Max as _Max
+    highest_other = (
+        Channel.objects.exclude(_owned_tvg_id_q())
+        .aggregate(m=_Max("channel_number"))["m"] or 0
+    )
+    numbering_mode = _resolve_numbering_mode(settings)
+    remembered_base = None
+    remembered_record: Dict[str, Tuple[int, int, int]] = {}
+    numbered_for: Dict[str, Tuple[int, int]] = {}
+    # Auto-record (#216): drop our not-yet-started recordings the plan no
+    # longer wants BEFORE the numbers held for kept channels are read (below)
+    # and before the stale reap, so a game whose team was removed neither holds
+    # its channel's number nor keeps its channel this run. Its own transaction,
+    # ahead of numbering: read first and cancelled later, a recording counted
+    # as keeping its channel held a slot a full compact band then refused a
+    # new game, and the apply aborted with the unwanted recording still
+    # scheduled (#288 review). A recording that starts before this runs is not
+    # cancelled (the locked re-check there), and is then counted as keeping
+    # its channel. If the apply fails after this, the cancellations stand, and
+    # so does their bookkeeping (saved right after).
+    with transaction.atomic():
+        _autorecord_cancel(autorec, dry_run)
+    # Committed on its own, so its bookkeeping is saved on its own too: left to
+    # _autorecord_finish, an apply that returned or failed after this kept the
+    # deleted recordings in the "created" state, and the next plan read each
+    # missing row as one the user deleted and tombstoned it for good (#288
+    # review).
+    if autorec.cancelled and not dry_run:
+        recording_policy.save_state(RECORDING_STATE_PATH, autorec.state)
+
+    # Number ONLY the games the pre-pass decided to write (prep_by_marker),
+    # which is why numbering runs after it. DO NOT number the whole slate: a
+    # game the write loop skips (no feed, too low for a placeholder) is known
+    # only once the pre-pass has run, and numbered anyway it held its channel's
+    # slot, so a full compact band dropped a new game for a slot the skipped
+    # game's channel then gave up (#288), and in kickoff mode a game whose
+    # kickoff moved was placed while its kept channel's old number went to a
+    # new game (#286).
+    decided_games = [g for g in games if _build_marker_key(g) in prep_by_marker]
+    decided_by_marker = {_build_marker_key(g): g for g in decided_games}
+    # A channel this apply KEEPS without writing it (an active recording, #146,
+    # or kept by its guide, #264) goes back to its number after parking, unless
+    # a new game was handed that number, in which case it stays at a parking
+    # number and its published number changes mid-recording. So those numbers
+    # are held back from every game: the reap's own policy over the channels
+    # whose game is not decided (_unwritten_channels; the reap below uses the
+    # same helper over seen_markers, which differs only by a compact game
+    # left without a slot, and such a game's channel has no free slot in the
+    # band for anyone to take). Collected BEFORE the floor, because the kickoff
+    # floor inference must run the placement apply will run (#219).
+    held_for_recordings = _numbers_held_for_recordings(
+        _unwritten_channels(existing_virtuals, prep_by_marker),
+        archive_enabled, guide_kept_ids, autorec.cancelled_ids,
+    )
+    # The WHOLE slate's size, not the decided games': with the auto band (one
+    # slot per game) a band sized to the decided games would shrink whenever a
+    # game is skipped and push published channels out of it.
+    band_size = _resolve_compact_band_size(settings, len(games))
+    # Per-game channel numbers (marker -> number). Computed once, for every game
+    # apply will write, so collision resolution sees all of them and park_base can be set above
+    # the true ceiling. In KICKOFF mode that ceiling is driven by how far ahead
+    # the slate reaches rather than by the game count; in COMPACT mode it is the
+    # top of the band. Existing numbers are passed so COMPACT can hold a
+    # published game on the slot it already has (see allocate_compact_numbers).
+    # Every number in use by a channel we do NOT own is reserved, in BOTH modes.
+    # Uniqueness is per-group at most (and only in Channel.clean(), see
+    # _PER_GROUP_NUMBER_NOTE), so nothing stops a collision, but the M3U,
+    # XMLTV and Xtream Codes outputs all key the guide on the bare channel number,
+    # so a shared number silently binds the wrong programme. Measured live on
+    # 2026-08-29 against a Peacock lineup occupying 400-499. Kickoff mode used to
+    # skip this because its floor followed the lineup; since #219 the floor is
+    # fixed, so a channel the user later adds in the millions is routed around
+    # here instead. No upper bound in kickoff mode: a nudge can walk past any.
+    if numbering_mode == NUMBERING_MODE_KICKOFF:
+        published = []
+        unpublished = []
+        for marker, g in decided_by_marker.items():
+            ch = existing_virtuals.get(marker)
+            start_dt = parse_iso_utc(g.get("start_time_utc"))
+            if ch is None or ch.channel_number is None:
+                unpublished.append((start_dt, marker))
+            else:
+                published.append((ch.channel_number, start_dt, marker))
+        # Kickoff reserves from the lowest number this slate can take under ANY
+        # floor (a floor is at least 1), not from the floor itself: the floor is
+        # not known yet, and _infer_kickoff_base must judge each candidate with
+        # the same reservations the real placement will honour (review finding,
+        # #219: a stranger on a published slot made the inference pick a floor
+        # that then nudged a published game). Nothing below this can be assigned.
+        starts = [(start_dt, marker) for _n, start_dt, marker in published] + unpublished
+        lowest_kickoff = 1 + min(
+            (
+                stable_channel_number(0, start_dt, marker, apply_tz)
+                for start_dt, marker in starts if start_dt is not None
+            ),
+            default=0,
+        )
+        reserved_numbers = (
+            _reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings
+        )
+        remembered_base, remembered_record = _load_numbering_state()
+        virtual_base = _resolve_kickoff_base(
+            settings, highest_other, remembered_base, published, apply_tz,
+            unpublished=unpublished, reserved=reserved_numbers,
+        )
+        # What each channel was numbered for (#278), from this floor only.
+        numbered_for = _numbered_for_floor(remembered_record, virtual_base, marker_renames)
+    else:
+        virtual_base = _resolve_virtual_base(settings, highest_other)
+        reserved_numbers = _reserved_channel_numbers(
+            target_group, virtual_base, virtual_base + band_size - 1,
+        ) | held_for_recordings
+    existing_numbers = {
+        marker: int(ch.channel_number)
+        for marker, ch in existing_virtuals.items()
+        if ch.channel_number is not None
+    }
+    chnum_by_marker = _assign_channel_numbers(
+        decided_games, virtual_base, apply_tz,
+        mode=numbering_mode,
+        band_size=band_size,
+        existing_numbers=existing_numbers,
+        reserved_numbers=reserved_numbers,
+        numbered_for=numbered_for,
+    )
+    if numbering_mode == NUMBERING_MODE_COMPACT and decided_games:
+        # A game with no slot cannot be published: a null channel_number
+        # truncates the whole Xtream Codes feed. Drop it HERE, before
+        # seen_markers is filled below, rather than skipping it in the write
+        # loop: a game marked seen and skipped afterwards is neither renumbered
+        # nor reaped, keeps the temporary parking number phase 0 gave it, and
+        # is stranded there. Measured live on 2026-08-29, which left 22
+        # channels sitting at 1400-1421. Dropping the game here hands its
+        # existing channel to the normal stale path, which preserves DVR
+        # recordings on the way out (#146).
+        placeable = [g for g in decided_games if _build_marker_key(g) in chnum_by_marker]
+        if not placeable:
+            # Every slot in the band is taken. Publishing nothing would reap the
+            # entire group over what is almost certainly a mis-set range, so fail
+            # safe: add, renumber and remove no channel, and tell the user which
+            # setting to move.
+            band_top = virtual_base + band_size - 1
+            # NOT "nothing was changed": by this point apply may already have
+            # created the target group, migrated channels into it after a rename,
+            # and created or upgraded the EPG source, all outside the transaction
+            # below. Claiming otherwise would send someone looking in the
+            # wrong place. (No description or logo has been fetched yet: the
+            # pre-pass's network half runs after numbering, #288.) What is true is that no channel was added, renumbered or
+            # removed, because every one of those happens after this return.
+            msg = (
+                f"Compact numbering found no free channel numbers in {virtual_base}-"
+                f"{band_top}: every number in that range is already used by another "
+                f"channel. No channels were added, renumbered or removed. Move "
+                f"'Starting channel number' to an empty stretch of your lineup, or "
+                f"raise 'Compact range size'."
+            )
+            logger.error("[ranked_matchups] %s", msg)
+            return {"status": "error", "message": msg}
+        if len(placeable) != len(decided_games):
+            logger.warning(
+                "[ranked_matchups] compact: publishing %d of %d games; the rest have "
+                "no free number in %d-%d",
+                len(placeable), len(decided_games), virtual_base, virtual_base + band_size - 1,
+            )
+    # ONLY NOW is a game genuinely seen: decided by the pre-pass AND given a
+    # number. seen_markers drives stale detection, so a marker in it whose game
+    # the write loop then skips leaves its channel neither published nor
+    # reaped, stranded at its parking number. A game left without a number
+    # loses its plan here, so the write loop and seen_markers agree.
+    # The games the pre-pass decided on, kept for the description and logo
+    # caches (live_markers, at the end of apply).
+    decided_markers = set(prep_by_marker)
+    for marker in [m for m in prep_by_marker if m not in chnum_by_marker]:
+        del prep_by_marker[marker]
+    seen_markers = set(prep_by_marker)
+    placeholder_channels_created = sum(1 for p in prep_by_marker.values() if p.placeholder)
+
+    # The pre-pass's network half (#136: still before the transaction), run
+    # only for the games apply will write. DO NOT move it back above numbering:
+    # there it fetched descriptions and logos for compact games then left
+    # without a slot, spending the network budget the published games needed,
+    # and fetched them before a full-band abort that publishes nothing (#288).
+    # ONE wall-clock allowance for every cosmetic fetch below (#271), see
+    # APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME, sized by and started for the
+    # games fetched for, so the deciding half and numbering spend none of it.
+    # DO NOT gate anything on it that decides WHICH channels publish or what
+    # streams they carry: the stream pool and the placeholder decision make no
+    # network call, and must never start to depend on one that can be skipped.
+    prepass_allowance = APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME * len(prep_by_marker)
+    child_seconds_left = tasks.pipeline_child_seconds_left()
+    if child_seconds_left is not None:
+        prepass_allowance = max(
+            0.0, min(prepass_allowance, child_seconds_left - APPLY_WRITE_RESERVE_SECONDS),
+        )
+    prepass_budget = NetworkBudget(prepass_allowance)
+    for marker, prep in prep_by_marker.items():
+        g, source, placeholder, tagline = prep.g, prep.source, prep.placeholder, prep.tagline
         new_name = format_channel_name(
-            g["sport_prefix"], signals, score, g["home"], g["away"],
+            g["sport_prefix"], prep.signals, prep.score, g["home"], g["away"],
             tagline=tagline,
             template=name_template,
-            rank_source=rank_source,
+            rank_source=prep.rank_source,
             sport_label=g.get("sport_label", ""),
             venue=g.get("venue"),
-            start_dt=start_dt,
+            start_dt=prep.start_dt,
             tz=apply_tz,
             recording=autorec.will_record(marker),
         )
@@ -7432,54 +7497,16 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 matchup_logos_fallback += 1
 
-        prep_by_marker[marker] = SimpleNamespace(
-            new_name=new_name,
-            description=description,
-            tagline=tagline,
-            logo_id=resolved_logo_id,
-            source_streams=source_streams,
-            start_dt=start_dt,
-        )
+        prep.new_name = new_name
+        prep.description = description
+        prep.logo_id = resolved_logo_id
     if prepass_budget.skipped:
         logger.warning(
             "[ranked_matchups] apply's network budget (%gs for %d games) ran out; "
             "skipped %d cosmetic fetch(es) (descriptions, logos), which keep their "
             "fallback until the next apply",
-            prepass_budget.seconds, len(games), prepass_budget.skipped,
+            prepass_budget.seconds, len(prep_by_marker), prepass_budget.skipped,
         )
-
-    # Numbers of channels this apply KEEPS without writing them are held back
-    # from every other game (#286). Kept means the reap's own policy (an
-    # active recording, #146, or kept by its guide, #264), and not written
-    # means not in seen_markers: the stale set the reap below works from. The
-    # first placement held back only channels whose game had LEFT the slate,
-    # because which in-slate games the write loop skips (no feed, too low for
-    # a placeholder) is only known now. Such a game whose kickoff moved no
-    # longer numbers onto its channel's number, so a new game could be handed
-    # it, the restore after parking found it taken, and the recording channel
-    # sat on a parking number. When the pre-pass found any, place again with
-    # them held back; the only change is the reservation (a floor that was
-    # inferred, with none remembered, is judged again with it, so the
-    # inference still runs the placement apply runs). COMPACT needs no
-    # second pass: allocate_compact_numbers keeps every published game on its
-    # own slot (marker-held, never released by a reschedule), so a skipped
-    # game's slot is never handed to another.
-    if numbering_mode == NUMBERING_MODE_KICKOFF:
-        kept_numbers = _numbers_held_for_recordings(
-            _unwritten_channels(existing_virtuals, seen_markers),
-            archive_enabled, guide_kept_ids,
-        )
-        if not kept_numbers <= reserved_numbers:
-            reserved_numbers = reserved_numbers | kept_numbers
-            virtual_base, numbered_for = _kickoff_floor(reserved_numbers)
-            chnum_by_marker = _assign_channel_numbers(
-                games, virtual_base, apply_tz,
-                mode=numbering_mode,
-                band_size=band_size,
-                existing_numbers=existing_numbers,
-                reserved_numbers=reserved_numbers,
-                numbered_for=numbered_for,
-            )
 
     max_target = max(chnum_by_marker.values(), default=virtual_base)
     # Park above every number ANY channel in the group holds (see
@@ -7504,11 +7531,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     profile_stats: Optional[Dict[str, Any]] = None
 
     with transaction.atomic():
-        # Auto-record (#216): drop our not-yet-started recordings the plan no
-        # longer wants BEFORE the stale reap looks at recordings, so a game
-        # whose team was removed can have its channel reaped this same run.
-        _autorecord_cancel(autorec, dry_run)
-
         # Persist the #217 re-key. Queryset .update(), not ch.save(): only the
         # tvg_id moves, and staying off save() keeps every Channel post_save
         # receiver out of it (see the epg_data signal trap further down). The
@@ -7571,9 +7593,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # _assign_channel_numbers / #121). In KICKOFF mode this is always
             # present: that map and the pre-pass skip exactly the same
             # bad-start_time rows, so any marker with a plan also has a number.
-            # In COMPACT mode unplaceable games are filtered out of `games`
-            # BEFORE the pre-pass (see the placeable filter above), so this guard
-            # should never fire. It stays as a belt: publishing a channel with a
+            # In COMPACT mode a game left without a slot loses its plan before
+            # seen_markers is filled (see the placeable filter above), so this
+            # guard should never fire. It stays as a belt: publishing a channel with a
             # null channel_number truncates the whole Xtream Codes feed (see
             # _ARCHIVE_CHANNEL_NUMBER), which is far worse than dropping a game.
             target_chnum = chnum_by_marker.get(marker)
@@ -7845,10 +7867,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 # hand) on a kept channel's old number, and the rename's
                 # queryset .update() moved the kept channel in beside it with
                 # nothing refusing the clash (1.34.0 batch review). And DO NOT
-                # use chnum_by_marker: it still holds entries for games the
-                # compact placeable-filter dropped and for games the pre-pass
-                # skipped, and treating those as taken refuses a kept channel
-                # its own original number and leaves it parked.
+                # use chnum_by_marker: it is the plan, not what the group's
+                # channels carry, and only what they carry can collide.
                 kept_ids = [ch.id for ch in kept_stale]
                 taken_now = set(
                     Channel.objects.filter(channel_group=target_group)
@@ -7970,28 +7990,56 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     ):
         _save_numbering_state(virtual_base, kickoff_record)
 
-    # Persist the LLM-description cache (prune entries whose marker is no
-    # longer in this refresh; keep file bounded to live games). Save outside
-    # the atomic block: sidecar JSON file is independent of the DB.
+    # The markers whose cached descriptions, logo URLs and logo files stay:
+    # every game the pre-pass decided on (a game left without a compact slot
+    # is published by a later apply, and its fetches should not be paid twice)
+    # and every channel of ours still in the group. DO NOT use seen_markers
+    # alone: a channel kept for its recording or by its guide is not seen, and
+    # sweeping its logo file left the live channel pointing at a deleted image
+    # for the rest of the recording (#288 review).
+    live_markers = set(decided_markers)
+    # Logo files ANY channel still points at are kept by NAME too: a channel
+    # of ours re-keyed (#217) and kept rather than rewritten shows the file
+    # named after its old marker, and a user may have given one of their own
+    # channels a matchup logo.
+    referenced_logo_files: frozenset = frozenset()
+    if not dry_run and target_group is not None and (llm_enabled or matchup_logos_enabled):
+        live_markers |= set(
+            Channel.objects.filter(_owned_tvg_id_q(), channel_group=target_group)
+            .values_list("tvg_id", flat=True)
+        )
+        referenced_logo_files = frozenset(
+            os.path.basename(url) for url in Channel.objects.filter(
+                logo__url__startswith=os.path.join(
+                    matchup_logos.LOGO_DIR, matchup_logos.LOGO_FILENAME_PREFIX,
+                ),
+            ).values_list("logo__url", flat=True) if url
+        )
+
+    # Persist the LLM-description cache, pruned to live_markers so the file
+    # stays bounded. Saved outside the atomic block: the sidecar JSON file is
+    # independent of the DB.
     if llm_enabled and not dry_run:
-        pruned = llm_descriptions.prune_cache(llm_cache, seen_markers)
+        pruned = llm_descriptions.prune_cache(llm_cache, live_markers)
         llm_descriptions.write_cache(LLM_DESCRIPTIONS_CACHE_PATH, pruned)
 
     # Persist the SportsDB thumb-URL cache and sweep stale matchup logo files
-    # from /data/logos/. Both prune to the live marker set so disk usage
-    # doesn't grow unbounded across many refresh cycles. Logo rows pointing
-    # at deleted files are left for Dispatcharr's own cleanup_unused_logos
-    # endpoint: deleting them here would race with concurrent UI reads.
+    # from /data/logos/. Both prune to live_markers so disk usage doesn't grow
+    # unbounded across many refresh cycles. Logo rows pointing at deleted
+    # files are left for Dispatcharr's own cleanup_unused_logos endpoint:
+    # deleting them here would race with concurrent UI reads.
     stale_logo_files_swept = 0
     if matchup_logos_enabled and not dry_run and thumb_cache is not None:
-        thumb_cache.prune(seen_markers)
+        thumb_cache.prune(live_markers)
         thumb_cache.save()
         if gamethumbs_cache is not None:
-            gamethumbs_cache.prune(seen_markers)
+            gamethumbs_cache.prune(live_markers)
             gamethumbs_cache.save()
         # Sweeps BOTH providers' files: sweep_stale_logo_files derives its live
         # set from every extension marker_to_filename can write.
-        stale_logo_files_swept = matchup_logos.sweep_stale_logo_files(seen_markers)
+        stale_logo_files_swept = matchup_logos.sweep_stale_logo_files(
+            live_markers, keep_filenames=referenced_logo_files,
+        )
 
     prefix = "[dry] " if dry_run else ""
     rename_msg = ""

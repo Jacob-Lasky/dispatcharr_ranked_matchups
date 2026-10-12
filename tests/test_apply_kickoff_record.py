@@ -237,6 +237,255 @@ def scenario_compact_mode_keeps_a_skipped_recording_channels_slot(env):
     assert got == {G411: 500, G415: 501, G431: 502, "ranked_matchups:CFB:400": 503}, got
 
 
+def scenario_witness_a_full_compact_band_gives_a_skipped_games_slot_to_a_new_game(env):
+    """#288: a compact band of one number, 500, holds 411. 411 then loses its
+    feed and scores below the placeholder threshold (no recording), and 431 is
+    new and playable. Slots were allocated before apply knew 411 would be
+    skipped, so 411 kept 500, 431 was dropped for want of a slot, and 411's
+    channel was then reaped: the band sat empty until the next apply."""
+    user_ch, _ = _seed_source_channel(env)
+    compact = {"channel_numbering_mode": "compact", "virtual_channel_base": 500,
+               "compact_band_size": 1}
+    _publish(env, [_game(411, user_ch.id)], settings=_settings(**compact))
+    assert _numbers(env) == {G411: 500}
+    gone = _row(411, KICKOFF, 999999, home="Home411", away="Away411")
+    gone["score"] = 1.0  # no source channel, below the placeholder threshold
+    result = _apply(env, [gone, _game(431, user_ch.id)], **compact)
+    assert "unmatched_skipped=1" in result["message"], result
+    got = _numbers(env)
+    assert got == {G431: 500}, got
+
+
+def scenario_a_skipped_game_that_is_not_kept_holds_no_number(env):
+    """#288's class in KICKOFF mode: only the games apply writes are numbered.
+    411 loses its feed (no recording, so its channel is reaped) as 450, on
+    the same slot, arrives: 450 is placed on 33772826 as if 411 had left the
+    slate. Numbered anyway, 411 kept 33772826 for a channel about to be
+    deleted, and 450 was nudged past the block, past 431, to 33772828."""
+    user_ch = _three_published(env)
+    gone = _row(411, KICKOFF, 999999, home="Home411", away="Away411")
+    gone["score"] = 1.0
+    result = _apply(env, [_game(415, user_ch.id), gone, _game(431, user_ch.id),
+                          _game(450, user_ch.id)])
+    assert "unmatched_skipped=1" in result["message"], result
+    got = _numbers(env)
+    assert got == {G415: 33772825, G431: 33772827, G450: 33772826}, got
+
+
+def scenario_a_compact_game_left_without_a_slot_is_reaped_not_stranded(env):
+    """The 2026-08-29 stranding, after #288 moved numbering behind the
+    pre-pass. A band of 500-501 holds 411 and 431; the user shrinks it to one
+    number. 411 keeps 500 and 431 has no slot. Its plan must be dropped before
+    seen_markers is built: marked seen and then skipped by the write loop, its
+    channel was neither renumbered nor reaped and stayed on a parking number."""
+    user_ch, _ = _seed_source_channel(env)
+    band = {"channel_numbering_mode": "compact", "virtual_channel_base": 500}
+    _publish(env, [_game(g, user_ch.id) for g in (411, 431)],
+             settings=_settings(compact_band_size=2, **band))
+    assert _numbers(env) == {G411: 500, G431: 501}
+    _apply(env, [_game(g, user_ch.id) for g in (411, 431)], compact_band_size=1, **band)
+    got = _numbers(env)
+    assert got == {G411: 500}, got
+
+
+def scenario_an_inferred_floor_ignores_the_channels_of_skipped_games(env):
+    """#288: the floor inference runs the placement apply runs, over the games
+    apply writes. 411 and 400 sit on the numbers floor 12 would give them; both
+    lose their feed (no recording, so both are reaped) and the state file is
+    gone. Judged over the whole slate, floor 12 kept three channels against
+    floor 11's two and was remembered, one above the floor 415 was numbered
+    from; judged over 415 alone, floor 11 names it exactly."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    later = _row(400, KICKOFF + timedelta(minutes=1), user_ch.id, home="Home400", away="Away400")
+    _publish(env, [_game(415, user_ch.id), _game(411, user_ch.id), later])
+    owned = _owned(env)
+    m.Channel.objects.filter(pk=owned[G411].pk).update(channel_number=33772827)
+    m.Channel.objects.filter(pk=owned["ranked_matchups:CFB:400"].pk).update(channel_number=33772828)
+    os.remove(env.plugin.NUMBERING_STATE_PATH)
+    gone = [_row(411, KICKOFF, 999999, home="Home411", away="Away411"),
+            _row(400, KICKOFF + timedelta(minutes=1), 999999, home="Home400", away="Away400")]
+    for g in gone:
+        g["score"] = 1.0
+    result = _apply(env, [_game(415, user_ch.id)] + gone)
+    assert "unmatched_skipped=2" in result["message"], result
+    assert _numbers(env) == {G415: 33772825}
+    assert _state(env)["kickoff_base"] == 11
+
+
+def scenario_witness_a_recording_apply_cancels_does_not_hold_a_full_bands_slot(env):
+    """Second opinion on #288: 411 on 500 (a band of one) has a recording the
+    plugin scheduled for a Recorded team. The user clears Recorded teams, 411
+    loses its feed, and 431 is new and playable. The recording is cancelled by
+    this apply before the reap, so 411's channel is reaped; counted as keeping
+    the channel, it held 500 and the full band refused 431 (an error, nothing
+    published)."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    compact = {"channel_numbering_mode": "compact", "virtual_channel_base": 500,
+               "compact_band_size": 1}
+    soon = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(411, soon, user_ch.id, home="Home411", away="Away411")],
+                     settings=_settings(recorded_teams="Home411", **compact))
+    rec = m.Recording.objects.get(channel=owned[G411])
+    assert rec.custom_properties.get("ranked_matchups_marker") == G411
+    gone = _row(411, soon, 999999, home="Home411", away="Away411")
+    gone["score"] = 1.0
+    result = _apply(env, [gone, _row(431, soon, user_ch.id, home="Home431", away="Away431")],
+                    recorded_teams="", **compact)
+    assert "unmatched_skipped=1" in result["message"], result
+    got = _numbers(env)
+    assert got == {G431: 500}, got
+    assert not m.Recording.objects.filter(pk=rec.pk).exists()
+
+
+def scenario_witness_a_recording_starting_soon_is_cancelled_before_numbering(env):
+    """Second opinion on #288, round 2: the same, with the unwanted recording
+    due to start in ten minutes. An earlier revision left out of the held
+    numbers only cancellations starting 30+ minutes ahead, so this one still
+    held 500, the full band aborted before the cancellation ran, and the
+    recording went ahead. Cancelling before numbering reads the real state."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    compact = {"channel_numbering_mode": "compact", "virtual_channel_base": 500,
+               "compact_band_size": 1}
+    kickoff = _now() + timedelta(minutes=40)  # recording starts 30 minutes before
+    owned = _publish(env, [_row(411, kickoff, user_ch.id, home="Home411", away="Away411")],
+                     settings=_settings(recorded_teams="Home411", **compact))
+    rec = m.Recording.objects.get(channel=owned[G411])
+    assert _now() < rec.start_time < _now() + timedelta(minutes=30)
+    gone = _row(411, kickoff, 999999, home="Home411", away="Away411")
+    gone["score"] = 1.0
+    _apply(env, [gone, _row(431, kickoff, user_ch.id, home="Home431", away="Away431")],
+           recorded_teams="", **compact)
+    got = _numbers(env)
+    assert got == {G431: 500}, got
+    assert not m.Recording.objects.filter(pk=rec.pk).exists()
+
+
+def scenario_witness_an_aborted_apply_keeps_the_cancellation_bookkeeping(env):
+    """Second opinion on #288, round 3: the cancellation now commits before
+    numbering, so an apply that then aborts (a full compact band) must still
+    drop the cancelled recording from the "created" state. Left there, the
+    next plan saw the row missing and tombstoned the game as deleted by the
+    user, never to be recorded again."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    compact = {"channel_numbering_mode": "compact", "virtual_channel_base": 500,
+               "compact_band_size": 1}
+    soon = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(411, soon, user_ch.id, home="Home411", away="Away411")],
+                     settings=_settings(recorded_teams="Home411", **compact))
+    rec = m.Recording.objects.get(channel=owned[G411])
+    with open(env.plugin.RECORDING_STATE_PATH, encoding="utf-8") as f:
+        assert G411 in json.load(f)["created"]
+    m.Channel.objects.create(name="Stranger", channel_number=500, channel_group=user_ch.channel_group)
+    gone = _row(411, soon, 999999, home="Home411", away="Away411")
+    gone["score"] = 1.0
+    _write_cache(env, [gone, _row(431, soon, user_ch.id, home="Home431", away="Away431")])
+    result = env.plugin._action_apply(_settings(recorded_teams="", **compact))
+    assert result["status"] == "error", result
+    assert not m.Recording.objects.filter(pk=rec.pk).exists()
+    with open(env.plugin.RECORDING_STATE_PATH, encoding="utf-8") as f:
+        state = json.load(f)
+    assert G411 not in state["created"], state
+    assert G411 not in state["tombstones"], state
+
+
+def scenario_logos_are_fetched_only_for_games_apply_writes(env):
+    """Second opinion on #288, round 4: the network half of the pre-pass
+    (descriptions, logos) runs after numbering, for placed games only. A band
+    of one keeps 411 and leaves 431 without a slot; only 411's logo is looked
+    up. Run before numbering, it spent the network budget on 431 too, and on
+    a full band the fetches were made for an apply that then aborted."""
+    import importlib
+    logos = importlib.import_module(env.plugin.__name__.rsplit(".", 1)[0] + ".logos")
+    looked_up = []
+    saved = (logos.resolve_thumb_url, logos.league_id_for)
+    logos.resolve_thumb_url = lambda home, away, *a, **k: looked_up.append(home)
+    logos.league_id_for = lambda *a, **k: None
+    try:
+        user_ch, _ = _seed_source_channel(env)
+        compact = {"channel_numbering_mode": "compact", "virtual_channel_base": 500,
+                   "compact_band_size": 1, "enable_matchup_logos": True,
+                   "gamethumbs_base_url": ""}
+        _publish(env, [_game(411, user_ch.id)], settings=_settings(**compact))
+        looked_up.clear()
+        os.remove(env.plugin.SPORTSDB_THUMB_CACHE_PATH)  # so 411 is looked up again
+        _apply(env, [_game(411, user_ch.id), _game(431, user_ch.id)], **compact)
+        assert _numbers(env) == {G411: 500}
+        assert looked_up == ["Home411"], looked_up
+    finally:
+        logos.resolve_thumb_url, logos.league_id_for = saved
+
+
+def scenario_a_full_compact_band_still_aborts(env):
+    """The abort moved behind the pre-pass (#288). A band of one whose number
+    another channel publishes still refuses the new game with an error, and
+    adds, renumbers and removes no channel."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    m.Channel.objects.create(name="Stranger", channel_number=500, channel_group=user_ch.channel_group)
+    _write_cache(env, [_game(431, user_ch.id)])
+    result = env.plugin._action_apply(_settings(
+        channel_numbering_mode="compact", virtual_channel_base=500, compact_band_size=1,
+    ))
+    assert result["status"] == "error", result
+    assert "no free channel numbers in 500-500" in result["message"], result
+    assert _numbers(env) == {}
+
+
+def scenario_witness_a_kept_channels_logo_file_is_not_swept(env):
+    """Second opinion on #288: the logo sweep at the end of apply kept the
+    files of the games apply wrote, and deleted the matchup logo of a channel
+    kept for its recording (its game left the slate), so the live channel
+    pointed at a deleted image for the rest of the recording. Logo lookups are
+    stubbed to misses: nothing here may reach the network."""
+    import importlib
+    m = env.m
+    logos = importlib.import_module(env.plugin.__name__.rsplit(".", 1)[0] + ".logos")
+    # The harness runs every scenario in one process: put the lookups back.
+    saved = (logos.resolve_thumb_url, logos.league_id_for)
+    logos.resolve_thumb_url = lambda *a, **k: None
+    logos.league_id_for = lambda *a, **k: None
+    try:
+        with_logos = {"enable_matchup_logos": True, "gamethumbs_base_url": ""}
+        user_ch = _seed_source_channel(env)[0]
+        _publish(env, [_game(g, user_ch.id) for g in (415, 431)], settings=_settings(**with_logos))
+        m.Recording.objects.create(
+            channel=_owned(env)[G431], start_time=_now() - timedelta(minutes=30),
+            end_time=_now() + timedelta(hours=3), custom_properties={"status": "recording"},
+        )
+        os.makedirs(logos.LOGO_DIR, exist_ok=True)
+        kept_logo = os.path.join(logos.LOGO_DIR, logos.marker_to_filename(G431))
+        # Round 2: a channel re-keyed (#217) and then kept shows the file named
+        # after its OLD marker; the kept 431 points at one here.
+        old_name = os.path.join(logos.LOGO_DIR, logos.marker_to_filename("ranked_matchups:CFB:7302311"))
+        gone_logo = os.path.join(logos.LOGO_DIR, logos.marker_to_filename("ranked_matchups:CFB:999"))
+        for path in (kept_logo, old_name, gone_logo):
+            with open(path, "wb") as f:
+                f.write(b"jpg")
+        logo = m.Logo.objects.create(name="old marker's logo", url=old_name)
+        m.Channel.objects.filter(pk=_owned(env)[G431].pk).update(logo_id=logo.id)
+        # Round 3: the user gave one of their own channels a matchup logo.
+        users_pick = os.path.join(logos.LOGO_DIR, logos.marker_to_filename("ranked_matchups:CFB:12"))
+        with open(users_pick, "wb") as f:
+            f.write(b"jpg")
+        pick = m.Logo.objects.create(name="user's pick", url=users_pick)
+        # Not a source of any game here: a source's logo is copied onto the
+        # matchup channel and would be kept through it instead.
+        m.Channel.objects.create(name="Mine", channel_number=11, logo_id=pick.id,
+                                 channel_group=user_ch.channel_group)
+        _apply(env, [_game(415, user_ch.id)], **with_logos)
+        assert set(_owned(env)) == {G415, G431}, "431 is kept for its recording"
+        assert os.path.exists(kept_logo), "the kept channel's logo file was swept"
+        assert os.path.exists(old_name), "the file the kept channel points at was swept"
+        assert os.path.exists(users_pick), "the file the user's own channel points at was swept"
+        assert not os.path.exists(gone_logo), "the sweep itself must still run"
+    finally:
+        logos.resolve_thumb_url, logos.league_id_for = saved
+
+
 def scenario_a_dry_run_writes_no_record(env):
     """A dry run on a fresh install writes no state file, and one after a real
     apply leaves it byte for byte, even when the slate it rehearses would

@@ -540,6 +540,8 @@ class TestFootballDataChunksReportLostDays:
             if url.endswith("/v4/matches"):
                 ranged.append((params["dateFrom"], params["dateTo"]))
                 if params["dateFrom"] in fail_chunk_from:
+                    if isinstance(bad_body, _Resp):
+                        return bad_body
                     if bad_body is not None:
                         return _Resp(bad_body)
                     raise soccer.requests.ConnectionError("chunk refused")
@@ -608,6 +610,16 @@ class TestFootballDataChunksReportLostDays:
         soccer, _ranged = self._stub(monkeypatch, fail_chunk_from={"2026-10-20"},
                                      bad_body={"message": "quota", "errorCode": 429})
         _rows, lost = self._fetch(soccer, "epl")
+        assert lost == _days(date(2026, 10, 20), date(2026, 10, 25))
+
+    def test_a_rate_limited_second_chunk_reports_its_own_days(self, monkeypatch):
+        """Guard (an item from #279's review, fixed by #280): a 429 on the
+        LATER chunk, after `_fd_get`'s own retries, keeps the first chunk's
+        games and reports the second chunk's days."""
+        soccer, _ranged = self._stub(monkeypatch, fail_chunk_from={"2026-10-20"},
+                                     bad_body=_Resp({"message": "slow down"}, status=429))
+        rows, lost = self._fetch(soccer, "epl")
+        assert [(r.home, r.start_time.date()) for r in rows] == [("Arsenal", date(2026, 10, 11))]
         assert lost == _days(date(2026, 10, 20), date(2026, 10, 25))
 
     def test_chunks_that_answer_are_quiet(self, monkeypatch):
@@ -990,11 +1002,12 @@ def _asked_days(url, params):
 _EMPTY_DATED = {"events": [], "gameWeek": [], "dates": [], "matches": [], "data": []}
 
 
-def _drive_every_source(plugin, monkeypatch, answer, fails=lambda days: True):
+def _drive_every_source(plugin, monkeypatch, answer, fails=lambda days: True, failure=None):
     """Run `fetch_upcoming(days_ahead=12)` on every source `_build_sources`
     builds with everything on. `answer(url)` is what an UNDATED request gets
     (a response, or raise). A DATED request fails when `fails(its days)`,
-    and otherwise answers with no games. Returns (failed days by class,
+    and otherwise answers with no games. A failing request raises, or, with
+    `failure`, answers `failure(url)` instead (a 200 that is not an answer). Returns (failed days by class,
     unreported by class, over-reported by class): unreported is a day of a
     failed request the source did not report, over-reported a day it
     reported that no failed request of its own covered (one that answered,
@@ -1017,6 +1030,8 @@ def _drive_every_source(plugin, monkeypatch, answer, fails=lambda days: True):
             return answer(url)
         if fails(days):
             failed.setdefault(current["name"], set()).update(days)
+            if failure is not None:
+                return failure(url)
             raise requests.ConnectionError("this dated request fails in this test")
         return _Resp([] if "collegebasketballdata" in url else _EMPTY_DATED)
 
@@ -1093,6 +1108,31 @@ def test_every_built_source_reports_the_days_its_dated_requests_lost(plugin, mon
         plugin, monkeypatch, _undated_answers)
     assert {"NcaamSource", "MlsEastSource", "MlsWestSource", "MlbRegularSource",
             "SoccerSource", "NbaRegularSource", "BoxingSource"} <= set(failed)
+    assert unreported == {}
+    assert overreported == {}
+
+
+def test_every_built_source_reports_the_days_a_listless_answer_lost(plugin, monkeypatch):
+    """The CLASS guard for #282's shape: every dated request answers HTTP 200
+    with an error object that carries none of the list keys a real answer
+    has (ESPN `events`, NHL `gameWeek`, statsapi `dates`, Football-Data
+    `matches`, boxing `data`, CollegeBasketballData's bare list). Each real
+    empty answer carries its list empty (measured 2026-10-11), so a body
+    without it is a failed request, and every source must report its days
+    lost (or raise), never read them as quiet. Before #282 every ESPN source
+    failed this: `fetch_scoreboard_day` passed the dict through as a day
+    with no games."""
+    failed, unreported, overreported = _drive_every_source(
+        plugin, monkeypatch, _undated_answers,
+        failure=lambda url: _Resp({"message": "rate limited", "errorCode": 429}))
+    # The instrument reached EVERY built source's dated path (Codex, #292
+    # follow-up: naming a handful let a source that stopped asking pass).
+    # The two exceptions ask for a whole season in one undated request, so a
+    # failure empties their label, which #240 already holds.
+    from tests.test_mapped_prefixes import _all_on_settings
+    reached = set(failed)
+    built = {type(src).__name__ for src in plugin._build_sources(_all_on_settings())}
+    assert built - reached == {"MlbPlayoffSource", "NcaafSource"}
     assert unreported == {}
     assert overreported == {}
 
