@@ -151,12 +151,14 @@ def test_ncaaf_eligibility_survives_the_fallback(monkeypatch, store):
     stub_requests_get(monkeypatch, get)
     monkeypatch.setattr(ncaaf.NcaafSource, "_current_season_year", staticmethod(lambda: 2026))
     first = ncaaf.NcaafSource(api_key="k", divisions="fbs")
+    first._fetch_games_cached()   # the complete read, kept
     assert first.outcome_eligible_teams() == frozenset({"Georgia"})
     answers["ok"] = False
     store.clock["now"] = T0 + timedelta(hours=6)
     later = ncaaf.NcaafSource(api_key="k", divisions="fbs")
-    assert later.outcome_eligible_teams() == frozenset({"Georgia"})
+    assert [g["home"] for g in later._fetch_games_cached()] == ["Georgia"]   # the kept read
     assert later.season_fallback() is not None
+    assert later.outcome_eligible_teams() == frozenset({"Georgia"})
 
 
 # ---------------------------------------------------------------------------
