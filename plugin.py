@@ -1427,17 +1427,35 @@ def _first_free_number(used, start: int) -> int:
     return num
 
 
+def _movable_owned_q() -> Any:
+    """Q for our channels apply may move between groups: every one but the
+    recordings archive channel, which stays in its archive group whatever the
+    settings say (a case-only change of 'Recordings group name' must not move
+    it into the live group, where it was reaped)."""
+    from django.db.models import Q
+    return ~Q(tvg_id=ARCHIVE_TVG_ID)
+
+
 def _archive_group(recordings_group_name):
     """The recordings group for this setting, or None: matched IGNORING CASE
-    (as archive_enabled compares it), preferring the group that holds the
-    archive channel. Matched exactly, changing only the case of the setting
-    created a second archive group and channel, splitting the recordings and
-    leaving the old group outside cleanup."""
-    from apps.channels.models import ChannelGroup
-    named = ChannelGroup.objects.filter(name__iexact=str(recordings_group_name).strip())
-    return (named.filter(channels__tvg_id=ARCHIVE_TVG_ID).first()
+    (as archive_enabled compares it). Matched exactly, changing only the case
+    of the setting created a second archive group and channel, splitting the
+    recordings and leaving the old group outside cleanup. Among case variants
+    (an install that already split), the one named exactly as the setting
+    that holds the archive channel wins, then any that holds it, then the
+    exact name."""
+    named = _archive_groups(recordings_group_name)
+    with_archive = named.filter(channels__tvg_id=ARCHIVE_TVG_ID).distinct()
+    return (with_archive.filter(name=recordings_group_name).first()
+            or with_archive.order_by("pk").first()
             or named.filter(name=recordings_group_name).first()
-            or named.first())
+            or named.order_by("pk").first())
+
+
+def _archive_groups(recordings_group_name) -> Any:
+    """Every group whose name matches the setting ignoring case."""
+    from apps.channels.models import ChannelGroup
+    return ChannelGroup.objects.filter(name__iexact=str(recordings_group_name).strip())
 
 
 def _ensure_archive_channel(recordings_group_name):
@@ -1661,17 +1679,21 @@ def _cleanup_empty_archive(recordings_group_name) -> bool:
     anything was removed. Safe: the archive channel is deleted only when it has
     zero Recording rows, so the CASCADE takes nothing with it."""
     from apps.channels.models import Channel, Recording
-    grp = _archive_group(recordings_group_name)
-    if grp is None:
-        return False
     removed = False
-    arch = Channel.objects.filter(channel_group=grp, tvg_id=ARCHIVE_TVG_ID).first()
-    if arch is not None and not Recording.objects.filter(channel_id=arch.id).exists():
-        arch.delete()
-        removed = True
-    if Channel.objects.filter(channel_group=grp).count() == 0:
-        grp.delete()
-        removed = True
+    # Every case variant: an install split by the old exact-name lookup has
+    # an archive in each, and each empties on its own schedule.
+    # A case variant goes only if it held our archive channel: an empty group
+    # of the user's that merely differs in case is not ours to delete (the
+    # exact name always was, as before).
+    for grp in list(_archive_groups(recordings_group_name)):
+        arch = Channel.objects.filter(channel_group=grp, tvg_id=ARCHIVE_TVG_ID).first()
+        ours = arch is not None or grp.name == recordings_group_name
+        if arch is not None and not Recording.objects.filter(channel_id=arch.id).exists():
+            arch.delete()
+            removed = True
+        if ours and Channel.objects.filter(channel_group=grp).count() == 0:
+            grp.delete()
+            removed = True
     return removed
 
 
@@ -6601,11 +6623,11 @@ def _reserved_channel_numbers(
     # of (in place). Numbering runs BEFORE that move commits, so a full band
     # refused there leaves nothing moved, and it must reserve exactly what it
     # would read after the move.
-    ours_in = [g for g in [target_group, *pending_groups] if g is not None]
-    reserved = _published_numbers(
-        Channel.objects.exclude(_owned_tvg_id_q() & Q(channel_group__in=ours_in)),
-        band_start, band_end,
-    )
+    ours = (
+        _owned_tvg_id_q() & Q(channel_group=target_group) if target_group is not None
+        else Q(pk__in=[])
+    ) | (_owned_tvg_id_q() & _movable_owned_q() & Q(channel_group__in=list(pending_groups)))
+    reserved = _published_numbers(Channel.objects.exclude(ours), band_start, band_end)
     if target_group is not None:
         reserved |= _published_numbers(
             Channel.objects.filter(channel_group=target_group).exclude(_owned_tvg_id_q()),
@@ -6745,7 +6767,7 @@ def _commit_group_setup(
     deleted_old_groups = 0
     if foreign_owned_groups:
         for old_g in foreign_owned_groups:
-            old_chans = Channel.objects.filter(_owned_tvg_id_q(), channel_group=old_g)
+            old_chans = Channel.objects.filter(_owned_tvg_id_q() & _movable_owned_q(), channel_group=old_g)
             n = old_chans.count()
             old_chans.update(channel_group=target_group)
             migrated_from_old_group += n
@@ -6994,17 +7016,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         set() if _cache_vouched(cache)
         else _guide_kept_ids(_owned_published_channels(), datetime.now(timezone.utc))
     )
-    # The archive is protected by WHAT IT HOLDS, its archive channel, not only
-    # by name: changing just the case of 'Recordings group name' made the
-    # existing archive group look like a previous live group, and the setup
-    # moved its archive channel into the live group, where it was reaped.
-    # DO NOT protect names ignoring case instead: an archive name equal (in
-    # any case) to the OLD live group's name then protected the old live
-    # group, stranding our channels in it beside new copies. The names stay
-    # exact, so a case-only rename of the live group still moves our channels.
+    # The archive CHANNEL never moves (_movable_owned_q), wherever it sits:
+    # changing just the case of 'Recordings group name' made the existing
+    # archive group look like a previous live group, and the setup moved its
+    # archive channel into the live group, where it was reaped. Excluded per
+    # CHANNEL, not per group: a previous live group that also holds a stray
+    # archive channel must still give up its game channels. DO NOT protect
+    # names ignoring case instead: an archive name equal (in any case) to the
+    # OLD live group's name then protected the old live group, stranding our
+    # channels in it beside new copies. Names stay exact, so a case-only
+    # rename of the live group still moves our channels.
     foreign_owned_groups = list(
         ChannelGroup.objects.exclude(name__in=_protected_group_names)
-        .exclude(channels__tvg_id=ARCHIVE_TVG_ID)
         .filter(_owned_tvg_id_q("channels__"))
         .distinct()
     )
@@ -7066,12 +7089,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # 3. Existing virtual channels we'll update or delete: ours in the target
     # group AND in the previous groups _commit_group_setup will move into it
     # (in place, same Channel.id), so everything decided before the move sees
-    # the channels it will act on. A dry run moves nothing, so it never did.
-    moving_groups = [] if dry_run else foreign_owned_groups
-    owned_groups = ([target_group] if target_group is not None else []) + moving_groups
+    # the channels it will act on. A dry run counts them too: it previews
+    # what the real apply does (updates, not creates).
+    moving_groups = foreign_owned_groups
+    in_target = Q(channel_group=target_group) if target_group is not None else Q(pk__in=[])
     existing_virtuals = {
         ch.tvg_id: ch for ch in Channel.objects.filter(
-            _owned_tvg_id_q(), channel_group__in=owned_groups,
+            _owned_tvg_id_q() & (in_target | (_movable_owned_q() & Q(channel_group__in=moving_groups))),
         )
     }
     # Channels made before #217 carry a marker that hashed the kickoff time.
@@ -7834,9 +7858,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # assignment, but not from the parking range.
     # The group as the setup (first thing in the transaction below) will
     # leave it: what it holds now, plus our channels it moves in.
-    in_group = Q(channel_group=target_group) if target_group is not None else Q(pk__in=[])
     highest_in_group = (
-        Channel.objects.filter(in_group | (_owned_tvg_id_q() & Q(channel_group__in=moving_groups)))
+        Channel.objects.filter(
+            in_target | (_owned_tvg_id_q() & _movable_owned_q() & Q(channel_group__in=moving_groups)))
         .aggregate(m=_Max("channel_number"))["m"] or 0
     )
     park_base = _resolve_park_base(max_target, highest_in_group)

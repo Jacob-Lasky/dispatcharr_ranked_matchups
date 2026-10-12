@@ -260,6 +260,80 @@ def scenario_witness_a_case_only_archive_rename_reuses_the_archive(env):
     assert not m.Channel.objects.filter(pk=arch.pk).exists()
 
 
+def scenario_witness_a_stray_archive_channel_does_not_strand_the_old_live_group(env):
+    """Codex review, round 3: an old live group holding our game channel AND a
+    stray archive channel (left there by the earlier case bug). Excluding
+    whole GROUPS that hold the archive kept the game channel there and the
+    rename made it a second channel. Per channel: the game channel moves,
+    the archive channel stays, and the old group, not empty, stays."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    old = ours.channel_group
+    stray = m.Channel.objects.create(
+        name="Matchups Recordings", channel_number=9999, channel_group=old,
+        tvg_id=env.plugin.ARCHIVE_TVG_ID,
+    )
+    m.Recording.objects.create(
+        channel=stray, start_time=_now() - timedelta(days=2),
+        end_time=_now() - timedelta(days=2, hours=-3), custom_properties={"status": "completed"},
+    )
+    _write_cache(env, [game])
+    result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+    assert result["status"] == "ok", result
+    mine = list(m.Channel.objects.filter(tvg_id=G401))
+    assert [(c.pk, c.channel_group.name) for c in mine] == [(ours.pk, NEW)], (
+        [(c.pk, c.channel_group.name) for c in mine]
+    )
+    stray.refresh_from_db()
+    assert stray.channel_group_id == old.pk
+    assert m.ChannelGroup.objects.filter(pk=old.pk).exists()
+
+
+def scenario_witness_split_archives_use_the_one_the_setting_names(env):
+    """Codex review, round 3: an install the old exact-name lookup already
+    split has an archive in 'Matchups Recordings' (older) and in 'matchups
+    recordings'. The setting names the second: new recordings go there, and
+    cleanup empties BOTH variants, not only the first one found."""
+    m = env.m
+    older = m.ChannelGroup.objects.create(name="Matchups Recordings")
+    named = m.ChannelGroup.objects.create(name="matchups recordings")
+    older_arch = m.Channel.objects.create(name="a", channel_number=9998, channel_group=older,
+                                          tvg_id=env.plugin.ARCHIVE_TVG_ID)
+    named_arch = m.Channel.objects.create(name="b", channel_number=9999, channel_group=named,
+                                          tvg_id=env.plugin.ARCHIVE_TVG_ID)
+    assert env.plugin._ensure_archive_channel("matchups recordings").pk == named_arch.pk
+    assert env.plugin._cleanup_empty_archive("matchups recordings") is True
+    assert not m.Channel.objects.filter(pk__in=[older_arch.pk, named_arch.pk]).exists()
+    assert not m.ChannelGroup.objects.filter(pk__in=[older.pk, named.pk]).exists()
+
+
+def scenario_cleanup_leaves_a_users_empty_case_variant_group(env):
+    """Guard: cleanup now visits case variants, but a group that never held
+    our archive and is not named exactly as the setting is the user's."""
+    m = env.m
+    theirs = m.ChannelGroup.objects.create(name="MATCHUPS RECORDINGS")
+    env.plugin._cleanup_empty_archive("Matchups Recordings")
+    assert m.ChannelGroup.objects.filter(pk=theirs.pk).exists()
+
+
+def scenario_witness_a_dry_run_previews_a_rename_as_updates(env):
+    """Codex review, round 3: the dry run left the channels the rename moves
+    out of what it counted, so it previewed them as CREATED where the real
+    apply updates them in place (same Channel.id)."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    _publish(env, [game], settings=_settings(**COMPACT))
+    m.ChannelGroup.objects.create(name=NEW)  # else a dry run returns before counting
+    _write_cache(env, [game])
+    dry = env.plugin._action_apply(_settings(channel_profile_name=NEW, dry_run=True, **COMPACT))
+    real = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+    assert "created=0, updated=1" in real["message"], real
+    assert "created=0, updated=1" in dry["message"], dry
+
+
 def _snapshot(env):
     """Every row of every model, every state file the plugin writes, and the
     logo directory: what a stopped apply must leave exactly as it found it."""
@@ -268,18 +342,15 @@ def _snapshot(env):
         model.__name__: sorted(repr(sorted(r.items())) for r in model.objects.values())
         for model in registry.get_models()
     }
+    # Every file under the scenario's temp dir: the redirected state files,
+    # the logo dir, and any sidecar a new write might add. (A file written
+    # into the repo checkout instead fails the harness itself.)
     files = {}
-    for attr in ("CACHE_PATH", "RECORDING_STATE_PATH", "NUMBERING_STATE_PATH",
-                 "LLM_DESCRIPTIONS_CACHE_PATH", "SPORTSDB_THUMB_CACHE_PATH", "GAMETHUMBS_CACHE_PATH"):
-        path = getattr(env.plugin, attr)
-        if os.path.exists(path):
+    for root, _dirs, names in os.walk(env.tmp):
+        for name in names:
+            path = os.path.join(root, name)
             with open(path, "rb") as f:
-                files[attr] = hashlib.sha256(f.read()).hexdigest()
-    logos_dir = os.path.join(env.tmp, "logos")
-    if os.path.isdir(logos_dir):
-        for name in sorted(os.listdir(logos_dir)):
-            with open(os.path.join(logos_dir, name), "rb") as f:
-                files[f"logos/{name}"] = hashlib.sha256(f.read()).hexdigest()
+                files[os.path.relpath(path, env.tmp)] = hashlib.sha256(f.read()).hexdigest()
     return rows, files
 
 
@@ -403,6 +474,8 @@ def _write_sites(fn, writers, aliases=None):
                     (receiver == "os" and f.attr in ("replace", "remove", "unlink", "rename"))
                     or receiver == "shutil"):
                 out.append((n.lineno, ast.unparse(f)))
+            elif name == "open" and _opens_for_writing(n, positional=1 if not receiver else 0):
+                out.append((n.lineno, ast.unparse(f)))
             elif name in _FILE_WRITES or (not receiver and name in writers) or qualified in writers:
                 out.append((n.lineno, qualified or name))
         for c in ast.iter_child_nodes(n):
@@ -410,6 +483,17 @@ def _write_sites(fn, writers, aliases=None):
 
     visit(fn)
     return out
+
+
+def _opens_for_writing(call, positional):
+    """open(path, "w") / Path(p).open("w"): a mode with w, a, x or +."""
+    mode = None
+    if len(call.args) > positional and isinstance(call.args[positional], ast.Constant):
+        mode = call.args[positional].value
+    for kw in call.keywords:
+        if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+            mode = kw.value.value
+    return isinstance(mode, str) and any(c in mode for c in "wax+")
 
 
 def _writers(functions, known=(), aliases=None):
@@ -530,6 +614,8 @@ class TestNothingCommitsBeforeTheLastCheck:
         "def _action_apply(s):\n    os.replace('a', 'b')\n    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n    with transaction.atomic():\n        pass",
         "def _action_apply(s):\n    Path('x').write_text('y')\n    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n    with transaction.atomic():\n        pass",
         "def _action_apply(s):\n    shutil.move('a', 'b')\n    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n    with transaction.atomic():\n        pass",
+        "def _action_apply(s):\n    with open('new.json', 'w') as f:\n        f.write('x')\n    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n    with transaction.atomic():\n        pass",
+        "def _action_apply(s):\n    Path('x').open(mode='a')\n    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n    with transaction.atomic():\n        pass",
     ])
     def test_the_scan_sees_an_early_write(self, snippet):
         sites, checks, _main = _apply_layout(snippet)
@@ -537,7 +623,7 @@ class TestNothingCommitsBeforeTheLastCheck:
 
     def test_the_scan_ignores_dicts_sets_and_strings(self):
         snippet = ("def _action_apply(s):\n    d = {}\n    d.update(a=1)\n    ids = set()\n"
-                   "    ids.update([1])\n    'a_b'.replace('_', '-')\n"
+                   "    ids.update([1])\n    'a_b'.replace('_', '-')\n    open('r.json').read()\n"
                    "    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n"
                    "    with transaction.atomic():\n        pass")
         sites, checks, _main = _apply_layout(snippet)
