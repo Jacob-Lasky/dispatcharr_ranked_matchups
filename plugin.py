@@ -1471,6 +1471,17 @@ def _archive_group(recordings_group_name):
             or named.filter(name=recordings_group_name).first())
 
 
+def _made_for_archive(group, archive) -> bool:
+    """True when `group` is the one `archive` was made for: _ensure_archive_channel
+    names the archive channel as its group (and renames it with a move), so
+    the pair agreeing is our mark on the group. DO NOT count a group as ours
+    merely for HOLDING the archive: a user who filed the archive channel in
+    their own group had that group deleted when the archive moved out or
+    was cleaned up. Ignoring case, as the group lookup does."""
+    return (group is not None and archive.name is not None
+            and group.name.casefold() == archive.name.casefold())
+
+
 def _archive_groups(recordings_group_name) -> Any:
     """Every group whose name matches the setting ignoring case."""
     from apps.channels.models import ChannelGroup
@@ -1550,8 +1561,9 @@ def _ensure_archive_channel(recordings_group_name):
 def _move_archive_into(grp):
     """Move the archive channel kept in another group (the recordings group
     was renamed) into `grp`, its recordings with it (they point at the
-    channel). Its old group goes once nothing references it: it held our
-    archive. None when there is no archive yet."""
+    channel). Its old group goes once nothing references it, if it was the
+    one made for the archive (_made_for_archive). None when there is no
+    archive yet."""
     from apps.channels.models import Channel, ChannelGroup
     arch = (
         Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).exclude(channel_group=grp)
@@ -1560,12 +1572,15 @@ def _move_archive_into(grp):
     if arch is None:
         return None
     old_group_id = arch.channel_group_id
+    old_was_ours = _made_for_archive(arch.channel_group, arch)
     # update(), not save(): no Channel post_save (the epg_data-wipe trap).
-    Channel.objects.filter(pk=arch.pk).update(channel_group=grp)
+    # Renamed with the move, so the new group carries our mark (_made_for_archive).
+    Channel.objects.filter(pk=arch.pk).update(channel_group=grp, name=grp.name)
     arch.channel_group = grp
+    arch.name = grp.name
     logger.info("[ranked_matchups] moved recordings archive channel id=%s into group %r",
                 arch.id, grp.name)
-    if old_group_id is not None:
+    if old_group_id is not None and old_was_ours:
         old = ChannelGroup.objects.select_for_update().filter(pk=old_group_id).first()
         if old is not None and not _group_is_referenced(old):
             old.delete()
@@ -1736,17 +1751,30 @@ def _cleanup_empty_archive(recordings_group_name) -> bool:
     The archive is found by WHAT IT IS (ARCHIVE_TVG_ID), wherever it sits, not
     by the setting's name: after the recordings group was renamed (or only
     its case changed) a lookup by the new name never saw the old archive, which
-    stayed forever beside a second one. A group goes only when nothing
-    references it (_group_is_referenced) and it is ours: it held our archive,
-    or it is named exactly as the setting (as before). An empty group of the
-    user's that merely differs in case is never touched or locked."""
+    stayed forever beside a second one. While any archive holds recordings,
+    they all fold into the one in the setting's group (moved there if none
+    is): left apart, split archives (an install the old exact-name lookup
+    split) both stayed for good, and one left in the live group was reaped
+    there with its recordings. A group goes only
+    when nothing references it (_group_is_referenced) and it is ours: the one
+    an archive was made for (_made_for_archive), or named exactly as the
+    setting (as before). A group of the user's, empty or holding the archive
+    they filed there, is never deleted."""
     from apps.channels.models import Channel, ChannelGroup, Recording
     from django.db import transaction
     removed = False
     with transaction.atomic():  # the row locks below need one; nests as a savepoint
-        archives = list(Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID))
-        ours = {a.channel_group_id for a in archives if a.channel_group_id is not None}
+        archives = list(Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).select_related("channel_group"))
+        ours = {a.channel_group_id for a in archives if _made_for_archive(a.channel_group, a)}
         ours |= set(ChannelGroup.objects.filter(name=recordings_group_name).values_list("pk", flat=True))
+        if Recording.objects.filter(channel_id__in=[a.id for a in archives]).exists():
+            # Idempotent when the one archive already sits in the setting's
+            # group; otherwise it moves there (_move_archive_into).
+            keep = _ensure_archive_channel(recordings_group_name)
+            others = [a.id for a in archives if a.id != keep.id]
+            if Recording.objects.filter(channel_id__in=others).update(channel_id=keep.id):
+                removed = True
+            archives = list(Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID))
         for arch in archives:
             if not Recording.objects.filter(channel_id=arch.id).exists():
                 arch.delete()
@@ -7170,11 +7198,16 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # (in place, same Channel.id), so everything decided before the move sees
     # the channels it will act on. A dry run counts them too: it previews
     # what the real apply does (updates, not creates).
+    # NEVER the recordings archive channel, wherever it sits: no game marks
+    # it seen, so it was reaped as stale, its recordings first "re-homed"
+    # onto itself, and the CASCADE took them (an archive left in the live
+    # group by the old case-only rename bug).
     moving_groups = foreign_owned_groups
     in_target = Q(channel_group=target_group) if target_group is not None else Q(pk__in=[])
     existing_virtuals = {
         ch.tvg_id: ch for ch in Channel.objects.filter(
-            _owned_tvg_id_q() & (in_target | (_movable_owned_q() & Q(channel_group__in=moving_groups))),
+            _owned_tvg_id_q() & _movable_owned_q()
+            & (in_target | Q(channel_group__in=moving_groups)),
         )
     }
     # Channels made before #217 carry a marker that hashed the kickoff time.

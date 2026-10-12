@@ -264,8 +264,9 @@ def scenario_witness_a_stray_archive_channel_does_not_strand_the_old_live_group(
     """Codex review, round 3: an old live group holding our game channel AND a
     stray archive channel (left there by the earlier case bug). Excluding
     whole GROUPS that hold the archive kept the game channel there and the
-    rename made it a second channel. Per channel: the game channel moves,
-    the archive channel stays, and the old group, not empty, stays."""
+    rename made it a second channel. Per channel: the game channel moves to
+    the live group, and the archive channel, holding a recording, never
+    does; cleanup folds it into the recordings group (round 9)."""
     m = env.m
     user_ch, _ = _seed_source_channel(env)
     game = _row(401, _now() + timedelta(hours=6), user_ch.id)
@@ -287,8 +288,8 @@ def scenario_witness_a_stray_archive_channel_does_not_strand_the_old_live_group(
         [(c.pk, c.channel_group.name) for c in mine]
     )
     stray.refresh_from_db()
-    assert stray.channel_group_id == old.pk
-    assert m.ChannelGroup.objects.filter(pk=old.pk).exists()
+    assert stray.channel_group.name == "Matchups Recordings", stray.channel_group.name
+    assert m.Recording.objects.filter(channel=stray).count() == 1
 
 
 def scenario_witness_split_archives_use_the_one_the_setting_names(env):
@@ -299,9 +300,11 @@ def scenario_witness_split_archives_use_the_one_the_setting_names(env):
     m = env.m
     older = m.ChannelGroup.objects.create(name="Matchups Recordings")
     named = m.ChannelGroup.objects.create(name="matchups recordings")
-    older_arch = m.Channel.objects.create(name="a", channel_number=9998, channel_group=older,
+    # Each archive is named as the group it was made for, as
+    # _ensure_archive_channel names it.
+    older_arch = m.Channel.objects.create(name=older.name, channel_number=9998, channel_group=older,
                                           tvg_id=env.plugin.ARCHIVE_TVG_ID)
-    named_arch = m.Channel.objects.create(name="b", channel_number=9999, channel_group=named,
+    named_arch = m.Channel.objects.create(name=named.name, channel_number=9999, channel_group=named,
                                           tvg_id=env.plugin.ARCHIVE_TVG_ID)
     assert env.plugin._ensure_archive_channel("matchups recordings").pk == named_arch.pk
     assert env.plugin._cleanup_empty_archive("matchups recordings") is True
@@ -398,6 +401,83 @@ def scenario_witness_a_renamed_away_archive_is_cleaned_up(env):
     assert env.plugin._cleanup_empty_archive("Saved Games") is True
     assert not m.Channel.objects.filter(pk=arch.pk).exists()
     assert not m.ChannelGroup.objects.filter(pk=old.pk).exists()
+
+
+def scenario_witness_an_archive_in_the_live_group_keeps_its_recordings(env):
+    """Codex review, round 9: an archive channel sitting in the live group
+    (left there by the earlier case-only rename bug) counted among our game
+    channels, so apply found it stale, "re-homed" its recordings onto itself
+    and reaped it: the CASCADE deleted them."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    arch = m.Channel.objects.create(name="Matchups Recordings", channel_number=9999,
+                                    channel_group=ours.channel_group,
+                                    tvg_id=env.plugin.ARCHIVE_TVG_ID)
+    rec = m.Recording.objects.create(
+        channel=arch, start_time=_now() - timedelta(days=2),
+        end_time=_now() - timedelta(days=2, hours=-3), custom_properties={"status": "completed"},
+    )
+    _write_cache(env, [game])
+    result = env.plugin._action_apply(_settings(**COMPACT))
+    assert result["status"] == "ok", result
+    assert m.Recording.objects.filter(pk=rec.pk).exists(), "the recording was deleted"
+    rec = m.Recording.objects.get(pk=rec.pk)
+    assert rec.channel.channel_group.name == "Matchups Recordings", rec.channel.channel_group.name
+    assert m.Channel.objects.filter(tvg_id=env.plugin.ARCHIVE_TVG_ID).count() == 1
+
+
+def scenario_witness_a_users_group_the_archive_was_moved_into_is_kept(env):
+    """Codex review, round 9: a group counted as ours merely for holding the
+    archive channel. The user filed it in their own 'Kept' group: moving it
+    out (a renamed setting) or cleaning it up deleted 'Kept'."""
+    m = env.m
+    theirs, arch, rec = _archive_with_recording(env, "Matchups Recordings")
+    theirs.name = "Kept"
+    theirs.save()
+    env.plugin._ensure_archive_channel("Saved Games")
+    arch.refresh_from_db()
+    assert arch.channel_group.name == "Saved Games"
+    assert m.ChannelGroup.objects.filter(pk=theirs.pk).exists(), "moving the archive out deleted 'Kept'"
+
+    mine = m.ChannelGroup.objects.create(name="Kept too")
+    m.Channel.objects.filter(pk=arch.pk).update(channel_group=mine)
+    rec.delete()
+    assert env.plugin._cleanup_empty_archive("Saved Games") is True
+    assert not m.Channel.objects.filter(pk=arch.pk).exists()
+    assert m.ChannelGroup.objects.filter(pk=mine.pk).exists(), "cleanup deleted 'Kept too'"
+
+
+def scenario_an_archive_renamed_twice_leaves_no_group_behind(env):
+    """Guard: a group is ours when the archive channel carries its name
+    (_made_for_archive), so a move must rename the channel too. Renamed
+    twice, the middle group would otherwise look like a user's and stay."""
+    m = env.m
+    first, arch, _rec = _archive_with_recording(env, "Matchups Recordings")
+    env.plugin._ensure_archive_channel("Saved Games")
+    middle = m.ChannelGroup.objects.get(name="Saved Games")
+    env.plugin._ensure_archive_channel("Kept Games")
+    arch.refresh_from_db()
+    assert (arch.name, arch.channel_group.name) == ("Kept Games", "Kept Games")
+    assert not m.ChannelGroup.objects.filter(pk__in=[first.pk, middle.pk]).exists()
+
+
+def scenario_witness_split_archives_holding_recordings_converge(env):
+    """Codex review, round 9: an install the old exact-name lookup split has an
+    archive in 'Matchups Recordings' and in 'matchups recordings', each with a
+    recording. Cleanup removed only EMPTY archives, so both stayed for good
+    and new recordings went to one. They fold into the one the setting names."""
+    m = env.m
+    older, older_arch, older_rec = _archive_with_recording(env, "Matchups Recordings")
+    named, named_arch, named_rec = _archive_with_recording(env, "matchups recordings")
+    env.plugin._cleanup_empty_archive("matchups recordings")
+    assert list(m.Channel.objects.filter(tvg_id=env.plugin.ARCHIVE_TVG_ID)
+                .values_list("pk", flat=True)) == [named_arch.pk]
+    assert {r.channel_id for r in m.Recording.objects.filter(pk__in=[older_rec.pk, named_rec.pk])} \
+        == {named_arch.pk}
+    assert not m.ChannelGroup.objects.filter(pk=older.pk).exists()
+    assert m.ChannelGroup.objects.filter(pk=named.pk).exists()
 
 
 def scenario_cleanup_leaves_a_users_empty_case_variant_group(env):
