@@ -210,6 +210,67 @@ def scenario_witness_an_old_source_made_to_fetch_during_the_prepass_is_kept(env)
     assert m.EPGSource.objects.filter(pk=old_src.pk).exists(), "the user's fetching source was deleted"
 
 
+def _during_the_prepass(env, edit):
+    """Run `edit` while apply's pre-pass runs (after its early reads)."""
+    prepare = env.plugin._autorecord_prepare
+
+    def edited(*a, **k):
+        edit()
+        return prepare(*a, **k)
+
+    env.plugin._autorecord_prepare = edited
+    return lambda: setattr(env.plugin, "_autorecord_prepare", prepare)
+
+
+def scenario_witness_an_old_source_renamed_to_the_live_name_keeps_its_guide(env):
+    """Codex review, round 14: the previous live group's source, renamed by
+    the user to the NEW live name during the pre-pass, was both the live
+    source and an old one: its guide rows were "moved" onto themselves, each
+    a clash with itself, and deleted. A channel kept for an active recording
+    (the write loop does not visit it) lost its guide. (Here, on sqlite,
+    whose foreign-key checks wait for the commit, the commit failed instead.)"""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() - timedelta(minutes=30), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    m.Recording.objects.create(channel=ours, start_time=_now() - timedelta(minutes=30),
+                               end_time=_now() + timedelta(hours=2), custom_properties={})
+    assert m.ProgramData.objects.filter(epg__tvg_id=G401).exists()
+    _write_cache(env, [_row(402, _now() + timedelta(hours=6), user_ch.id)])
+    restore = _during_the_prepass(env, lambda: m.EPGSource.objects.filter(name=OLD).update(name=NEW))
+    try:
+        result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+    finally:
+        restore()
+    assert result["status"] == "ok", result
+    ours.refresh_from_db()
+    assert ours.epg_data_id is not None and m.ProgramData.objects.filter(epg_id=ours.epg_data_id).exists(), (
+        "the recording channel's guide was deleted"
+    )
+
+
+def scenario_witness_an_old_group_renamed_during_the_prepass_is_judged_by_its_new_name(env):
+    """Codex review, round 14: the old live group, renamed by the user to
+    'Kept' during the pre-pass, was deleted once our channel moved out: the
+    lock re-read the row and threw it away, and the name test read the stale
+    'Top Matchups', a name this plugin creates."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    old = ours.channel_group
+    _write_cache(env, [game])
+    restore = _during_the_prepass(env, lambda: m.ChannelGroup.objects.filter(pk=old.pk).update(name="Kept"))
+    try:
+        result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+    finally:
+        restore()
+    assert result["status"] == "ok", result
+    ours.refresh_from_db()
+    assert ours.channel_group.name == NEW
+    assert m.ChannelGroup.objects.filter(pk=old.pk, name="Kept").exists(), "the user's 'Kept' was deleted"
+
+
 def scenario_a_rename_keeps_our_numbers(env):
     """Guard: numbering now runs BEFORE the group move commits, so it must
     count our channels in the group being renamed away from as ours. Counted
@@ -1036,6 +1097,42 @@ def test_a_channel_is_locked_before_its_recordings_are_checked(fn_name, lock_nee
               if src.startswith("Recording.objects.filter(") and check_needle in src]
     assert locks and checks, (locks, checks)
     assert min(locks) < min(checks), f"{fn_name} reads recordings before locking the channels"
+
+
+def _locks_through_a_join(source):
+    """Lines of every statement that row-locks (select_for_update) through a
+    relation lookup (a `__` keyword other than pk__in / id__in, or a lookup
+    on a field: `name__iexact` is not a join, `channels__tvg_id` is)."""
+    allowed_suffixes = ("__in", "__iexact", "__isnull", "__startswith", "__exact")
+    found = []
+    for stmt in ast.walk(ast.parse(source)):
+        if not isinstance(stmt, ast.stmt) or isinstance(stmt, (ast.FunctionDef, ast.ClassDef,
+                                                               ast.If, ast.For, ast.With, ast.Try)):
+            continue
+        if "select_for_update(" not in ast.unparse(stmt):
+            continue
+        for call in (n for n in ast.walk(stmt) if isinstance(n, ast.Call)):
+            for kw in call.keywords:
+                name = kw.arg or ""
+                base = next((name[: -len(x)] for x in allowed_suffixes if name.endswith(x)), name)
+                if "__" in base:
+                    found.append((stmt.lineno, name))
+    return found
+
+
+def test_no_row_lock_goes_through_a_join():
+    """Postgres refuses FOR UPDATE on the nullable side of an outer join,
+    which a lookup across a relation (OR'd, or nullable) produces; sqlite,
+    which ignores select_for_update, cannot show it. Every lock here reads
+    one table, by pk or by its own columns."""
+    assert [n for _, n in _locks_through_a_join(
+        "list(ChannelGroup.objects.select_for_update().filter(Q(channels__tvg_id=1) | Q(name=2)))\n"
+        "x = Channel.objects.select_for_update().filter(channel_group__name='a').first()\n"
+        "y = EPGSource.objects.select_for_update().filter(pk__in=[1], name__iexact='a').first()\n"
+    )] == ["channels__tvg_id", "channel_group__name"], "instrument"
+    source = open(PLUGIN_PY, encoding="utf-8").read()
+    assert source.count("select_for_update(") >= 6, "instrument: the plugin's locks were not found"
+    assert _locks_through_a_join(source) == []
 
 
 class TestNothingCommitsBeforeTheLastCheck:

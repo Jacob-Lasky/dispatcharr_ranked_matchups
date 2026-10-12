@@ -1588,8 +1588,10 @@ def _move_archive_into(grp, live_group_name=""):
     )
     if arch is None:
         return None
-    old_group_id = arch.channel_group_id
-    old_was_ours = _archive_group_is_ours(arch.channel_group, arch, grp.name, live_group_name)
+    # Locked, then judged as it is now (see _commit_group_setup).
+    old = (ChannelGroup.objects.select_for_update().filter(pk=arch.channel_group_id).first()
+           if arch.channel_group_id is not None else None)
+    old_was_ours = _archive_group_is_ours(old, arch, grp.name, live_group_name)
     # update(), not save(): no Channel post_save (the epg_data-wipe trap).
     # Renamed with the move, so the new group carries our mark (_made_for_archive).
     Channel.objects.filter(pk=arch.pk).update(channel_group=grp, name=grp.name)
@@ -1597,10 +1599,8 @@ def _move_archive_into(grp, live_group_name=""):
     arch.name = grp.name
     logger.info("[ranked_matchups] moved recordings archive channel id=%s into group %r",
                 arch.id, grp.name)
-    if old_group_id is not None and old_was_ours:
-        old = ChannelGroup.objects.select_for_update().filter(pk=old_group_id).first()
-        if old is not None and not _group_is_referenced(old):
-            old.delete()
+    if old is not None and old_was_ours and not _group_is_referenced(old):
+        old.delete()
     return arch
 
 
@@ -1787,6 +1787,16 @@ def _cleanup_empty_archive(recordings_group_name, live_group_name="") -> bool:
         # CASCADEd away with the channel. A list, not .exists(): that locks
         # one row (LIMIT 1).
         list(Channel.objects.select_for_update().filter(tvg_id=ARCHIVE_TVG_ID)
+             .values_list("pk", flat=True))
+        # Their groups locked too, before the names ownership is judged by
+        # are read (see _commit_group_setup). By pk: DO NOT lock through the
+        # channels join, Postgres refuses FOR UPDATE on the nullable side of
+        # the outer join an OR across it makes.
+        candidates = set(
+            Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).exclude(channel_group=None)
+            .values_list("channel_group_id", flat=True)
+        ) | set(ChannelGroup.objects.filter(name=recordings_group_name).values_list("pk", flat=True))
+        list(ChannelGroup.objects.select_for_update().filter(pk__in=candidates)
              .values_list("pk", flat=True))
         archives = list(Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).select_related("channel_group"))
         ours = {a.channel_group_id for a in archives
@@ -6886,10 +6896,13 @@ def _commit_group_setup(
         return None
     # The previous sources, chosen before the pre-pass, re-read the same way:
     # one the user pointed at a guide meanwhile is theirs (_never_fetches_q),
-    # and was emptied and deleted below.
+    # and was emptied and deleted below. Never the live source: one the user
+    # renamed to the live name meanwhile is both, and its rows, "moved" onto
+    # themselves, each clashed with itself and were deleted.
     foreign_epg_sources = list(
         EPGSource.objects.select_for_update()
         .filter(pk__in=[s.pk for s in foreign_epg_sources]).filter(_never_fetches_q())
+        .exclude(pk__in=[epg_source.pk] if epg_source is not None else [])
         .order_by("pk")
     )
 
@@ -6918,6 +6931,15 @@ def _commit_group_setup(
     deleted_old_groups = 0
     if foreign_owned_groups:
         for old_g in foreign_owned_groups:
+            # Row lock and re-read FIRST, so a concurrent assignment (an M3U
+            # refresh) cannot land between the reference check and the delete
+            # below (on Postgres its foreign-key check takes a key-share lock
+            # on this row, which waits on ours), and the group is judged as it
+            # is NOW: chosen before the pre-pass, a group the user renamed
+            # meanwhile was deleted under its old name.
+            old_g = ChannelGroup.objects.select_for_update().filter(pk=old_g.pk).first()
+            if old_g is None:
+                continue
             old_chans = Channel.objects.filter(_owned_tvg_id_q() & _movable_owned_q(), channel_group=old_g)
             n = old_chans.count()
             old_chans.update(channel_group=target_group)
@@ -6927,12 +6949,7 @@ def _commit_group_setup(
             # see _DELETABLE_LEGACY_GROUP_NAMES for why this is not a substring
             # test and must not become one again (#157).
             # Kept while ANYTHING still points at it (_group_is_referenced):
-            # a stream, an M3U account's settings for it, an override. The row
-            # lock first, so a concurrent assignment (an M3U refresh) cannot
-            # land between the check and the delete: on Postgres its
-            # foreign-key check takes a key-share lock on this row, which
-            # waits on ours.
-            ChannelGroup.objects.select_for_update().filter(pk=old_g.pk).exists()
+            # a stream, an M3U account's settings for it, an override.
             if not _group_is_referenced(old_g):
                 if old_g.name.strip().lower() in deletable_group_names:
                     old_g.delete()
