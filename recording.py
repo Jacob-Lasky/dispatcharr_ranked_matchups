@@ -662,7 +662,7 @@ def stop_entries(plan: Plan, ours_by_marker: Dict[str, Any], names: Dict[str, st
     return out
 
 
-def _entry_at(entry: Dict[str, Any]) -> Optional[datetime]:
+def entry_at(entry: Dict[str, Any]) -> Optional[datetime]:
     try:
         return _aware(datetime.fromisoformat(str(entry.get("at"))))
     except ValueError:
@@ -675,7 +675,7 @@ def due_stops(entries: Dict[str, Dict[str, Any]], now: datetime) -> List[Tuple[s
     now = _aware(now)
     out = []
     for rid, e in entries.items():
-        at = _entry_at(e)
+        at = entry_at(e)
         if at is not None and now - STOP_GRACE <= at <= now:
             out.append((rid, e))
     return sorted(out, key=lambda kv: (kv[1].get("at"), kv[0]))
@@ -693,7 +693,7 @@ def next_stop_delay(entries: Dict[str, Dict[str, Any]], now: datetime) -> Option
     STOP_RETRY while any stop is still inside its grace window. None when
     there is nothing to wait for."""
     now = _aware(now)
-    ats = [at for at in (_entry_at(e) for e in entries.values()) if at is not None]
+    ats = [at for at in (entry_at(e) for e in entries.values()) if at is not None]
     future = [at for at in ats if at > now]
     delays = [(min(future) - now).total_seconds()] if future else []
     if any(now - STOP_GRACE <= at <= now for at in ats):

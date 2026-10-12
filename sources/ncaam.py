@@ -23,6 +23,7 @@ March Madness). Calls in May-October return [] cleanly.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -85,7 +86,7 @@ class NcaamSource(PointsBasedSportSource):
             logger.warning("[ncaam] no CBB-Data API key configured; returning []")
             return []
 
-        season_year = self._current_season_year()
+        season_year = self._season()
         # Raises RankingsUnavailable when the request FAILS: that is an outage
         # the refresh holds the previous games for (#240), where None, no poll
         # published yet, is a real preseason and stays quiet. DO NOT catch it
@@ -156,6 +157,32 @@ class NcaamSource(PointsBasedSportSource):
         # past so fetch_upcoming filters everything out and returns [].
         now = datetime.now(timezone.utc)
         return now.year + 1 if now.month >= 11 else now.year
+
+    def _season(self) -> int:
+        """`_current_season_year()`, read ONCE per source (one refresh). The
+        upcoming fetch, the season read and the key its complete read is
+        kept under (`points_based.season_store_key`) must name the same
+        season; three clock reads could straddle the season boundary and
+        file one season's games under the other's key."""
+        if getattr(self, "_season_memo", None) is None:
+            self._season_memo = self._current_season_year()
+        return self._season_memo
+
+    def _season_store_id(self) -> Optional[str]:
+        """The season AND the poll's teams: the stored population is the games
+        of the teams the poll ranks (`_fetch_full_season_games`), so a read
+        filtered by last week's poll must not stand in for this week's,
+        where a newly ranked team's games would be missing and score no
+        stakes (Codex, #289 follow-up round 3). None when the poll did not
+        answer: then the season cannot be read either, and nothing is kept
+        or recalled."""
+        try:
+            ranked = self._poll(self._season())
+        except RankingsUnavailable:
+            return None
+        teams = ",".join(sorted(ranked or ()))
+        digest = hashlib.sha256(teams.encode("utf-8")).hexdigest()[:12]
+        return f"{self._season()}|{self.poll_name}|{digest}"
 
     def _poll(self, season: int) -> Optional[Dict[str, int]]:
         """`_fetch_rankings(season)`, read ONCE per source (#283).
@@ -313,7 +340,7 @@ class NcaamSource(PointsBasedSportSource):
         """
         if not self.api_key:
             return []
-        season = self._current_season_year()
+        season = self._season()
         # The poll `fetch_upcoming` ranked the slate with (`_poll`); a failed
         # one raises here too, so the importance call fails (and is logged)
         # instead of simulating an empty population as zero importance (#283).

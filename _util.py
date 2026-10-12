@@ -3,6 +3,7 @@ and `sources/*.py` can import without circulars."""
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import math
@@ -16,8 +17,10 @@ from typing import Any, Dict, List, Optional
 from ._http import get_within_deadline
 
 
-def write_json_atomic(path: str, data: Any, **dump_kwargs: Any) -> None:
+def write_json_atomic(path: str, data: Any, *, compress: bool = False, **dump_kwargs: Any) -> None:
     """Write `data` as JSON to `path` so a reader never sees a half-written file.
+    `compress` writes it gzipped (read it back with ``gzip.open(path, "rt")``),
+    for a state file large enough to matter on disk (`sources/_season_store`).
 
     The ONE implementation of the plugin's state-file write; DO NOT hand-roll
     another. Two rules, both learned the hard way:
@@ -36,7 +39,8 @@ def write_json_atomic(path: str, data: Any, **dump_kwargs: Any) -> None:
     """
     tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        opener = gzip.open if compress else open
+        with opener(tmp, "wt", encoding="utf-8") as f:
             json.dump(data, f, **dump_kwargs)
         os.replace(tmp, path)
     finally:
