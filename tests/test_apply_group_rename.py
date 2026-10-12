@@ -17,6 +17,7 @@ Assertions use literal names ("Top Matchups", "!Top Matchups", the
 """
 
 import importlib.util
+import json
 import os
 from datetime import timedelta
 
@@ -125,7 +126,8 @@ def scenario_a_kept_channel_is_not_restored_onto_a_strangers_number(env):
     someone else's channel on that RAW number (here one the user filed in the
     new group by hand). Nothing in the database refuses the duplicate, so both
     sat on one number, the guide bound arbitrarily and the UI refused to save
-    either. The kept channel must stay parked instead."""
+    either. The kept channel moves to the next free number instead (it used to
+    stay parked, which the next scenario shows is no safer)."""
     m = env.m
     user_ch, rec_ch, programmes = _recording_on_air(env)
     number = rec_ch.channel_number
@@ -145,6 +147,85 @@ def scenario_a_kept_channel_is_not_restored_onto_a_strangers_number(env):
                .values_list("channel_number", flat=True))
     assert len(raw) == len(set(raw)), raw
     _assert_guide_kept(env, rec_ch, programmes)
+
+
+def scenario_witness_a_kept_channel_is_never_left_on_a_parking_number(env):
+    """Batch interaction review: as above, the stranger in the new group has
+    the kept channel's old number. The kept channel was left on its parking
+    number, which is only clear of OUR group: a channel elsewhere publishing
+    that number shares the bare-number guide key (#117), and the kept
+    channel's guide binds to the wrong programme. It now takes the first number
+    above its old one that nothing publishes anywhere: here number + 1 is
+    taken by a channel in yet another group, so number + 2."""
+    m = env.m
+    user_ch, rec_ch, programmes = _recording_on_air(env)
+    number = rec_ch.channel_number
+    new_group = m.ChannelGroup.objects.create(name=NEW)
+    m.Channel.objects.create(name="Hand-filed", channel_number=number, channel_group=new_group)
+    elsewhere = m.ChannelGroup.objects.create(name="Elsewhere")
+    m.Channel.objects.create(name="Next door", channel_number=number + 1, channel_group=elsewhere)
+
+    _rename_with_401_off_the_slate(env, user_ch)
+
+    rec_ch.refresh_from_db()
+    assert rec_ch.channel_number == number + 2, (rec_ch.channel_number, number)
+    published = list(m.Channel.objects.values_list("channel_number", flat=True))
+    assert published.count(rec_ch.channel_number) == 1, published
+    _assert_guide_kept(env, rec_ch, programmes)
+
+
+def scenario_witness_a_kept_channel_that_moves_does_not_push_another_kept_one(env):
+    """Second opinion on the batch fix: 401 and 403 are both kept for their
+    recordings across the rename, on neighbouring numbers. A hand-filed
+    channel in the new group has 401's number, so 401 must move; taking the
+    first free number above its own, it took 403's (403 not yet restored) and
+    pushed 403 along too. 403 keeps its number; 401 moves past it. 401's
+    kickoff record entry (#278) follows it to its new number."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() - timedelta(minutes=30)
+    owned = _publish(env, [
+        _row(401, kickoff, user_ch.id),
+        _row(403, kickoff, user_ch.id, home="Clemson", away="Duke"),
+        _row(402, _now() + timedelta(days=1), user_ch.id, home="Texas", away="Oklahoma"),
+    ])
+    a, b = owned[RECORDING], owned["ranked_matchups:CFB:403"]
+    m.Channel.objects.filter(pk=b.pk).update(channel_number=a.channel_number + 1)
+    for ch in (a, b):
+        m.Recording.objects.create(
+            channel=ch, start_time=kickoff, end_time=_now() + timedelta(hours=3),
+            custom_properties={"status": "recording"},
+        )
+    number = a.channel_number
+    new_group = m.ChannelGroup.objects.create(name=NEW)
+    m.Channel.objects.create(name="Hand-filed", channel_number=number, channel_group=new_group)
+
+    _rename_with_401_off_the_slate(env, user_ch)
+
+    a.refresh_from_db()
+    b.refresh_from_db()
+    assert b.channel_number == number + 1, (b.channel_number, number)
+    assert a.channel_number == number + 2, (a.channel_number, number)
+    with open(env.plugin.NUMBERING_STATE_PATH, encoding="utf-8") as f:
+        entry = json.load(f)["numbered_for"][RECORDING]
+    assert entry[1] == number + 2, entry
+
+
+def scenario_witness_a_fractional_kept_number_is_not_restored_onto_a_published_floor(env):
+    """Second opinion on the batch fix: reservations are floored, so a kept
+    channel on 400.5 (renumbered by hand) next to a channel elsewhere
+    publishing 400.5 compared unequal to the reserved 400 and kept sharing
+    it. A fractional number is free only if its floor is."""
+    m = env.m
+    user_ch, rec_ch, programmes = _recording_on_air(env)
+    m.Channel.objects.filter(pk=rec_ch.pk).update(channel_number=400.5)
+    elsewhere = m.ChannelGroup.objects.create(name="Elsewhere")
+    m.Channel.objects.create(name="Also 400.5", channel_number=400.5, channel_group=elsewhere)
+
+    _rename_with_401_off_the_slate(env, user_ch)
+
+    rec_ch.refresh_from_db()
+    assert rec_ch.channel_number == 401, rec_ch.channel_number
 
 
 def scenario_the_moved_entry_goes_with_its_channel_when_the_recording_ends(env):

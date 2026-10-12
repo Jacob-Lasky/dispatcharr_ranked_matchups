@@ -1221,18 +1221,32 @@ def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool, markers=None) -> None:
 
 def _autorecord_cancel_committed(ar: "_AutoRecord", dry_run: bool, markers=None) -> None:
     """_autorecord_cancel in a transaction of its own (its re-check locks the
-    row), with the state change saved right after it commits.
+    row), with the state change saved BEFORE that transaction commits.
 
     Saved here, not left to _autorecord_finish: an apply that returned or
     failed in between kept the deleted recordings in the "created" state, and
     the next plan read each missing row as one the user deleted and tombstoned
     it for good (#288 review). If the apply fails after this, the
-    cancellations and their bookkeeping both stand."""
+    cancellations and their bookkeeping both stand.
+
+    Write-ahead, inside the transaction, NOT after the commit: a kill between
+    the commit and the file write left the same stale "created" entry, and the
+    game was tombstoned the next time it was wanted. Saved first, a kill before
+    the commit rolls the deletion back and leaves a row of ours with no
+    "created" entry, which the plan reads as ours and unedited
+    (recording.was_edited) and never as a user deletion.
+
+    The residual of this order is smaller than the one it replaces: it needs a
+    kill between the file write and the commit AND the user then deleting or
+    editing that same row, one the plan had just decided it did not want,
+    before the next apply (which otherwise cancels it again). The old order's
+    needed only the kill, and cost the game for good."""
     from django.db import transaction
     with transaction.atomic():
+        before = ar.cancelled
         _autorecord_cancel(ar, dry_run, markers)
-    if ar.cancelled and not dry_run:
-        recording_policy.save_state(RECORDING_STATE_PATH, ar.state)
+        if ar.cancelled > before and not dry_run:
+            recording_policy.save_state(RECORDING_STATE_PATH, ar.state)
 
 
 def _reason_props(ar: "_AutoRecord", marker: str) -> Dict[str, Any]:
@@ -2975,7 +2989,45 @@ APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME = 30 + 10 + 15
 # writes. Generous on purpose: the writes are a 0.55s transaction (#137) plus
 # the sweeps, and a whole live auto_pipeline (refresh AND apply) took 382s on
 # 2026-10-11.
+#
+# It is also the least time left in the child for apply to START, and to
+# commit its first recording cancellation (_apply_time_short): a slow refresh
+# in auto_pipeline can leave apply seconds to live, and a kill that lands
+# after a committed cancellation but before the main transaction leaves the
+# cancelled recording's replacement unwritten until the next run.
 APPLY_WRITE_RESERVE_SECONDS = 120
+
+
+def _apply_time_short(before: str, dry_run: bool) -> Optional[Dict[str, Any]]:
+    """None when apply may go on; otherwise the error result to return.
+
+    Inside the pipeline child, apply must not begin a step it cannot finish
+    before tasks.py kills the child. Below APPLY_WRITE_RESERVE_SECONDS it
+    stops and says so, and its result carries tasks.APPLY_STOPPED_FOR_TIME,
+    so tasks.run_pipeline_subprocess re-runs it at once in a fresh child when
+    it came from auto_pipeline (a standalone apply or reap is left to the next
+    run; reap's pending path finishes it).
+    A dry run is never stopped: it writes nothing, so a kill costs nothing.
+    Outside a child (no deadline) nothing is ever stopped.
+
+    120s is about three times the slowest whole live apply (5.8s to 39.4s
+    over the 12 runs logged 2026-10-11, network fetches included). No time
+    check can bound a query blocked on a lock; a kill that still lands after
+    a cancellation is repaired by the next apply (see the cancellation step).
+    """
+    if dry_run:
+        return None
+    left = tasks.pipeline_child_seconds_left()
+    if left is None or left >= APPLY_WRITE_RESERVE_SECONDS:
+        return None
+    message = (
+        f"Apply stopped {before}: not enough time left in this pipeline run "
+        f"({int(max(left, 0.0))}s; it keeps {APPLY_WRITE_RESERVE_SECONDS}s to finish). "
+        "No recording was cancelled and the slate was not published; it is "
+        "applied again in a fresh pipeline run, or by the next one."
+    )
+    logger.warning("[ranked_matchups] %s", message)
+    return {"status": "error", "message": message, tasks.APPLY_STOPPED_FOR_TIME: True}
 
 # Hard ceiling on max_games, derived from the scheduler-lock budget rather than
 # picked for roundness.
@@ -4322,6 +4374,11 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 errs.append(err)
     for label, errs in bracket_failures.items():
         src_summary.append(_source_error_entry(f"{label} bracket (stakes not simulated)", "; ".join(errs)))
+    # A points-based season scored from its last complete read (#289
+    # follow-up); one with no kept read was held as an outage at fetch. Only
+    # when importance ran: a seed read at build time used nothing otherwise.
+    if weights.importance > 0:
+        src_summary.extend(_season_fallback_entries(sources, game_sources))
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
@@ -5183,8 +5240,11 @@ def _resolve_park_base(max_target_number: int, highest_in_group: float = 0) -> i
 
     `highest_in_group` is the highest number any channel in the target group
     holds now. Without it, a channel the user added to our group by hand above
-    our targets could sit exactly on a parking number, and the park UPDATE would
-    hit the constraint and roll back every apply (found in review, #219)."""
+    our targets could sit exactly on a parking number, sharing it for the rest
+    of the transaction (no database constraint refuses it,
+    _PER_GROUP_NUMBER_NOTE). Parking numbers are never committed: every parked
+    channel is either written with its target or restored to a free number
+    (the kept-channel restore in _action_apply)."""
     return int(max(max_target_number, int(highest_in_group or 0))) + 1000
 
 
@@ -6652,6 +6712,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 "the next refresh that finds games."
             )}
         return {"status": "ok", "message": "Cache empty; run refresh first."}
+    # Before ANY write: a slow refresh in the same pipeline child can leave
+    # apply too little life to finish (see APPLY_WRITE_RESERVE_SECONDS).
+    short = _apply_time_short("before starting", _dry_run_enabled(settings))
+    if short is not None:
+        return short
     games, dup_dropped = _unique_by_marker(cache.get("games", []))
     if dup_dropped:
         logger.warning(
@@ -7404,6 +7469,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # re-check there), and is then counted as keeping its channel. Only these
     # markers: the decided games' recordings wait for the plan over the games
     # numbering places (second step, below, #291).
+    #
+    # This is apply's first IRREVERSIBLE commit, so the time check runs again
+    # here: the deciding half above (stream pools over every game) can spend
+    # the margin the check at the start saw. Past this point apply does not
+    # stop on time: stopping between the two cancellation steps would itself
+    # split a cancellation from its replacement, and the network half below is
+    # capped at the child's remaining life less the reserve.
+    #
+    # DO NOT move the cancellations into the main transaction to make them
+    # atomic with their replacements. They commit first on purpose (#288,
+    # #291: a recording counted as keeping its channel held a full compact
+    # band's slot, and the second plan must name the channels numbering
+    # placed), and the network half between them cannot sit inside a
+    # transaction (#136). A kill that still lands after this commit is
+    # repaired by the next apply: the cancelled recording left the "created"
+    # state when it committed, so the next plan schedules the replacement and
+    # does not read the missing row as a user deletion
+    # (tests/test_apply_time_reserve.py pins both).
+    short = _apply_time_short("before cancelling recordings", dry_run)
+    if short is not None:
+        return short
     _autorecord_cancel_committed(
         autorec, dry_run,
         markers={m for m in autorec.ours if m not in prep_by_marker},
@@ -7768,6 +7854,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         .order_by("order")
                         .values_list("stream_id", flat=True)
                     )
+                    # DO NOT remove a stream link from a channel that is
+                    # recording right now (except an excluded-group one, the
+                    # rule #206 applies to a channel kept for its recording).
+                    # A placeholder (no feed matched this time: the provider
+                    # renamed the slot, an M3U refresh dropped the source's
+                    # link) still clears the score threshold or plays a
+                    # Recorded team, so it is written, and replacing its links
+                    # with the empty pool cut the running capture (batch
+                    # interaction review); a different non-empty pool can pull
+                    # the stream it is capturing from just the same. While it
+                    # records, the new pool's streams are ADDED after its
+                    # current ones, and the next apply after the recording
+                    # ends trims them.
+                    if current_ordered and any(
+                        recording_policy.is_in_progress(r)
+                        for r in Recording.objects.filter(channel=existing)
+                    ):
+                        kept_links = [sid for sid in current_ordered if sid not in excluded_ids]
+                        source_streams = kept_links + [
+                            sid for sid in source_streams if sid not in kept_links
+                        ]
                     if current_ordered != source_streams:
                         ChannelStream.objects.filter(channel=existing).delete()
                         for order, sid in enumerate(source_streams):
@@ -7993,11 +8100,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         stripped, len(kept_stale),
                     )
 
-            # Restore kept channels (recording, or guide) to their pre-park number
-            # so they don't linger at a ~park_base value. Only restore a number
-            # no other channel in the group carries now, so no number is
-            # duplicated in the group (_PER_GROUP_NUMBER_NOTE); any (rare)
-            # collision leaves that channel parked, still safe.
+            # Restore kept channels (recording, or guide) to their pre-park number,
+            # or, when another channel has it now, to the first number above it
+            # that is free. DO NOT leave a kept channel on its parking number:
+            # parking is only clear of our own group, so a channel in ANOTHER
+            # group could publish the same number, and the guide keys on the
+            # bare number everywhere (#117, #202): the kept channel's guide then
+            # bound to the wrong programme (batch interaction review). One rule:
+            # free means no channel in the group carries it raw and no channel
+            # anywhere else publishes it (_reserved_channel_numbers, effective).
             if kept_stale:
                 # Raw numbers channels in the group REALLY carry now, read back
                 # rather than planned. DO NOT use only the numbers this run
@@ -8014,13 +8125,37 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     .exclude(id__in=kept_ids)
                     .values_list("channel_number", flat=True)
                 )
-                restore = []
+                # Two passes: every kept channel whose old number is free gets it
+                # back FIRST, so one that has to move never takes another kept
+                # channel's old number and pushes that one along too.
+                origs = {ch.id: prepark_numbers.get(ch.id) for ch in kept_stale}
+
+                def _free(number, blocked) -> bool:
+                    # Reservations are floored (_reserved_channel_numbers), so a
+                    # fractional number is free only if its floor is too.
+                    return number not in blocked and int(number) not in blocked
+
+                restore, moving = [], []
                 for ch in kept_stale:
-                    orig = prepark_numbers.get(ch.id)
-                    if orig is not None and orig not in taken_now:
+                    orig = origs[ch.id]
+                    if orig is not None and _free(
+                            orig, taken_now | _reserved_channel_numbers(target_group, int(orig))):
                         ch.channel_number = orig
                         restore.append(ch)
                         taken_now.add(orig)  # two kept channels, one old number
+                    else:
+                        moving.append(ch)
+                held_origs = {n for n in origs.values() if n is not None}
+                for ch in moving:
+                    orig = origs[ch.id]
+                    # No old number (cleared by hand): from the floor, as a
+                    # fresh game would be.
+                    start = int(orig) if orig is not None else int(virtual_base)
+                    blocked = (taken_now | held_origs
+                               | _reserved_channel_numbers(target_group, start))
+                    ch.channel_number = float(_first_free_number(blocked, start))
+                    restore.append(ch)
+                    taken_now.add(ch.channel_number)
                 if restore:
                     Channel.objects.bulk_update(restore, ["channel_number"])
                 # A kept channel back on the number it was numbered for is
@@ -8028,11 +8163,20 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 # (#278) is carried over, whatever floor it names: if its game
                 # returns to the slate under that floor, it keeps the number.
                 # One left parked has no entry to carry.
+                # One that had to move is recorded at its NEW number (same
+                # offset and floor): it was not numbered there, but holding it
+                # spares the recording channel a second move when its game
+                # returns (batch interaction review).
                 kept_id_set = {ch.id for ch in kept_stale}
+                moved_ids = {ch.id for ch in moving}
                 renamed = {new: legacy for _ch, legacy, new in marker_renames}
                 for kept_marker, kept_ch in existing_virtuals.items():
                     entry = remembered_record.get(renamed.get(kept_marker, kept_marker))
-                    if kept_ch.id in kept_id_set and entry and entry[1] == kept_ch.channel_number:
+                    if kept_ch.id not in kept_id_set or not entry:
+                        continue
+                    if kept_ch.id in moved_ids:
+                        kept_numbered[kept_marker] = (entry[0], int(kept_ch.channel_number), entry[2])
+                    elif entry[1] == kept_ch.channel_number:
                         kept_numbered[kept_marker] = entry
             deleted_stale = len(reap_ids)
             kept_stale_n = len(kept_stale)
@@ -8305,10 +8449,13 @@ def _action_auto_pipeline_sync(settings: Dict[str, Any]) -> Dict[str, Any]:
     # not reported as stalled at refresh's last line (#227).
     logger.info("[ranked_matchups] apply: starting")
     r2 = _action_apply(settings)
-    return {
+    out = {
         "status": r2.get("status", "ok"),
         "message": f"refresh: {r1.get('message')} | apply: {r2.get('message')}",
     }
+    if r2.get(tasks.APPLY_STOPPED_FOR_TIME):
+        out[tasks.APPLY_STOPPED_FOR_TIME] = True  # the parent re-applies in a fresh child
+    return out
 
 
 def _action_auto_pipeline_async(settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -8456,6 +8603,35 @@ def _require_seasons(src: Any) -> None:
         require = getattr(s, "require_season", None)
         if callable(require):
             require()
+
+
+def _season_fallback_entries(sources: List[Any], game_sources: List[Any]) -> List[str]:
+    """Summary entries for the points-based seasons this refresh simulated
+    from their last COMPLETE read (#289 follow-up, `sources/_season_store`):
+    "<label> season (using the last complete read from <time>)", one per
+    label (MLS East and West share "MLS"). Informational, not an error: the
+    games were scored, on stakes a little old. A failed season with no kept
+    read never reaches here; `_require_seasons` made its label an outage.
+
+    Reported for a source whose games were scored, or whose read seeded a
+    scored playoff or bracket source (`strength_sources`); a league with
+    nothing on the slate used nothing.
+    """
+    affected = {id(s) for s in game_sources}
+    for s in game_sources:
+        affected.update(id(r) for r in getattr(s, "strength_sources", ()))
+    by_label: Dict[str, List[str]] = {}
+    for src in sources:
+        fallback = getattr(src, "season_fallback", None)
+        read_at = fallback() if callable(fallback) and id(src) in affected else None
+        if read_at is None:
+            continue
+        when = read_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+        reads = by_label.setdefault(src.sport_label, [])
+        if when not in reads:
+            reads.append(when)
+    return [f"{label} season (using the last complete read from {', '.join(reads)})"
+            for label, reads in by_label.items()]
 
 
 def _seeded_from(regulars: List[Any], *seeded: Any) -> None:
@@ -9742,6 +9918,38 @@ def _next_reap_delay(settings: Dict[str, Any]) -> float:
 _HANDOFF_RECHECK_SECONDS = 300
 
 
+def _cached_live_starts() -> Tuple[Dict[str, Optional[datetime]], set]:
+    """What the cache says NOW about each game, for _run_due_stops: (marker ->
+    the start of its live block, from the games; the markers only the bench
+    lists). The FIRST row of a marker wins, as apply keeps it
+    (_unique_by_marker). A cache that cannot be read this way (not a list, a
+    row that is not a mapping) yields nothing rather than raising: an
+    exception here ended the reaper's pass, and a stop that came due
+    meanwhile was lost to its grace window. Nothing known means the stops run
+    as planned, as before this check existed."""
+    starts: Dict[str, Optional[datetime]] = {}
+    benched: set = set()
+    try:
+        cache = _read_cache()
+        for key in ("games", "bench"):
+            rows = cache.get(key)
+            for g in (rows if isinstance(rows, list) else []):
+                if not isinstance(g, dict):
+                    continue
+                marker = _build_marker_key(g)
+                if marker in starts or marker in benched:
+                    continue
+                if key == "bench":
+                    benched.add(marker)
+                    continue
+                start_dt = parse_iso_utc(g.get("start_time_utc"))
+                starts[marker] = _live_window(g, start_dt)[0] if start_dt is not None else None
+    except Exception:
+        logger.exception("[ranked_matchups] handoff check could not read the cache")
+        return {}, set()
+    return starts, benched
+
+
 def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> int:
     """Stop our running recordings whose planned handoff time has come (#216
     phase C). Every worker's reaper loop runs this; each stop is a locked,
@@ -9790,6 +9998,33 @@ def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> 
                     logger.warning(
                         "[ranked_matchups] handoff for recording %s skipped: %s is no "
                         "longer set to record", rid, entry.get("taker_name") or taker)
+                    continue
+                # The taker must still start when the plan said. DO NOT trust
+                # the taker's scheduled recording for that: a refresh that
+                # moved the game later leaves the row at its old time until
+                # the next apply moves it, and the reaper runs in between (the
+                # apply's network pre-pass alone can take minutes). It stopped
+                # the holder for a game now hours away (batch interaction
+                # review). A taker the cache does not list (a source outage,
+                # #224) gives no sign the handoff moved, so it still runs.
+                # Read here, per stop, with the holder locked, so a refresh
+                # that lands mid-pass is seen. A benched taker is no longer
+                # planned (apply cancels its recording), so it gets no slot.
+                cached_starts, benched = _cached_live_starts()
+                if taker in benched:
+                    logger.warning(
+                        "[ranked_matchups] handoff for recording %s skipped: %s is on the "
+                        "bench now; the next apply replans it", rid,
+                        entry.get("taker_name") or taker)
+                    continue
+                taker_start = cached_starts.get(taker)
+                planned_at = recording_policy.entry_at(entry)
+                if taker_start is not None and planned_at is not None and taker_start > planned_at:
+                    logger.warning(
+                        "[ranked_matchups] handoff for recording %s skipped: %s now starts "
+                        "at %s, after the planned handoff; the next apply replans it", rid,
+                        entry.get("taker_name") or taker,
+                        taker_start.astimezone(tz).strftime("%-I:%M %p"))
                     continue
                 cp = recording_policy.stopped_properties(rec.custom_properties, now, taker)
                 if cp is None:

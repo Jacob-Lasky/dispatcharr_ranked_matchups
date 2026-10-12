@@ -135,7 +135,7 @@ class NcaafSource(PointsBasedSportSource):
             logger.warning("[ncaaf] no CFBD API key configured; returning []")
             return []
 
-        season_year = self._current_season_year()
+        season_year = self._season()
         # RAISES RankingsUnavailable for a failed request (#283), so the
         # refresh reports NCAAF as errored and holds its previous games
         # (#240). None is a poll that is not published yet, logged at INFO by
@@ -223,6 +223,16 @@ class NcaafSource(PointsBasedSportSource):
         now = datetime.now(timezone.utc)
         return now.year if now.month >= 8 else now.year - 1
 
+    def _season(self) -> int:
+        """`_current_season_year()`, read ONCE per source (one refresh). The
+        upcoming fetch, the season read and the key its complete read is
+        kept under (`points_based.season_store_key`) must name the same
+        season; three clock reads could straddle the season boundary and
+        file one season's games under the other's key."""
+        if getattr(self, "_season_memo", None) is None:
+            self._season_memo = self._current_season_year()
+        return self._season_memo
+
     def _fetch_rankings(self, year: int) -> Optional[Dict[str, int]]:
         """Return {team_name → rank} for the latest snapshot, or None if no
         poll has been published yet (preseason). RAISES `RankingsUnavailable`
@@ -281,6 +291,12 @@ class NcaafSource(PointsBasedSportSource):
             ", ".join(str(p.get("poll")) for p in latest["polls"]) or "none",
         )
         return None
+
+    def _season_store_id(self) -> Optional[str]:
+        """The season AND the division selection: the stored population is
+        cut to the selected divisions, so another selection is another
+        season (`points_based.season_store_key`)."""
+        return f"{self._season()}|{','.join(sorted(self._allowed_classifications))}"
 
     def _fetch_raw_season(self, year: int) -> List[Dict]:
         """One CFBD /games call per season year, cached for this instance.
@@ -453,22 +469,24 @@ class NcaafSource(PointsBasedSportSource):
         keeps both facts true at once: the FBS team's record still includes
         the cupcake win, and nobody is measured against a league they are
         not in.
+
+        Read off the simulated population itself (each record carries both
+        sides' classification), not the raw CFBD season: the population is
+        what the simulator replays, including a last complete read standing
+        in for a failed one (`points_based._fetch_games_cached`), and asking
+        CFBD again from here during an outage would cost a 60 s timeout per
+        importance call. Equivalent to reading the raw season: a team whose
+        own classification is selected has every one of its games in the
+        population, by the either-side game filter above.
         """
-        if self.season_fetch_failure() is not None:
-            # The season is not simulated this refresh (#289); asking CFBD
-            # again from here, once per importance call, would cost a 60 s
-            # timeout each time the outage persists.
-            return frozenset()
-        raw = self._fetch_raw_season(self._current_season_year())
         allowed = self._allowed_classifications
         eligible = set()
-        for g in raw:
-            home = g.get("homeTeam") or g.get("home_team")
-            away = g.get("awayTeam") or g.get("away_team")
-            if home and g.get("homeClassification") in allowed:
-                eligible.add(home)
-            if away and g.get("awayClassification") in allowed:
-                eligible.add(away)
+        for g in self._fetch_games_cached():
+            classes = g.get("extra") or {}
+            if g.get("home") and classes.get("home_classification") in allowed:
+                eligible.add(g["home"])
+            if g.get("away") and classes.get("away_classification") in allowed:
+                eligible.add(g["away"])
         return frozenset(eligible)
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
@@ -492,7 +510,7 @@ class NcaafSource(PointsBasedSportSource):
         """
         if not self.api_key:
             return []
-        raw = self._fetch_raw_season(self._current_season_year())
+        raw = self._fetch_raw_season(self._season())
         out: List[Dict[str, Any]] = []
         for g in raw:
             if not self._in_selected_divisions(g):
@@ -512,5 +530,8 @@ class NcaafSource(PointsBasedSportSource):
                 "away_points": ap if completed else None,
                 "status": "FINISHED" if completed else "SCHEDULED",
                 "start_time": parse_iso_utc(g.get("startDate")),
+                # For `outcome_eligible_teams`, which reads the population.
+                "extra": {"home_classification": g.get("homeClassification"),
+                          "away_classification": g.get("awayClassification")},
             })
         return out

@@ -103,6 +103,14 @@ PIPELINE_CHILD_ENV = "RANKED_MATCHUPS_PIPELINE_CHILD"
 # pre-pass inside the child's life (#271).
 PIPELINE_DEADLINE_ENV = "RANKED_MATCHUPS_PIPELINE_DEADLINE"
 
+# Result key a pipeline child sets when apply STOPPED because the child had too
+# little life left to finish it (plugin._apply_time_short). Nothing was
+# cancelled or published, so run_pipeline_subprocess runs the follow-up below
+# in a FRESH child (a full _SUBPROCESS_TIMEOUT_SECONDS) right away, instead of
+# leaving the refreshed cache unapplied until the next scheduled run (an M3U
+# rematch could otherwise miss the live game it was triggered for).
+APPLY_STOPPED_FOR_TIME = "apply_stopped_for_time"
+
 # Sentinel prefixing the single stdout line the subprocess emits with its
 # JSON result. Reserving a marker (rather than parsing all of stdout) means a
 # stray print during the child's django.setup() can't corrupt the result.
@@ -489,6 +497,43 @@ def pipeline_child_seconds_left() -> Optional[float]:
 
 
 def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+    """`_run_pipeline_child`, plus ONE apply in a fresh child when an
+    auto_pipeline's apply stopped for lack of time (APPLY_STOPPED_FOR_TIME).
+    Only one: the fresh child starts with its whole life, so its apply cannot
+    run short, and a follow-up of a follow-up would hide a real fault. The
+    caller holds the scheduler lock across both (its TTL, 90 min, covers two
+    children).
+
+    ONLY auto_pipeline, where refresh shares the child and can legitimately
+    leave apply seconds. DO NOT extend it to apply or reap: their child starts
+    with its whole life and a whole apply takes under 40s (12 live runs,
+    2026-10-11), so running short there means something is wedged, and both
+    have synchronous HTTP callers (Apply, Reap now) that would wait past the
+    browser's timeout for a second child. A reap whose apply stopped is
+    finished by reap's own pending path on its next run."""
+    result = _run_pipeline_child(action, settings)
+    follow_up = ACTION_APPLY
+    if action != ACTION_AUTO_PIPELINE or not result.get(APPLY_STOPPED_FOR_TIME):
+        return result
+    logger.warning(
+        "[ranked_matchups] %s: apply ran short of time in its pipeline child; "
+        "running %s now in a fresh one", action, follow_up,
+    )
+    # Renews the inflight key's TTL (30 min, one child's worth), or the
+    # follow-up would outlive it and show_status would stop saying RUNNING NOW.
+    _update_inflight_phase(f"{follow_up} (fresh child)")
+    again = _run_pipeline_child(follow_up, settings)
+    out = dict(again)
+    # The follow-up's outcome FIRST: show_status cuts the message at 240
+    # characters, and a long refresh summary first would hide why it failed.
+    out["message"] = (
+        f"{follow_up} in a fresh child: {again.get('message', '')} "
+        f"| first run: {result.get('message', '')}"
+    )
+    return out
+
+
+def _run_pipeline_child(action: str, settings: Dict[str, Any]) -> Dict[str, Any]:
     """Run a heavy pipeline action ('refresh' / 'apply' / 'auto_pipeline') in
     a SEPARATE PROCESS and return its result dict.
 

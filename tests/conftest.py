@@ -129,6 +129,16 @@ def _isolated_last_run(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_season_store(tmp_path, monkeypatch):
+    """Point sources/_season_store.STORE_DIR at a per-test temp directory
+    (#289 follow-up): every complete season read in a test writes its season
+    there, and a later test would otherwise recall it in place of a failure."""
+    import importlib
+    store = importlib.import_module(f"{PKG_NAME}.sources._season_store")
+    monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "season_cache"))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_odds_cache(tmp_path, monkeypatch):
     """Point sources/_odds.CACHE_PATH at a per-test temp file (#200), for the
     same reason as _isolated_last_run: left live, a test would write
