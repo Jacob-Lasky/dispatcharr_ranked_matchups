@@ -1069,11 +1069,23 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
         g for g in games
         if g.get("recorded_matched") or (record_ranked and _ranked_eligible(g, leagues, streamed))
     ]
+    # Games the CACHE asks to record, bench included, whether or not they are
+    # candidates now (a game apply gives no channel this time, or one on the
+    # bench, is not one, #291): a recording
+    # the user deleted for one of them still has to become a tombstone. Watched
+    # only for that; left to the candidates, a deletion went unrecorded while
+    # the game had no channel, its "created" entry aged out, and the game was
+    # recorded again when it returned (#291 review).
+    watched = [
+        _build_marker_key(g)
+        for g in list(games if slate_games is None else slate_games) + list(bench or [])
+        if g.get("recorded_matched") or (record_ranked and _ranked_eligible(g, leagues))
+    ]
     ours_rows = list(Recording.objects.filter(
         custom_properties__has_key=recording_policy.MARKER_KEY,
         end_time__gt=now - recording_policy.STATE_RETENTION,
     ))
-    if not recorded_rows and not ours_rows:
+    if not recorded_rows and not ours_rows and not watched:
         return ar
     ar.enabled = True
     ar.state = recording_policy.load_state(RECORDING_STATE_PATH)
@@ -1112,7 +1124,7 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
                       [str(g.get("home", "")), str(g.get("away", ""))])
 
     ar.ours, skip = recording_policy.classify_existing(
-        ours_rows, ar.state, [c.marker for c in candidates])
+        ours_rows, ar.state, list(dict.fromkeys([c.marker for c in candidates] + watched)))
     ar.new_tombstones = [m for m, why in skip.items()
                          if why == "deleted by you" and m not in ar.state["tombstones"]]
     live_rows = list(Recording.objects.filter(end_time__gt=now))
@@ -6609,8 +6621,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         )
     # Recorded teams are re-matched against the CURRENT setting first, so an
     # edit takes effect on this apply rather than the next refresh (#221). The
-    # auto-record plan that reads them is built after the pre-pass (#291).
+    # auto-record plan that reads them is built after the pre-pass (#291). The
+    # bench too: the plan watches benched games for deleted recordings, and a
+    # stale match there missed one (#291 review).
     _rematch_recorded_teams(games, settings)
+    bench = list(cache.get("bench") or [])
+    _rematch_recorded_teams(bench, settings)
 
     group_name = settings.get("channel_profile_name", DEFAULT_GROUP_NAME)
     # Archive group for preserved DVR recordings (#146). Blank falls back to the
@@ -7334,7 +7350,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # means for a ranked game's eligibility (_ranked_eligible).
     streamed = {m for m, p in prep_by_marker.items() if p.source_streams}
     autorec = _autorecord_prepare(
-        decided_games, settings, bench=cache.get("bench") or [],
+        decided_games, settings, bench=bench,
         slate_games=games, streamed=streamed,
     )
     # Auto-record (#216), first step: drop our not-yet-started recordings the
@@ -7500,7 +7516,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         first = autorec
         autorec = _autorecord_prepare(
             [g for g in decided_games if _build_marker_key(g) not in unplaced],
-            settings, bench=cache.get("bench") or [], slate_games=games,
+            settings, bench=bench, slate_games=games,
             streamed=streamed,
         )
         # Carried over: what the first plan already did (its cancellations)
@@ -8172,7 +8188,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         foreign_msg += (
             f" Excluded-group streams skipped: {len(policy_dropped_stream_ids)}."
         )
-    autorec_msg = _autorecord_finish(autorec, games, dry_run)
+    # The bench is still known: its recording state is kept like the games'
+    # (#291 review), or a benched game's deletion record aged out.
+    autorec_msg = _autorecord_finish(autorec, games + bench, dry_run)
     rec_msg = ""
     if rehomed_recordings or kept_stale_n > kept_by_guide_n:
         rec_msg = (

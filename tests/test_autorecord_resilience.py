@@ -111,7 +111,11 @@ class TestWiring:
         # game it does not write is still known), so neither a benched game
         # nor a skipped one reads as missing.
         assert src.count("slate_games=games,") == 2
-        assert src.count('bench=cache.get("bench") or []') == 2
+        assert src.count("bench=bench,") == 2
+        # ...re-matched against the current Recorded teams like the games, and
+        # its recording state kept like theirs (#291 review).
+        assert "_rematch_recorded_teams(bench, settings)" in src
+        assert "_autorecord_finish(autorec, games + bench, dry_run)" in src
 
     def test_cancel_uses_the_slate_and_the_reason_check(self, src):
         body = _body(src, "_autorecord_cancel")

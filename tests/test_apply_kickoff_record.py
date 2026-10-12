@@ -646,6 +646,65 @@ def scenario_witness_a_deletion_seen_before_a_game_loses_its_slot_is_tombstoned(
         assert G431 in json.load(f)["tombstones"]
 
 
+def scenario_witness_a_deletion_while_a_game_has_no_channel_is_tombstoned(env):
+    """#291 review, final round: the user deleted 431's recording, and on the
+    next apply 431 has no channel (no feed, too low for a placeholder), so it
+    is no plan candidate. The deletion must still become a tombstone: left
+    undetected, 431's "created" entry aged out while it was away and the game
+    was recorded again when it came back."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    settings = {"record_ranked_games": True, "recording_slots": 1}
+    owned = _publish(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")],
+                     settings=_settings(**settings))
+    m.Recording.objects.filter(channel=owned[G431]).delete()  # the user, in the DVR tab
+    skipped = _row(431, kickoff, 999999, home="Home431", away="Away431")
+    skipped["score"] = 1.0
+    result = _apply(env, [skipped], **settings)
+    assert "unmatched_skipped=1" in result["message"], result
+    with open(env.plugin.RECORDING_STATE_PATH, encoding="utf-8") as f:
+        assert G431 in json.load(f)["tombstones"]
+
+
+def scenario_witness_a_deletion_while_a_game_is_on_the_bench_is_tombstoned(env):
+    """#291 review: the same, with 431 moved to the bench (the list is full)
+    instead of losing its channel. Bench games are never candidates either."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    settings = {"record_ranked_games": True, "recording_slots": 1}
+    row431 = _row(431, kickoff, user_ch.id, home="Home431", away="Away431")
+    owned = _publish(env, [row431], settings=_settings(**settings))
+    m.Recording.objects.filter(channel=owned[G431]).delete()  # the user, in the DVR tab
+    _write_cache(env, [_row(411, kickoff + timedelta(days=1), user_ch.id,
+                            home="Home411", away="Away411")], bench=[row431])
+    result = env.plugin._action_apply(_settings(**settings))
+    assert result["status"] == "ok", result
+    with open(env.plugin.RECORDING_STATE_PATH, encoding="utf-8") as f:
+        assert G431 in json.load(f)["tombstones"]
+
+
+def scenario_witness_a_benched_games_deletion_is_matched_against_current_teams(env):
+    """#291 review: the bench row still carries the match its refresh made
+    (none: 431 was recorded as a ranked game), and the user has since added
+    431's team to Recorded teams and turned ranked recording off. The watch
+    must use the CURRENT teams, as the games do, to see the deletion."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    row431 = _row(431, kickoff, user_ch.id, home="Home431", away="Away431")
+    owned = _publish(env, [row431], settings=_settings(record_ranked_games=True, recording_slots=1))
+    m.Recording.objects.filter(channel=owned[G431]).delete()  # the user, in the DVR tab
+    benched = dict(row431, recorded_matched=[])
+    _write_cache(env, [_row(411, kickoff + timedelta(days=1), user_ch.id,
+                            home="Home411", away="Away411")], bench=[benched])
+    result = env.plugin._action_apply(_settings(recorded_teams="Home431, Home411"))
+    assert result["status"] == "ok", result
+    with open(env.plugin.RECORDING_STATE_PATH, encoding="utf-8") as f:
+        assert G431 in json.load(f)["tombstones"]
+
+
 def scenario_a_skipped_games_recording_is_planned_again_with_its_channel(env):
     """The other half: its feed returns, it is written, and planned again."""
     m = env.m
