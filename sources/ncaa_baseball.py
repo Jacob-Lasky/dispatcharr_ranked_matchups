@@ -49,7 +49,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow
+from .base import GameRow, attach_poll_ranks
 from .bracket import BestOfNSeriesSource, DoubleEliminationSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import (
@@ -59,6 +59,7 @@ from .._util import (
 )
 from ._espn import (
     extract_espn_scoreboard_event,
+    fetch_espn_poll,
     fetch_scoreboard_day,
     fetch_scoreboard_days,
     scoreboard_event_over,
@@ -191,10 +192,10 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
         the US-Eastern lookback day, #256), the FINISHED and stale drops and the
         dedupe. Populate rank_home/rank_away from the D1Baseball.com Top 25 so
         the rank-pair signal fires for marquee matchups. Per-day, never a date
-        range: see `_espn.SCOREBOARD_EVENT_LIMIT`.
+        range: see `_espn.SCOREBOARD_EVENT_LIMIT`. The poll is read after
+        the sweep, only when it found a game (`base.attach_poll_ranks`), and
+        a failed one raises (#283).
         """
-        rankings = self._fetch_rankings()
-
         def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
             if _is_postseason_event(event):
                 # Owned by NcaaBaseballPlayoffSource. Skipping here
@@ -215,8 +216,8 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
                 sport_label=self.sport_label,
                 home=home,
                 away=away,
-                rank_home=rankings.get(home),
-                rank_away=rankings.get(away),
+                rank_home=None,
+                rank_away=None,
                 start_time=start,
                 extra={
                     "espn_event_id": eid,
@@ -225,7 +226,10 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
                     "fd_competition_code": self.league_context_code,
                 },
             )
-        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
+        return attach_poll_ranks(
+            sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row),
+            self._fetch_rankings,
+        )
 
     # ---------- _fetch_full_season_games (importance side) ----------
 
@@ -276,31 +280,10 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
     # ---------- Rankings (D1Baseball.com poll) ----------
 
     def _fetch_rankings(self) -> Dict[str, int]:
-        """Return {canonical_team_name: ranking_number} for the D1Baseball
-        Top 25. ESPN exposes one poll; if it's missing or empty we
-        gracefully return {} and the rank-pair signal sits out the
-        refresh cycle.
-        """
-        data = _http_get(f"{ESPN_BASE}/rankings")
-        if not data:
-            return {}
-        ranks_by_team: Dict[str, int] = {}
-        polls = data.get("rankings") or []
-        if not polls:
-            return ranks_by_team
-        # Prefer the D1Baseball poll; if multiple polls appear later
-        # we'd want to make this selectable, but for now there's just one.
-        poll = polls[0]
-        for r in poll.get("ranks") or []:
-            team_obj = r.get("team") or {}
-            name = _team_canonical_name(team_obj)
-            try:
-                rank = int(r.get("current") or 0)
-            except (TypeError, ValueError):
-                continue
-            if name and rank > 0:
-                ranks_by_team[name] = rank
-        return ranks_by_team
+        """{canonical_team_name: rank} from the D1Baseball Top 25, the one
+        poll ESPN exposes. Raises `RankingsUnavailable` when it did not
+        answer (#283; see `_espn.fetch_espn_poll`)."""
+        return fetch_espn_poll(_http_get, f"{ESPN_BASE}/rankings", _team_canonical_name)
 
 
 # =====================================================================

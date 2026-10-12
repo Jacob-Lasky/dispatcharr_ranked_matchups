@@ -245,8 +245,10 @@ class BracketSportSource(SportSource):
         []).
 
         `fetch_day(day)` returns the parsed payload, or anything that is not
-        a dict (the sources' `_http_get` gives None) for a failed request. A
-        dict, even an empty one, is an answer: a day with no games.
+        a dict for a failed request. Every caller fetches through
+        `_espn.fetch_scoreboard_day`, which already turns a body without an
+        `events` list into None (#282), so any dict here is an answer, and
+        `{"events": []}` is a day with no games.
 
         Fetched in date-ordered batches of `_SEASON_WALK_WORKERS` days, each
         batch concurrently (`_espn.fetch_days`): a healthy 92-day playoff

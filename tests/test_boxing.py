@@ -8,6 +8,8 @@ country array) rather than an invented one.
 """
 
 
+import pytest
+
 from dispatcharr_ranked_matchups.sources import BoxingSource
 from dispatcharr_ranked_matchups.sources.base import SportSource
 from dispatcharr_ranked_matchups.sources import boxing as boxing_mod
@@ -160,3 +162,140 @@ class TestBoxingParse:
 
         stub_requests_get(monkeypatch, lambda *a, **kw: ErrResp())
         assert BoxingSource(api_key="x").fetch_upcoming() == []
+
+
+class TestBoxingSchedulePages:
+    """The schedule is paged (#284): boxing-data.com documents `page_size`
+    (default 25) and `page_num`, and answers with `pagination: {page, items,
+    total_pages, total_items}` (the capture above). One page of 25 used to be
+    all that was read. Paging is NOT live-measured (no key was available), so
+    an answer that does not follow the documented contract is read as
+    truncated: its cards are kept and the schedule's days reported lost."""
+
+    @staticmethod
+    def _cards(first, n):
+        return [{"id": f"c{i}", "title": f"Fighter{i} vs. Rival{i}: Card",
+                 "date": "2026-07-11T20:00:00"} for i in range(first, first + n)]
+
+    @staticmethod
+    def _page(cards, page, total_pages, total_items):
+        return {"pagination": {"page": page, "items": len(cards), "total_pages": total_pages,
+                               "total_items": total_items},
+                "error": None, "data": cards}
+
+    def _run(self, monkeypatch, pages):
+        """Serve `pages` by `page_num` (absent = 1): a body, or None for a
+        failed request. Returns (rows, lost days, page params asked)."""
+        from dispatcharr_ranked_matchups.sources.base import recording_lost_days
+        asked = []
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            asked.append(dict(params))
+            body = pages.get(params.get("page_num", 1))
+            if body is None:
+                return type("R", (), {"status_code": 503, "json": lambda self: None})()
+            return FakeResp(body)
+
+        stub_requests_get(monkeypatch, fake_get)
+        with recording_lost_days() as lost:
+            rows = BoxingSource(api_key="x").fetch_upcoming(days_ahead=7)
+        return rows, lost, asked
+
+    def test_every_page_is_read(self, monkeypatch):
+        """WITNESS: 28 cards over two pages. Only the first 25 came back, with
+        nothing logged; the 26th to 28th were dropped from the slate."""
+        rows, lost, asked = self._run(monkeypatch, {
+            1: self._page(self._cards(0, 25), 1, 2, 28),
+            2: self._page(self._cards(25, 3), 2, 2, 28),
+        })
+        assert len(rows) == 28
+        assert [a.get("page_num") for a in asked] == [None, 2]
+        assert all(a["page_size"] == 25 for a in asked)
+        assert lost == set()
+
+    def test_a_failed_later_page_keeps_the_cards_and_reports_the_days(self, monkeypatch):
+        """WITNESS: page 2 failed. The page-1 cards are published, and the
+        schedule's days are reported lost so the refresh holds what it had."""
+        rows, lost, _asked = self._run(monkeypatch, {
+            1: self._page(self._cards(0, 25), 1, 2, 28),
+            2: None,
+        })
+        assert len(rows) == 25
+        assert len(lost) == 8   # today-UTC through today+7
+
+    def test_a_full_page_without_usable_paging_is_truncated(self, monkeypatch):
+        """WITNESS: a full page that cannot say whether more follow (no
+        `pagination`) read as the whole schedule."""
+        body = self._page(self._cards(0, 25), 1, 1, 25)
+        del body["pagination"]
+        rows, lost, asked = self._run(monkeypatch, {1: body})
+        assert len(rows) == 25 and len(asked) == 1
+        assert len(lost) == 8
+
+    def test_a_server_ignoring_page_num_is_truncated_not_duplicated(self, monkeypatch):
+        """WITNESS: asked for page 2, the API answers page 1 again (as one
+        that ignored `page_num` would). Its cards are not added twice, and
+        the schedule is reported, since page 2 was never really read."""
+        page1 = self._page(self._cards(0, 25), 1, 2, 28)
+        rows, lost, _asked = self._run(monkeypatch, {1: page1, 2: page1})
+        assert len(rows) == 25
+        assert len(lost) == 8
+
+    def test_more_pages_than_the_cap_are_reported(self, monkeypatch):
+        """Five pages listed: four are read (literal, not `_MAX_PAGES`, so a
+        cap dropped to 1 fails here) and the fifth's days reported."""
+        pages = {p: self._page(self._cards(25 * (p - 1), 25), p, 5, 125) for p in range(1, 6)}
+        rows, lost, asked = self._run(monkeypatch, pages)
+        assert len(asked) == 4 and len(rows) == 100
+        assert len(lost) == 8
+
+    @pytest.mark.parametrize("page2", [
+        {"pagination": {"page": 1, "items": 3, "total_pages": 1, "total_items": 3}},
+        {"pagination": {"page": 2, "items": 3, "total_pages": 1, "total_items": 3}},
+        {"pagination": None},
+        {"pagination": {"page": 2, "items": 3, "total_pages": 2, "total_items": 53}},
+        {"pagination": {"page": 2, "items": 3, "total_pages": 3, "total_items": 54}},
+    ], ids=["short-page-labelled-1", "claims-fewer-pages", "no-pagination",
+            "page-count-shrank", "card-count-grew"])
+    def test_a_short_later_page_that_cannot_vouch_is_reported(self, monkeypatch, page2):
+        """WITNESS (Codex rounds 1-2): page 1 said three pages; page 2 came
+        back short but labelled page 1, claiming one or two pages in all, or
+        with no paging. A short page vouches for itself only on page 1, and a
+        later page must belong to the schedule page 1 described."""
+        body = {"error": None, "data": self._cards(25, 3), **page2}
+        rows, lost, asked = self._run(monkeypatch, {
+            1: self._page(self._cards(0, 25), 1, 3, 53), 2: body,
+        })
+        assert len(asked) == 2 and len(rows) == 28
+        assert len(lost) == 8
+
+    def test_a_card_on_two_pages_means_the_schedule_moved(self, monkeypatch):
+        """WITNESS (Codex round 3): between the two requests one card was
+        added ahead of page 1 and another dropped, so both counts still read
+        two pages and 28 cards, but page 1's last card shows again at the top
+        of page 2. Its repeat was deduped silently, and the read vouched for
+        a schedule it did not see whole (a card can move past the boundary
+        unseen). The repeat now fails the read, so the days are reported."""
+        page1 = self._cards(0, 25)
+        page2 = [page1[-1]] + self._cards(25, 3)
+        rows, lost, _asked = self._run(monkeypatch, {
+            1: self._page(page1, 1, 2, 28), 2: self._page(page2, 2, 2, 28),
+        })
+        assert len(rows) == 28
+        assert len(lost) == 8
+
+    def test_a_last_page_short_of_the_listed_cards_is_reported(self, monkeypatch):
+        """WITNESS (Codex round 4): page 1 lists 26 cards over two pages and
+        page 2 answers in the same terms with no cards. The 26th card was
+        dropped with no lost day reported."""
+        rows, lost, asked = self._run(monkeypatch, {
+            1: self._page(self._cards(0, 25), 1, 2, 26), 2: self._page([], 2, 2, 26),
+        })
+        assert len(asked) == 2 and len(rows) == 25
+        assert len(lost) == 8
+
+    def test_one_short_page_is_the_whole_schedule(self, monkeypatch):
+        """Guard: the measured case. One request, as before, no `page_num`."""
+        rows, lost, asked = self._run(monkeypatch, {1: _SCHEDULE_PAYLOAD})
+        assert len(rows) == 2 and lost == set()
+        assert asked == [{"days": 7, "date_sort": "ASC", "page_size": 25}]

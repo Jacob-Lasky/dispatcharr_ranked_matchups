@@ -64,6 +64,24 @@ class TestWalkReportsLostDays:
         _pages, lost = _walk(dead=set())
         assert lost == set()
 
+    @pytest.mark.parametrize("body", [{}, {"code": 404, "message": "x"}, {"events": None}])
+    def test_a_day_answered_without_an_events_list_is_lost(self, body):
+        """WITNESS (#282): a 200 whose body has no `events` list, an error
+        page or a cut-off answer, read as a quiet day, so the refresh did not
+        hold that day's games. A real empty day is `"events": []` (measured
+        2026-10-11 across 13 leagues); the day is lost like a failed one."""
+        from dispatcharr_ranked_matchups.sources import _espn
+        from dispatcharr_ranked_matchups.sources.base import recording_lost_days
+
+        def http_get(url):
+            return body if "dates=20261013" in url else {"events": []}
+
+        with recording_lost_days() as lost:
+            pages = _espn.fetch_scoreboard_days(
+                http_get, "https://x.test/scoreboard", date(2026, 10, 10), date(2026, 10, 17))
+        assert pages[3] == (date(2026, 10, 13), None)
+        assert lost == {date(2026, 10, 13)}
+
     def test_days_an_abandoned_walk_never_requested_are_lost(self, monkeypatch):
         """The hang rule stops a 40-day walk after its first chunk (16 days,
         all failed, "slow" by a zero threshold). The 24 days never requested
@@ -215,6 +233,13 @@ def test_the_guard_sees_the_nhl_loop():
     NHL's one per-day walk, shared by both of its sources since #256."""
     tree = ast.parse((SOURCES / "nhl.py").read_text(encoding="utf-8"))
     assert [name for name, _loop in _upcoming_day_loops(tree)] == ["_upcoming_schedule_games"]
+
+
+def test_the_guard_sees_the_boxing_page_loop():
+    """Same check for the boxing schedule's pages (#284), reached from
+    `BoxingSource.fetch_upcoming` through `_fetch_schedule`."""
+    tree = ast.parse((SOURCES / "boxing.py").read_text(encoding="utf-8"))
+    assert [name for name, _loop in _upcoming_day_loops(tree)] == ["_fetch_schedule"]
 
 
 def test_the_guard_sees_the_football_data_chunk_loop():
@@ -496,15 +521,18 @@ class TestMlbRangeReportsLostDays:
 
 
 class TestFootballDataChunksReportLostDays:
-    """Football-Data's /v4/matches takes dateFrom/dateTo and caps a request at
-    10 days, so a 14-day lookahead from 2026-10-11 is two chunks:
-    2026-10-11..2026-10-21 and 2026-10-22..2026-10-25. The result is cached
-    and shared by every FD competition in the refresh."""
+    """Football-Data's /v4/matches takes dateFrom/dateTo, caps a request at a
+    10-day difference, and treats dateTo as EXCLUSIVE (measured 2026-10-11,
+    #285). A 14-day lookahead at 16:00Z on 2026-10-11 covers the lookback
+    day 2026-10-10 through 2026-10-25, so it asks dateFrom=2026-10-10 up to
+    dateTo=2026-10-26 in two chunks: 2026-10-10..2026-10-20 and
+    2026-10-20..2026-10-26, which cover 10-10..10-19 and 10-20..10-25. The
+    result is cached and shared by every FD competition in the refresh."""
 
     def _stub(self, monkeypatch, fail_chunk_from, bad_body=None):
         soccer = importlib.import_module(f"{PKG}.soccer")
         soccer._clear_fd_caches()
-        monkeypatch.setattr(soccer, "datetime", _pinned(NOON))
+        _pin_window(monkeypatch, NOON)
         ranged = []
 
         def get(url, headers=None, params=None, timeout=None):
@@ -515,14 +543,16 @@ class TestFootballDataChunksReportLostDays:
                     if bad_body is not None:
                         return _Resp(bad_body)
                     raise soccer.requests.ConnectionError("chunk refused")
-                # One fixture per competition on the chunk's first day, so a
-                # row says which chunk answered.
-                kickoff = f"{params['dateFrom']}T14:00:00Z"
+                # One upcoming fixture per competition on the chunk's first
+                # day still ahead of the pinned clock, so a row says which
+                # chunk answered.
+                kickoff = f"{max(params['dateFrom'], '2026-10-11')}T19:00:00Z"
+                cid = 10 * len(ranged)
                 return _Resp({"matches": [
-                    {"id": 1, "competition": {"code": "PL"}, "utcDate": kickoff,
+                    {"id": cid + 1, "competition": {"code": "PL"}, "utcDate": kickoff,
                      "homeTeam": {"name": "Arsenal"}, "awayTeam": {"name": "Chelsea"},
                      "status": "TIMED", "stage": "REGULAR_SEASON", "matchday": 8},
-                    {"id": 2, "competition": {"code": "ELC"}, "utcDate": kickoff,
+                    {"id": cid + 2, "competition": {"code": "ELC"}, "utcDate": kickoff,
                      "homeTeam": {"name": "Leeds"}, "awayTeam": {"name": "Hull"},
                      "status": "TIMED", "stage": "REGULAR_SEASON", "matchday": 11},
                 ]})
@@ -540,48 +570,45 @@ class TestFootballDataChunksReportLostDays:
     def test_a_failed_second_chunk_reports_its_own_days(self, monkeypatch):
         """WITNESS: the first chunk answered, the second failed after its
         retries. `_fetch_tier_fixtures` kept the first chunk's games and said
-        nothing, so 2026-10-22..25 read as four quiet days for EVERY FD
+        nothing, so the second chunk's days read as quiet for EVERY FD
         competition, and each still had games, so none read as an outage."""
-        soccer, ranged = self._stub(monkeypatch, fail_chunk_from={"2026-10-22"})
+        soccer, ranged = self._stub(monkeypatch, fail_chunk_from={"2026-10-20"})
         rows, lost = self._fetch(soccer, "epl")
-        assert ranged[0] == ("2026-10-11", "2026-10-21")
-        assert ranged[-1] == ("2026-10-22", "2026-10-25")
+        # (the failed chunk is asked again by _fd_get's own retries)
+        assert sorted(set(ranged)) == [("2026-10-10", "2026-10-20"), ("2026-10-20", "2026-10-26")]
         assert [(r.home, r.start_time.date()) for r in rows] == [("Arsenal", date(2026, 10, 11))]
-        assert lost == {date(2026, 10, 22), date(2026, 10, 23),
-                        date(2026, 10, 24), date(2026, 10, 25)}
+        assert lost == _days(date(2026, 10, 20), date(2026, 10, 25))
 
     def test_a_competition_reading_the_cached_result_reports_them_too(self, monkeypatch):
         """WITNESS: the second competition makes no request of its own (the
-        tier result is cached), and lost the same four days."""
-        soccer, ranged = self._stub(monkeypatch, fail_chunk_from={"2026-10-22"})
+        tier result is cached), and lost the same days."""
+        soccer, ranged = self._stub(monkeypatch, fail_chunk_from={"2026-10-20"})
         self._fetch(soccer, "epl")
         requests_so_far = len(ranged)
         rows, lost = self._fetch(soccer, "championship")
         assert len(ranged) == requests_so_far  # served from the cache
         assert [(r.home, r.start_time.date()) for r in rows] == [("Leeds", date(2026, 10, 11))]
-        assert lost == {date(2026, 10, 22), date(2026, 10, 23),
-                        date(2026, 10, 24), date(2026, 10, 25)}
+        assert lost == _days(date(2026, 10, 20), date(2026, 10, 25))
 
     def test_a_failed_first_chunk_does_not_stop_the_walk(self, monkeypatch):
         """WITNESS: the walk stopped at the first failed chunk, so the second
         was never asked for and its days were lost without any request
         covering them. It now asks for every chunk and reports only the one
-        that failed: the second answered for 2026-10-22..25."""
-        soccer, ranged = self._stub(monkeypatch, fail_chunk_from={"2026-10-11"})
+        that failed: the second answered for 2026-10-20..25."""
+        soccer, ranged = self._stub(monkeypatch, fail_chunk_from={"2026-10-10"})
         rows, lost = self._fetch(soccer, "epl")
-        assert ranged[-1] == ("2026-10-22", "2026-10-25")
-        assert [(r.home, r.start_time.date()) for r in rows] == [("Arsenal", date(2026, 10, 22))]
-        assert lost == _days(date(2026, 10, 11), date(2026, 10, 21))
+        assert ranged[-1] == ("2026-10-20", "2026-10-26")
+        assert [(r.home, r.start_time.date()) for r in rows] == [("Arsenal", date(2026, 10, 20))]
+        assert lost == _days(date(2026, 10, 10), date(2026, 10, 19))
 
     def test_an_answer_without_a_matches_list_is_a_failure(self, monkeypatch):
         """WITNESS: a 200 whose body carries no `matches` list (an error
         object) was read as a chunk with no fixtures. Every real answer has
         the list, `[]` included."""
-        soccer, _ranged = self._stub(monkeypatch, fail_chunk_from={"2026-10-22"},
+        soccer, _ranged = self._stub(monkeypatch, fail_chunk_from={"2026-10-20"},
                                      bad_body={"message": "quota", "errorCode": 429})
         _rows, lost = self._fetch(soccer, "epl")
-        assert lost == {date(2026, 10, 22), date(2026, 10, 23),
-                        date(2026, 10, 24), date(2026, 10, 25)}
+        assert lost == _days(date(2026, 10, 20), date(2026, 10, 25))
 
     def test_chunks_that_answer_are_quiet(self, monkeypatch):
         soccer, _ranged = self._stub(monkeypatch, fail_chunk_from=set())
@@ -676,9 +703,10 @@ class TestCbbRangeReportsLostDays:
         """WITNESS: a 200 carrying null, `{}` or rows without a pollType from
         /rankings read as "no poll yet". The poll is a flat list of poll
         rows, `[]` before the first one."""
+        from dispatcharr_ranked_matchups.sources.base import RankingsUnavailable
         _pin_window(monkeypatch, NOON)
         ncaam, ranged = self._stub(monkeypatch, rankings=lambda: _Resp(body), games=[])
-        with pytest.raises(ValueError, match="not a list"):
+        with pytest.raises(RankingsUnavailable, match="not a list"):
             ncaam.NcaamSource(api_key="k").fetch_upcoming(days_ahead=2)
         assert ranged == []
 
@@ -699,11 +727,75 @@ class TestCbbRangeReportsLostDays:
             assert ncaam.NcaamSource(api_key="k").fetch_upcoming(days_ahead=2) == []
         assert lost == set()
 
-    def test_the_season_walk_still_reads_a_failed_poll_as_no_signal(self, monkeypatch):
-        """Guard: the importance-side season fetch keeps its no-op on a
-        failed /rankings (an empty population, zero importance), because it
-        runs at scoring time, outside the fetch the refresh holds games for."""
-        ncaam, _ranged = self._stub(monkeypatch, rankings=self._refused, games=[])
+    def test_the_season_walk_raises_on_a_failed_poll(self, monkeypatch):
+        """WITNESS (#283): the importance-side season walk read a failed
+        /rankings as "no poll yet" and returned an empty population, so every
+        game it was asked about scored zero importance with nothing said. A
+        failed poll now raises there too (the importance call logs it)."""
+        from dispatcharr_ranked_matchups.sources.base import RankingsUnavailable
+        ncaam, ranged = self._stub(monkeypatch, rankings=self._refused, games=[])
+        with pytest.raises(RankingsUnavailable, match="refused"):
+            ncaam.NcaamSource(api_key="k")._fetch_full_season_games()
+        assert ranged == []
+
+    def test_the_season_walk_reuses_the_poll_the_slate_was_ranked_with(self, monkeypatch):
+        """WITNESS (#283): the slate and the simulated population came from
+        two /rankings requests, so one could answer and the other fail. The
+        poll is read once per source: a failure seen by `fetch_upcoming` is
+        the one the season walk raises, without asking again, and an answer
+        is the one it simulates."""
+        from dispatcharr_ranked_matchups.sources.base import RankingsUnavailable
+        _pin_window(monkeypatch, NOON)
+        polls = [self._refused, lambda: _Resp(self.POLL)]
+        asked = []
+
+        def rankings():
+            asked.append(1)
+            return polls.pop(0)()
+
+        ncaam, _ranged = self._stub(monkeypatch, rankings=rankings, games=[])
+        src = ncaam.NcaamSource(api_key="k")
+        with pytest.raises(RankingsUnavailable):
+            src.fetch_upcoming(days_ahead=2)
+        with pytest.raises(RankingsUnavailable):
+            src._fetch_full_season_games()
+        assert len(asked) == 1
+
+    def test_the_season_walk_reuses_an_answered_poll(self, monkeypatch):
+        """WITNESS (#283), the success half: the poll that ranked the slate
+        is the one the season walk simulates, not a second request that could
+        fail (or answer differently) in between. The second answer here is a
+        newer poll, so the old code read it without raising and only the
+        request count tells."""
+        _pin_window(monkeypatch, NOON)
+        newer = [{"pollType": "AP Top 25", "week": 2, "team": "Kansas", "ranking": 1}]
+        polls = [lambda: _Resp(self.POLL), lambda: _Resp(newer)]
+        asked = []
+
+        def rankings():
+            asked.append(1)
+            return polls.pop(0)()
+
+        ncaam, _ranged = self._stub(monkeypatch, rankings=rankings, games=[])
+        src = ncaam.NcaamSource(api_key="k")
+        assert src.fetch_upcoming(days_ahead=2) == []
+        src._fetch_full_season_games()
+        assert len(asked) == 1
+
+    def test_a_poll_whose_rows_carry_no_ranking_is_an_outage(self, monkeypatch):
+        """WITNESS (Codex round 1): AP rows listed, none with a ranking, read
+        as "no poll yet" and the slate skipped as a preseason."""
+        from dispatcharr_ranked_matchups.sources.base import RankingsUnavailable
+        _pin_window(monkeypatch, NOON)
+        rows = [{"pollType": "AP Top 25", "week": 1, "team": "Duke"}]
+        ncaam, ranged = self._stub(monkeypatch, rankings=rows, games=[])
+        with pytest.raises(RankingsUnavailable, match="no readable rank"):
+            ncaam.NcaamSource(api_key="k").fetch_upcoming(days_ahead=2)
+        assert ranged == []
+
+    def test_the_season_walk_still_reads_no_poll_yet_as_no_population(self, monkeypatch):
+        """Guard: an ANSWERED empty poll (preseason) is still the quiet no-op."""
+        ncaam, _ranged = self._stub(monkeypatch, rankings=[], games=[])
         assert ncaam.NcaamSource(api_key="k")._fetch_full_season_games() == []
 
 
@@ -859,10 +951,13 @@ _DAY_IN_URL = (
     re.compile(r"[?&]dates=(\d{4})(\d{2})(\d{2})"),            # ESPN scoreboard
     re.compile(r"/schedule/(\d{4})-(\d{2})-(\d{2})(?:$|\?)"),  # NHL api-web
 )
+# (first-day param, last-day param, whether the last is EXCLUSIVE).
 _RANGE_PARAMS = (
-    ("startDate", "endDate"),             # MLB statsapi
-    ("dateFrom", "dateTo"),               # Football-Data /v4/matches
-    ("startDateRange", "endDateRange"),   # CollegeBasketballData
+    ("startDate", "endDate", False),             # MLB statsapi
+    # Football-Data covers dateFrom 00:00Z up to dateTo 00:00Z (measured
+    # 2026-10-11, #285): dateTo's own day is not asked for.
+    ("dateFrom", "dateTo", True),
+    ("startDateRange", "endDateRange", False),   # CollegeBasketballData
 )
 
 
@@ -877,9 +972,10 @@ def _asked_days(url, params):
             days.add(date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
     query = dict(parse_qsl(urlsplit(url).query))
     query.update({k: str(v) for k, v in (params or {}).items()})
-    for lo, hi in _RANGE_PARAMS:
+    for lo, hi, exclusive in _RANGE_PARAMS:
         if lo in query and hi in query:
-            days |= _days(date.fromisoformat(query[lo][:10]), date.fromisoformat(query[hi][:10]))
+            last = date.fromisoformat(query[hi][:10]) - timedelta(days=1 if exclusive else 0)
+            days |= _days(date.fromisoformat(query[lo][:10]), last)
     if url.endswith("/events/schedule") and "days" in query:   # boxing, from today-UTC
         today = datetime.now(UTC).date()
         days |= _days(today, today + timedelta(days=int(query["days"])))
@@ -936,7 +1032,8 @@ def _drive_every_source(plugin, monkeypatch, answer, fails=lambda days: True):
         try:
             with recording_lost_days() as lost:
                 # 12 days, so Football-Data's 10-day cap splits the window
-                # into two chunks (today..today+10, then the last two days).
+                # into two chunks (today-1 up to today+9, then up to the
+                # exclusive today+13).
                 src.fetch_upcoming(days_ahead=12)
         except Exception:
             continue  # an outage the refresh sees for itself
@@ -1011,6 +1108,7 @@ def test_no_source_reports_a_day_a_request_answered_for(plugin, monkeypatch):
     assert {"NbaRegularSource", "NhlRegularSource", "NcaamSource", "MlsEastSource",
             "MlbRegularSource", "SoccerSource", "BoxingSource"} <= set(failed)
     assert failed["NbaRegularSource"] == {tomorrow}
-    assert max(failed["SoccerSource"]) == tomorrow + timedelta(days=9)  # chunk 1 only
+    # Chunk 1 only: dateFrom=today-1 up to the exclusive dateTo=today+9.
+    assert max(failed["SoccerSource"]) == tomorrow + timedelta(days=7)
     assert unreported == {}
     assert overreported == {}
