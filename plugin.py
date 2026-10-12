@@ -1443,13 +1443,14 @@ def _archive_group(recordings_group_name):
     recordings and leaving the old group outside cleanup. Among case variants
     (an install that already split), the one named exactly as the setting
     that holds the archive channel wins, then any that holds it, then the
-    exact name."""
+    exact name. DO NOT fall back to any case variant: a user's own group that
+    only differs in case, adopted as the archive, was later deleted by
+    cleanup as ours."""
     named = _archive_groups(recordings_group_name)
     with_archive = named.filter(channels__tvg_id=ARCHIVE_TVG_ID).distinct()
     return (with_archive.filter(name=recordings_group_name).first()
             or with_archive.order_by("pk").first()
-            or named.filter(name=recordings_group_name).first()
-            or named.order_by("pk").first())
+            or named.filter(name=recordings_group_name).first())
 
 
 def _archive_groups(recordings_group_name) -> Any:
@@ -6999,7 +7000,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # sweep: the archive channel is intentionally "ours" (so the matcher skips
     # it), which would otherwise make this sweep migrate it into the live group
     # and delete the archive group out from under preserved recordings.
-    _protected_group_names = [group_name, recordings_group_name]
+    # Only the LIVE name is protected by name. DO NOT add the recordings name
+    # back: the archive is protected per CHANNEL (_movable_owned_q), and a
+    # recordings name equal to the OLD live group's name, protected by name,
+    # stranded that group's game channels beside copies in the new group.
+    _protected_group_names = [group_name]
     # Names the cleanup sweep may delete once empty. See #157.
     _deletable_group_names = _deletable_group_names_for(
         group_name, recordings_group_name,
@@ -7028,8 +7033,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # rename of the live group still moves our channels.
     foreign_owned_groups = list(
         ChannelGroup.objects.exclude(name__in=_protected_group_names)
-        .filter(_owned_tvg_id_q("channels__"))
-        .distinct()
+        .filter(pk__in=Channel.objects.filter(_owned_tvg_id_q() & _movable_owned_q())
+                .values("channel_group"))
     )
     # Our sources never fetch anything (blank url and file_path, not Schedules
     # Direct, see _never_fetches_q). A source that does is fed from somewhere else, even when its rows carry
@@ -7048,13 +7053,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # group and dry_run defaults on, so apply returns here having
             # written nothing and logged nothing, and the caller discards the
             # message. _dry_run_report puts it in the log too.
+            moving = Channel.objects.filter(
+                _owned_tvg_id_q() & _movable_owned_q(), channel_group__in=foreign_owned_groups,
+            ).count()
             return {
                 "status": "ok",
                 "message": _dry_run_report(
-                    f"[dry] Would create ChannelGroup {group_name!r} + EPGSource and clone "
-                    f"{sum(1 for g in games if g.get('channel_id'))} matched games into it. "
-                    f"Would also clean up {len(foreign_owned_groups)} stale group(s) and "
-                    f"{len(foreign_epg_sources)} stale EPGSource(s) from prior target names.",
+                    f"[dry] Would create ChannelGroup {group_name!r} + EPGSource, move "
+                    f"{moving} existing channel(s) into it in place (same Channel.id) from "
+                    f"{len(foreign_owned_groups)} previous group(s), and publish "
+                    f"{sum(1 for g in games if g.get('channel_id'))} matched games there. "
+                    f"Would also move our guide rows off {len(foreign_epg_sources)} previous "
+                    f"EPGSource(s), and remove a previous group or source once nothing is left in it.",
                     dry_run,
                 ),
             }
@@ -7819,7 +7829,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 cache=llm_cache,
                 boundary_summary=_boundary,
                 marker=marker,
-                allow_network=prepass_budget.allow,
+                # A dry run serves cached prose only: an uncached call costs
+                # money for a description nothing will write or cache.
+                allow_network=(lambda: False) if dry_run else prepass_budget.allow,
                 # Supplies the outcome-band cutoffs the prompt needs to state
                 # each team's exact distance from relegation / Europe rather
                 # than leaving the model to infer it from a table slice (#209).

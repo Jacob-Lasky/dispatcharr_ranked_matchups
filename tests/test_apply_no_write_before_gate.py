@@ -334,6 +334,98 @@ def scenario_witness_a_dry_run_previews_a_rename_as_updates(env):
     assert "created=0, updated=1" in dry["message"], dry
 
 
+def scenario_witness_a_recordings_name_like_the_old_live_name_strands_nothing(env):
+    """Codex review, round 4: Top Matchups -> !Top Matchups with 'Recordings
+    group name' set to Top Matchups. Protected BY NAME as the archive, the old
+    live group kept our game channel and the rename made a copy. The archive
+    is protected per channel now, so only the live name is."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    _write_cache(env, [game])
+    result = env.plugin._action_apply(_settings(
+        channel_profile_name=NEW, recordings_group_name=OLD, **COMPACT))
+    assert result["status"] == "ok", result
+    mine = list(m.Channel.objects.filter(tvg_id=G401))
+    assert [(c.pk, c.channel_group.name) for c in mine] == [(ours.pk, NEW)], (
+        [(c.pk, c.channel_group.name) for c in mine]
+    )
+
+
+def scenario_witness_a_dry_run_into_a_new_group_says_it_moves(env):
+    """Codex review, round 4: with the new group not created yet, the dry run
+    returns early and said it would CLONE the games, where the real apply
+    moves the existing channels in place."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    _publish(env, [game], settings=_settings(**COMPACT))
+    # An archive beside it holds nothing that moves: not a previous group.
+    archive = m.ChannelGroup.objects.create(name="Matchups Recordings")
+    m.Channel.objects.create(name="Matchups Recordings", channel_number=9999,
+                             channel_group=archive, tvg_id=env.plugin.ARCHIVE_TVG_ID)
+    _write_cache(env, [game])
+    dry = env.plugin._action_apply(_settings(channel_profile_name=NEW, dry_run=True, **COMPACT))
+    assert "move 1 existing channel(s)" in dry["message"], dry
+    assert "from 1 previous group(s)" in dry["message"], dry
+    assert "clone" not in dry["message"], dry
+
+
+def scenario_witness_the_archive_is_not_made_in_a_users_case_variant_group(env):
+    """Codex review, round 4: the archive lookup fell back to ANY case
+    variant, so a user's own empty 'MATCHUPS RECORDINGS' became the archive,
+    and cleanup later deleted it as ours."""
+    m = env.m
+    theirs = m.ChannelGroup.objects.create(name="MATCHUPS RECORDINGS")
+    arch = env.plugin._ensure_archive_channel("Matchups Recordings")
+    assert arch.channel_group.name == "Matchups Recordings", arch.channel_group.name
+    assert not m.Channel.objects.filter(channel_group=theirs).exists()
+    env.plugin._cleanup_empty_archive("Matchups Recordings")
+    assert m.ChannelGroup.objects.filter(pk=theirs.pk).exists()
+
+
+def scenario_witness_a_dry_run_makes_no_paid_description_call(env):
+    """Codex review, round 4: with LLM descriptions on, a dry run called the
+    provider on every cache miss, for prose it then neither wrote nor cached."""
+    import importlib
+    llm = importlib.import_module(env.plugin.__name__.rsplit(".", 1)[0] + ".llm_descriptions")
+    calls = []
+    real = llm._call_anthropic
+    llm._call_anthropic = lambda *a, **k: calls.append(1) or "A preview."
+    try:
+        user_ch, _ = _seed_source_channel(env)
+        game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+        _publish(env, [game], settings=_settings(**COMPACT))
+        _write_cache(env, [game])
+        env.plugin._action_apply(_settings(
+            dry_run=True, llm_descriptions_enabled=True, anthropic_api_key="test-key", **COMPACT))
+    finally:
+        llm._call_anthropic = real
+    assert calls == [], f"{len(calls)} paid description call(s) in a dry run"
+
+
+def scenario_an_archive_beside_the_live_group_is_not_a_previous_group(env):
+    """Guard: with the recordings name no longer protected by name, a normal
+    apply must still leave the archive group alone and report no migration."""
+    m = env.m
+    archive = m.ChannelGroup.objects.create(name="Matchups Recordings")
+    arch = m.Channel.objects.create(name="Matchups Recordings", channel_number=9999,
+                                    channel_group=archive, tvg_id=env.plugin.ARCHIVE_TVG_ID)
+    m.Recording.objects.create(
+        channel=arch, start_time=_now() - timedelta(days=2),
+        end_time=_now() - timedelta(days=2, hours=-3), custom_properties={"status": "completed"},
+    )
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    _publish(env, [game], settings=_settings(**COMPACT))
+    _write_cache(env, [game])
+    result = env.plugin._action_apply(_settings(**COMPACT))
+    assert result["status"] == "ok" and "Migrated from old target" not in result["message"], result
+    arch.refresh_from_db()
+    assert arch.channel_group_id == archive.pk
+
+
 def _snapshot(env):
     """Every row of every model, every state file the plugin writes, and the
     logo directory: what a stopped apply must leave exactly as it found it."""
