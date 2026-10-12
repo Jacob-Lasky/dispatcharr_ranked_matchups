@@ -955,6 +955,64 @@ def scenario_stopping_at_any_check_leaves_nothing_behind(env):
     assert m.ProgramData.objects.filter(epg__epg_source__name="Renamed Matchups").exists()
 
 
+def scenario_witness_a_name_the_database_rejects_is_refused_before_any_write(env):
+    """Codex review, round 18: the group setup now runs in the main
+    transaction, AFTER the recording cancellations commit. A live-group name
+    the database rejects (longer than EPGSource.name allows) failed every
+    apply there, after its cancellations, so a displaced recording was
+    cancelled and its replacement, planned in the rolled-back transaction,
+    never scheduled; no later apply could repair it. On base the setup failed
+    first. Refused now before the first write. sqlite does not enforce
+    lengths, so a pre_save receiver stands in for Postgres's refusal."""
+    from django.db.models.signals import pre_save
+    from django.db.utils import DataError
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    armed = dict(COMPACT, recorded_teams="Georgia", record_ranked_games=True)
+    _publish(env, [game], settings=_settings(**armed))
+    assert m.Recording.objects.exists(), "instrument: auto-record did not run"
+    _write_cache(env, [game])
+    limit = m.EPGSource._meta.get_field("name").max_length
+    too_long = "M" * (limit + 1)
+
+    def postgres_length_check(sender, instance, **kw):
+        if len(instance.name or "") > limit:
+            raise DataError("value too long for type character varying(%d)" % limit)
+
+    pre_save.connect(postgres_length_check, sender=m.EPGSource)
+    before = _snapshot(env)
+    try:
+        # Recording no team now: the plan cancels the scheduled recording.
+        result = env.plugin._action_apply(_settings(
+            channel_profile_name=too_long, **dict(armed, recorded_teams="", record_ranked_games=False)))
+    except DataError:
+        result = None
+    finally:
+        pre_save.disconnect(postgres_length_check, sender=m.EPGSource)
+    after = _snapshot(env)
+    changed = sorted(k for k in set(before[0]) | set(after[0]) if before[0].get(k) != after[0].get(k))
+    changed += sorted(k for k in set(before[1]) | set(after[1]) if before[1].get(k) != after[1].get(k))
+    assert not changed, f"an apply whose setup the database rejected still wrote: {changed}"
+    assert result is not None and result["status"] == "error" and str(limit) in result["message"], result
+
+
+def scenario_every_name_the_setup_writes_is_checked(env):
+    """Guard for _setup_name_problem: both settings, every model each names,
+    the NUL Postgres refuses in any text, and nothing at the limit itself."""
+    m = env.m
+    check = env.plugin._setup_name_problem
+    src_limit = m.EPGSource._meta.get_field("name").max_length
+    chan_limit = m.Channel._meta.get_field("name").max_length
+    assert src_limit and chan_limit, "instrument: the harness models carry no limits"
+    assert check("Top Matchups", "Matchups Recordings") is None
+    assert check("M" * src_limit, "R" * chan_limit) is None
+    assert "Target group name" in check("M" * (src_limit + 1), "Matchups Recordings")
+    assert "Recordings group name" in check("Top Matchups", "R" * (chan_limit + 1))
+    assert "NUL" in check("Top\x00Matchups", "Matchups Recordings")
+    assert "NUL" in check("Top Matchups", "Matchups\x00Recordings")
+
+
 # ----------------------------------------- class guard, by source (AST) ---
 
 _ORM_WRITES = {"create", "get_or_create", "update_or_create", "bulk_create", "bulk_update",
