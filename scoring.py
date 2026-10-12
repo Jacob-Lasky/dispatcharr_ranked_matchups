@@ -311,14 +311,24 @@ _EC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
     ("WINNER",         "winner",       10.0),
 ]
 
-# International-tournament knockout importance premium (pre-weight
+# International-tournament knockout importance FLOOR (pre-weight
 # importance_points), keyed by the UPPER-cased tournament stage. A knockout
-# game is win-or-go-home: maximal stakes. But compute_match_importance returns 0
-# for it (there is no standings distribution to Monte-Carlo: the outcome is
-# binary), so without this a marquee World Cup Round-of-32 tie (e.g. France vs
-# Sweden) scored only its tournament-stage band (raw 1.5 -> ~0.95/10) and ranked
-# BELOW a random regular-season game AND below placeholder_min_score, so it
-# never even got a placeholder channel. EURO knockouts did the same until #250.
+# game is win-or-go-home: maximal stakes. compute_match_importance scores it
+# from the simulated bracket once the row is placed in it (#243), and then it
+# is usually far ABOVE these values: EURO 2024's knockouts replayed through the
+# real KnockoutSoccerSource scored round of 16 6.5-13.1, quarter-finals
+# 10.7-16.9 and the final 18.4 (measured 2026-10-12). But when the game cannot
+# be placed (the bracket fetch gave up, the fixture's teams are not in the
+# simulated bracket yet, no chain) it scores 0, and without a floor a marquee
+# World Cup Round-of-32 tie (e.g. France vs Sweden) scored only its
+# tournament-stage band (raw 1.5 -> ~0.95/10), BELOW a random regular-season
+# game AND below placeholder_min_score, so it never even got a placeholder
+# channel. EURO knockouts had no floor at all until #250.
+#
+# A FLOOR, never an override: plugin.py applies it only when it beats the
+# simulated value. DO NOT turn it back into an override; that cut a placed
+# EURO final from 18.4 to 6.0 (displayed 10.0 -> 9.2) and threw away its
+# explanation (#250 review).
 #
 # ONE map for every competition granted the premium
 # (`_KNOCKOUT_PREMIUM_COMPETITIONS`): a round is worth the same in any of them,

@@ -539,16 +539,20 @@ EURO knockout cascade (`round_of_16` through `winner`) next to
 only over a context's bands, so the cascade is what makes the chain
 visible in the score.
 
-The knockout games themselves are the other half. A knockout tie has no
-standings for the simulation to replay (the outcome is binary), so its
-Monte Carlo importance is 0 and, with only its tournament-stage band, it
-would score below the 5.0 `placeholder_min_score` and get no channel when
-its stream is unmatched. World Cup and EURO knockout games therefore get a
-round-scaled importance premium instead (`scoring._KNOCKOUT_IMPORTANCE`:
-round of 32 2.8, round of 16 3.4, quarter-final 4.0, semi-final 4.6, final
-6.0, third place 3.4), one map for both, displayed about 5.5 / 6.5 / 7.5 /
-8.3 / 9.2 at the default weights. Measured on EURO 2024's real fixtures, a
-quarter-final went from 2.3 to 7.5 and the final from 4.4 to 9.2 (#250).
+The knockout games themselves score from the simulated bracket once each
+is placed in it (#243): EURO 2024's knockouts replayed through the real
+knockout source scored round of 16 6.5-13.1, quarter-finals 10.7-16.9 and
+the final 18.4 importance points. A knockout game that cannot be placed
+(the bracket fetch gave up, its teams are not in the simulated bracket)
+scores 0 and, with only its tournament-stage band, would fall below the
+5.0 `placeholder_min_score` and get no channel when its stream is
+unmatched. World Cup and EURO knockout games therefore get a round-scaled
+importance FLOOR (`scoring._KNOCKOUT_IMPORTANCE`: round of 32 2.8, round
+of 16 3.4, quarter-final 4.0, semi-final 4.6, final 6.0, third place 3.4),
+one map for both, displayed about 5.5 / 6.5 / 7.5 / 8.3 / 9.2 at the
+default weights. It applies only when it beats the simulated value; an
+unplaced EURO 2024 quarter-final goes from 2.3 to 7.5 and the final from
+4.4 to 9.2 (#250).
 The competitions granted it are listed in
 `scoring._KNOCKOUT_PREMIUM_COMPETITIONS`; club and domestic cups use the
 same stage labels and are deliberately not in it. A tournament whose chain

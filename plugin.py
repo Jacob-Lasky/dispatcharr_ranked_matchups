@@ -4070,16 +4070,18 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                     g.home, g.away, e,
                 )
 
-        # International-tournament knockout premium (World Cup, EURO). A
-        # knockout tie is win-or-go-home, but the Monte Carlo above scores it 0
-        # (binary outcome, no standings leverage to simulate), so a marquee
-        # knockout game would otherwise rank at the bottom and fall under
-        # placeholder_min_score. Override with a round-scaled importance
-        # premium; the gate (competition + knockout stage) lives in the pure,
-        # unit-tested scoring.knockout_importance, so group games keep their
-        # simulated importance and club and domestic cups are not affected.
+        # International-tournament knockout FLOOR (World Cup, EURO). A
+        # knockout tie placed in its simulated bracket (#243) scores its real
+        # stakes above, usually well over this; one that could not be placed
+        # scores 0 and would rank at the bottom, under placeholder_min_score.
+        # So the round-scaled premium applies only when it beats the simulated
+        # value: DO NOT make it an override, which cut a placed EURO final
+        # from 18.4 to 6.0 (see scoring._KNOCKOUT_IMPORTANCE). The gate
+        # (competition + knockout stage) lives in the pure, unit-tested
+        # scoring.knockout_importance, so group games and club and domestic
+        # cups are not affected.
         _ko_premium = knockout_importance(comp_code, extra.get("stage"))
-        if _ko_premium is not None:
+        if _ko_premium is not None and _ko_premium > importance_pts:
             importance_pts = _ko_premium
             importance_notes = [knockout_premium_note(comp_code)]
             importance_thresholds_hit = []
