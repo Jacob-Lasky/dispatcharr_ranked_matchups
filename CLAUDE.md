@@ -1133,9 +1133,11 @@ says which.
   "scored 0": the other signals still ran, so a knockout tie keeps its round
   premium. The points-based leagues report the same way (#289,
   `PointsBasedSportSource.season_fetch_failure`), with one difference that is
-  deliberate: their failure is NOT retried in the refresh. Their season is a
-  walk of up to ~300 requests (or 32 clubs), not one request, and its blips
-  are already re-asked inside the walk.
+  deliberate: their failure is NOT retried in the refresh. Most of their
+  seasons are walks (an ESPN day walk of up to ~300 requests with its blips
+  already re-asked inside it, or NHL's 32 clubs), and a re-walk per league
+  multiplies an outage against the pipeline ceiling; MLB and NCAAF are one
+  request and NCAAM three, kept to the same rule so the family has one.
 - **An Odds API request costs a credit per region per market, and the free
   plan has 500 a month** (#200). Three sources asking three regions on every
   refresh spent the allowance in days, after which every call answered 401

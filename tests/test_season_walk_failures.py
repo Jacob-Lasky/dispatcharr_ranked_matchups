@@ -260,16 +260,25 @@ def test_refresh_reports_a_season_that_was_not_simulated(monkeypatch, refresh_en
 
 def test_refresh_does_not_report_a_failed_season_with_nothing_on_the_slate(monkeypatch, refresh_env):
     """Guard: a league with no game in this refresh lost nothing to the
-    failure (a season read only for a playoff seed, an offseason)."""
+    failure (a season read only for a playoff seed, an offseason). An NFL
+    game is on the slate, so the refresh reaches the reporting step (an
+    empty slate returns before it) and NFL's answered season stays quiet."""
     nba = importlib.import_module(f"{PKG}.nba")
+    nfl = importlib.import_module(f"{PKG}.nfl")
     monkeypatch.setattr(nba, "_http_get", lambda url, *a, **k: (
         None if "dates=20261225" in url else {"events": []}))
-    src = nba.NbaRegularSource(season_end_year=2027)
-    src._fetch_games_cached()
-    assert src.season_fetch_failure() is not None
+    tomorrow = datetime.now(UTC) + timedelta(days=1)
+    game = _event("f1", "Buffalo", "Miami", tomorrow.replace(hour=23, minute=0), "pre")
+    monkeypatch.setattr(nfl, "_http_get", lambda url, *a, **k: (
+        {"events": [game]} if f"dates={tomorrow.strftime('%Y%m%d')}" in url else {"events": []}))
+    idle = nba.NbaRegularSource(season_end_year=2027)
+    idle._fetch_games_cached()
+    assert idle.season_fetch_failure() is not None
     _write_prior, run, read = refresh_env
-    run([src], weight_importance=1)
-    assert not any("season (stakes not simulated)" in s for s in read().get("summary", []))
+    run([idle, nfl.NflRegularSource(season_end_year=2027)], weight_importance=1)
+    cache = read()
+    assert [(g["home"], g["away"]) for g in cache["games"]] == [("Buffalo", "Miami")]
+    assert [s for s in cache["summary"] if "season (stakes not simulated)" in s] == []
 
 
 # ---------------------------------------------------------------------------
