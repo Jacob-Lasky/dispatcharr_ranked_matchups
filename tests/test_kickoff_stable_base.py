@@ -421,10 +421,13 @@ class TestApplyWiring:
 
     def test_parking_clears_every_number_in_the_group(self):
         src, _fn = _apply_fn()
-        i = src.index("highest_in_group = (")
+        i = src.index("# The group as the setup (first thing in the transaction below) will")
         block = src[i:src.index("park_base = _resolve_park_base(max_target, highest_in_group)", i)]
         assert "channel_group=target_group" in block
         assert '_Max("channel_number")' in block
+        # The group as the setup (inside the transaction) leaves it, #271
+        # follow-up: our channels it moves in count before they are moved.
+        assert "channel_group__in=moving_groups" in block
 
     def test_reserved_numbers_are_collected_in_both_modes(self):
         _src, fn = _apply_fn()

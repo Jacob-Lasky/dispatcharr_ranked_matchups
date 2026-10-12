@@ -138,6 +138,12 @@ def scenario_witness_a_case_only_archive_rename_keeps_the_archive(env):
         name="Matchups Recordings", channel_number=9999, channel_group=archive,
         tvg_id=env.plugin.ARCHIVE_TVG_ID,
     )
+    # A finished recording lives there: the archive exists only while it
+    # holds one, and an empty one is (rightly) cleaned up.
+    m.Recording.objects.create(
+        channel=archive_ch, start_time=_now() - timedelta(days=2),
+        end_time=_now() - timedelta(days=2, hours=-3), custom_properties={"status": "completed"},
+    )
     game = _row(401, _now() + timedelta(hours=6), user_ch.id)
     _publish(env, [game], settings=_settings(recordings_group_name="matchups recordings", **COMPACT))
     row = m.Channel.objects.filter(pk=archive_ch.pk).first()
@@ -184,6 +190,76 @@ def scenario_a_case_only_rename_of_the_live_group_moves_our_channel(env):
     assert mine[0].channel_group.name == "Top Matchups"
 
 
+def scenario_witness_a_failed_rename_rolls_back(env):
+    """Codex review, round 2: the setup committed on its own, so an error
+    later in it (an EPGSource name the database rejects, here the #263 row
+    move failing) left our channels moved and their guide on the old source.
+    Inside the main transaction it rolls back with everything else."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    _write_cache(env, [game])
+    real = env.plugin._move_owned_epg_rows
+
+    def rejected(*a, **k):
+        raise RuntimeError("the database rejected the write")
+
+    env.plugin._move_owned_epg_rows = rejected
+    try:
+        try:
+            env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("instrument: the injected failure never happened")
+    finally:
+        env.plugin._move_owned_epg_rows = real
+    ours.refresh_from_db()
+    assert ours.channel_group.name == OLD, (
+        f"the failed apply left our channel moved into {ours.channel_group.name!r}"
+    )
+    assert not m.ChannelGroup.objects.filter(name=NEW).exists()
+    assert m.EPGSource.objects.filter(name=OLD).exists()
+
+
+def scenario_witness_an_archive_name_like_the_old_live_name_strands_nothing(env):
+    """Codex review, round 2: the live group goes Top Matchups -> !Top Matchups
+    while Recordings group name is set to 'top matchups'. Protecting archive
+    NAMES ignoring case protected the old live group: our channel stayed in it
+    and the game got a second channel. The archive is protected by the archive
+    channel it holds, and the names exactly."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    _write_cache(env, [game])
+    result = env.plugin._action_apply(_settings(
+        channel_profile_name=NEW, recordings_group_name="top matchups", **COMPACT))
+    assert result["status"] == "ok", result
+    mine = list(m.Channel.objects.filter(tvg_id=G401))
+    assert [(c.pk, c.channel_group.name, int(c.channel_number)) for c in mine] == [(ours.pk, NEW, 401)], (
+        [(c.pk, c.channel_group.name, c.channel_number) for c in mine]
+    )
+
+
+def scenario_witness_a_case_only_archive_rename_reuses_the_archive(env):
+    """Codex review, round 2: archive creation and cleanup looked the group up
+    by exact name, so 'matchups recordings' made a second archive group and
+    channel beside 'Matchups Recordings', splitting the recordings."""
+    m = env.m
+    archive = m.ChannelGroup.objects.create(name="Matchups Recordings")
+    arch = m.Channel.objects.create(
+        name="Matchups Recordings", channel_number=9999, channel_group=archive,
+        tvg_id=env.plugin.ARCHIVE_TVG_ID,
+    )
+    got = env.plugin._ensure_archive_channel("matchups recordings")
+    assert got.pk == arch.pk, "a second archive channel was created"
+    assert list(m.ChannelGroup.objects.filter(name__iexact="matchups recordings")) == [archive]
+    assert env.plugin._cleanup_empty_archive("matchups recordings") is True  # it holds no recording
+    assert not m.Channel.objects.filter(pk=arch.pk).exists()
+
+
 def _snapshot(env):
     """Every row of every model, every state file the plugin writes, and the
     logo directory: what a stopped apply must leave exactly as it found it."""
@@ -224,7 +300,10 @@ def scenario_stopping_at_any_check_leaves_nothing_behind(env):
     A write moved above any check, however it is spelled, fails here."""
     user_ch, _ = _seed_source_channel(env)
     game = _row(401, _now() + timedelta(hours=6), user_ch.id)
-    _publish(env, [game], settings=_settings(**COMPACT))
+    # Auto-record armed too, so its state and recordings are in play.
+    armed = dict(COMPACT, recorded_teams="Georgia", record_ranked_games=True)
+    _publish(env, [game], settings=_settings(**armed))
+    assert env.m.Recording.objects.exists(), "instrument: auto-record did not run"
     _write_cache(env, [game])
     gates = _gate_count()
     assert gates >= 2, f"instrument: found {gates} time checks in _action_apply"
@@ -241,7 +320,7 @@ def scenario_stopping_at_any_check_leaves_nothing_behind(env):
 
         env.plugin._apply_time_short = check
         try:
-            result = env.plugin._action_apply(_settings(channel_profile_name="Renamed Matchups", **COMPACT))
+            result = env.plugin._action_apply(_settings(channel_profile_name="Renamed Matchups", **armed))
         finally:
             env.plugin._apply_time_short = real
         assert result.get("message") == "stopped by the test", (
@@ -252,7 +331,7 @@ def scenario_stopping_at_any_check_leaves_nothing_behind(env):
         changed += sorted(k for k in set(before[1]) | set(after[1]) if before[1].get(k) != after[1].get(k))
         assert not changed, f"apply stopped at check #{stop_at} of {gates} still wrote: {changed}"
     # Instrument: unstopped, the same apply DOES write all of it.
-    result = env.plugin._action_apply(_settings(channel_profile_name="Renamed Matchups", **COMPACT))
+    result = env.plugin._action_apply(_settings(channel_profile_name="Renamed Matchups", **armed))
     assert result["status"] == "ok", result
     m = env.m
     assert m.ChannelGroup.objects.filter(name="Renamed Matchups").exists()
@@ -265,20 +344,13 @@ def scenario_stopping_at_any_check_leaves_nothing_behind(env):
 
 _ORM_WRITES = {"create", "get_or_create", "update_or_create", "bulk_create", "bulk_update",
                "save", "delete"}
-_FILE_WRITES = {"write_json_atomic", "save_state"}
+_FILE_WRITES = {"write_json_atomic", "save_state", "write_text", "write_bytes"}
 _ATOMIC = "transaction.atomic()"
 
 # Committed writes apply makes AFTER its last time check but OUTSIDE its main
 # transaction, each with why it cannot wait for that transaction. Anything new
 # there must be added here, with its reason, or fail.
 ALLOWED_BEFORE_MAIN_TRANSACTION = {
-    "_commit_group_setup": (
-        "Steps 1-2's group and guide setup (create the group, move our channels "
-        "and #263 guide rows from a previous group/source). Numbering, which "
-        "runs before the main transaction, reads the channels in the group, so "
-        "the move must be visible to it. A kill after it is repaired by the "
-        "next apply's renumbering."
-    ),
     "_autorecord_cancel_committed": (
         "Recording cancellations commit before numbering on purpose (#288: a "
         "recording counted as keeping its channel held a full compact band's "
@@ -327,7 +399,9 @@ def _write_sites(fn, writers, aliases=None):
             elif isinstance(f, ast.Attribute) and f.attr == "update" and (
                     ".objects" in receiver or "filter(" in receiver or receiver in querysets):
                 out.append((n.lineno, ast.unparse(f)))
-            elif isinstance(f, ast.Attribute) and receiver == "os" and f.attr in ("replace", "remove", "unlink"):
+            elif isinstance(f, ast.Attribute) and (
+                    (receiver == "os" and f.attr in ("replace", "remove", "unlink", "rename"))
+                    or receiver == "shutil"):
                 out.append((n.lineno, ast.unparse(f)))
             elif name in _FILE_WRITES or (not receiver and name in writers) or qualified in writers:
                 out.append((n.lineno, qualified or name))
@@ -409,6 +483,17 @@ class TestNothingCommitsBeforeTheLastCheck:
         writers = _module_writers()
         assert {"logos.download_thumb", "recording.save_state", "_util.write_json_atomic"} <= writers
 
+    def test_the_group_setup_runs_inside_the_main_transaction(self):
+        """Atomic with the slate: a stopped, refused or failed apply never
+        leaves a rename half done (Codex review, round 2)."""
+        tree = ast.parse(open(PLUGIN_PY, encoding="utf-8").read())
+        apply = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_action_apply")
+        main = [n for n in apply.body if _is_atomic(n)]
+        calls = [n for n in ast.walk(apply) if isinstance(n, ast.Call)
+                 and getattr(n.func, "id", None) == "_commit_group_setup"]
+        assert len(main) == 1 and len(calls) == 1
+        assert any(n is calls[0] for n in ast.walk(main[0])), "the setup left the main transaction"
+
     def test_a_write_through_an_imported_module_is_seen(self):
         snippet = ("def _action_apply(s):\n    from . import logos as matchup_logos\n"
                    "    matchup_logos.download_thumb('u', 'p')\n"
@@ -443,6 +528,8 @@ class TestNothingCommitsBeforeTheLastCheck:
         "def helper():\n    write_json_atomic('p', {})\ndef _action_apply(s):\n    helper()\n    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n    with transaction.atomic():\n        pass",
         "def _action_apply(s):\n    def inner():\n        Logo.objects.get_or_create(url='u')\n    inner()\n    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n    with transaction.atomic():\n        pass",
         "def _action_apply(s):\n    os.replace('a', 'b')\n    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n    with transaction.atomic():\n        pass",
+        "def _action_apply(s):\n    Path('x').write_text('y')\n    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n    with transaction.atomic():\n        pass",
+        "def _action_apply(s):\n    shutil.move('a', 'b')\n    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n    with transaction.atomic():\n        pass",
     ])
     def test_the_scan_sees_an_early_write(self, snippet):
         sites, checks, _main = _apply_layout(snippet)
