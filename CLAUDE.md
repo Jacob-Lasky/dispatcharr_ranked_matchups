@@ -1132,9 +1132,12 @@ says which.
   appended to `src_summary` BEFORE the cache write so `_slate_problems` and
   **Show current state** see it. The label says "stakes not simulated", not
   "scored 0": the other signals still ran, so a knockout tie keeps its round
-  premium. The points-based leagues report the same way (#289,
-  `PointsBasedSportSource.season_fetch_failure`), with one difference that is
-  deliberate: their failure is NOT retried in the refresh. Most of their
+  premium. A points-based season that failed with no usable kept read reports
+  the same way (#289, `PointsBasedSportSource.season_fetch_failure`); one
+  that simulated its last complete read instead (`sources/_season_store.py`,
+  no older than 36 h) reports "<label> season (using the last complete read
+  from <time>)", informational, not an error. One difference is deliberate:
+  a points-based failure is NOT retried in the refresh. Most of their
   seasons are walks (an ESPN day walk of up to ~300 requests with its blips
   already re-asked inside it, or NHL's 32 clubs), and a re-walk per league
   multiplies an outage against the pipeline ceiling; MLB and NCAAF are one

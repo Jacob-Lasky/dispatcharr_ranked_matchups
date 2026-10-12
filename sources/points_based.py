@@ -169,6 +169,10 @@ class PointsBasedSportSource(SportSource):
             return self._all_games_cache
         if self._season_failure is not None:
             return []
+        # The key BEFORE the read: NCAAF and NCAAM pick their season from the
+        # clock, and a key taken after a read that crossed their season
+        # boundary would file last season's games under the next season.
+        key = self.season_store_key()
         failure: Optional[str] = None
         try:
             with recording_lost_days() as lost:
@@ -180,7 +184,6 @@ class PointsBasedSportSource(SportSource):
                 days = sorted(lost)
                 failure = (f"no answer for {len(days)} day(s) of the season "
                            f"({days[0].isoformat()}..{days[-1].isoformat()})")
-        key = self.season_store_key()
         if failure is not None:
             self._season_failure = failure
             kept = _season_store.recall(key) if key else None

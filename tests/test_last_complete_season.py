@@ -123,6 +123,27 @@ def test_another_season_does_not_stand_in(monkeypatch, store):
     assert nxt.season_fallback() is None
 
 
+def test_a_read_that_crosses_a_season_boundary_is_kept_under_its_own_season(monkeypatch, store):
+    """WITNESS (Codex, round 1): NCAAF and NCAAM pick their season from the
+    clock, so a read running across their boundary (Aug 1 / Nov 1 UTC) read
+    one season while a key taken AFTER the read named the next one, and a
+    later failure in that next season recalled the wrong games. The key is
+    taken before the read. Modelled on NBA by moving its season mid-read."""
+    src = _nba(monkeypatch)
+    old_key = src.season_store_key()
+    real = src._fetch_full_season_games
+
+    def crossing():
+        games = real()
+        src.season_end_year = 2028   # the clock moved on while reading
+        return games
+
+    monkeypatch.setattr(src, "_fetch_full_season_games", crossing)
+    src._fetch_games_cached()
+    assert store.recall(old_key) is not None
+    assert store.recall(src.season_store_key()) is None
+
+
 def test_no_prior_read_is_not_simulated(monkeypatch, store):
     """Guard: the #289 behaviour when there is nothing to fall back to."""
     src = _nba(monkeypatch, dead_day="20261225")
@@ -258,28 +279,61 @@ def _build(plugin, monkeypatch, get):
 
 def test_every_points_based_source_falls_back_to_its_last_complete_read(plugin, monkeypatch, store):
     """CLASS guard. Every points-based source `_build_sources` builds reads
-    its season whole (every API's answered shape), then a refresh 6 h later
-    builds them again with every request failing. Each must simulate the
-    read it kept: a distinct key naming its season, remembered on success,
-    recalled on failure. A new source that forgets to name its season, or
-    a store keyed so two sources collide, fails here."""
+    its season whole (each answered with its own distinct game, carrying a
+    datetime and an extra, through its instance's season fetch), then a
+    refresh 6 h later builds them again with every request failing. Each
+    must simulate exactly the read it kept: a distinct key naming its season,
+    remembered on success, recalled on failure. A new source that forgets to
+    name its season, a store keyed so two sources collide, or a recall that
+    returns another source's games fails here."""
     import requests
     first = _build(plugin, monkeypatch, lambda url, **k: _answer(url, k.get("params") or {}))
     assert {type(s).__name__ for s in first} == _EVERY_SEASON
     keys = [s.season_store_key() for s in first]
     assert None not in keys and len(set(keys)) == len(keys)
+    expected = {}
     for s in first:
-        s._fetch_games_cached()
-        assert s.season_fetch_failure() is None, s.season_store_key()
+        game = {"id": s.season_store_key(), "home": "A", "away": "B", "home_points": 1,
+                "away_points": 0, "status": "FINISHED",
+                "start_time": datetime(2026, 10, 1, 23, 0, tzinfo=UTC), "extra": {"k": s.sport_label}}
+        s._all_games_cache = None
+        s._season_failure = None
+        monkeypatch.setattr(s, "_fetch_full_season_games", lambda game=game: [game])
+        assert s._fetch_games_cached() == [game]
+        expected[s.season_store_key()] = [game]
 
     def refuse(url, **_k):
         raise requests.ConnectionError("every request fails in this test")
 
     store.clock["now"] = T0 + timedelta(hours=6)
     later = _build(plugin, monkeypatch, refuse)
-    missing = []
+    wrong = {}
     for s in later:
-        s._fetch_games_cached()
-        if s.season_fetch_failure() is None or s.season_fallback() != T0:
-            missing.append(s.season_store_key())
-    assert missing == []
+        got = s._fetch_games_cached()
+        if s.season_fetch_failure() is None or s.season_fallback() != T0 or got != expected[s.season_store_key()]:
+            wrong[s.season_store_key()] = got
+    assert wrong == {}
+
+
+def test_a_label_split_between_a_kept_read_and_none_is_one_error_entry(plugin):
+    """Guard (Codex, round 1): MLS East fell back, West had no kept read;
+    the shared label is one entry, an error, naming both."""
+    class _Src:
+        sport_label = "MLS"
+
+        def __init__(self, failure, read_at):
+            self._f, self._r = failure, read_at
+
+        def season_fetch_failure(self):
+            return self._f
+
+        def season_fallback(self):
+            return self._r
+
+    east, west = _Src("lost a day", T0), _Src("map unavailable", None)
+    assert plugin._season_failure_entries([east, west], [east, west]) == [
+        "MLS season (stakes not simulated): error (map unavailable; the rest used "
+        "the last complete read from 2026-10-12 04:00Z)"
+    ]
+    assert plugin._season_failure_entries([east], [east]) == [
+        "MLS season (using the last complete read from 2026-10-12 04:00Z)"]

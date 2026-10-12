@@ -8336,12 +8336,19 @@ def _season_failure_entries(sources: List[Any], game_sources: List[Any]) -> List
         errs = by_label.setdefault(src.sport_label, [])
         if err not in errs:
             errs.append(err)
-    return (
-        [f"{label} season (using the last complete read from {', '.join(reads)})"
-         for label, reads in fell_back.items()]
-        + [_source_error_entry(f"{label} season (stakes not simulated)", "; ".join(errs))
-           for label, errs in by_label.items()]
-    )
+    # ONE entry per label. Two sources sharing one (MLS East and West) can
+    # split: one falls back, the other has no usable read. That label is an
+    # error, since some of its games got no stakes, and the entry says the
+    # rest used a kept read.
+    out = []
+    for label, errs in by_label.items():
+        reason = "; ".join(errs)
+        if label in fell_back:
+            reason += f"; the rest used the last complete read from {', '.join(fell_back[label])}"
+        out.append(_source_error_entry(f"{label} season (stakes not simulated)", reason))
+    out.extend(f"{label} season (using the last complete read from {', '.join(reads)})"
+               for label, reads in fell_back.items() if label not in by_label)
+    return out
 
 
 def _seeded_from(regulars: List[Any], *seeded: Any) -> None:
