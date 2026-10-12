@@ -158,7 +158,17 @@ binds the guide arbitrarily for BOTH channels. The numbers of stale channels
 this apply will KEEP (an active recording, or kept by their guide;
 `_numbers_held_for_recordings`, the reap step's own policy run early) are
 reserved too, so a new game cannot take the number such a channel is restored
-to after parking. "Stale" is `_unwritten_channels`, the ONE set the reap also
+to after parking. A kept channel whose old number another channel has since
+taken (a hand-filed channel in a renamed group) moves to the first number
+above it that no channel carries in the group and none publishes anywhere: a
+parking number is never committed, since parking is clear only of our own
+group and the guide keys on the bare number everywhere (kept channels whose
+old number is free are restored first, so a moving one never takes another's;
+a moved one's #278 record entry follows it to the new number). And the write
+never removes a stream link from a channel recording right now, except an
+excluded-group one (#206): written as a placeholder (no feed matched, but the
+score or a Recorded team still earns a channel) or with a different pool, it
+keeps its links and the new pool's streams are added after them. "Stale" is `_unwritten_channels`, the ONE set the reap also
 uses: every channel the write loop will not write, including an in-slate game
 it skips (no feed, too low for a placeholder). That set is only known after
 apply's pre-pass, so NUMBERING RUNS AFTER THE PRE-PASS, over only the games it
@@ -920,7 +930,17 @@ says which.
   planned with `live_stops=True` and comes back in `Plan.stops`; apply writes
   it to `recording_stops.json` and `_run_due_stops` (in `_reaper_loop`) makes
   the Stop-button write at the handoff moment, after checking the taker's
-  channel has a stream. A held recording is never dropped whole. The symmetric
+  channel has a stream, that the taker is still set to record, and that the
+  CURRENT cache (`_cached_live_starts`, read per stop with the holder locked,
+  first row per marker as apply keeps it, a malformed cache read as nothing)
+  neither puts the taker's live block later than the handoff nor lists it only
+  on the bench (the stops file is the last apply's plan; a refresh that moved
+  the taker leaves its recording row at the old time until the next apply,
+  and the reaper runs in between). It does NOT re-run apply's other decisions
+  (placeholder threshold, eligibility): a taker the next apply will skip still
+  takes the handoff; that would mean a second planner. Re-validating, not clearing the file at
+  refresh: a cleared plan drops correct handoffs too, and the taker's capture
+  then starts beside the holder's. A held recording is never dropped whole. The symmetric
   half is easy to miss: a recording cut on
   the previous apply comes back as `held` with the SHORT end, so
   `plan_recordings` must extend it only when the extra time still fits the
