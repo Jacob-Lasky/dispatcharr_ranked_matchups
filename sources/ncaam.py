@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import GameRow, RankingsUnavailable, report_lost_day_range
+from .base import GameRow, RankingsUnavailable, SeasonUnavailable, report_lost_day_range
 from .points_based import PointsBasedSportSource
 from ._espn import upcoming_window
 from .._http import get_within_deadline
@@ -348,11 +348,18 @@ class NcaamSource(PointsBasedSportSource):
                     timeout=30,
                 )
                 r.raise_for_status()
-                all_games.extend(r.json() or [])
+                data = r.json()
+                if not isinstance(data, list):
+                    raise ValueError(f"/games answered {type(data).__name__}, not a list")
             except Exception as e:
                 logger.warning("[ncaam] full-season chunk %s..%s failed: %s",
                                start.date(), end.date(), e)
-                continue
+                # A third of the season missing is not a shorter season
+                # (#289): skipped, its results and fixtures fell out of
+                # every simulation with nothing reported.
+                raise SeasonUnavailable(
+                    f"full-season chunk {start.date()}..{end.date()} failed: {e}") from e
+            all_games.extend(data)
 
         out: List[Dict[str, Any]] = []
         for g in all_games:

@@ -4192,6 +4192,23 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 errs.append(err)
     for label, errs in bracket_failures.items():
         src_summary.append(_source_error_entry(f"{label} bracket (stakes not simulated)", "; ".join(errs)))
+    # Likewise a points-based season that could not be fetched whole (#289):
+    # its games were scored with no standings stakes rather than against a
+    # season with holes in it. Only sources with a game in this slate: a
+    # season read only to seed playoff strengths (at build time) leaves the
+    # playoff source on its prior, which its own WARNING already says, and an
+    # out-of-season league with nothing on the slate lost nothing to report.
+    scored = {id(s) for s in game_sources}
+    season_failures: Dict[str, List[str]] = {}
+    for src in sources:
+        failure = getattr(src, "season_fetch_failure", None)
+        err = failure() if callable(failure) and id(src) in scored else None
+        if isinstance(err, str) and err:
+            errs = season_failures.setdefault(src.sport_label, [])
+            if err not in errs:
+                errs.append(err)
+    for label, errs in season_failures.items():
+        src_summary.append(_source_error_entry(f"{label} season (stakes not simulated)", "; ".join(errs)))
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),

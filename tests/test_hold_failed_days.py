@@ -837,14 +837,16 @@ def test_a_failed_standings_request_stays_failed_for_the_source(monkeypatch):
     conference map when it is built, came back empty on a failed request and
     was cached; a retried map that recovered then let `fetch_upcoming` publish
     games scored against that empty season. One request per source, so the
-    upcoming fetch sees the same failure and raises."""
+    upcoming fetch sees the same failure and raises. Since #289 the season
+    read reports the failure instead of returning an empty season."""
     mls_standings = importlib.import_module(f"{PKG}.mls_standings")
     answers = [None, _standings("East", "West")]
     monkeypatch.setattr(
         mls_standings, "_http_get",
         lambda url, *a, **k: answers.pop(0) if url.endswith("/standings") else {"events": []})
     src = mls_standings.MlsEastSource()
-    assert src._fetch_full_season_games() == []
+    assert src._fetch_games_cached() == []
+    assert "standings" in (src.season_fetch_failure() or "")
     with pytest.raises(RuntimeError, match="standings"):
         src.fetch_upcoming(days_ahead=2)
     assert len(answers) == 1   # never asked again

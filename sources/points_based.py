@@ -26,13 +26,16 @@ refactor can unify all sources around one canonical match dict.
 
 from __future__ import annotations
 
+import logging
 import random
 from abc import abstractmethod
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .base import GameRow, MatchResult, SportSource
+from .base import FeedUnavailable, GameRow, MatchResult, SportSource, recording_lost_days
 from .._util import poisson_sample as _poisson
+
+logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.points_based")
 
 
 class PointsBasedSportSource(SportSource):
@@ -71,6 +74,11 @@ class PointsBasedSportSource(SportSource):
     # Subclasses MUST set these. Keep type-checkable defaults so the ABC
     # surfaces a clear NotImplementedError at instantiation if missed.
     league_context_code: str = ""
+    # Why this refresh's season list could not be fetched whole, or None. A
+    # class default, not only set in __init__, because several subclasses
+    # own their caches without calling super().__init__(). See
+    # `_fetch_games_cached`.
+    _season_failure: Optional[str] = None
     _DEFAULT_POINTS_FOR: float = 25.0
     _DEFAULT_POINTS_AGAINST: float = 25.0
 
@@ -107,15 +115,68 @@ class PointsBasedSportSource(SportSource):
           }
 
         Caller (this class) caches the result per source instance.
+
+        MUST NOT return a partial season quietly (#289). A request that
+        failed, or answered something that is not its answer, raises
+        `base.SeasonUnavailable` (or the `RankingsUnavailable` of a poll the
+        population is drawn from); a day an ESPN walk lost is reported by
+        the walk itself (`base.report_lost_days`). `_fetch_games_cached`
+        reads both. An answer with no games (an offseason) is `[]`, quiet.
         """
         raise NotImplementedError
 
     def _fetch_games_cached(self) -> List[Dict[str, Any]]:
+        """The season list, fetched ONCE per source instance (one refresh).
+
+        A season that could not be fetched whole is NOT simulated (#289): the
+        list is `[]`, so no game of the league scores standings stakes, and
+        `season_fetch_failure()` says why, which the refresh reports as
+        "<label> season (stakes not simulated)", the way it reports a
+        Football-Data season (#228) or a playoff bracket (#245). Before, a
+        failed request or a lost walk day dropped its games from the list
+        and the simulator replayed the rest as the whole season: standings
+        missing results, a calendar missing fixtures, wrong stakes for every
+        game in the league, and nothing in the summary.
+
+        Lost days are read in a record of their OWN, because this runs at
+        scoring time (outside any) and at build time for the playoff
+        strength seeds, where the days are the season's, not an upcoming
+        fetch's.
+
+        The failure is kept for the refresh and NOT retried. The ESPN walk
+        already re-asks a blip of failed days (`_espn._retry_failed_days`),
+        and a second whole-season walk per league would multiply an outage
+        across a dozen leagues against the 25-minute pipeline ceiling: one
+        walk can spend its 120 s budget, where Football-Data's bounded
+        retry (#228) is one request. The next refresh fetches afresh.
+        """
         if self._all_games_cache is not None:
             return self._all_games_cache
-        out = self._fetch_full_season_games()
+        if self._season_failure is not None:
+            return []
+        failure: Optional[str] = None
+        try:
+            with recording_lost_days() as lost:
+                out = self._fetch_full_season_games()
+        except FeedUnavailable as e:
+            failure = str(e) or type(e).__name__
+        else:
+            if lost:
+                days = sorted(lost)
+                failure = (f"no answer for {len(days)} day(s) of the season "
+                           f"({days[0].isoformat()}..{days[-1].isoformat()})")
+        if failure is not None:
+            self._season_failure = failure
+            logger.warning("[points_based] %s season not simulated: %s",
+                           self.sport_label, failure)
+            return []
         self._all_games_cache = out or []
         return self._all_games_cache
+
+    def season_fetch_failure(self) -> Optional[str]:
+        """Why this refresh's season list could not be fetched whole, or None
+        (see `_fetch_games_cached`)."""
+        return self._season_failure
 
     # ---------- importance interface ----------
 

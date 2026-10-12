@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, report_lost_day_range
+from .base import GameRow, SeasonUnavailable, report_lost_day_range
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, http_get_json
@@ -245,9 +245,12 @@ class MlbRegularSource(PointsBasedSportSource):
         )
         data = _http_get(url)
         out: List[Dict[str, Any]] = []
-        if not data:
-            return out
-        for date_entry in data.get("dates", []) or []:
+        if not (isinstance(data, dict) and isinstance(data.get("dates"), list)):
+            # Failed, or not a schedule: NOT an empty season (#289). A season
+            # with no games still answers `"dates": []` (measured 2026-10-11
+            # for season=2031).
+            raise SeasonUnavailable("regular-season schedule did not answer")
+        for date_entry in data["dates"]:
             for g in date_entry.get("games", []) or []:
                 gid = g.get("gamePk")
                 if gid is None:

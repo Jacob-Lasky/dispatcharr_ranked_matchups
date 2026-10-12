@@ -455,7 +455,8 @@ class TestNcaafSeasonFetchIsSharedAndCached:
 
     def test_a_failed_fetch_is_not_cached(self, monkeypatch):
         """A transient error must not freeze an empty season for the life of
-        the instance, which would silently zero NCAAF until a restart."""
+        the instance, which would silently zero NCAAF until a restart. Nor
+        is it an empty season this time (#289): it raises."""
         from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
         payload = self._payload()
         state = {"fail": True}
@@ -476,8 +477,10 @@ class TestNcaafSeasonFetchIsSharedAndCached:
             return FakeResp()
 
         stub_requests_get(monkeypatch, fake_get)
+        from dispatcharr_ranked_matchups.sources.base import SeasonUnavailable
         src = ncaaf_mod.NcaafSource(api_key="x")
-        assert src._fetch_raw_season(2026) == []
+        with pytest.raises(SeasonUnavailable, match="boom"):
+            src._fetch_raw_season(2026)
         assert len(src._fetch_raw_season(2026)) == 1
 
 
