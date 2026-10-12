@@ -940,7 +940,20 @@ says which.
   reason no longer holds under the CURRENT settings. A marker still IN the
   slate but unplanned is cancelled as before: that is real evidence. Three
   things this rests on: the slate is games **plus bench**, or a demoted game
-  would read as vanished; the team question is re-asked through
+  would read as vanished (since #291 the plan's CANDIDATES are only the games
+  apply will write a channel for, but its slate stays the whole cache: a
+  cached game it skips, or one left without a compact slot, is known and
+  unplanned, so its scheduled recording is cancelled and planned again once
+  it has a channel; treated as missing instead, a recording was judged by its
+  stored reason against a cache that had moved on, and sat outside the slot
+  budget. No exception for a channel the guide keeps while the cache cannot
+  vouch (#264): a recorded team's game always gets a channel (placeholder),
+  and a ranked game with no stream attached is never eligible, so a skipped
+  guide-kept game's scheduled recording is cancelled too (an exception judged
+  by the stored reason was tried and kept captures through corrected rows and
+  excluded streams). And every scheduled recording
+  the reason rule keeps for a game missing from the slate counts as `busy` in
+  the plan, so a one-slot plan never schedules a second capture beside it); the team question is re-asked through
   `scoring.match_favorites` against the stored game rather than by comparing
   stored list entries, so fixing a typo in **Recorded teams** does not look
   like removing the team; and a row with no stored reason (written by 1.29.0 /
@@ -954,14 +967,21 @@ says which.
   `_autorecord_for_game` and `_autorecord_cancel` both re-fetch via
   `select_for_update()` inside a transaction (a plain re-read only narrows the
   race) and re-check `is_in_progress` / `is_terminal`. `_autorecord_cancel`
-  runs in a transaction of its OWN, after the pre-pass and BEFORE numbering
-  (#288 review): the numbers held back for kept channels are read after it,
-  so a recording it cancels holds no number (in a full compact band it once
-  made apply abort with the unwanted recording still scheduled). Its state
-  change (`created` entries dropped) is saved right after it commits: left to
-  `_autorecord_finish`, an apply that returned or failed in between kept the
-  entries, and the next plan read each missing row as deleted by the user
-  and tombstoned it for good.
+  runs through `_autorecord_cancel_committed`, a transaction of its OWN, in
+  two steps. The plan is built after the pre-pass's deciding half over the
+  games apply will write (#291: a channel-less game planned anyway took the
+  only slot from one with a channel, and nothing recorded). Step one, BEFORE
+  numbering, cancels only recordings on channels apply will not write (#288
+  review: the numbers held back for kept channels are read after it, so a
+  recording it cancels holds no number; in a full compact band one once made
+  apply abort with the unwanted recording still scheduled). Numbering may
+  leave a compact game without a slot; the plan is then built again over the
+  placed games, and step two cancels the rest by it, before the network half
+  writes the 🔴 into names. Each step's state change (`created` entries
+  dropped) is saved right after it commits: left to `_autorecord_finish`, an
+  apply that returned or failed in between kept the entries, and the next
+  plan read each missing row as deleted by the user and tombstoned it for
+  good.
 - **Apply re-derives `recorded_matched`, it does not trust the cache** (#221).
   Refresh stamps the match into each cached row, so an edit to **Recorded
   teams** would otherwise sit inert until the next scheduled refresh hours
@@ -1335,7 +1355,9 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
 - Ranked games in spare recording slots (#216, phase B): `record_ranked_games`
   (off by default) plus `record_leagues` (league codes in priority order, blank
   = every league) make a stream-matched ranked game a slot candidate
-  (`_ranked_eligible`; a favorite is preferred, never eligible). Slots still
+  (`_ranked_eligible`; a favorite is preferred, never eligible; in apply
+  "stream-matched" means the pre-pass attached a stream to its channel, not
+  that the cache names a match, #291 review). Slots still
   fill in kickoff order; `recording_preference` (`earliest` default,
   `favorites` / `league` / `rating`) decides what happens when a game kicks off
   with every slot full, via `priority_key` / `can_interrupt`. Every handoff is

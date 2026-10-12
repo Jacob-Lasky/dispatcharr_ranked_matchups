@@ -611,7 +611,8 @@ def cancellable(ours_by_marker: Dict[str, Any], plan: Plan,
     """Our not-yet-started recordings that are no longer wanted.
 
     A game that is IN the slate (the whole cache: applied games and bench) but
-    no longer planned is cancelled: the team was removed or it lost its slot.
+    no longer planned is cancelled: the team was removed, it lost its slot, or
+    apply gives it no channel this time (#291).
     A game MISSING from the slate is cancelled only when ``reason_holds`` says
     its stored reason no longer holds. DO NOT treat "missing from the slate" as
     "not wanted": a one-off source failure (measured 2026-09-26, CFBD returned

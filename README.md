@@ -663,7 +663,8 @@ does not have to be a Favorite, and listing it does not change its score.
   spare slots** and slots your recorded teams do not need go to the best games
   on the list, from **Leagues to record** (league codes as they appear at the
   start of channel names, e.g. `CFB, EPL, NFL`; blank means every league). A
-  ranked game is only recorded once a stream has been matched for it.
+  ranked game is only recorded once a stream has been matched for it and
+  attached to its channel.
 - **Who wins a slot.** Slots always fill in kickoff order. **Recording
   preference** decides what happens when a game kicks off and every slot is
   full:
