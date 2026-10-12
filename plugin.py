@@ -1679,7 +1679,7 @@ def _cleanup_empty_archive(recordings_group_name) -> bool:
     under it, so the group exists only while it holds recordings. Returns True if
     anything was removed. Safe: the archive channel is deleted only when it has
     zero Recording rows, so the CASCADE takes nothing with it."""
-    from apps.channels.models import Channel, Recording
+    from apps.channels.models import Channel, Recording, Stream
     removed = False
     # Every case variant: an install split by the old exact-name lookup has
     # an archive in each, and each empties on its own schedule.
@@ -1692,7 +1692,9 @@ def _cleanup_empty_archive(recordings_group_name) -> bool:
         if arch is not None and not Recording.objects.filter(channel_id=arch.id).exists():
             arch.delete()
             removed = True
-        if ours and Channel.objects.filter(channel_group=grp).count() == 0:
+        if (ours and Channel.objects.filter(channel_group=grp).count() == 0
+                and not Stream.objects.filter(channel_group=grp).exists()):
+            # Not while it holds streams: deleting a group nulls their group.
             grp.delete()
             removed = True
     return removed
@@ -6739,7 +6741,7 @@ def _commit_group_setup(
     Not for a dry run (nothing here is a preview). Returns the target group,
     the EPGSource, and the counts the summary reports.
     """
-    from apps.channels.models import Channel, ChannelGroup
+    from apps.channels.models import Channel, ChannelGroup, Stream
     from apps.epg.models import EPGData, EPGSource
     from django.db import transaction
 
@@ -6776,7 +6778,10 @@ def _commit_group_setup(
             # this plugin itself would have created. Exact, case-insensitive:
             # see _DELETABLE_LEGACY_GROUP_NAMES for why this is not a substring
             # test and must not become one again (#157).
-            if Channel.objects.filter(channel_group=old_g).count() == 0:
+            # Kept while it still holds streams: deleting a group nulls the
+            # group of every stream in it (SET_NULL).
+            if (Channel.objects.filter(channel_group=old_g).count() == 0
+                    and not Stream.objects.filter(channel_group=old_g).exists()):
                 if old_g.name.strip().lower() in deletable_group_names:
                     old_g.delete()
                     deleted_old_groups += 1

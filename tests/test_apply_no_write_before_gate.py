@@ -309,6 +309,19 @@ def scenario_witness_split_archives_use_the_one_the_setting_names(env):
     assert not m.ChannelGroup.objects.filter(pk__in=[older.pk, named.pk]).exists()
 
 
+def scenario_witness_archive_cleanup_keeps_a_group_holding_streams(env):
+    """Codex review, round 5: an empty archive group was deleted even while
+    streams belonged to it, nulling their group."""
+    m = env.m
+    archive = m.ChannelGroup.objects.create(name="Matchups Recordings")
+    m.Channel.objects.create(name="Matchups Recordings", channel_number=9999,
+                             channel_group=archive, tvg_id=env.plugin.ARCHIVE_TVG_ID)
+    stream = m.Stream.objects.create(name="Grouped stream", channel_group=archive)
+    env.plugin._cleanup_empty_archive("Matchups Recordings")
+    stream.refresh_from_db()
+    assert stream.channel_group_id == archive.pk, "the stream lost its group"
+
+
 def scenario_cleanup_leaves_a_users_empty_case_variant_group(env):
     """Guard: cleanup now visits case variants, but a group that never held
     our archive and is not named exactly as the setting is the user's."""
@@ -344,12 +357,20 @@ def scenario_witness_a_recordings_name_like_the_old_live_name_strands_nothing(en
     game = _row(401, _now() + timedelta(hours=6), user_ch.id)
     ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
     _write_cache(env, [game])
+    stream = m.Stream.objects.create(name="Grouped stream", channel_group=ours.channel_group)
     result = env.plugin._action_apply(_settings(
         channel_profile_name=NEW, recordings_group_name=OLD, **COMPACT))
     assert result["status"] == "ok", result
     mine = list(m.Channel.objects.filter(tvg_id=G401))
     assert [(c.pk, c.channel_group.name) for c in mine] == [(ours.pk, NEW)], (
         [(c.pk, c.channel_group.name) for c in mine]
+    )
+    # Codex review, round 5: emptied, the old group (now the recordings
+    # group's name) was deleted by the move or by archive cleanup, and the
+    # streams in it lost their group. Neither deletes a group with streams.
+    stream.refresh_from_db()
+    assert stream.channel_group is not None and stream.channel_group.name == OLD, (
+        "the stream lost its group"
     )
 
 
@@ -424,6 +445,25 @@ def scenario_an_archive_beside_the_live_group_is_not_a_previous_group(env):
     assert result["status"] == "ok" and "Migrated from old target" not in result["message"], result
     arch.refresh_from_db()
     assert arch.channel_group_id == archive.pk
+
+
+def scenario_witness_a_renamed_away_group_holding_streams_is_kept(env):
+    """Codex review, round 5: emptied of our channels, the old group was
+    deleted even while M3U streams still belonged to it, and SET_NULL left
+    those streams with no group."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    old = ours.channel_group
+    stream = m.Stream.objects.create(name="Grouped stream", channel_group=old)
+    _write_cache(env, [game])
+    result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+    assert result["status"] == "ok", result
+    ours.refresh_from_db()
+    assert ours.channel_group.name == NEW
+    stream.refresh_from_db()
+    assert stream.channel_group_id == old.pk, "the stream lost its group"
 
 
 def _snapshot(env):
