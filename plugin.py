@@ -1491,7 +1491,16 @@ def _ensure_archive_channel(recordings_group_name):
     arch = Channel.objects.filter(
         channel_group=grp, tvg_id=ARCHIVE_TVG_ID,
     ).first()
-    if arch is not None and arch.channel_number is not None:
+    moved = False
+    if arch is None:
+        # The recordings group was renamed: the ONE archive moves (with its
+        # recordings) rather than a second one being made beside it.
+        arch = _move_archive_into(grp)
+        moved = arch is not None
+    if arch is not None and arch.channel_number is not None and not (
+        moved and Channel.objects.filter(channel_group=grp, channel_number=arch.channel_number)
+        .exclude(pk=arch.pk).exists()
+    ):
         return arch
 
     # Either a fresh create, or a self-heal of an install whose archive channel
@@ -1528,12 +1537,38 @@ def _ensure_archive_channel(recordings_group_name):
         )
     else:
         # update() bypasses the post_save signal chain (the epg_data-wipe trap).
+        was = arch.channel_number
         Channel.objects.filter(pk=arch.pk).update(channel_number=number)
         arch.channel_number = number
         logger.info(
-            "[ranked_matchups] backfilled archive channel id=%s number=%s (was None)",
-            arch.id, number,
+            "[ranked_matchups] renumbered archive channel id=%s number=%s (was %s)",
+            arch.id, number, was,
         )
+    return arch
+
+
+def _move_archive_into(grp):
+    """Move the archive channel kept in another group (the recordings group
+    was renamed) into `grp`, its recordings with it (they point at the
+    channel). Its old group goes once nothing references it: it held our
+    archive. None when there is no archive yet."""
+    from apps.channels.models import Channel, ChannelGroup
+    arch = (
+        Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).exclude(channel_group=grp)
+        .order_by("pk").first()
+    )
+    if arch is None:
+        return None
+    old_group_id = arch.channel_group_id
+    # update(), not save(): no Channel post_save (the epg_data-wipe trap).
+    Channel.objects.filter(pk=arch.pk).update(channel_group=grp)
+    arch.channel_group = grp
+    logger.info("[ranked_matchups] moved recordings archive channel id=%s into group %r",
+                arch.id, grp.name)
+    if old_group_id is not None:
+        old = ChannelGroup.objects.select_for_update().filter(pk=old_group_id).first()
+        if old is not None and not _group_is_referenced(old):
+            old.delete()
     return arch
 
 
@@ -1693,29 +1728,33 @@ def _sync_profile_memberships(settings: Dict[str, Any], dry_run: bool = False) -
 
 
 def _cleanup_empty_archive(recordings_group_name) -> bool:
-    """Remove the archive channel (and then the group) once no recordings remain
+    """Remove the archive channel (and then its group) once no recordings remain
     under it, so the group exists only while it holds recordings. Returns True if
     anything was removed. Safe: the archive channel is deleted only when it has
-    zero Recording rows, so the CASCADE takes nothing with it."""
+    zero Recording rows, so the CASCADE takes nothing with it.
+
+    The archive is found by WHAT IT IS (ARCHIVE_TVG_ID), wherever it sits, not
+    by the setting's name: after the recordings group was renamed (or only
+    its case changed) a lookup by the new name never saw the old archive, which
+    stayed forever beside a second one. A group goes only when nothing
+    references it (_group_is_referenced) and it is ours: it held our archive,
+    or it is named exactly as the setting (as before). An empty group of the
+    user's that merely differs in case is never touched or locked."""
     from apps.channels.models import Channel, ChannelGroup, Recording
     from django.db import transaction
     removed = False
-    # Every case variant: an install split by the old exact-name lookup has
-    # an archive in each, and each empties on its own schedule.
-    # A case variant goes only if it held our archive channel: an empty group
-    # of the user's that merely differs in case is not ours to delete (the
-    # exact name always was, as before).
     with transaction.atomic():  # the row locks below need one; nests as a savepoint
-        for grp in list(_archive_groups(recordings_group_name)):
-            arch = Channel.objects.filter(channel_group=grp, tvg_id=ARCHIVE_TVG_ID).first()
-            if arch is None and grp.name != recordings_group_name:
-                continue  # never ours: not locked, not touched
-            # Row lock before the reference check: see _commit_group_setup.
-            ChannelGroup.objects.select_for_update().filter(pk=grp.pk).exists()
-            if arch is not None and not Recording.objects.filter(channel_id=arch.id).exists():
+        archives = list(Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID))
+        ours = {a.channel_group_id for a in archives if a.channel_group_id is not None}
+        ours |= set(ChannelGroup.objects.filter(name=recordings_group_name).values_list("pk", flat=True))
+        for arch in archives:
+            if not Recording.objects.filter(channel_id=arch.id).exists():
                 arch.delete()
                 removed = True
-            if not _group_is_referenced(grp):
+        for group_id in sorted(ours):
+            # Row lock before the reference check: see _commit_group_setup.
+            grp = ChannelGroup.objects.select_for_update().filter(pk=group_id).first()
+            if grp is not None and not _group_is_referenced(grp):
                 grp.delete()
                 removed = True
     return removed

@@ -361,6 +361,45 @@ def scenario_witness_archive_cleanup_keeps_a_group_holding_streams(env):
     assert stream.channel_group_id == archive.pk, "the stream lost its group"
 
 
+def _archive_with_recording(env, group_name, recorded=True):
+    m = env.m
+    grp = m.ChannelGroup.objects.create(name=group_name)
+    arch = m.Channel.objects.create(name=group_name, channel_number=9999, channel_group=grp,
+                                    tvg_id=env.plugin.ARCHIVE_TVG_ID)
+    rec = m.Recording.objects.create(
+        channel=arch, start_time=_now() - timedelta(days=2),
+        end_time=_now() - timedelta(days=2, hours=-3), custom_properties={"status": "completed"},
+    ) if recorded else None
+    return grp, arch, rec
+
+
+def scenario_witness_a_renamed_recordings_group_moves_its_one_archive(env):
+    """Codex review, round 8: 'Recordings group name' Matchups Recordings ->
+    Saved Games. The next rehome made a SECOND archive channel (same tvg_id)
+    in Saved Games and left the old one, with its recordings, behind. The one
+    archive moves, recordings and all, and its emptied old group goes."""
+    m = env.m
+    old, arch, rec = _archive_with_recording(env, "Matchups Recordings")
+    got = env.plugin._ensure_archive_channel("Saved Games")
+    assert got.pk == arch.pk, "a second archive channel was created"
+    assert m.Channel.objects.filter(tvg_id=env.plugin.ARCHIVE_TVG_ID).count() == 1
+    got.refresh_from_db()
+    assert got.channel_group.name == "Saved Games"
+    assert m.Recording.objects.get(pk=rec.pk).channel_id == arch.pk
+    assert not m.ChannelGroup.objects.filter(pk=old.pk).exists()
+
+
+def scenario_witness_a_renamed_away_archive_is_cleaned_up(env):
+    """Codex review, round 8: after the rename, the old archive's last
+    recording went, and cleanup (looking up the NEW name) never saw it: the
+    archive channel and its group stayed for good."""
+    m = env.m
+    old, arch, _rec = _archive_with_recording(env, "Matchups Recordings", recorded=False)
+    assert env.plugin._cleanup_empty_archive("Saved Games") is True
+    assert not m.Channel.objects.filter(pk=arch.pk).exists()
+    assert not m.ChannelGroup.objects.filter(pk=old.pk).exists()
+
+
 def scenario_cleanup_leaves_a_users_empty_case_variant_group(env):
     """Guard: cleanup now visits case variants, but a group that never held
     our archive and is not named exactly as the setting is the user's."""
@@ -726,7 +765,7 @@ def _apply_layout(source, module_writers=frozenset()):
     return sorted(set(_write_sites(apply, writers, mod_aliases))), checks, main
 
 
-@pytest.mark.parametrize("fn_name", ["_commit_group_setup", "_cleanup_empty_archive"])
+@pytest.mark.parametrize("fn_name", ["_commit_group_setup", "_cleanup_empty_archive", "_move_archive_into"])
 def test_a_group_is_locked_before_its_references_are_checked(fn_name):
     """Codex review, round 6: a stream assigned to a group between the
     "does it hold streams?" check and the delete still lost its group. The
@@ -741,11 +780,6 @@ def test_a_group_is_locked_before_its_references_are_checked(fn_name):
     checks = [n.lineno for n in calls if getattr(n.func, "id", None) == "_group_is_referenced"]
     assert locks and checks, (locks, checks)
     assert min(locks) < min(checks), f"{fn_name} checks references before locking the group"
-    if fn_name == "_cleanup_empty_archive":
-        # Codex review, round 7: only OUR groups are locked; a user's group
-        # that merely matches in case is skipped before the lock.
-        skips = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Continue)]
-        assert skips and min(skips) < min(locks), "cleanup locks groups that are not ours"
 
 
 class TestNothingCommitsBeforeTheLastCheck:
