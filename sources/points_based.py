@@ -32,7 +32,9 @@ from abc import abstractmethod
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from .base import FeedUnavailable, GameRow, MatchResult, SportSource, recording_lost_days
+from .base import (
+    FeedUnavailable, GameRow, MatchResult, SeasonUnavailable, SportSource, recording_lost_days,
+)
 from .._util import poisson_sample as _poisson
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.points_based")
@@ -129,14 +131,14 @@ class PointsBasedSportSource(SportSource):
         """The season list, fetched ONCE per source instance (one refresh).
 
         A season that could not be fetched whole is NOT simulated (#289): the
-        list is `[]`, so no game of the league scores standings stakes, and
-        `season_fetch_failure()` says why, which the refresh reports as
-        "<label> season (stakes not simulated)", the way it reports a
-        Football-Data season (#228) or a playoff bracket (#245). Before, a
-        failed request or a lost walk day dropped its games from the list
-        and the simulator replayed the rest as the whole season: standings
-        missing results, a calendar missing fixtures, wrong stakes for every
-        game in the league, and nothing in the summary.
+        list is `[]` and `season_fetch_failure()` says why. The refresh never
+        scores a game against that empty list: `require_season`, called
+        right after `fetch_upcoming`, raises, and the label is held as an
+        outage like a failed rank feed (#283). Before, a failed request or a
+        lost walk day dropped its games from the list and the simulator
+        replayed the rest as the whole season: standings missing results, a
+        calendar missing fixtures, wrong stakes for every game in the league,
+        and nothing in the summary.
 
         Lost days are read in a record of their OWN, because this runs at
         scoring time (outside any) and at build time for the playoff
@@ -177,6 +179,14 @@ class PointsBasedSportSource(SportSource):
         """Why this refresh's season list could not be fetched whole, or None
         (see `_fetch_games_cached`)."""
         return self._season_failure
+
+    def require_season(self) -> None:
+        """Read the season now (cached for scoring) and RAISE
+        `SeasonUnavailable` when it could not be fetched whole. See
+        `plugin._require_seasons` for why the refresh asks."""
+        self._fetch_games_cached()
+        if self._season_failure is not None:
+            raise SeasonUnavailable(f"season not fetched whole: {self._season_failure}")
 
     # ---------- importance interface ----------
 

@@ -278,10 +278,11 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         """The conference map, or None when its request failed. Fetched ONCE
         per source, a failure included. DO NOT retry a failure here: the
         strength estimate reads the season through this map when the source
-        is BUILT, before `fetch_upcoming`, and caches what it got
-        (`points_based`), so a retry that recovered would publish games
-        scored against the empty season the failure left behind. Failing
-        both, `fetch_upcoming` raises and the refresh holds the games it had."""
+        is BUILT, before `fetch_upcoming`, and the season read is not retried
+        either (`points_based._fetch_games_cached`), so a retry that recovered
+        would let `fetch_upcoming` list games whose season had already failed.
+        Failing both, `fetch_upcoming` raises and the refresh holds the games
+        it had (and since #289 a failed season would hold them anyway)."""
         if not self._conference_map_fetched:
             self._conference_map_cache = _fetch_conference_map()
             self._conference_map_fetched = True
