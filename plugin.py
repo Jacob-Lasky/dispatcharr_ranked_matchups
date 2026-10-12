@@ -6935,6 +6935,12 @@ def _commit_group_setup(
     )
 
     if target_group is None:
+        # Missing before the pre-pass, re-read row-locked: one a user created
+        # meanwhile is adopted (as base's lookup-then-create did). Created
+        # blind, it hit the unique name and failed the transaction after the
+        # recording cancellations had committed.
+        target_group = ChannelGroup.objects.select_for_update().filter(name=group_name).first()
+    if target_group is None:
         target_group = ChannelGroup.objects.create(name=group_name)
         logger.info("[ranked_matchups] created ChannelGroup id=%s name=%r",
                     target_group.id, group_name)

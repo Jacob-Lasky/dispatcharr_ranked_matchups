@@ -222,6 +222,29 @@ def _during_the_prepass(env, edit):
     return lambda: setattr(env.plugin, "_autorecord_prepare", prepare)
 
 
+def scenario_witness_a_live_group_created_during_the_prepass_is_adopted(env):
+    """Codex review, round 19: the live group, missing when apply looked
+    before its pre-pass, was created in the main transaction; a user who
+    created it meanwhile made that create hit the unique name, failing the
+    transaction after the recording cancellations had committed. The setup
+    re-reads it, row-locked, and adopts it."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    _write_cache(env, [game])
+    made = []
+    restore = _during_the_prepass(env, lambda: made.append(m.ChannelGroup.objects.create(name=NEW)))
+    try:
+        result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+    finally:
+        restore()
+    assert result["status"] == "ok", result
+    ours.refresh_from_db()
+    assert made and ours.channel_group_id == made[0].pk
+    assert m.ChannelGroup.objects.filter(name=NEW).count() == 1
+
+
 def scenario_witness_an_old_source_renamed_to_the_live_name_keeps_its_guide(env):
     """Codex review, round 14: the previous live group's source, renamed by
     the user to the NEW live name during the pre-pass, was both the live
