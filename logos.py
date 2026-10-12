@@ -549,8 +549,15 @@ class ThumbCache:
         return len(stale)
 
 
-def sweep_stale_logo_files(live_markers: set[str], logo_dir: str = LOGO_DIR) -> int:
+def sweep_stale_logo_files(live_markers: set[str], logo_dir: str = LOGO_DIR, *,
+                           keep_filenames: frozenset = frozenset()) -> int:
     """Delete /data/logos/ranked_matchups_*.jpg files whose marker isn't live.
+
+    `keep_filenames` are file names a live channel's Logo still points at,
+    kept whatever their marker: a channel re-keyed (#217) but not rewritten
+    this apply (kept for its recording) still shows the file named after its
+    OLD marker. Keyword-only on purpose: the ORM harness swaps `logo_dir`
+    through `__defaults__`, which a second positional default would misalign.
 
     Called at the end of each apply pass. Returns number of files removed.
     Stale-detection is by filename hash: a file is live iff its name equals
@@ -578,7 +585,7 @@ def sweep_stale_logo_files(live_markers: set[str], logo_dir: str = LOGO_DIR) -> 
         # keyed by a live marker; never sweep them here.
         if name.startswith(BADGE_FILENAME_PREFIX):
             continue
-        if name in live_filenames:
+        if name in live_filenames or name in keep_filenames:
             continue
         path = os.path.join(logo_dir, name)
         try:

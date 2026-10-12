@@ -3812,8 +3812,9 @@ class TestPlaceholderDecisionUsesTheRealPool:
 
     def test_the_placeholder_decision_is_above_the_seen_marker_line(self):
         src = self._src()
+        # A game is seen exactly when it has a plan (#288).
         add = min(m.start() for m in re.finditer(
-            r"^[ \t]*seen_markers\.add\(marker\)[ \t]*$", src, re.M))
+            r"^[ \t]*prep_by_marker\[marker\] = SimpleNamespace\($", src, re.M))
         assert src.index("if not source_streams:") < add
 
     def test_the_decision_keys_on_the_pool_not_on_named_candidates(self):
