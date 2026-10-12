@@ -3722,17 +3722,39 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # as a quiet one and the games published for it are dropped.
     lost_days_by_label: Dict[str, set] = {}
     from .sources.base import recording_lost_days
+    # Read here, not at the favorites-only gate below, because the season
+    # check in the fetch loop asks the same gate whether a source's games
+    # will be scored at all.
+    fav_only_mode = str(settings.get(_FAVORITES_ONLY_SETTING, _FAVORITES_ONLY_OFF)
+                        or _FAVORITES_ONLY_OFF).lower()
     for src in sources:
         pulled_by_label.setdefault(src.sport_label, 0)
         try:
             with recording_lost_days() as lost_days:
                 games = src.fetch_upcoming(days_ahead=lookahead)
+            # Placed BEFORE the season check: the favorites-only gate it asks
+            # keeps a non-favorite game in postseason mode only once the
+            # bracket has stamped its round (#243), so a playoff game checked
+            # unplaced would be dropped here, skip its seeding season, and
+            # then be kept and scored by the real gate below (#289 review).
+            _place_in_bracket(src, games, for_scoring=False)
+            # A season the simulator would replay with holes in it is an
+            # outage, like a failed rank feed (#283), so the label's previous
+            # games are held, scored as they were, instead of republished with
+            # no standings stakes (#289). Asked only when a game of this
+            # source will be scored for importance: none fetched, all dropped
+            # by the favorites-only gate, or importance turned off, and this
+            # check asks for no season. (A playoff source's seeding season
+            # was read when the sources were built, whatever the slate.)
+            if weights.importance > 0 and _filter_favorites_only(
+                    games, [src] * len(games), favorites, fav_only_mode,
+                    always_keep=recorded_teams)[0]:
+                _require_seasons(src)
         except Exception as e:
             logger.exception("[ranked_matchups] source %s fetch failed", src.sport_label)
             src_summary.append(_source_error_entry(src.sport_label, e))
             raised_labels.add(src.sport_label)
             continue
-        _place_in_bracket(src, games, for_scoring=False)
         pulled_by_label[src.sport_label] += len(games)
         all_games.extend(games)
         game_sources.extend([src] * len(games))
@@ -3825,8 +3847,6 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # drop. Independent of and composable with the per-source
     # friendlies_favorites_only gate (a friendly already gated to favorites
     # simply survives this too). See `_filter_favorites_only`.
-    fav_only_mode = str(settings.get(_FAVORITES_ONLY_SETTING, _FAVORITES_ONLY_OFF)
-                        or _FAVORITES_ONLY_OFF).lower()
     if fav_only_mode in _FAVORITES_ONLY_ACTIVE_MODES and not favorites:
         logger.warning(
             "[ranked_matchups] favorites_only=%s but no Favorites are "
@@ -4210,8 +4230,6 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 errs.append(err)
     for label, errs in bracket_failures.items():
         src_summary.append(_source_error_entry(f"{label} bracket (stakes not simulated)", "; ".join(errs)))
-    # Likewise a points-based season that could not be fetched whole (#289).
-    src_summary.extend(_season_failure_entries(sources, game_sources))
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
@@ -8295,41 +8313,30 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
 _SOURCE_ERROR_MARK = ": error ("
 
 
-def _season_failure_entries(sources: List[Any], game_sources: List[Any]) -> List[str]:
-    """Summary entries for the points-based seasons this refresh could not
-    fetch whole (#289, `PointsBasedSportSource.season_fetch_failure`), one
-    per label: MLS East and West share "MLS", and one outage must not read
-    as two failed sources.
+def _require_seasons(src: Any) -> None:
+    """RAISE `SeasonUnavailable` when `src`'s own points-based season, or a
+    regular season its playoff strengths were seeded from
+    (`strength_sources`, `_seeded_from`), could not be fetched whole (#289).
 
-    A season is reported when its games were scored (they got no standings
-    stakes instead of stakes from a season with holes in it), AND when a
-    scored playoff or bracket source took its team strengths from it
-    (`strength_sources`, recorded by `_seeded_from` while the sources were
-    built): that playoff model fell back to its prior, which a playoff-only
-    slate would otherwise never mention. A league with nothing on the slate
-    lost nothing to the failure, and is not reported.
+    `_action_refresh` calls this right after a source's `fetch_upcoming`, in
+    the same `try`, so a failed season takes the path a failed rank feed
+    takes (#283): the label is an outage, the games it published last time
+    are held with the scores they had, and the summary says `<label>: error`.
+    The season is read once per source and cached for scoring, so this costs
+    no extra request; a seeding season was read when the sources were built.
     """
-    affected = {id(s) for s in game_sources}
-    for s in game_sources:
-        affected.update(id(r) for r in getattr(s, "strength_sources", ()))
-    by_label: Dict[str, List[str]] = {}
-    for src in sources:
-        failure = getattr(src, "season_fetch_failure", None)
-        err = failure() if callable(failure) and id(src) in affected else None
-        if isinstance(err, str) and err:
-            errs = by_label.setdefault(src.sport_label, [])
-            if err not in errs:
-                errs.append(err)
-    return [_source_error_entry(f"{label} season (stakes not simulated)", "; ".join(errs))
-            for label, errs in by_label.items()]
+    for s in (src, *getattr(src, "strength_sources", ())):
+        require = getattr(s, "require_season", None)
+        if callable(require):
+            require()
 
 
 def _seeded_from(regulars: List[Any], *seeded: Any) -> None:
     """Record on each playoff / bracket source in `seeded` the regular-season
-    sources its team strengths came from, so a regular season that failed is
-    reported when only the playoff games are on the slate
-    (`_season_failure_entries`, #289). Call it wherever
-    `set_regular_season_strengths` is fed from a regular source."""
+    sources its team strengths came from, so a regular season that failed
+    holds the playoff label too (`_require_seasons`, #289): its playoff model
+    would otherwise run on the league prior with nothing said. Call it
+    wherever `set_regular_season_strengths` is fed from a regular source."""
     for s in seeded:
         s.strength_sources = tuple(regulars)
 
