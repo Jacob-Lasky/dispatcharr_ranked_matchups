@@ -15,9 +15,12 @@ test_apply_time_reserve.py, so nothing sleeps.
 """
 
 import ast
+import contextlib
 import hashlib
 import importlib.util
 import os
+import sys
+import types
 from datetime import timedelta
 
 import pytest
@@ -76,6 +79,40 @@ def _numbers_in(env, group_name):
     return sorted(
         int(c.channel_number) for c in env.m.Channel.objects.filter(channel_group__name=group_name)
     )
+
+
+@contextlib.contextmanager
+def _published_under_override(number, **which):
+    """The harness has no with_effective_values (apply then reads raw numbers
+    as published ones). This stand-in publishes the channels matching
+    `which` at `number`, every other one at its raw number."""
+    from django.db.models import Case, F, Value, When
+    managers = types.ModuleType("apps.channels.managers")
+    managers.with_effective_values = lambda qs: qs.annotate(effective_channel_number=Case(
+        When(then=Value(float(number)), **which), default=F("channel_number")))
+    sys.modules["apps.channels.managers"] = managers
+    try:
+        yield
+    finally:
+        del sys.modules["apps.channels.managers"]
+
+
+def _changed(before, after):
+    """What differs between two _snapshot()s: model names, then file paths."""
+    return [k for i in (0, 1)
+            for k in sorted(set(before[i]) | set(after[i])) if before[i].get(k) != after[i].get(k)]
+
+
+def _during_the_prepass(env, edit):
+    """Run `edit` while apply's pre-pass runs (after its early reads)."""
+    prepare = env.plugin._autorecord_prepare
+
+    def edited(*a, **k):
+        edit()
+        return prepare(*a, **k)
+
+    env.plugin._autorecord_prepare = edited
+    return lambda: setattr(env.plugin, "_autorecord_prepare", prepare)
 
 
 # ------------------------------------------------- scenarios (subprocess) ---
@@ -165,18 +202,12 @@ def scenario_witness_a_source_made_to_fetch_during_the_prepass_is_not_adopted(en
     game = _row(401, _now() + timedelta(hours=6), user_ch.id)
     _publish(env, [game], settings=_settings(**COMPACT))
     _write_cache(env, [game])
-    prepare = env.plugin._autorecord_prepare
-
-    def user_edits_the_source(*a, **k):
-        m.EPGSource.objects.filter(name=OLD).update(url="http://guide.example/xmltv.xml",
-                                                    is_active=True)
-        return prepare(*a, **k)
-
-    env.plugin._autorecord_prepare = user_edits_the_source
+    restore = _during_the_prepass(env, lambda: m.EPGSource.objects.filter(name=OLD).update(
+        url="http://guide.example/xmltv.xml", is_active=True))
     try:
         result = env.plugin._action_apply(_settings(**COMPACT))
     finally:
-        env.plugin._autorecord_prepare = prepare
+        restore()
     assert result["status"] == "error" and "fetches its own guide" in result["message"], result
     assert "No channel or guide was changed." in result["message"], result
     src = m.EPGSource.objects.get(name=OLD)
@@ -195,31 +226,14 @@ def scenario_witness_an_old_source_made_to_fetch_during_the_prepass_is_kept(env)
     _publish(env, [game], settings=_settings(**COMPACT))
     _write_cache(env, [game])
     old_src = m.EPGSource.objects.get(name=OLD)
-    prepare = env.plugin._autorecord_prepare
-
-    def user_edits_the_old_source(*a, **k):
-        m.EPGSource.objects.filter(pk=old_src.pk).update(url="http://guide.example/xmltv.xml")
-        return prepare(*a, **k)
-
-    env.plugin._autorecord_prepare = user_edits_the_old_source
+    restore = _during_the_prepass(env, lambda: m.EPGSource.objects.filter(pk=old_src.pk).update(
+        url="http://guide.example/xmltv.xml"))
     try:
         result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
     finally:
-        env.plugin._autorecord_prepare = prepare
+        restore()
     assert result["status"] == "ok", result
     assert m.EPGSource.objects.filter(pk=old_src.pk).exists(), "the user's fetching source was deleted"
-
-
-def _during_the_prepass(env, edit):
-    """Run `edit` while apply's pre-pass runs (after its early reads)."""
-    prepare = env.plugin._autorecord_prepare
-
-    def edited(*a, **k):
-        edit()
-        return prepare(*a, **k)
-
-    env.plugin._autorecord_prepare = edited
-    return lambda: setattr(env.plugin, "_autorecord_prepare", prepare)
 
 
 def scenario_witness_a_live_group_created_during_the_prepass_is_adopted(env):
@@ -253,17 +267,11 @@ def scenario_witness_a_live_group_created_before_numbering_has_its_raw_numbers_r
     channel was numbered 401 beside it in that group (the UI then refuses to
     save either). The harness has no with_effective_values; a stand-in
     publishes that channel at 8888."""
-    import sys
-    import types
-    from django.db.models import Case, F, Value, When
     m = env.m
     user_ch, _ = _seed_source_channel(env)
     game = _row(401, _now() + timedelta(hours=6), user_ch.id)
     ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
     _write_cache(env, [game])
-    managers = types.ModuleType("apps.channels.managers")
-    managers.with_effective_values = lambda qs: qs.annotate(effective_channel_number=Case(
-        When(name="Mine", then=Value(8888.0)), default=F("channel_number")))
     cancel = env.plugin._autorecord_cancel_committed
 
     def group_appears(*a, **k):
@@ -272,13 +280,12 @@ def scenario_witness_a_live_group_created_before_numbering_has_its_raw_numbers_r
             m.Channel.objects.create(name="Mine", channel_number=401, channel_group=grp)
         return cancel(*a, **k)
 
-    sys.modules["apps.channels.managers"] = managers
     env.plugin._autorecord_cancel_committed = group_appears
     try:
-        result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+        with _published_under_override(8888, name="Mine"):
+            result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
     finally:
         env.plugin._autorecord_cancel_committed = cancel
-        del sys.modules["apps.channels.managers"]
     assert result["status"] == "ok", result
     ours.refresh_from_db()
     assert ours.channel_group.name == NEW
@@ -698,15 +705,8 @@ def scenario_an_overridden_archive_in_the_live_group_keeps_its_raw_number(env):
     9999 must still be reserved in its group (Channel.clean() compares raw
     numbers). The harness has no with_effective_values, so a stand-in
     publishes the archive at 8888 and everything else at its raw number."""
-    import sys
-    import types
-    from django.db.models import Case, F, Value, When
     m = env.m
-    managers = types.ModuleType("apps.channels.managers")
-    managers.with_effective_values = lambda qs: qs.annotate(effective_channel_number=Case(
-        When(tvg_id=env.plugin.ARCHIVE_TVG_ID, then=Value(8888.0)), default=F("channel_number")))
-    sys.modules["apps.channels.managers"] = managers
-    try:
+    with _published_under_override(8888, tvg_id=env.plugin.ARCHIVE_TVG_ID):
         user_ch, _ = _seed_source_channel(env)
         game = _row(401, _now() + timedelta(hours=6), user_ch.id)
         ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
@@ -718,8 +718,6 @@ def scenario_an_overridden_archive_in_the_live_group_keeps_its_raw_number(env):
         result = env.plugin._action_apply(_settings(
             recordings_group_name=OLD, **dict(COMPACT, virtual_channel_base=9999)))
         assert result["status"] == "ok", result
-    finally:
-        del sys.modules["apps.channels.managers"]
     ours.refresh_from_db()
     arch.refresh_from_db()
     assert ours.channel_group_id == arch.channel_group_id
@@ -1004,9 +1002,7 @@ def scenario_stopping_at_any_check_leaves_nothing_behind(env):
         assert result.get("message") == "stopped by the test", (
             f"instrument: apply never reached check #{stop_at}: {result}"
         )
-        after = _snapshot(env)
-        changed = sorted(k for k in set(before[0]) | set(after[0]) if before[0].get(k) != after[0].get(k))
-        changed += sorted(k for k in set(before[1]) | set(after[1]) if before[1].get(k) != after[1].get(k))
+        changed = _changed(before, _snapshot(env))
         assert not changed, f"apply stopped at check #{stop_at} of {gates} still wrote: {changed}"
     # Instrument: unstopped, the same apply DOES write all of it.
     result = env.plugin._action_apply(_settings(channel_profile_name="Renamed Matchups", **armed))
@@ -1053,9 +1049,7 @@ def scenario_witness_a_name_the_database_rejects_is_refused_before_any_write(env
         result = None
     finally:
         pre_save.disconnect(postgres_length_check, sender=m.EPGSource)
-    after = _snapshot(env)
-    changed = sorted(k for k in set(before[0]) | set(after[0]) if before[0].get(k) != after[0].get(k))
-    changed += sorted(k for k in set(before[1]) | set(after[1]) if before[1].get(k) != after[1].get(k))
+    changed = _changed(before, _snapshot(env))
     assert not changed, f"an apply whose setup the database rejected still wrote: {changed}"
     assert result is not None and result["status"] == "error" and str(limit) in result["message"], result
 
