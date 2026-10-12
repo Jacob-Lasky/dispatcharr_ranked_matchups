@@ -10193,6 +10193,13 @@ class TestComputeGroupStandings:
         assert rows == [a, b, c, d]
 
 
+def _fd_kickoff_tomorrow() -> str:
+    """A Football-Data `utcDate` a day ahead of the real clock: the tier fetch
+    keeps only upcoming or live matches (`_espn.UpcomingWindow.admits`, #285),
+    so a fixture without one, or one already played, is dropped there."""
+    return (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class TestFdCacheBatching:
     """The plugin's _action_refresh enables ~10+ soccer competitions and
     FD.org's free tier allows 10 calls/min. Before this batching, every
@@ -10270,12 +10277,15 @@ class TestFdCacheBatching:
         # competition.code matches self.config.fd_code.
         from dispatcharr_ranked_matchups.sources import soccer
 
+        kickoff = _fd_kickoff_tomorrow()
         payload = {"matches": [
             {"competition": {"code": "PL"},  "id": 11, "homeTeam": {"name": "Wrexham AFC"}},
             {"competition": {"code": "ELC"}, "id": 12},
             {"competition": {"code": "BL1"}, "id": 13},
             {"competition": {"code": "PL"},  "id": 14, "homeTeam": {"name": "Hull City"}},
         ]}
+        for m in payload["matches"]:
+            m.update(utcDate=kickoff, status="TIMED")
 
         class FakeResponse:
             status_code = 200  # _fd_get checks this before raise_for_status
@@ -10299,17 +10309,18 @@ class TestFdCacheBatching:
         # build, and that match must not silently route to the wrong
         # source.
         from dispatcharr_ranked_matchups.sources import soccer
+        kickoff = _fd_kickoff_tomorrow()
 
         class FakeResponse:
             status_code = 200  # _fd_get checks this before raise_for_status
             def raise_for_status(self): pass
             def json(self):
                 return {"matches": [
-                    {"competition": {"code": "PL"}, "id": 21},
-                    {"competition": {},             "id": 22},   # missing code
-                    {"id": 23},                                    # missing competition entirely
-                    {"competition": {"code": None}, "id": 24},   # explicit null
-                    {"competition": {"code": "PL"}, "id": 25},
+                    {"competition": {"code": "PL"}, "id": 21, "utcDate": kickoff},
+                    {"competition": {},             "id": 22, "utcDate": kickoff},   # missing code
+                    {"id": 23, "utcDate": kickoff},              # missing competition entirely
+                    {"competition": {"code": None}, "id": 24, "utcDate": kickoff},   # explicit null
+                    {"competition": {"code": "PL"}, "id": 25, "utcDate": kickoff},
                 ]}
 
         stub_requests_get(monkeypatch, lambda *a, **k: FakeResponse())
@@ -10534,7 +10545,8 @@ class TestTierFixturesChunkingForLongWindows:
             def raise_for_status(self): pass
             def json(self):
                 return {"matches": [
-                    {"competition": {"code": self._code_prefix}, "id": len(call_log)},
+                    {"competition": {"code": self._code_prefix}, "id": len(call_log),
+                     "utcDate": _fd_kickoff_tomorrow()},
                 ]}
 
         def fake_get(url, **kwargs):
@@ -10548,21 +10560,18 @@ class TestTierFixturesChunkingForLongWindows:
         stub_requests_get(monkeypatch, fake_get)
 
         out = soccer._fetch_tier_fixtures("testkey", days_ahead=17)
-        # Two chunks: [today, today+10] and [today+11, today+17].
+        # The window is today-1 .. today+17, asked as dateFrom=today-1 up to
+        # the EXCLUSIVE dateTo=today+18 (#285): two chunks, [today-1,
+        # today+9) and [today+9, today+18).
         assert len(call_log) == 2
         # Both chunks' matches present in the merged result.
         assert "CHUNK_1" in out
         assert "CHUNK_2" in out
-        # No overlap on the boundary day: chunk2.dateFrom must be
-        # AFTER chunk1.dateTo, not equal to it.
-        from datetime import datetime as _dt
-        chunk1_to = _dt.strptime(call_log[0]["dateTo"], "%Y-%m-%d")
-        chunk2_from = _dt.strptime(call_log[1]["dateFrom"], "%Y-%m-%d")
-        assert chunk2_from > chunk1_to, (
-            f"chunk2 starts {chunk2_from.date()} but chunk1 ended "
-            f"{chunk1_to.date()}: boundary overlap would double-fetch "
-            "the boundary day"
-        )
+        # chunk2 starts ON chunk1's dateTo. dateTo is exclusive (measured
+        # 2026-10-11: dateFrom=2026-09-19&dateTo=2026-09-20 returned none of
+        # the 20th's matches but the one at 00:00Z), so starting the day
+        # after it, as this asserted before #285, never asked for that day.
+        assert call_log[1]["dateFrom"] == call_log[0]["dateTo"]
 
     def test_chunk_size_respects_max_window_days(self, monkeypatch):
         # Each chunk's window must be <= _FD_TIER_MAX_WINDOW_DAYS.
@@ -10610,7 +10619,8 @@ class TestTierFixturesChunkingForLongWindows:
             def raise_for_status(self): pass
             def json(self):
                 return {"matches": [
-                    {"competition": {"code": "PL"}, "id": call_count["n"]},
+                    {"competition": {"code": "PL"}, "id": call_count["n"],
+                     "utcDate": _fd_kickoff_tomorrow()},
                 ]}
 
         def fake_get(url, **kwargs):
@@ -10622,7 +10632,9 @@ class TestTierFixturesChunkingForLongWindows:
             raise soccer.requests.RequestException("simulated 429")
 
         stub_requests_get(monkeypatch, fake_get)
-        out = soccer._fetch_tier_fixtures("testkey", days_ahead=20)
+        # 15 days ahead is a 17-day request (lookback day, exclusive dateTo):
+        # two chunks.
+        out = soccer._fetch_tier_fixtures("testkey", days_ahead=15)
 
         assert call_count["n"] == 1 + soccer._FD_MAX_ATTEMPTS
         # First chunk's data survives the second chunk's failure.
@@ -10642,7 +10654,8 @@ class TestTierFixturesChunkingForLongWindows:
             status_code = 200
             def raise_for_status(self): pass
             def json(self):
-                return {"matches": [{"competition": {"code": "PL"}, "id": 1}]}
+                return {"matches": [{"competition": {"code": "PL"}, "id": 1,
+                                     "utcDate": _fd_kickoff_tomorrow()}]}
 
         def fake_get(url, **kwargs):
             calls["n"] += 1

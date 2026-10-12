@@ -120,12 +120,13 @@ _LEAGUE_PATH = {
 
 def _serve_buckets(monkeypatch, module, buckets, requested=None, urls=None):
     """Stub `module._http_get`: a scoreboard request gets the events filed
-    under its `dates=` bucket; anything else (rankings, standings) gets an
+    under its `dates=` bucket; a poll request gets an answered page with no
+    polls (a failed one raises, #283); anything else (standings) gets an
     empty dict, which every source reads as "no data"."""
     def fake(url, *a, **k):
         m = re.search(r"dates=(\d{8})", url)
         if not m:
-            return {}
+            return {"rankings": []} if url.endswith("/rankings") else {}
         if urls is not None:
             urls.append(url)
         if requested is not None:
