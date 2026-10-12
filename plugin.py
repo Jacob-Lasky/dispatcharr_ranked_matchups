@@ -4319,6 +4319,11 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 errs.append(err)
     for label, errs in bracket_failures.items():
         src_summary.append(_source_error_entry(f"{label} bracket (stakes not simulated)", "; ".join(errs)))
+    # A points-based season scored from its last complete read (#289
+    # follow-up); one with no kept read was held as an outage at fetch. Only
+    # when importance ran: a seed read at build time used nothing otherwise.
+    if weights.importance > 0:
+        src_summary.extend(_season_fallback_entries(sources, game_sources))
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
@@ -8453,6 +8458,35 @@ def _require_seasons(src: Any) -> None:
         require = getattr(s, "require_season", None)
         if callable(require):
             require()
+
+
+def _season_fallback_entries(sources: List[Any], game_sources: List[Any]) -> List[str]:
+    """Summary entries for the points-based seasons this refresh simulated
+    from their last COMPLETE read (#289 follow-up, `sources/_season_store`):
+    "<label> season (using the last complete read from <time>)", one per
+    label (MLS East and West share "MLS"). Informational, not an error: the
+    games were scored, on stakes a little old. A failed season with no kept
+    read never reaches here; `_require_seasons` made its label an outage.
+
+    Reported for a source whose games were scored, or whose read seeded a
+    scored playoff or bracket source (`strength_sources`); a league with
+    nothing on the slate used nothing.
+    """
+    affected = {id(s) for s in game_sources}
+    for s in game_sources:
+        affected.update(id(r) for r in getattr(s, "strength_sources", ()))
+    by_label: Dict[str, List[str]] = {}
+    for src in sources:
+        fallback = getattr(src, "season_fallback", None)
+        read_at = fallback() if callable(fallback) and id(src) in affected else None
+        if read_at is None:
+            continue
+        when = read_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+        reads = by_label.setdefault(src.sport_label, [])
+        if when not in reads:
+            reads.append(when)
+    return [f"{label} season (using the last complete read from {', '.join(reads)})"
+            for label, reads in by_label.items()]
 
 
 def _seeded_from(regulars: List[Any], *seeded: Any) -> None:
