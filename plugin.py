@@ -1221,18 +1221,32 @@ def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool, markers=None) -> None:
 
 def _autorecord_cancel_committed(ar: "_AutoRecord", dry_run: bool, markers=None) -> None:
     """_autorecord_cancel in a transaction of its own (its re-check locks the
-    row), with the state change saved right after it commits.
+    row), with the state change saved BEFORE that transaction commits.
 
     Saved here, not left to _autorecord_finish: an apply that returned or
     failed in between kept the deleted recordings in the "created" state, and
     the next plan read each missing row as one the user deleted and tombstoned
     it for good (#288 review). If the apply fails after this, the
-    cancellations and their bookkeeping both stand."""
+    cancellations and their bookkeeping both stand.
+
+    Write-ahead, inside the transaction, NOT after the commit: a kill between
+    the commit and the file write left the same stale "created" entry, and the
+    game was tombstoned the next time it was wanted. Saved first, a kill before
+    the commit rolls the deletion back and leaves a row of ours with no
+    "created" entry, which the plan reads as ours and unedited
+    (recording.was_edited) and never as a user deletion.
+
+    The residual of this order is smaller than the one it replaces: it needs a
+    kill between the file write and the commit AND the user then deleting or
+    editing that same row, one the plan had just decided it did not want,
+    before the next apply (which otherwise cancels it again). The old order's
+    needed only the kill, and cost the game for good."""
     from django.db import transaction
     with transaction.atomic():
+        before = ar.cancelled
         _autorecord_cancel(ar, dry_run, markers)
-    if ar.cancelled and not dry_run:
-        recording_policy.save_state(RECORDING_STATE_PATH, ar.state)
+        if ar.cancelled > before and not dry_run:
+            recording_policy.save_state(RECORDING_STATE_PATH, ar.state)
 
 
 def _reason_props(ar: "_AutoRecord", marker: str) -> Dict[str, Any]:
@@ -2975,7 +2989,45 @@ APPLY_PREPASS_WORST_CASE_SECONDS_PER_GAME = 30 + 10 + 15
 # writes. Generous on purpose: the writes are a 0.55s transaction (#137) plus
 # the sweeps, and a whole live auto_pipeline (refresh AND apply) took 382s on
 # 2026-10-11.
+#
+# It is also the least time left in the child for apply to START, and to
+# commit its first recording cancellation (_apply_time_short): a slow refresh
+# in auto_pipeline can leave apply seconds to live, and a kill that lands
+# after a committed cancellation but before the main transaction leaves the
+# cancelled recording's replacement unwritten until the next run.
 APPLY_WRITE_RESERVE_SECONDS = 120
+
+
+def _apply_time_short(before: str, dry_run: bool) -> Optional[Dict[str, Any]]:
+    """None when apply may go on; otherwise the error result to return.
+
+    Inside the pipeline child, apply must not begin a step it cannot finish
+    before tasks.py kills the child. Below APPLY_WRITE_RESERVE_SECONDS it
+    stops and says so, and its result carries tasks.APPLY_STOPPED_FOR_TIME,
+    so tasks.run_pipeline_subprocess re-runs it at once in a fresh child when
+    it came from auto_pipeline (a standalone apply or reap is left to the next
+    run; reap's pending path finishes it).
+    A dry run is never stopped: it writes nothing, so a kill costs nothing.
+    Outside a child (no deadline) nothing is ever stopped.
+
+    120s is about three times the slowest whole live apply (5.8s to 39.4s
+    over the 12 runs logged 2026-10-11, network fetches included). No time
+    check can bound a query blocked on a lock; a kill that still lands after
+    a cancellation is repaired by the next apply (see the cancellation step).
+    """
+    if dry_run:
+        return None
+    left = tasks.pipeline_child_seconds_left()
+    if left is None or left >= APPLY_WRITE_RESERVE_SECONDS:
+        return None
+    message = (
+        f"Apply stopped {before}: not enough time left in this pipeline run "
+        f"({int(max(left, 0.0))}s; it keeps {APPLY_WRITE_RESERVE_SECONDS}s to finish). "
+        "No recording was cancelled and the slate was not published; it is "
+        "applied again in a fresh pipeline run, or by the next one."
+    )
+    logger.warning("[ranked_matchups] %s", message)
+    return {"status": "error", "message": message, tasks.APPLY_STOPPED_FOR_TIME: True}
 
 # Hard ceiling on max_games, derived from the scheduler-lock budget rather than
 # picked for roundness.
@@ -6657,6 +6709,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 "the next refresh that finds games."
             )}
         return {"status": "ok", "message": "Cache empty; run refresh first."}
+    # Before ANY write: a slow refresh in the same pipeline child can leave
+    # apply too little life to finish (see APPLY_WRITE_RESERVE_SECONDS).
+    short = _apply_time_short("before starting", _dry_run_enabled(settings))
+    if short is not None:
+        return short
     games, dup_dropped = _unique_by_marker(cache.get("games", []))
     if dup_dropped:
         logger.warning(
@@ -7409,6 +7466,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # re-check there), and is then counted as keeping its channel. Only these
     # markers: the decided games' recordings wait for the plan over the games
     # numbering places (second step, below, #291).
+    #
+    # This is apply's first IRREVERSIBLE commit, so the time check runs again
+    # here: the deciding half above (stream pools over every game) can spend
+    # the margin the check at the start saw. Past this point apply does not
+    # stop on time: stopping between the two cancellation steps would itself
+    # split a cancellation from its replacement, and the network half below is
+    # capped at the child's remaining life less the reserve.
+    #
+    # DO NOT move the cancellations into the main transaction to make them
+    # atomic with their replacements. They commit first on purpose (#288,
+    # #291: a recording counted as keeping its channel held a full compact
+    # band's slot, and the second plan must name the channels numbering
+    # placed), and the network half between them cannot sit inside a
+    # transaction (#136). A kill that still lands after this commit is
+    # repaired by the next apply: the cancelled recording left the "created"
+    # state when it committed, so the next plan schedules the replacement and
+    # does not read the missing row as a user deletion
+    # (tests/test_apply_time_reserve.py pins both).
+    short = _apply_time_short("before cancelling recordings", dry_run)
+    if short is not None:
+        return short
     _autorecord_cancel_committed(
         autorec, dry_run,
         markers={m for m in autorec.ours if m not in prep_by_marker},
@@ -8368,10 +8446,13 @@ def _action_auto_pipeline_sync(settings: Dict[str, Any]) -> Dict[str, Any]:
     # not reported as stalled at refresh's last line (#227).
     logger.info("[ranked_matchups] apply: starting")
     r2 = _action_apply(settings)
-    return {
+    out = {
         "status": r2.get("status", "ok"),
         "message": f"refresh: {r1.get('message')} | apply: {r2.get('message')}",
     }
+    if r2.get(tasks.APPLY_STOPPED_FOR_TIME):
+        out[tasks.APPLY_STOPPED_FOR_TIME] = True  # the parent re-applies in a fresh child
+    return out
 
 
 def _action_auto_pipeline_async(settings: Dict[str, Any]) -> Dict[str, Any]:

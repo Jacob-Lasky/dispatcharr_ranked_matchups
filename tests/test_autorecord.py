@@ -309,8 +309,17 @@ class TestApplyWiring:
             w for w in ast.walk(committed) if isinstance(w, ast.With)
             and ast.unparse(w.items[0].context_expr) == "transaction.atomic()"
         ]
-        assert len(holders) == 1 and len(holders[0].body) == 1, "its own transaction"
-        assert ast.unparse(holders[0].body[0]) == "_autorecord_cancel(ar, dry_run, markers)"
+        assert len(holders) == 1, "its own transaction"
+        inside = [ast.unparse(c) for c in ast.walk(holders[0]) if isinstance(c, ast.Call)]
+        assert "_autorecord_cancel(ar, dry_run, markers)" in inside
+        # Write-ahead (#271 follow-up): the state file is saved INSIDE the
+        # transaction, so a kill before the commit rolls the deletion back
+        # rather than leaving a stale "created" entry that tombstones the game.
+        saves = [c for c in ast.walk(committed) if isinstance(c, ast.Call)
+                 and ast.unparse(c.func) == "recording_policy.save_state"]
+        assert saves and all(ast.unparse(c) in inside for c in saves), (
+            "the state save must sit inside the cancellation's transaction"
+        )
         fn = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef) and n.name == "_action_apply")
         assert not any(isinstance(c, ast.Call) and ast.unparse(c.func) == "_autorecord_cancel"
