@@ -439,7 +439,7 @@ class TestApplyWiring:
     def test_the_floor_is_resolved_after_existing_channels_are_rekeyed(self):
         src, _fn = _apply_fn()
         rekey = src.index("marker_renames = _rekey_legacy_virtuals(existing_virtuals, games)")
-        resolve = src.index("virtual_base, numbered_for = _kickoff_floor(reserved_numbers)")
+        resolve = src.index("virtual_base = _resolve_kickoff_base(")
         assert rekey < resolve
 
 
@@ -520,7 +520,7 @@ class TestKeptRecordingChannelsHoldTheirNumbers:
         src, _fn = _apply_fn()
         held = src.index("held_for_recordings = _numbers_held_for_recordings(")
         kickoff = src.index("_reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings")
-        resolve = src.index("virtual_base, numbered_for = _kickoff_floor(reserved_numbers)")
+        resolve = src.index("virtual_base = _resolve_kickoff_base(")
         compact = src.index(") | held_for_recordings", resolve)
         assert held < kickoff < resolve < compact
         assert compact < src.index("chnum_by_marker = _assign_channel_numbers(")
@@ -746,12 +746,10 @@ class TestInferenceRunsTheRealPlacement:
         (call,) = _calls(fn, "_resolve_kickoff_base")
         kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
         assert kw.get("unpublished") == "unpublished"
-        assert kw.get("reserved") == "reserved"
-        # ...and the closure around it is always handed the full reservation,
-        # in the first placement and in the #286 second one.
-        floors = _calls(fn, "_kickoff_floor")
-        assert len(floors) == 2
-        assert all([ast.unparse(a) for a in c.args] == ["reserved_numbers"] for c in floors)
+        assert kw.get("reserved") == "reserved_numbers"
+        # ...and its slate is the games apply will place: the decided ones (#288).
+        src, _fn = _apply_fn()
+        assert "for marker, g in decided_by_marker.items():" in src
 
     def test_one_placement_implementation(self):
         """_assign_channel_numbers and the inference must share the placement:
@@ -1149,14 +1147,13 @@ class TestTheRecordHoldsANudgedChannel:
         _src, fn = _apply_fn()
         (filt,) = _calls(fn, "_numbered_for_floor")
         assert [ast.unparse(a) for a in filt.args] == [
-            "remembered_record", "base", "marker_renames",
+            "remembered_record", "virtual_base", "marker_renames",
         ]
-        assigns = _calls(fn, "_assign_channel_numbers")
-        assert len(assigns) == 2  # the placement, and its #286 second pass
-        for assign in assigns:
-            kw = {k.arg: ast.unparse(k.value) for k in assign.keywords}
-            assert kw.get("numbered_for") == "numbered_for"
-            assert kw.get("existing_numbers") == "existing_numbers"
+        (assign,) = _calls(fn, "_assign_channel_numbers")
+        kw = {k.arg: ast.unparse(k.value) for k in assign.keywords}
+        assert kw.get("numbered_for") == "numbered_for"
+        assert kw.get("existing_numbers") == "existing_numbers"
+        assert ast.unparse(assign.args[0]) == "decided_games"
 
     def test_only_entries_numbered_from_this_floor_are_trusted(self, plugin):
         """A kept recording channel keeps the number floor 6892 gave it after
@@ -1263,15 +1260,29 @@ class TestKeptChannelsKeepTheirNumbers:
     or a new skip in the write loop is covered without touching this."""
 
     def test_the_reap_and_the_second_placement_share_the_stale_set(self):
-        _src, fn = _apply_fn()
-        stale_calls = _calls(fn, "_unwritten_channels")
-        assert len(stale_calls) == 2
-        for call in stale_calls:
-            assert [ast.unparse(a) for a in call.args] == ["existing_virtuals", "seen_markers"]
+        """The reservation and the reap share _unwritten_channels and the keep
+        arguments. Since #288 there is one placement, after the pre-pass: the
+        reservation takes the channels whose game has no plan, the reap the
+        channels whose game is not seen, and seen_markers is the plans that got
+        a number, so the two differ only by a compact game left without a slot."""
+        src, fn = _apply_fn()
+        stale_calls = {ast.unparse(c.args[1]) for c in _calls(fn, "_unwritten_channels")
+                       if ast.unparse(c.args[0]) == "existing_virtuals"}
+        assert stale_calls == {"seen_markers", "prep_by_marker"}
         held = [c for c in _calls(fn, "_numbers_held_for_recordings")
                 if ast.unparse(c.args[0]).startswith("_unwritten_channels(")]
         assert len(held) == 1
-        assert [ast.unparse(a) for a in held[0].args[1:]] == ["archive_enabled", "guide_kept_ids"]
+        assert [ast.unparse(a) for a in held[0].args[1:3]] == ["archive_enabled", "guide_kept_ids"]
+        # The recordings this apply's auto-record cancelled keep nothing at the
+        # reap, so they keep nothing here either (#288 review), and the
+        # cancellation has already run when the numbers are read.
+        assert ast.unparse(held[0].args[3]) == "autorec.cancelled_ids"
+        assert src.index("_autorecord_cancel(autorec, dry_run)") < src.index(
+            "held_for_recordings = _numbers_held_for_recordings(")
+        # Order: every plan exists before the reservation, which precedes the floor.
+        assert (src.index("prep_by_marker[marker] = SimpleNamespace(")
+                < src.index("held_for_recordings = _numbers_held_for_recordings(")
+                < src.index("virtual_base = _resolve_kickoff_base("))
         partitions = _calls(fn, "_partition_stale_for_recordings")
         assert partitions and all(
             ast.unparse(c.args[3]) == "archive_enabled" and ast.unparse(c.args[4]) == "guide_kept_ids"
