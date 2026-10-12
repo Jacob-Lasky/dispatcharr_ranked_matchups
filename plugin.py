@@ -1455,20 +1455,20 @@ def _movable_owned_q() -> Any:
 
 
 def _archive_group(recordings_group_name):
-    """The recordings group for this setting, or None: matched IGNORING CASE
-    (as archive_enabled compares it). Matched exactly, changing only the case
-    of the setting created a second archive group and channel, splitting the
-    recordings and leaving the old group outside cleanup. Among case variants
-    (an install that already split), the one named exactly as the setting
-    that holds the archive channel wins, then any that holds it, then the
-    exact name. DO NOT fall back to any case variant: a user's own group that
+    """The recordings group for this setting, or None: the group named
+    exactly as the setting, else a case variant that holds the archive
+    channel (as archive_enabled compares names ignoring case). Without the
+    variant, changing only the case of the setting created a second archive
+    group and channel, splitting the recordings. The exact name wins over a
+    variant holding the archive (_ensure_archive_channel moves the archive
+    in): the variant first, recordings kept going where the setting no
+    longer says, and cleanup could delete the exactly named group. DO NOT
+    fall back to a case variant WITHOUT the archive: a user's own group that
     only differs in case, adopted as the archive, was later deleted by
     cleanup as ours."""
     named = _archive_groups(recordings_group_name)
-    with_archive = named.filter(channels__tvg_id=ARCHIVE_TVG_ID).distinct()
-    return (with_archive.filter(name=recordings_group_name).first()
-            or with_archive.order_by("pk").first()
-            or named.filter(name=recordings_group_name).first())
+    return (named.filter(name=recordings_group_name).first()
+            or named.filter(channels__tvg_id=ARCHIVE_TVG_ID).distinct().order_by("pk").first())
 
 
 def _archive_group_is_ours(group, archive, recordings_group_name, live_group_name="") -> bool:

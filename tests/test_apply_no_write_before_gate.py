@@ -686,6 +686,23 @@ def scenario_witness_a_users_group_the_archive_was_moved_into_is_kept(env):
     assert m.ChannelGroup.objects.filter(pk=mine.pk).exists(), "cleanup deleted 'Kept too'"
 
 
+def scenario_witness_the_archive_goes_to_the_group_named_exactly_as_the_setting(env):
+    """Codex review, round 17: with an (empty) group named exactly as the
+    setting AND a case variant holding the old archive, the lookup chose the
+    variant, so recordings kept going there, not where the setting says, and
+    cleanup could delete the exactly named group. The exact group wins; the
+    one archive moves into it."""
+    m = env.m
+    variant, arch, rec = _archive_with_recording(env, "matchups recordings")
+    exact = m.ChannelGroup.objects.create(name="Matchups Recordings")
+    got = env.plugin._ensure_archive_channel("Matchups Recordings")
+    assert got.pk == arch.pk
+    arch.refresh_from_db()
+    assert arch.channel_group_id == exact.pk, arch.channel_group.name
+    assert m.Recording.objects.get(pk=rec.pk).channel_id == arch.pk
+    assert not m.ChannelGroup.objects.filter(pk=variant.pk).exists()
+
+
 def scenario_an_archive_renamed_twice_leaves_no_group_behind(env):
     """Guard: a group is ours when the archive channel carries its name
     (_made_for_archive), so a move must rename the channel too. Renamed
