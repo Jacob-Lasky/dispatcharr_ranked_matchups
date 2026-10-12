@@ -448,8 +448,11 @@ _EXEMPT = {
     # NHL api-web: `id` is the game's primary key, and both skip None.
     ("nhl.py", "_upcoming_schedule_games"),
     ("nhl.py", "_fetch_full_season_games"),
-    # Football-Data match ids (primary key), simulator bookkeeping.
+    # Football-Data match ids (primary key): simulator bookkeeping, and the
+    # tier fixture sweep, which also keeps an id-less match rather than
+    # keying it on None.
     ("soccer.py", "remaining_matches"),
+    ("soccer.py", "_fetch_tier_fixtures"),
     # CFBD game id, a spreads lookup table rather than a dedupe.
     ("ncaaf.py", "_fetch_spreads"),
     # The simulator's applied-set bookkeeping over records a walk already
