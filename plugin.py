@@ -5185,8 +5185,11 @@ def _resolve_park_base(max_target_number: int, highest_in_group: float = 0) -> i
 
     `highest_in_group` is the highest number any channel in the target group
     holds now. Without it, a channel the user added to our group by hand above
-    our targets could sit exactly on a parking number, and the park UPDATE would
-    hit the constraint and roll back every apply (found in review, #219)."""
+    our targets could sit exactly on a parking number, sharing it for the rest
+    of the transaction (no database constraint refuses it,
+    _PER_GROUP_NUMBER_NOTE). Parking numbers are never committed: every parked
+    channel is either written with its target or restored to a free number
+    (the kept-channel restore in _action_apply)."""
     return int(max(max_target_number, int(highest_in_group or 0))) + 1000
 
 
@@ -7770,6 +7773,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         .order_by("order")
                         .values_list("stream_id", flat=True)
                     )
+                    # DO NOT remove a stream link from a channel that is
+                    # recording right now (except an excluded-group one, the
+                    # rule #206 applies to a channel kept for its recording).
+                    # A placeholder (no feed matched this time: the provider
+                    # renamed the slot, an M3U refresh dropped the source's
+                    # link) still clears the score threshold or plays a
+                    # Recorded team, so it is written, and replacing its links
+                    # with the empty pool cut the running capture (batch
+                    # interaction review); a different non-empty pool can pull
+                    # the stream it is capturing from just the same. While it
+                    # records, the new pool's streams are ADDED after its
+                    # current ones, and the next apply after the recording
+                    # ends trims them.
+                    if current_ordered and any(
+                        recording_policy.is_in_progress(r)
+                        for r in Recording.objects.filter(channel=existing)
+                    ):
+                        kept_links = [sid for sid in current_ordered if sid not in excluded_ids]
+                        source_streams = kept_links + [
+                            sid for sid in source_streams if sid not in kept_links
+                        ]
                     if current_ordered != source_streams:
                         ChannelStream.objects.filter(channel=existing).delete()
                         for order, sid in enumerate(source_streams):
@@ -7995,11 +8019,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                         stripped, len(kept_stale),
                     )
 
-            # Restore kept channels (recording, or guide) to their pre-park number
-            # so they don't linger at a ~park_base value. Only restore a number
-            # no other channel in the group carries now, so no number is
-            # duplicated in the group (_PER_GROUP_NUMBER_NOTE); any (rare)
-            # collision leaves that channel parked, still safe.
+            # Restore kept channels (recording, or guide) to their pre-park number,
+            # or, when another channel has it now, to the first number above it
+            # that is free. DO NOT leave a kept channel on its parking number:
+            # parking is only clear of our own group, so a channel in ANOTHER
+            # group could publish the same number, and the guide keys on the
+            # bare number everywhere (#117, #202): the kept channel's guide then
+            # bound to the wrong programme (batch interaction review). One rule:
+            # free means no channel in the group carries it raw and no channel
+            # anywhere else publishes it (_reserved_channel_numbers, effective).
             if kept_stale:
                 # Raw numbers channels in the group REALLY carry now, read back
                 # rather than planned. DO NOT use only the numbers this run
@@ -8016,13 +8044,37 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                     .exclude(id__in=kept_ids)
                     .values_list("channel_number", flat=True)
                 )
-                restore = []
+                # Two passes: every kept channel whose old number is free gets it
+                # back FIRST, so one that has to move never takes another kept
+                # channel's old number and pushes that one along too.
+                origs = {ch.id: prepark_numbers.get(ch.id) for ch in kept_stale}
+
+                def _free(number, blocked) -> bool:
+                    # Reservations are floored (_reserved_channel_numbers), so a
+                    # fractional number is free only if its floor is too.
+                    return number not in blocked and int(number) not in blocked
+
+                restore, moving = [], []
                 for ch in kept_stale:
-                    orig = prepark_numbers.get(ch.id)
-                    if orig is not None and orig not in taken_now:
+                    orig = origs[ch.id]
+                    if orig is not None and _free(
+                            orig, taken_now | _reserved_channel_numbers(target_group, int(orig))):
                         ch.channel_number = orig
                         restore.append(ch)
                         taken_now.add(orig)  # two kept channels, one old number
+                    else:
+                        moving.append(ch)
+                held_origs = {n for n in origs.values() if n is not None}
+                for ch in moving:
+                    orig = origs[ch.id]
+                    # No old number (cleared by hand): from the floor, as a
+                    # fresh game would be.
+                    start = int(orig) if orig is not None else int(virtual_base)
+                    blocked = (taken_now | held_origs
+                               | _reserved_channel_numbers(target_group, start))
+                    ch.channel_number = float(_first_free_number(blocked, start))
+                    restore.append(ch)
+                    taken_now.add(ch.channel_number)
                 if restore:
                     Channel.objects.bulk_update(restore, ["channel_number"])
                 # A kept channel back on the number it was numbered for is
@@ -8030,11 +8082,20 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 # (#278) is carried over, whatever floor it names: if its game
                 # returns to the slate under that floor, it keeps the number.
                 # One left parked has no entry to carry.
+                # One that had to move is recorded at its NEW number (same
+                # offset and floor): it was not numbered there, but holding it
+                # spares the recording channel a second move when its game
+                # returns (batch interaction review).
                 kept_id_set = {ch.id for ch in kept_stale}
+                moved_ids = {ch.id for ch in moving}
                 renamed = {new: legacy for _ch, legacy, new in marker_renames}
                 for kept_marker, kept_ch in existing_virtuals.items():
                     entry = remembered_record.get(renamed.get(kept_marker, kept_marker))
-                    if kept_ch.id in kept_id_set and entry and entry[1] == kept_ch.channel_number:
+                    if kept_ch.id not in kept_id_set or not entry:
+                        continue
+                    if kept_ch.id in moved_ids:
+                        kept_numbered[kept_marker] = (entry[0], int(kept_ch.channel_number), entry[2])
+                    elif entry[1] == kept_ch.channel_number:
                         kept_numbered[kept_marker] = entry
             deleted_stale = len(reap_ids)
             kept_stale_n = len(kept_stale)
@@ -9773,6 +9834,38 @@ def _next_reap_delay(settings: Dict[str, Any]) -> float:
 _HANDOFF_RECHECK_SECONDS = 300
 
 
+def _cached_live_starts() -> Tuple[Dict[str, Optional[datetime]], set]:
+    """What the cache says NOW about each game, for _run_due_stops: (marker ->
+    the start of its live block, from the games; the markers only the bench
+    lists). The FIRST row of a marker wins, as apply keeps it
+    (_unique_by_marker). A cache that cannot be read this way (not a list, a
+    row that is not a mapping) yields nothing rather than raising: an
+    exception here ended the reaper's pass, and a stop that came due
+    meanwhile was lost to its grace window. Nothing known means the stops run
+    as planned, as before this check existed."""
+    starts: Dict[str, Optional[datetime]] = {}
+    benched: set = set()
+    try:
+        cache = _read_cache()
+        for key in ("games", "bench"):
+            rows = cache.get(key)
+            for g in (rows if isinstance(rows, list) else []):
+                if not isinstance(g, dict):
+                    continue
+                marker = _build_marker_key(g)
+                if marker in starts or marker in benched:
+                    continue
+                if key == "bench":
+                    benched.add(marker)
+                    continue
+                start_dt = parse_iso_utc(g.get("start_time_utc"))
+                starts[marker] = _live_window(g, start_dt)[0] if start_dt is not None else None
+    except Exception:
+        logger.exception("[ranked_matchups] handoff check could not read the cache")
+        return {}, set()
+    return starts, benched
+
+
 def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> int:
     """Stop our running recordings whose planned handoff time has come (#216
     phase C). Every worker's reaper loop runs this; each stop is a locked,
@@ -9821,6 +9914,33 @@ def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> 
                     logger.warning(
                         "[ranked_matchups] handoff for recording %s skipped: %s is no "
                         "longer set to record", rid, entry.get("taker_name") or taker)
+                    continue
+                # The taker must still start when the plan said. DO NOT trust
+                # the taker's scheduled recording for that: a refresh that
+                # moved the game later leaves the row at its old time until
+                # the next apply moves it, and the reaper runs in between (the
+                # apply's network pre-pass alone can take minutes). It stopped
+                # the holder for a game now hours away (batch interaction
+                # review). A taker the cache does not list (a source outage,
+                # #224) gives no sign the handoff moved, so it still runs.
+                # Read here, per stop, with the holder locked, so a refresh
+                # that lands mid-pass is seen. A benched taker is no longer
+                # planned (apply cancels its recording), so it gets no slot.
+                cached_starts, benched = _cached_live_starts()
+                if taker in benched:
+                    logger.warning(
+                        "[ranked_matchups] handoff for recording %s skipped: %s is on the "
+                        "bench now; the next apply replans it", rid,
+                        entry.get("taker_name") or taker)
+                    continue
+                taker_start = cached_starts.get(taker)
+                planned_at = recording_policy.entry_at(entry)
+                if taker_start is not None and planned_at is not None and taker_start > planned_at:
+                    logger.warning(
+                        "[ranked_matchups] handoff for recording %s skipped: %s now starts "
+                        "at %s, after the planned handoff; the next apply replans it", rid,
+                        entry.get("taker_name") or taker,
+                        taker_start.astimezone(tz).strftime("%-I:%M %p"))
                     continue
                 cp = recording_policy.stopped_properties(rec.custom_properties, now, taker)
                 if cp is None:

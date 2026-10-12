@@ -799,6 +799,171 @@ def scenario_a_kept_recording_on_a_channel_with_no_stream_is_cancelled(env):
     assert list(m.Recording.objects.values_list("channel_id", flat=True)) == [owned[G411].id]
 
 
+def scenario_witness_a_recording_channel_keeps_its_stream_when_it_turns_placeholder(env):
+    """Batch interaction review: 431 is on air and recording when its source
+    channel loses the stream link. Its score still clears the placeholder
+    threshold, so apply publishes it as a placeholder, and the write replaced
+    the virtual channel's stream links with the empty pool: the surviving
+    link was deleted mid-recording."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    kickoff = _now() - timedelta(minutes=30)
+    owned = _publish(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")])
+    ch = owned[G431]
+    assert list(m.ChannelStream.objects.filter(channel=ch).values_list("stream_id", flat=True)) == [stream.id]
+    m.Recording.objects.create(
+        channel=ch, start_time=_now() - timedelta(minutes=30),
+        end_time=_now() + timedelta(hours=3), custom_properties={"status": "recording"},
+    )
+    m.ChannelStream.objects.filter(channel=user_ch).delete()  # the provider renamed the slot
+    result = _apply(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")])
+    assert "placeholders=1" in result["message"], result
+    links = list(m.ChannelStream.objects.filter(channel=ch).values_list("stream_id", flat=True))
+    assert links == [stream.id], (links, result["message"])
+
+
+def scenario_witness_a_recorded_teams_recording_channel_keeps_its_stream_too(env):
+    """The other way into the placeholder branch: 431 scores below the
+    threshold but plays a Recorded team, so it is written as a placeholder
+    while recording. Same rule: its stream link stays."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    kickoff = _now() - timedelta(minutes=30)
+    owned = _publish(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")],
+                     settings=_settings(recorded_teams="Home431"))
+    ch = owned[G431]
+    m.Recording.objects.filter(channel=ch).update(custom_properties={
+        "status": "recording", "ranked_matchups_marker": G431})
+    m.ChannelStream.objects.filter(channel=user_ch).delete()
+    low = _row(431, kickoff, user_ch.id, home="Home431", away="Away431")
+    low["score"] = 1.0
+    result = _apply(env, [low], recorded_teams="Home431")
+    assert "placeholders=1" in result["message"], result
+    links = list(m.ChannelStream.objects.filter(channel=ch).values_list("stream_id", flat=True))
+    assert links == [stream.id], (links, result["message"])
+
+
+def scenario_witness_a_recording_channel_keeps_its_stream_when_the_pool_changes(env):
+    """Second opinion on the batch fix: the match now yields a DIFFERENT
+    non-empty pool (another source channel's stream) while 431 records. The
+    write replaced the links, pulling the stream being captured. While it
+    records, the new stream is added after the current one."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    other_ch = _allowed_source_channel(env)
+    other_stream = m.ChannelStream.objects.get(channel=other_ch).stream_id
+    kickoff = _now() - timedelta(minutes=30)
+    owned = _publish(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")])
+    ch = owned[G431]
+    m.Recording.objects.create(
+        channel=ch, start_time=kickoff, end_time=_now() + timedelta(hours=3),
+        custom_properties={"status": "recording"},
+    )
+    result = _apply(env, [_row(431, kickoff, other_ch.id, home="Home431", away="Away431")])
+    links = list(m.ChannelStream.objects.filter(channel=ch).order_by("order")
+                 .values_list("stream_id", flat=True))
+    assert links == [stream.id, other_stream], (links, result["message"])
+
+
+def _handoff_due(env, taker_kickoff, duplicate_later=False, benched=False):
+    """411 is recording; the stops file (written by the LAST apply) hands its
+    slot to 431 one minute ago. The cache, rewritten by a refresh since, now
+    lists 431 at `taker_kickoff` (None: not listed at all). 431's channel has a
+    stream and its scheduled recording still exists (the next apply has not
+    moved it yet). Returns (holder recording, what _run_due_stops returned)."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    grp = user_ch.channel_group
+    holder_ch = m.Channel.objects.create(name="411", channel_number=500, channel_group=grp, tvg_id=G411)
+    taker_ch = m.Channel.objects.create(name="431", channel_number=501, channel_group=grp, tvg_id=G431)
+    m.ChannelStream.objects.create(channel=taker_ch, stream=stream, order=0)
+    now = _now()
+    holder = m.Recording.objects.create(
+        channel=holder_ch, start_time=now - timedelta(hours=1), end_time=now + timedelta(hours=2),
+        custom_properties={"status": "recording", "ranked_matchups_marker": G411},
+    )
+    m.Recording.objects.create(
+        channel=taker_ch, start_time=now - timedelta(minutes=1), end_time=now + timedelta(hours=3),
+        custom_properties={"ranked_matchups_marker": G431},
+    )
+    with open(env.plugin.RECORDING_STOPS_PATH, "w", encoding="utf-8") as f:
+        json.dump({str(holder.id): {
+            "at": (now - timedelta(minutes=1)).isoformat(), "marker": G411,
+            "taker": G431, "taker_name": "Away431 at Home431",
+        }}, f)
+    if taker_kickoff == "malformed":
+        with open(env.plugin.CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"games": {"bad": {}}, "refreshed_at": now.isoformat()}, f)
+    else:
+        games = [] if taker_kickoff is None else [
+            _row(431, taker_kickoff, user_ch.id, home="Home431", away="Away431")]
+        if duplicate_later:
+            games.append(_row(431, taker_kickoff + timedelta(hours=2), user_ch.id,
+                              home="Other431", away="Away431"))
+        if benched:
+            _write_cache(env, [], bench=games)
+        else:
+            _write_cache(env, games)
+    done = env.plugin._run_due_stops(_settings())
+    holder.refresh_from_db()
+    return holder, done
+
+
+def scenario_witness_the_reaper_does_not_hand_off_to_a_game_moved_later(env):
+    """Batch interaction review: a refresh moved 431 two hours later, and the
+    apply that will rewrite the plan has not finished (the reaper runs during
+    its network pre-pass). 431's old scheduled recording and stream still
+    passed the reaper's checks, so it stopped 411 at 431's OLD start for a
+    game that now starts in two hours."""
+    holder, done = _handoff_due(env, _now() + timedelta(hours=2))
+    assert done == 0
+    assert holder.custom_properties.get("status") == "recording", holder.custom_properties
+
+
+def scenario_witness_the_reaper_reads_a_duplicate_marker_as_apply_does(env):
+    """Second opinion, round 2: the cache lists 431 twice (different team
+    names, so the refresh's pair dedupe kept both). Apply keeps the FIRST row;
+    the reaper read the last, two hours later, and skipped a handoff apply
+    still calls for."""
+    holder, done = _handoff_due(env, _now() - timedelta(minutes=1)
+                                + timedelta(minutes=env.plugin.EPG_PRE_MIN), duplicate_later=True)
+    assert done == 1
+
+
+def scenario_witness_a_malformed_cache_does_not_stop_the_handoff(env):
+    """Second opinion, round 2: a parseable but malformed cache raised inside
+    the reaper's pass, which then slept past the stop's grace window. Nothing
+    readable means the stop runs as planned."""
+    holder, done = _handoff_due(env, "malformed")
+    assert done == 1
+
+
+def scenario_witness_the_reaper_does_not_hand_off_to_a_benched_game(env):
+    """Second opinion, round 3: a refresh moved 431 to the bench at its old
+    time. The next apply plans it no slot and cancels its recording, so the
+    handoff the old plan made is no longer called for."""
+    holder, done = _handoff_due(env, _now() - timedelta(minutes=1)
+                                + timedelta(minutes=env.plugin.EPG_PRE_MIN), benched=True)
+    assert done == 0
+    assert holder.custom_properties.get("status") == "recording", holder.custom_properties
+
+
+def scenario_the_reaper_still_hands_off_when_the_cache_agrees(env):
+    """The guard: the cache still lists 431 at the time the plan used (its
+    live block starts EPG_PRE_MIN before kickoff), so the handoff runs."""
+    kickoff = _now() - timedelta(minutes=1) + timedelta(minutes=env.plugin.EPG_PRE_MIN)
+    holder, done = _handoff_due(env, kickoff)
+    assert done == 1
+    assert holder.custom_properties.get("status") != "recording", holder.custom_properties
+
+
+def scenario_the_reaper_still_hands_off_when_the_cache_does_not_list_the_taker(env):
+    """And when the cache does not list 431 at all (a source outage keeps its
+    recording, #224), nothing says the handoff moved: it runs as before."""
+    holder, done = _handoff_due(env, None)
+    assert done == 1
+
+
 def scenario_a_full_compact_band_still_aborts(env):
     """The abort moved behind the pre-pass (#288). A band of one whose number
     another channel publishes still refuses the new game with an error, and
