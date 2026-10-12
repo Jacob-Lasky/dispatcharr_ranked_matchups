@@ -33,7 +33,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from . import _season_store
-from .base import FeedUnavailable, GameRow, MatchResult, SportSource, recording_lost_days
+from .base import (
+    FeedUnavailable, GameRow, MatchResult, SeasonUnavailable, SportSource, recording_lost_days,
+)
 from .._util import poisson_sample as _poisson
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.points_based")
@@ -137,18 +139,20 @@ class PointsBasedSportSource(SportSource):
         games from the list and the simulator replayed the rest as the whole
         season: standings missing results, a calendar missing fixtures, wrong
         stakes for every game in the league, and nothing in the summary.
-        Instead, `season_fetch_failure()` says why, and the list is:
+        Instead, `season_fetch_failure()` says why, and:
 
-          - the source's last COMPLETE read, if one is no older than
-            `_season_store.MAX_AGE` (`season_fallback()` gives its time; the
-            refresh reports "<label> season (using the last complete read
-            from <time>)"). Scoring nothing would drop every game of the
-            league to no standings stakes for the refresh, and its channels
-            could fall out of the top N and be reaped, then return: the churn
-            #261/#264 and #283 prevent elsewhere.
-          - otherwise `[]`, NOT simulated, reported as "<label> season
-            (stakes not simulated)", the way a Football-Data season (#228)
-            or a playoff bracket (#245) is.
+          - the list is the source's last COMPLETE read, if one is no older
+            than `_season_store.MAX_AGE` (`season_fallback()` gives its time;
+            the refresh reports "<label> season (using the last complete
+            read from <time>)"), and the league is scored as usual;
+          - otherwise the list is `[]`, and the refresh never scores a game
+            against it: `require_season`, called right after
+            `fetch_upcoming`, raises, and the label is held as an outage like
+            a failed rank feed (#283).
+
+        Either way the league's channels stay put: dropping every game to no
+        stakes for a refresh could push them out of the top N to be reaped
+        and returned, the churn #261/#264 and #283 prevent elsewhere.
 
         A complete read is remembered (`_season_store.remember`) and replaces
         the last one; a failed or partial read never is.
@@ -235,6 +239,15 @@ class PointsBasedSportSource(SportSource):
         """Why this refresh's season list could not be fetched whole, or None
         (see `_fetch_games_cached`)."""
         return self._season_failure
+
+    def require_season(self) -> None:
+        """Read the season now (cached for scoring) and RAISE
+        `SeasonUnavailable` when it could not be fetched whole AND no recent
+        complete read stands in for it. See `plugin._require_seasons` for why
+        the refresh asks."""
+        self._fetch_games_cached()
+        if self._season_failure is not None and self._season_fallback_at is None:
+            raise SeasonUnavailable(f"season not fetched whole: {self._season_failure}")
 
     # ---------- importance interface ----------
 

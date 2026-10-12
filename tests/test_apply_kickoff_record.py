@@ -419,6 +419,386 @@ def scenario_logos_are_fetched_only_for_games_apply_writes(env):
         logos.resolve_thumb_url, logos.league_id_for = saved
 
 
+def scenario_witness_a_slotless_game_does_not_take_the_incumbents_recording(env):
+    """#291: a compact band of one number holds 411, a Recorded team's game at
+    20:00 with its recording scheduled, and the plan has one recording slot.
+    431, an earlier Recorded game overlapping it, arrives. The plan was built
+    over the whole slate before numbering, so it gave the slot to 431 and
+    cancelled 411's recording; numbering then kept 411 on 500 and left 431
+    without a slot, so 431 got no channel and no recording either: nothing was
+    recorded. A game without a channel cannot be recorded, so the plan must be
+    built over the games apply places."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    settings = {"channel_numbering_mode": "compact", "virtual_channel_base": 500,
+                "compact_band_size": 1, "recorded_teams": "Home411, Home431",
+                "recording_slots": 1}
+    kickoff = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(411, kickoff, user_ch.id, home="Home411", away="Away411")],
+                     settings=_settings(**settings))
+    rec = m.Recording.objects.get(channel=owned[G411])
+    result = _apply(env, [
+        _row(411, kickoff, user_ch.id, home="Home411", away="Away411"),
+        _row(431, kickoff - timedelta(minutes=30), user_ch.id, home="Home431", away="Away431"),
+    ], **settings)
+    got = _numbers(env)
+    assert got == {G411: 500}, got
+    recs = list(m.Recording.objects.values_list("channel_id", flat=True))
+    assert m.Recording.objects.filter(pk=rec.pk).exists(), (recs, result["message"])
+    assert recs == [owned[G411].id], recs
+
+
+def scenario_witness_a_skipped_ranked_game_does_not_take_the_recording_slot(env):
+    """#291's class in KICKOFF mode: any game apply does not write has no
+    channel to record on. With Record ranked games on and one slot, 431 (an
+    earlier ranked game whose matched channel no longer exists, so it has no
+    feed and scores too low for a placeholder: skipped) still counted as
+    eligible, because eligibility reads the cached match. Planned over the
+    whole slate it took the slot, and 411, written with a feed, was left
+    with no recording and nothing recorded at all."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    settings = {"record_ranked_games": True, "recording_slots": 1}
+    kickoff = _now() + timedelta(hours=6)
+    skipped = _row(431, kickoff - timedelta(minutes=30), 999999, home="Home431", away="Away431")
+    skipped["score"] = 1.0
+    result = _apply(env, [_row(411, kickoff, user_ch.id, home="Home411", away="Away411"), skipped],
+                    **settings)
+    assert "unmatched_skipped=1" in result["message"], result
+    owned = _owned(env)
+    assert set(owned) == {G411}
+    recs = list(m.Recording.objects.values_list("channel_id", flat=True))
+    assert recs == [owned[G411].id], (recs, result["message"])
+
+
+def _ranked_recording_then_skipped(env):
+    """431, a ranked game with a feed, gets a recording; then its feed goes
+    and it scores too low for a placeholder, so apply skips it."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    settings = {"record_ranked_games": True, "recording_slots": 1}
+    owned = _publish(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")],
+                     settings=_settings(**settings))
+    rec = m.Recording.objects.get(channel=owned[G431])
+    skipped = _row(431, kickoff, 999999, home="Home431", away="Away431")
+    skipped["score"] = 1.0
+    result = _apply(env, [skipped], **settings)
+    assert "unmatched_skipped=1" in result["message"], result
+    return rec, user_ch, kickoff
+
+
+def scenario_a_skipped_games_scheduled_recording_is_cancelled(env):
+    """#291: a game apply does not write has no channel to record on, so the
+    plan leaves it out; the cache still knows it, so its scheduled recording
+    is cancelled as known and unplanned, and its channel reaped. It is planned
+    again on the apply that gives it a channel. (Kept as "missing from the
+    slate" instead, a review found it judged by a stored reason the cache had
+    moved past, and outside the slot budget.)"""
+    rec, _user_ch, _kickoff = _ranked_recording_then_skipped(env)
+    assert not env.m.Recording.objects.filter(pk=rec.pk).exists()
+    assert _owned(env) == {}
+
+
+def scenario_a_recording_for_a_game_the_cache_corrected_is_cancelled(env):
+    """#291 review: the cache corrects 431's teams (same event id, so the same
+    marker) to ones no longer Recorded, and the game has no feed. Judged as
+    missing from the slate, its recording was checked against the OLD teams
+    stored on it and kept; the cache knows the game, so it is cancelled."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")],
+                     settings=_settings(recorded_teams="Home431"))
+    rec = m.Recording.objects.get(channel=owned[G431])
+    corrected = _row(431, kickoff, 999999, home="Home999", away="Away999")
+    corrected["score"] = 1.0
+    result = _apply(env, [corrected], recorded_teams="Home431")
+    assert "unmatched_skipped=1" in result["message"], result
+    assert not m.Recording.objects.filter(pk=rec.pk).exists()
+
+
+def scenario_witness_a_recording_kept_for_a_missing_game_occupies_its_slot(env):
+    """#291 review (the #224 path): 411's game vanishes from the cache while
+    its Recorded team is still listed, so its scheduled recording is kept as
+    a possible source outage. The plan did not count it, and with one slot
+    scheduled overlapping 431 beside it: two captures for one stream."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    settings = {"recorded_teams": "Home411, Home431", "recording_slots": 1}
+    kickoff = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(411, kickoff, user_ch.id, home="Home411", away="Away411")],
+                     settings=_settings(**settings))
+    rec = m.Recording.objects.get(channel=owned[G411])
+    result = _apply(env, [_row(431, kickoff + timedelta(minutes=30), user_ch.id,
+                               home="Home431", away="Away431")], **settings)
+    assert m.Recording.objects.filter(pk=rec.pk).exists(), result["message"]
+    assert m.Recording.objects.count() == 1, (
+        list(m.Recording.objects.values_list("channel_id", flat=True)), result["message"])
+
+
+def scenario_a_guide_kept_skipped_ranked_game_holds_no_recording_slot(env):
+    """#291 review, decided: the cache cannot vouch for the slate (lost during
+    an outage) and lists 431 with no feed, below the placeholder threshold.
+    Apply keeps 431's unstamped channel by its guide (#264), but a ranked game
+    with no stream attached is never eligible (_ranked_eligible), so its
+    scheduled recording is cancelled like any skipped game's and planned again
+    once a refresh gives it a stream. Judged by its stored reason instead (an
+    earlier revision of this fix), it kept a recording through cache rows that
+    had moved on, and through a stream the group policy had just excluded."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    settings = {"record_ranked_games": True, "recording_slots": 1}
+    owned = _publish(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")],
+                     settings=_settings(**settings))
+    rec = m.Recording.objects.get(channel=owned[G431])
+    _kit._strip_stamps(env)
+    m.ChannelStream.objects.filter(channel=user_ch).delete()
+    skipped = _row(431, kickoff, user_ch.id, home="Home431", away="Away431")
+    skipped["score"] = 1.0
+    _write_cache(env, [skipped], empty_slate_known=False)
+    result = env.plugin._action_apply(_settings(**settings))
+    assert result["status"] == "ok", result
+    assert "unmatched_skipped=1" in result["message"], result
+    assert set(_owned(env)) == {G431}, "the guide keeps 431's channel"
+    assert not m.Recording.objects.filter(pk=rec.pk).exists(), result["message"]
+
+
+def scenario_a_guide_kept_game_the_cache_corrected_loses_its_recording(env):
+    """#291 review, round 5 (guard): the guide-kept case above with the cache
+    (unvouched) correcting 431 to teams no longer Recorded. The game stays in
+    the plan's slate, known and unplanned: its recording is cancelled rather
+    than kept by the old teams stored on it."""
+    m = env.m
+    user_ch, stream = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")],
+                     settings=_settings(recorded_teams="Home431"))
+    rec = m.Recording.objects.get(channel=owned[G431])
+    _kit._strip_stamps(env)
+    m.ChannelStream.objects.filter(channel=user_ch).delete()
+    corrected = _row(431, kickoff, user_ch.id, home="Home999", away="Away999")
+    corrected["score"] = 1.0
+    _write_cache(env, [corrected], empty_slate_known=False)
+    result = env.plugin._action_apply(_settings(recorded_teams="Home431"))
+    assert result["status"] == "ok", result
+    assert "unmatched_skipped=1" in result["message"], result
+    assert not m.Recording.objects.filter(pk=rec.pk).exists(), result["message"]
+
+
+def scenario_witness_a_streamless_ranked_placeholder_does_not_take_the_slot(env):
+    """#291 review: 431 kicks off first and scores high enough for a
+    placeholder, but the channel its cached match names no longer exists, so
+    its published channel carries no stream. Eligibility read the cached match,
+    so 431 took the only slot and 411, playable, recorded nothing."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    stale = _row(431, kickoff - timedelta(minutes=30), 999999, home="Home431", away="Away431")
+    result = _apply(env, [_row(411, kickoff, user_ch.id, home="Home411", away="Away411"), stale],
+                    record_ranked_games=True, recording_slots=1)
+    owned = _owned(env)
+    assert set(owned) == {G411, G431}, "431 is published as a placeholder"
+    recs = list(m.Recording.objects.values_list("channel_id", flat=True))
+    assert recs == [owned[G411].id], (recs, result["message"])
+
+
+def scenario_witness_a_recording_the_user_edited_occupies_its_slot(env):
+    """#291 review: the user extended 411's scheduled recording, so it is
+    theirs (never moved or cancelled). With 411 gone from the cache and its
+    team no longer Recorded, the plan did not count it, and with one slot
+    scheduled an overlapping 431 beside it."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(411, kickoff, user_ch.id, home="Home411", away="Away411")],
+                     settings=_settings(recorded_teams="Home411", recording_slots=1))
+    rec = m.Recording.objects.get(channel=owned[G411])
+    m.Recording.objects.filter(pk=rec.pk).update(end_time=rec.end_time + timedelta(minutes=30))
+    result = _apply(env, [_row(431, kickoff + timedelta(minutes=30), user_ch.id,
+                               home="Home431", away="Away431")],
+                    recorded_teams="Home431", recording_slots=1)
+    assert m.Recording.objects.filter(pk=rec.pk).exists(), result["message"]
+    assert m.Recording.objects.count() == 1, (
+        list(m.Recording.objects.values_list("channel_id", flat=True)), result["message"])
+
+
+def scenario_witness_a_deletion_seen_before_a_game_loses_its_slot_is_tombstoned(env):
+    """#291 review: the user deleted 431's recording, then shrank the compact
+    band so 431 has no slot. The first plan (over the decided games) saw the
+    deletion; the second (over the placed ones) no longer considers 431, and
+    the tombstone was dropped with the first plan, so a later apply that gave
+    431 a slot again would record what the user deleted."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    band = {"channel_numbering_mode": "compact", "virtual_channel_base": 500,
+            "recorded_teams": "Home411, Home431"}
+    rows = [_row(411, kickoff, user_ch.id, home="Home411", away="Away411"),
+            _row(431, kickoff + timedelta(hours=3), user_ch.id, home="Home431", away="Away431")]
+    owned = _publish(env, rows, settings=_settings(compact_band_size=2, **band))
+    assert _numbers(env) == {G411: 500, G431: 501}
+    m.Recording.objects.filter(channel=owned[G431]).delete()  # the user, in the DVR tab
+    _apply(env, rows, compact_band_size=1, **band)
+    assert _numbers(env) == {G411: 500}
+    with open(env.plugin.RECORDING_STATE_PATH, encoding="utf-8") as f:
+        assert G431 in json.load(f)["tombstones"]
+
+
+def scenario_witness_a_deletion_while_a_game_has_no_channel_is_tombstoned(env):
+    """#291 review, final round: the user deleted 431's recording, and on the
+    next apply 431 has no channel (no feed, too low for a placeholder), so it
+    is no plan candidate. The deletion must still become a tombstone: left
+    undetected, 431's "created" entry aged out while it was away and the game
+    was recorded again when it came back."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    settings = {"record_ranked_games": True, "recording_slots": 1}
+    owned = _publish(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")],
+                     settings=_settings(**settings))
+    m.Recording.objects.filter(channel=owned[G431]).delete()  # the user, in the DVR tab
+    skipped = _row(431, kickoff, 999999, home="Home431", away="Away431")
+    skipped["score"] = 1.0
+    result = _apply(env, [skipped], **settings)
+    assert "unmatched_skipped=1" in result["message"], result
+    with open(env.plugin.RECORDING_STATE_PATH, encoding="utf-8") as f:
+        assert G431 in json.load(f)["tombstones"]
+
+
+def scenario_witness_a_deletion_while_a_game_is_on_the_bench_is_tombstoned(env):
+    """#291 review: the same, with 431 moved to the bench (the list is full)
+    instead of losing its channel. Bench games are never candidates either."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    settings = {"record_ranked_games": True, "recording_slots": 1}
+    row431 = _row(431, kickoff, user_ch.id, home="Home431", away="Away431")
+    owned = _publish(env, [row431], settings=_settings(**settings))
+    m.Recording.objects.filter(channel=owned[G431]).delete()  # the user, in the DVR tab
+    _write_cache(env, [_row(411, kickoff + timedelta(days=1), user_ch.id,
+                            home="Home411", away="Away411")], bench=[row431])
+    result = env.plugin._action_apply(_settings(**settings))
+    assert result["status"] == "ok", result
+    with open(env.plugin.RECORDING_STATE_PATH, encoding="utf-8") as f:
+        assert G431 in json.load(f)["tombstones"]
+
+
+def scenario_witness_a_benched_games_deletion_is_matched_against_current_teams(env):
+    """#291 review: the bench row still carries the match its refresh made
+    (none: 431 was recorded as a ranked game), and the user has since added
+    431's team to Recorded teams and turned ranked recording off. The watch
+    must use the CURRENT teams, as the games do, to see the deletion."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    kickoff = _now() + timedelta(hours=6)
+    row431 = _row(431, kickoff, user_ch.id, home="Home431", away="Away431")
+    owned = _publish(env, [row431], settings=_settings(record_ranked_games=True, recording_slots=1))
+    m.Recording.objects.filter(channel=owned[G431]).delete()  # the user, in the DVR tab
+    benched = dict(row431, recorded_matched=[])
+    _write_cache(env, [_row(411, kickoff + timedelta(days=1), user_ch.id,
+                            home="Home411", away="Away411")], bench=[benched])
+    result = env.plugin._action_apply(_settings(recorded_teams="Home431, Home411"))
+    assert result["status"] == "ok", result
+    with open(env.plugin.RECORDING_STATE_PATH, encoding="utf-8") as f:
+        assert G431 in json.load(f)["tombstones"]
+
+
+def scenario_a_skipped_games_recording_is_planned_again_with_its_channel(env):
+    """The other half: its feed returns, it is written, and planned again."""
+    m = env.m
+    _rec, user_ch, kickoff = _ranked_recording_then_skipped(env)
+    _apply(env, [_row(431, kickoff, user_ch.id, home="Home431", away="Away431")],
+           record_ranked_games=True, recording_slots=1)
+    owned = _owned(env)
+    assert set(owned) == {G431}
+    assert list(m.Recording.objects.values_list("channel_id", flat=True)) == [owned[G431].id]
+
+
+def _allowed_source_channel(env):
+    """A user channel whose one stream sits in group "Allowed" (the seeded
+    ones are all in "Sports")."""
+    m = env.m
+    acct = m.M3UAccount.objects.create(name="acct-allowed", max_streams=4)
+    grp, _ = m.ChannelGroup.objects.get_or_create(name="Allowed")
+    stream = m.Stream.objects.create(name="Allowed HD", m3u_account=acct, channel_group=grp)
+    ch = m.Channel.objects.create(name="Allowed", channel_number=20, channel_group=grp)
+    m.ChannelStream.objects.create(channel=ch, stream=stream, order=0)
+    return ch
+
+
+def scenario_witness_a_kept_recording_whose_only_stream_is_excluded_holds_no_slot(env):
+    """#297: 411's game vanishes from the cache (a source outage) while its
+    team is still Recorded, so its scheduled recording is kept (#224) and its
+    channel with it. The user has excluded the "Sports" group, so apply strips
+    the kept channel's only stream (#206): the recording will capture nothing.
+    It still held the only slot, and 431, playable from an allowed group, got
+    no recording, on this apply and every one after."""
+    m = env.m
+    sports_ch, _ = _seed_source_channel(env)
+    allowed_ch = _allowed_source_channel(env)
+    settings = {"recorded_teams": "Home411, Home431", "recording_slots": 1}
+    kickoff = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(411, kickoff, sports_ch.id, home="Home411", away="Away411")],
+                     settings=_settings(**settings))
+    rec = m.Recording.objects.get(channel=owned[G411])
+    result = _apply(env, [_row(431, kickoff + timedelta(minutes=30), allowed_ch.id,
+                               home="Home431", away="Away431")],
+                    excluded_groups="Sports", **settings)
+    owned = _owned(env)
+    assert G431 in owned, result["message"]
+    recs = list(m.Recording.objects.values_list("channel_id", flat=True))
+    assert recs == [owned[G431].id], (recs, result["message"])
+    assert not m.Recording.objects.filter(pk=rec.pk).exists()
+
+
+def scenario_a_kept_recording_with_an_allowed_stream_left_is_kept(env):
+    """#297's guard: 411's channel carries a stream from "Sports" AND one from
+    "Allowed". Excluding "Sports" leaves it one it can record from, so the
+    outage protection (#224) still keeps the recording, and it still holds
+    the only slot."""
+    m = env.m
+    sports_ch, _ = _seed_source_channel(env)
+    allowed_ch = _allowed_source_channel(env)
+    settings = {"recorded_teams": "Home411, Home431", "recording_slots": 1}
+    kickoff = _now() + timedelta(hours=6)
+    both = _row(411, kickoff, sports_ch.id, home="Home411", away="Away411")
+    both["channel_ids"] = [sports_ch.id, allowed_ch.id]
+    owned = _publish(env, [both], settings=_settings(**settings))
+    assert m.ChannelStream.objects.filter(channel=owned[G411]).count() == 2
+    rec = m.Recording.objects.get(channel=owned[G411])
+    _apply(env, [_row(431, kickoff + timedelta(minutes=30), allowed_ch.id,
+                      home="Home431", away="Away431")],
+           excluded_groups="Sports", **settings)
+    assert m.Recording.objects.filter(pk=rec.pk).exists()
+    assert m.Recording.objects.count() == 1
+    assert m.ChannelStream.objects.filter(channel=owned[G411]).count() == 1
+
+
+def scenario_a_kept_recording_on_a_channel_with_no_stream_is_cancelled(env):
+    """The same rule without any exclusion: 411 was published as a placeholder
+    (a Recorded team, no feed yet) and its game then vanished from the cache.
+    Its channel has nothing to record from, so its recording is not kept as
+    an outage survivor; it is planned again when the game returns."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    settings = {"recorded_teams": "Home411"}
+    kickoff = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(411, kickoff, 999999, home="Home411", away="Away411")],
+                     settings=_settings(**settings))
+    assert m.ChannelStream.objects.filter(channel=owned[G411]).count() == 0
+    rec = m.Recording.objects.get(channel=owned[G411])
+    _apply(env, [_row(431, kickoff + timedelta(days=1), user_ch.id,
+                      home="Home431", away="Away431")], **settings)
+    assert not m.Recording.objects.filter(pk=rec.pk).exists()
+    assert G411 not in _owned(env)
+    # Back on the list with a feed: planned and recorded again.
+    _apply(env, [_row(411, kickoff, user_ch.id, home="Home411", away="Away411")], **settings)
+    owned = _owned(env)
+    assert list(m.Recording.objects.values_list("channel_id", flat=True)) == [owned[G411].id]
+
+
 def scenario_a_full_compact_band_still_aborts(env):
     """The abort moved behind the pre-pass (#288). A band of one whose number
     another channel publishes still refuses the new game with an error, and

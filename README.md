@@ -663,7 +663,8 @@ does not have to be a Favorite, and listing it does not change its score.
   spare slots** and slots your recorded teams do not need go to the best games
   on the list, from **Leagues to record** (league codes as they appear at the
   start of channel names, e.g. `CFB, EPL, NFL`; blank means every league). A
-  ranked game is only recorded once a stream has been matched for it.
+  ranked game is only recorded once a stream has been matched for it and
+  attached to its channel.
 - **Who wins a slot.** Slots always fill in kickoff order. **Recording
   preference** decides what happens when a game kicks off and every slot is
   full:
@@ -686,7 +687,12 @@ does not have to be a Favorite, and listing it does not change its score.
     its slot instead.
 - **Outages do not cost recordings.** If a source briefly returns nothing and
   a game drops off the list, its recording is kept as long as the reason for
-  it (the team, or ranked recording for that league) still holds.
+  it (the team, or ranked recording for that league) still holds and its
+  channel still has a stream to record from (one not in an **Excluded
+  groups** group). Such a recording, for a game no longer on the list, that
+  has not started and that you have not edited, could capture nothing, so it
+  is cancelled rather than hold a slot another game needs; it is planned
+  again, if a slot is free, when the game comes back with a feed.
 - **Changing your mind.** Adding or removing a team takes effect on the next
   Apply (a team whose games are not on the list yet needs a Refresh to fetch
   them). Removing a team cancels its recordings that have not

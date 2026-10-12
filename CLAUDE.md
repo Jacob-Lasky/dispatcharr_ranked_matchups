@@ -58,7 +58,7 @@ downstream is sport-agnostic.
 | `matcher.py` | `match_games_to_channels()` resolves cached `GameRow` to Dispatcharr channels and streams. `_build_epg_lookup` (plugin.py) supplies three candidate paths: A, EPG `ProgramData` title, sub-title or description (whole-channel); B, channel name (whole-channel); C, stream name (stream-granular, so a stream need not be on a channel at all). Three tiers: `regex_strict` (channel or stream name names both teams, merging Tier-2 programme matches behind it), `regex_unique` (exactly one non-preview programme match), then Claude batched fallback or first candidate. `_partition_attach_targets` splits the result into `channel_ids` and `stream_ids`. |
 | `sources/base.py` | `GameRow` + `MatchResult` dataclasses + abstract `SportSource`. ABC declares the Monte Carlo importance interface (`supports_importance` flag + 7 optional methods); sources opt in by overriding. A second, independent flag `shared_season_importance` (default False, #230) says the source's `sample_result` ignores `state`, so one set of simulated seasons can serve every one of its games — see the cost section below. `rank_field_size` (default None, #198) is how many teams a POLL source's ranks are drawn from; league sources leave it None (see step 5 of the extension contract). |
 | `sources/bracket.py` | `BracketSportSource` shared state machine for all knockout/playoff sports (bracket inference, `_round_reached`, `terminal_outcomes` cascade). Three concrete tie shapes: `AggregateLegSource` (two-leg, used by `KnockoutSoccerSource`), `BestOfNSeriesSource` (best-of-N series, used by `NhlPlayoffSource`, `MlbPlayoffSource`, `NcaaBaseballPlayoffSource`, `NcaaSoftballPlayoffSource` for their Super Regional + Finals stages), and `DoubleEliminationSource` (4-team double-elim base class for NCAA Baseball / Softball Regional + 8-team MCWS/WCWS bracket; plumbing into the sport sources is tracked in #43). `BestOfNSeriesSource._series_length_for_stage(stage)` hook lets each sport map stages to series lengths — NHL uses uniform 7; MLB uses 3/5/7/7 (WC/LDS/LCS/WS). `place_upcoming` stamps each fetched upcoming row with its bracket identity via `_sim_extra` (its unplaced count asks `_unplaced_row_reaches_a_tie`: a stage, and for `DoubleEliminationSource` the same `_find_tie_meta` lookup apply_result uses, so a College World Series row the fetch left with `grouping_key=None` counts only when no tie holds its teams, #256) (each tie shape's ONE builder of a simulated row's `extra`), and `ALL_ROWS_POSTSEASON` marks the playoff-only shapes — see the #243 gotcha below. `ForcedWinnerPoissonSampler` is the ONE playoff `sample_result` (Poisson from `_strength_for`, a tie broken by a coin-flipped +1; `LAMBDA_FLOOR` 0.05 for soccer), mixed in FIRST by every series/double-elim source: a source claiming `supports_importance` without a sampler raised `NotImplementedError` per game (#249; `tests/test_playoff_sampler.py` scans for it, and checks every tie winner's `round_reached` is the next round's `KNOCKOUT_ROUND_DEPTH`, which WNBA's SF->FINALS jump from 1 to 3 broke). The bracket-fetch failure accounting (`_sweep_bracket_days`, `_cache_bracket_games`, `BRACKET_FETCH_MAX_ATTEMPTS`, `allow_bracket_scoring_retry`, `bracket_fetch_failure`) also lives here — see the #245 part of the #243 gotcha. |
-| `sources/points_based.py` | Shared Monte Carlo for round-robin point-scoring sports (NCAAF, NCAAM, NHL regular, MLB regular). Subclasses set `_count_field` to choose between `"wins"` (CFB/CBB/MLB) and `"standings_points"` (NHL) for terminal_outcomes bucketing. Sets `shared_season_importance = True` for the whole family: the result model is Poisson on fixed strengths and never reads `state`. `_fetch_games_cached` reads the season ONCE per source instance inside its own `recording_lost_days()` record, and a season that could not be fetched whole (a walk day lost, or `base.SeasonUnavailable` / `RankingsUnavailable` raised by the walk: NHL's per-club schedules, MLB's and NCAAF's one season request, NCAAM's three chunks, MLS's conference map) is never simulated with holes in it (#289): `season_fetch_failure()` says why, and the season is the source's last COMPLETE read when one is no older than 36 h (`sources/_season_store.py`; reported "<label> season (using the last complete read from <time>)"), else `[]`, not simulated, reported `<label> season (stakes not simulated)`, for a source with a game in the slate. A complete read replaces the kept one; a failed or partial read never does. `season_store_key()` names class, label and season (NCAAF adds its divisions, NCAAM its poll), so a new season never reads the last one's games. Not retried within the refresh: an ESPN walk already re-asks its blips, and a second whole-season walk per league would multiply an outage against the pipeline ceiling. |
+| `sources/points_based.py` | Shared Monte Carlo for round-robin point-scoring sports (NCAAF, NCAAM, NHL regular, MLB regular). Subclasses set `_count_field` to choose between `"wins"` (CFB/CBB/MLB) and `"standings_points"` (NHL) for terminal_outcomes bucketing. Sets `shared_season_importance = True` for the whole family: the result model is Poisson on fixed strengths and never reads `state`. `_fetch_games_cached` reads the season ONCE per source instance inside its own `recording_lost_days()` record, and a season that could not be fetched whole (a walk day lost, or `base.SeasonUnavailable` / `RankingsUnavailable` raised by the walk: NHL's per-club schedules, MLB's and NCAAF's one season request, NCAAM's three chunks, MLS's conference map) is never simulated with holes in it (#289): `season_fetch_failure()` says why, and the season is the source's last COMPLETE read when one is no older than 36 h (`sources/_season_store.py`, reported "<label> season (using the last complete read from <time>)" by `plugin._season_fallback_entries`), else `[]`. The refresh never scores against `[]`: `plugin._require_seasons` calls `require_season()` right after a source's `fetch_upcoming` (when one of its games will be scored for importance), on the source and on every regular season its playoff strengths were seeded from (`strength_sources`, recorded by `plugin._seeded_from` at each `set_regular_season_strengths` site), and the `SeasonUnavailable` takes the failed-rank-feed path (#283): `<label>: error`, the label's previous games held with the scores they had. A complete read replaces the kept one; a failed or partial read never does. `season_store_key()` names class, label and season (NCAAF adds its divisions, NCAAM a digest of its poll's teams, the population it simulates), taken BEFORE the read, and NCAAF/NCAAM read their season year once per source (`_season`), so a read never lands under another season's key. Not retried within the refresh: an ESPN walk already re-asks its blips, and a second whole-season walk per league would multiply an outage against the pipeline ceiling. |
 | `sources/ncaaf.py` | CFBD `/rankings`, `/games`, `/lines` calls. CFBD uses **camelCase** (homeTeam, awayTeam) — easy gotcha. |
 | `sources/nhl.py` | api-web.nhle.com (official, no key). `NhlRegularSource` uses standings points (regulation win = 2, OT/SO loss = 1, regulation loss = 0). `NhlPlayoffSource` is a best-of-7 BracketSportSource. The two cross-feed: NhlPlayoffSource borrows regular-season strengths via `set_regular_season_strengths()` so cup-final sampling uses the 82-game baseline. Both `fetch_upcoming` read `_upcoming_schedule_games`, which walks `_espn.upcoming_window` one returned `gameWeek` at a time (api-web answers seven days per `schedule/{date}`, filed by US Eastern date), takes only the run of days contiguous from the one requested (a gapped answer neither skips the gap nor pre-empts a later day's own answer) and keeps only days inside the window (#256). |
 | `sources/mlb.py` | statsapi.mlb.com (official, no key). `MlbRegularSource` uses raw win count (no OT-loss bonus). `MlbPlayoffSource` is a BestOfNSeriesSource with per-stage series lengths (WC=3, LDS=5, LCS=7, WS=7). Same regular-season → playoff strength-sharing pattern as NHL. `MlbRegularSource.fetch_upcoming` takes `startDate`/`endDate` from `_espn.upcoming_window`, because statsapi files a game under its US date (#256), and skips the listing a moved game left behind by statsapi's own marker (`rescheduleDate` for a postponement, `resumeDate` for a suspension; the listing it moved to carries `rescheduledFrom` / `resumedFrom`), and keeps one listing per `gamePk` (only a kept listing claims its `gamePk`, so a skipped one never hides the live one). DO NOT replace the marker with "first" or "last listing wins": a game moves earlier as well as later, so either order publishes the abandoned slot in one direction. |
@@ -751,8 +751,9 @@ rankings paragraph below) and MLS's `/standings` conference map (`_fetch_confere
 failure or on a map missing either conference; East and West share the label
 "MLS", so one conference's quiet [] hid its days behind the other's games).
 The map is fetched ONCE per source, a failure included: the source reads its
-season through it when it is BUILT, and a retry that recovered in
-`fetch_upcoming` would publish games scored against the empty season. Season-wide schedules that fail
+season through it when it is BUILT, and that season read is not retried
+(#289), so the upcoming fetch must fail with it rather than list games whose
+season has already failed. Season-wide schedules that fail
 whole (NCAAF `/games?year=`, the MLB postseason) leave their label empty,
 which #240 already holds. The behavioural guard
 `test_every_built_source_reports_the_days_it_could_not_fetch` reads dates off
@@ -940,7 +941,20 @@ says which.
   reason no longer holds under the CURRENT settings. A marker still IN the
   slate but unplanned is cancelled as before: that is real evidence. Three
   things this rests on: the slate is games **plus bench**, or a demoted game
-  would read as vanished; the team question is re-asked through
+  would read as vanished (since #291 the plan's CANDIDATES are only the games
+  apply will write a channel for, but its slate stays the whole cache: a
+  cached game it skips, or one left without a compact slot, is known and
+  unplanned, so its scheduled recording is cancelled and planned again once
+  it has a channel; treated as missing instead, a recording was judged by its
+  stored reason against a cache that had moved on, and sat outside the slot
+  budget. No exception for a channel the guide keeps while the cache cannot
+  vouch (#264): a recorded team's game always gets a channel (placeholder),
+  and a ranked game with no stream attached is never eligible, so a skipped
+  guide-kept game's scheduled recording is cancelled too (an exception judged
+  by the stored reason was tried and kept captures through corrected rows and
+  excluded streams). And every scheduled recording
+  the reason rule keeps for a game missing from the slate counts as `busy` in
+  the plan, so a one-slot plan never schedules a second capture beside it); the team question is re-asked through
   `scoring.match_favorites` against the stored game rather than by comparing
   stored list entries, so fixing a typo in **Recorded teams** does not look
   like removing the team; and a row with no stored reason (written by 1.29.0 /
@@ -954,14 +968,21 @@ says which.
   `_autorecord_for_game` and `_autorecord_cancel` both re-fetch via
   `select_for_update()` inside a transaction (a plain re-read only narrows the
   race) and re-check `is_in_progress` / `is_terminal`. `_autorecord_cancel`
-  runs in a transaction of its OWN, after the pre-pass and BEFORE numbering
-  (#288 review): the numbers held back for kept channels are read after it,
-  so a recording it cancels holds no number (in a full compact band it once
-  made apply abort with the unwanted recording still scheduled). Its state
-  change (`created` entries dropped) is saved right after it commits: left to
-  `_autorecord_finish`, an apply that returned or failed in between kept the
-  entries, and the next plan read each missing row as deleted by the user
-  and tombstoned it for good.
+  runs through `_autorecord_cancel_committed`, a transaction of its OWN, in
+  two steps. The plan is built after the pre-pass's deciding half over the
+  games apply will write (#291: a channel-less game planned anyway took the
+  only slot from one with a channel, and nothing recorded). Step one, BEFORE
+  numbering, cancels only recordings on channels apply will not write (#288
+  review: the numbers held back for kept channels are read after it, so a
+  recording it cancels holds no number; in a full compact band one once made
+  apply abort with the unwanted recording still scheduled). Numbering may
+  leave a compact game without a slot; the plan is then built again over the
+  placed games, and step two cancels the rest by it, before the network half
+  writes the 🔴 into names. Each step's state change (`created` entries
+  dropped) is saved right after it commits: left to `_autorecord_finish`, an
+  apply that returned or failed in between kept the entries, and the next
+  plan read each missing row as deleted by the user and tombstoned it for
+  good.
 - **Apply re-derives `recorded_matched`, it does not trust the cache** (#221).
   Refresh stamps the match into each cached row, so an edit to **Recorded
   teams** would otherwise sit inert until the next scheduled refresh hours
@@ -1132,16 +1153,22 @@ says which.
   appended to `src_summary` BEFORE the cache write so `_slate_problems` and
   **Show current state** see it. The label says "stakes not simulated", not
   "scored 0": the other signals still ran, so a knockout tie keeps its round
-  premium. A points-based season that failed with no usable kept read reports
-  the same way (#289, `PointsBasedSportSource.season_fetch_failure`); one
-  that simulated its last complete read instead (`sources/_season_store.py`,
-  no older than 36 h) reports "<label> season (using the last complete read
-  from <time>)", informational, not an error. One difference is deliberate:
-  a points-based failure is NOT retried in the refresh. Most of their
-  seasons are walks (an ESPN day walk of up to ~300 requests with its blips
-  already re-asked inside it, or NHL's 32 clubs), and a re-walk per league
-  multiplies an outage against the pipeline ceiling; MLB and NCAAF are one
-  request and NCAAM three, kept to the same rule so the family has one.
+  premium. The points-based leagues deliberately do NOT follow this (#289):
+  a failed points-based season simulates its last complete read when one is
+  no older than 36 h (`sources/_season_store.py`, reported "<label> season
+  (using the last complete read from <time>)", informational), and otherwise
+  is an OUTAGE that holds the label's previous games, the way a failed rank
+  feed is (#283), because publishing a league's games with no standings
+  stakes is the flattened slate #283 exists to avoid, and its channels could
+  be reaped and come back. Football-Data keeps "not simulated" because its
+  season is one request per competition that often recovers by scoring time,
+  which is what `allow_scoring_retry()` is for, and an outage decided at
+  fetch time would forgo that recovery. The points-based failure is NOT
+  retried in the refresh: most of their seasons are walks (an ESPN day walk
+  of up to ~300 requests with its blips already re-asked inside it, or NHL's
+  32 clubs), and a re-walk per league multiplies an outage against the
+  pipeline ceiling; MLB and NCAAF are one request and NCAAM three, kept to
+  the same rule so the family has one.
 - **An Odds API request costs a credit per region per market, and the free
   plan has 500 a month** (#200). Three sources asking three regions on every
   refresh spent the allowance in days, after which every call answered 401
@@ -1332,7 +1359,9 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
 - Ranked games in spare recording slots (#216, phase B): `record_ranked_games`
   (off by default) plus `record_leagues` (league codes in priority order, blank
   = every league) make a stream-matched ranked game a slot candidate
-  (`_ranked_eligible`; a favorite is preferred, never eligible). Slots still
+  (`_ranked_eligible`; a favorite is preferred, never eligible; in apply
+  "stream-matched" means the pre-pass attached a stream to its channel, not
+  that the cache names a match, #291 review). Slots still
   fill in kickoff order; `recording_preference` (`earliest` default,
   `favorites` / `league` / `rating`) decides what happens when a game kicks off
   with every slot full, via `priority_key` / `can_interrupt`. Every handoff is
@@ -1341,7 +1370,11 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   is stopped at the handoff by the live timer (phase C)
 - Recordings survive a source outage (#224): each one stores why it exists, and
   a game that vanished from the whole cache is only cancelled once that reason
-  stops holding under the current settings
+  stops holding under the current settings, OR its channel has no stream left
+  to record from (none, or only excluded-group ones that #206 strips from a
+  kept channel; #297: such a recording captured nothing and still held a slot).
+  One rule, inside `ar.reason_holds`, so the cancel step and the plan's `busy`
+  agree
 - Failed and upstream-starved runs are visible (#227): every background run's
   outcome is persisted to `last_run.json`, **Show current state** ends with that
   verdict (OK / FAILED with the streak and the last good refresh / RUNNING NOW /

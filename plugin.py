@@ -1017,20 +1017,45 @@ def _record_leagues(settings: Dict[str, Any]) -> List[str]:
     return [x.casefold() for x in _parse_favorites(settings.get(RECORD_LEAGUES_SETTING, ""))]
 
 
-def _ranked_eligible(g: Dict[str, Any], leagues: List[str]) -> bool:
+def _ranked_eligible(g: Dict[str, Any], leagues: List[str],
+                     streamed: Optional[set] = None) -> bool:
     """A ranked (non-recorded-team) game may take a slot only when it has a
     matched stream NOW and its league is listed (blank list = every league).
     A stream-less ranked game would hold a slot it cannot use and push a
     playable game out; it becomes a candidate on the first apply that matches
-    a stream. Favorites make a game preferred, never eligible, by design."""
-    has_stream = bool(g.get("channel_id") or g.get("channel_ids") or g.get("stream_ids"))
+    a stream. Favorites make a game preferred, never eligible, by design.
+
+    `streamed` is the markers apply's pre-pass actually attached streams to
+    (#291 review). DO NOT judge by the cache's match alone when it is given:
+    a cached channel id can name a channel that no longer exists or no longer
+    carries the game, and a placeholder published for such a game took the
+    only slot from a playable one."""
+    if streamed is not None:
+        has_stream = _build_marker_key(g) in streamed
+    else:
+        has_stream = bool(g.get("channel_id") or g.get("channel_ids") or g.get("stream_ids"))
     in_league = not leagues or str(g.get("sport_prefix", "")).casefold() in leagues
     return has_stream and in_league
 
 
 def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
-                        bench: Optional[List[Dict[str, Any]]] = None) -> "_AutoRecord":
+                        bench: Optional[List[Dict[str, Any]]] = None,
+                        slate_games: Optional[List[Dict[str, Any]]] = None,
+                        streamed: Optional[set] = None,
+                        excluded_stream_ids=frozenset()) -> "_AutoRecord":
     """Read-only: build the plan before apply writes anything.
+
+    `games` are the CANDIDATES: apply passes only the games it will write a
+    channel for (#291), since a game without one cannot be recorded and,
+    planned anyway, took the only slot from a game that has one. `slate_games`
+    (default `games`) is what the cache knows, for the #224 cancel rule; apply
+    passes the whole cache, so a cached game it does not write is KNOWN and
+    unplanned, and its not-yet-started recording is cancelled, as a ranked
+    game with no stream is never eligible (_ranked_eligible). DO NOT pass the
+    candidates as the slate there: "missing from the slate" keeps a recording
+    while its STORED reason holds, which (#291 review) kept a recording the
+    cache had since corrected to another game, and kept one outside the slot
+    budget, the plan seeing neither.
 
     Runs even when the Recorded teams list is empty IF the plugin still has
     recordings of its own, so clearing the list cancels them (the design's
@@ -1043,24 +1068,54 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
     record_ranked = bool(settings.get(RECORD_RANKED_SETTING, False))
     recorded_rows = [
         g for g in games
+        if g.get("recorded_matched") or (record_ranked and _ranked_eligible(g, leagues, streamed))
+    ]
+    # Games the CACHE asks to record, bench included, whether or not they are
+    # candidates now (a game apply gives no channel this time, or one on the
+    # bench, is not one, #291): a recording
+    # the user deleted for one of them still has to become a tombstone. Watched
+    # only for that; left to the candidates, a deletion went unrecorded while
+    # the game had no channel, its "created" entry aged out, and the game was
+    # recorded again when it returned (#291 review).
+    watched = [
+        _build_marker_key(g)
+        for g in list(games if slate_games is None else slate_games) + list(bench or [])
         if g.get("recorded_matched") or (record_ranked and _ranked_eligible(g, leagues))
     ]
     ours_rows = list(Recording.objects.filter(
         custom_properties__has_key=recording_policy.MARKER_KEY,
         end_time__gt=now - recording_policy.STATE_RETENTION,
     ))
-    if not recorded_rows and not ours_rows:
+    if not recorded_rows and not ours_rows and not watched:
         return ar
     ar.enabled = True
     ar.state = recording_policy.load_state(RECORDING_STATE_PATH)
     # The slate is EVERYTHING the cache knows about, bench included: a game that
     # dropped to the bench is known and unplanned (cancel), a game missing from
     # both is unknown and may just be a source outage (keep, #224).
-    ar.slate = {_build_marker_key(g) for g in list(games) + list(bench or [])}
+    known = games if slate_games is None else slate_games
+    ar.slate = {_build_marker_key(g) for g in list(known) + list(bench or [])}
     from .scoring import match_favorites
-    ar.reason_holds = recording_policy.reason_checker(
+    reason_holds = recording_policy.reason_checker(
         _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, "")), record_ranked,
         _record_leagues(settings), matcher=match_favorites)
+    # A recording kept for a game missing from the slate (#224) is kept only
+    # while its channel still has a stream it can record from: one the group
+    # policy does not exclude (#206 strips excluded links from a kept channel,
+    # and nothing starts from one). DO NOT keep it on its stored reason alone:
+    # its channel left with no stream, it recorded nothing and still held a
+    # slot, so a playable game got no recording (#297). Cancelled instead, it
+    # is planned again when its game returns with a feed. ONE rule, through
+    # reason_holds, so the cancel step and the slot budget (busy) agree.
+    recordable: set = set()
+    if ours_rows:
+        from apps.channels.models import ChannelStream
+        recordable = set(
+            ChannelStream.objects.filter(channel_id__in={r.channel_id for r in ours_rows})
+            .exclude(stream_id__in=excluded_stream_ids)
+            .values_list("channel_id", flat=True)
+        )
+    ar.reason_holds = lambda r: r.channel_id in recordable and reason_holds(r)
     from apps.m3u.models import M3UAccount
 
     post_roll = timedelta(minutes=max(0, _int_setting(
@@ -1087,7 +1142,7 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
                       [str(g.get("home", "")), str(g.get("away", ""))])
 
     ar.ours, skip = recording_policy.classify_existing(
-        ours_rows, ar.state, [c.marker for c in candidates])
+        ours_rows, ar.state, list(dict.fromkeys([c.marker for c in candidates] + watched)))
     ar.new_tombstones = [m for m, why in skip.items()
                          if why == "deleted by you" and m not in ar.state["tombstones"]]
     live_rows = list(Recording.objects.filter(end_time__gt=now))
@@ -1106,6 +1161,19 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
             skip[c.marker] = "you are already recording it"
     held = {m: (r.start_time, r.end_time) for m, r in ar.ours.items()
             if recording_policy.is_in_progress(r)}
+    # A scheduled recording of ours that this apply KEEPS whatever the plan
+    # says occupies a slot like any other capture: one the user edited (it is
+    # theirs from then on, never moved or cancelled), and one whose game is
+    # missing from the slate while its stored reason holds (#224). Left out, a
+    # one-slot plan scheduled an overlapping game beside it: two captures for
+    # one stream (#291 review). Running ones are `held` already.
+    cand_markers = {c.marker for c in candidates}
+    busy += [
+        (r.start_time, r.end_time) for m, r in ar.ours.items()
+        if not recording_policy.is_in_progress(r) and recording_policy.occupies_stream(r, now)
+        and (skip.get(m) == "you changed it"
+             or (m not in cand_markers and m not in ar.slate and ar.reason_holds(r)))
+    ]
     limits = list(M3UAccount.objects.filter(is_active=True).values_list("max_streams", flat=True))
     slots = recording_policy.resolve_slot_budget(
         settings.get(RECORDING_SLOTS_SETTING, 0), limits,
@@ -1120,15 +1188,20 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
     return ar
 
 
-def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool) -> None:
+def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool, markers=None) -> None:
     """Delete our not-yet-started recordings that the plan no longer wants.
     instance.delete() fires Dispatcharr's revoke_task_on_delete, which cancels
-    the scheduled capture. Only rows carrying our marker are ever considered."""
+    the scheduled capture. Only rows carrying our marker are ever considered,
+    and only those of `markers` when given (apply cancels in two steps, see
+    _autorecord_cancel_committed). A recording already counted is skipped, so
+    a dry run that plans twice does not count one twice."""
     if not ar.enabled:
         return
     from apps.channels.models import Recording
     for rec in recording_policy.cancellable(ar.ours, ar.plan, ar.slate, ar.reason_holds):
         m = recording_policy.rec_marker(rec)
+        if (markers is not None and m not in markers) or rec.pk in ar.cancelled_ids:
+            continue
         if not dry_run:
             # Re-check a LOCKED fresh copy: the row in ar.ours was loaded when
             # the plan was built, and a recording that has started since must
@@ -1144,6 +1217,22 @@ def _autorecord_cancel(ar: "_AutoRecord", dry_run: bool) -> None:
         # We removed it, so its absence next time is not the user's doing.
         ar.state["created"].pop(m, None)
         ar.ours.pop(m, None)
+
+
+def _autorecord_cancel_committed(ar: "_AutoRecord", dry_run: bool, markers=None) -> None:
+    """_autorecord_cancel in a transaction of its own (its re-check locks the
+    row), with the state change saved right after it commits.
+
+    Saved here, not left to _autorecord_finish: an apply that returned or
+    failed in between kept the deleted recordings in the "created" state, and
+    the next plan read each missing row as one the user deleted and tombstoned
+    it for good (#288 review). If the apply fails after this, the
+    cancellations and their bookkeeping both stand."""
+    from django.db import transaction
+    with transaction.atomic():
+        _autorecord_cancel(ar, dry_run, markers)
+    if ar.cancelled and not dry_run:
+        recording_policy.save_state(RECORDING_STATE_PATH, ar.state)
 
 
 def _reason_props(ar: "_AutoRecord", marker: str) -> Dict[str, Any]:
@@ -3722,17 +3811,39 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # as a quiet one and the games published for it are dropped.
     lost_days_by_label: Dict[str, set] = {}
     from .sources.base import recording_lost_days
+    # Read here, not at the favorites-only gate below, because the season
+    # check in the fetch loop asks the same gate whether a source's games
+    # will be scored at all.
+    fav_only_mode = str(settings.get(_FAVORITES_ONLY_SETTING, _FAVORITES_ONLY_OFF)
+                        or _FAVORITES_ONLY_OFF).lower()
     for src in sources:
         pulled_by_label.setdefault(src.sport_label, 0)
         try:
             with recording_lost_days() as lost_days:
                 games = src.fetch_upcoming(days_ahead=lookahead)
+            # Placed BEFORE the season check: the favorites-only gate it asks
+            # keeps a non-favorite game in postseason mode only once the
+            # bracket has stamped its round (#243), so a playoff game checked
+            # unplaced would be dropped here, skip its seeding season, and
+            # then be kept and scored by the real gate below (#289 review).
+            _place_in_bracket(src, games, for_scoring=False)
+            # A season the simulator would replay with holes in it is an
+            # outage, like a failed rank feed (#283), so the label's previous
+            # games are held, scored as they were, instead of republished with
+            # no standings stakes (#289). Asked only when a game of this
+            # source will be scored for importance: none fetched, all dropped
+            # by the favorites-only gate, or importance turned off, and this
+            # check asks for no season. (A playoff source's seeding season
+            # was read when the sources were built, whatever the slate.)
+            if weights.importance > 0 and _filter_favorites_only(
+                    games, [src] * len(games), favorites, fav_only_mode,
+                    always_keep=recorded_teams)[0]:
+                _require_seasons(src)
         except Exception as e:
             logger.exception("[ranked_matchups] source %s fetch failed", src.sport_label)
             src_summary.append(_source_error_entry(src.sport_label, e))
             raised_labels.add(src.sport_label)
             continue
-        _place_in_bracket(src, games, for_scoring=False)
         pulled_by_label[src.sport_label] += len(games)
         all_games.extend(games)
         game_sources.extend([src] * len(games))
@@ -3825,8 +3936,6 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # drop. Independent of and composable with the per-source
     # friendlies_favorites_only gate (a friendly already gated to favorites
     # simply survives this too). See `_filter_favorites_only`.
-    fav_only_mode = str(settings.get(_FAVORITES_ONLY_SETTING, _FAVORITES_ONLY_OFF)
-                        or _FAVORITES_ONLY_OFF).lower()
     if fav_only_mode in _FAVORITES_ONLY_ACTIVE_MODES and not favorites:
         logger.warning(
             "[ranked_matchups] favorites_only=%s but no Favorites are "
@@ -4210,8 +4319,9 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                 errs.append(err)
     for label, errs in bracket_failures.items():
         src_summary.append(_source_error_entry(f"{label} bracket (stakes not simulated)", "; ".join(errs)))
-    # Likewise a points-based season that could not be fetched whole (#289).
-    src_summary.extend(_season_failure_entries(sources, game_sources))
+    # A points-based season scored from its last complete read (#289
+    # follow-up); one with no kept read was held as an outage at fetch.
+    src_summary.extend(_season_fallback_entries(sources, game_sources))
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
@@ -6548,11 +6658,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             "[ranked_matchups] apply: dropped %d cached game(s) sharing a marker "
             "with a higher-ranked one (same source event listed twice)", dup_dropped,
         )
-    # Auto-record plan (#216). Read-only; the writes happen per game below.
     # Recorded teams are re-matched against the CURRENT setting first, so an
-    # edit takes effect on this apply rather than the next refresh (#221).
+    # edit takes effect on this apply rather than the next refresh (#221). The
+    # auto-record plan that reads them is built after the pre-pass (#291). The
+    # bench too: the plan watches benched games for deleted recordings, and a
+    # stale match there missed one (#291 review).
     _rematch_recorded_teams(games, settings)
-    autorec = _autorecord_prepare(games, settings, bench=cache.get("bench") or [])
+    bench = list(cache.get("bench") or [])
+    _rematch_recorded_teams(bench, settings)
 
     group_name = settings.get("channel_profile_name", DEFAULT_GROUP_NAME)
     # Archive group for preserved DVR recordings (#146). Blank falls back to the
@@ -7255,27 +7368,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     remembered_base = None
     remembered_record: Dict[str, Tuple[int, int, int]] = {}
     numbered_for: Dict[str, Tuple[int, int]] = {}
-    # Auto-record (#216): drop our not-yet-started recordings the plan no
-    # longer wants BEFORE the numbers held for kept channels are read (below)
-    # and before the stale reap, so a game whose team was removed neither holds
-    # its channel's number nor keeps its channel this run. Its own transaction,
-    # ahead of numbering: read first and cancelled later, a recording counted
-    # as keeping its channel held a slot a full compact band then refused a
-    # new game, and the apply aborted with the unwanted recording still
-    # scheduled (#288 review). A recording that starts before this runs is not
-    # cancelled (the locked re-check there), and is then counted as keeping
-    # its channel. If the apply fails after this, the cancellations stand, and
-    # so does their bookkeeping (saved right after).
-    with transaction.atomic():
-        _autorecord_cancel(autorec, dry_run)
-    # Committed on its own, so its bookkeeping is saved on its own too: left to
-    # _autorecord_finish, an apply that returned or failed after this kept the
-    # deleted recordings in the "created" state, and the next plan read each
-    # missing row as one the user deleted and tombstoned it for good (#288
-    # review).
-    if autorec.cancelled and not dry_run:
-        recording_policy.save_state(RECORDING_STATE_PATH, autorec.state)
-
     # Number ONLY the games the pre-pass decided to write (prep_by_marker),
     # which is why numbering runs after it. DO NOT number the whole slate: a
     # game the write loop skips (no feed, too low for a placeholder) is known
@@ -7286,6 +7378,37 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # new game (#286).
     decided_games = [g for g in games if _build_marker_key(g) in prep_by_marker]
     decided_by_marker = {_build_marker_key(g): g for g in decided_games}
+    # The auto-record plan (#216; read-only, the writes happen per game below)
+    # plans the same games, and only them. A game with no channel cannot be
+    # recorded: planned anyway, it could take the only recording slot from a
+    # game that has one, whose recording was then cut short or cancelled
+    # while nothing recorded the channel-less game (#291). Its slate is still
+    # the whole cache (see _autorecord_prepare): such a game's own scheduled
+    # recording is cancelled, and planned again once it has a channel.
+    # The markers the pre-pass attached a stream to: what "has a stream now"
+    # means for a ranked game's eligibility (_ranked_eligible).
+    streamed = {m for m, p in prep_by_marker.items() if p.source_streams}
+    autorec = _autorecord_prepare(
+        decided_games, settings, bench=bench,
+        slate_games=games, streamed=streamed, excluded_stream_ids=excluded_ids,
+    )
+    # Auto-record (#216), first step: drop our not-yet-started recordings the
+    # plan no longer wants on channels apply will NOT write (games the
+    # pre-pass did not decide on), BEFORE the numbers held for kept channels
+    # are read (below) and before the stale reap, so such a game whose team
+    # was removed neither holds its channel's number nor keeps its channel.
+    # Read first and cancelled later, a recording counted as keeping its
+    # channel held a slot a full compact band then refused a new game, and the
+    # apply aborted with the unwanted recording still scheduled (#288 review).
+    # A recording that starts before this runs is not cancelled (the locked
+    # re-check there), and is then counted as keeping its channel. Only these
+    # markers: the decided games' recordings wait for the plan over the games
+    # numbering places (second step, below, #291).
+    _autorecord_cancel_committed(
+        autorec, dry_run,
+        markers={m for m in autorec.ours if m not in prep_by_marker},
+    )
+
     # A channel this apply KEEPS without writing it (an active recording, #146,
     # or kept by its guide, #264) goes back to its number after parking, unless
     # a new game was handed that number, in which case it stays at a parking
@@ -7422,6 +7545,26 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         del prep_by_marker[marker]
     seen_markers = set(prep_by_marker)
     placeholder_channels_created = sum(1 for p in prep_by_marker.values() if p.placeholder)
+    # Auto-record, second step (#291). A game numbering left without a slot
+    # (compact, full band) has no channel either, so the plan is built again
+    # over the games that kept theirs, for the reason above (same slate). Then the decided
+    # games' cancellations, by the plan that names their channels. Both before
+    # the network half, which writes the 🔴 into channel names from the plan.
+    unplaced = decided_markers - set(prep_by_marker)
+    if unplaced and autorec.enabled:
+        first = autorec
+        autorec = _autorecord_prepare(
+            [g for g in decided_games if _build_marker_key(g) not in unplaced],
+            settings, bench=bench, slate_games=games,
+            streamed=streamed, excluded_stream_ids=excluded_ids,
+        )
+        # Carried over: what the first plan already did (its cancellations)
+        # and saw (a recording the user deleted, a tombstone the second plan
+        # cannot see once the game left it, #291 review).
+        autorec.cancelled += first.cancelled
+        autorec.cancelled_ids |= first.cancelled_ids
+        autorec.new_tombstones = list(dict.fromkeys(first.new_tombstones + autorec.new_tombstones))
+    _autorecord_cancel_committed(autorec, dry_run)
 
     # The pre-pass's network half (#136: still before the transaction), run
     # only for the games apply will write. DO NOT move it back above numbering:
@@ -8084,7 +8227,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         foreign_msg += (
             f" Excluded-group streams skipped: {len(policy_dropped_stream_ids)}."
         )
-    autorec_msg = _autorecord_finish(autorec, games, dry_run)
+    # The bench is still known: its recording state is kept like the games'
+    # (#291 review), or a benched game's deletion record aged out.
+    autorec_msg = _autorecord_finish(autorec, games + bench, dry_run)
     rec_msg = ""
     if rehomed_recordings or kept_stale_n > kept_by_guide_n:
         rec_msg = (
@@ -8295,68 +8440,59 @@ def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
 _SOURCE_ERROR_MARK = ": error ("
 
 
-def _season_failure_entries(sources: List[Any], game_sources: List[Any]) -> List[str]:
-    """Summary entries for the points-based seasons this refresh could not
-    fetch whole (#289, `PointsBasedSportSource.season_fetch_failure`), one
-    per label: MLS East and West share "MLS", and one outage must not read
-    as two failed sources.
+def _require_seasons(src: Any) -> None:
+    """RAISE `SeasonUnavailable` when `src`'s own points-based season, or a
+    regular season its playoff strengths were seeded from
+    (`strength_sources`, `_seeded_from`), could not be fetched whole (#289).
 
-    A season simulated from its last complete read (#289 follow-up) reads
-    "<label> season (using the last complete read from <time>)"; one with no
-    usable read, whose games got no standings stakes, reads "<label> season
-    (stakes not simulated)" as an error. A season is reported when its games
-    were scored, AND when a
-    scored playoff or bracket source took its team strengths from it
-    (`strength_sources`, recorded by `_seeded_from` while the sources were
-    built): that playoff model fell back to its prior, which a playoff-only
-    slate would otherwise never mention. A league with nothing on the slate
-    lost nothing to the failure, and is not reported.
+    `_action_refresh` calls this right after a source's `fetch_upcoming`, in
+    the same `try`, so a failed season takes the path a failed rank feed
+    takes (#283): the label is an outage, the games it published last time
+    are held with the scores they had, and the summary says `<label>: error`.
+    The season is read once per source and cached for scoring, so this costs
+    no extra request; a seeding season was read when the sources were built.
+    """
+    for s in (src, *getattr(src, "strength_sources", ())):
+        require = getattr(s, "require_season", None)
+        if callable(require):
+            require()
+
+
+def _season_fallback_entries(sources: List[Any], game_sources: List[Any]) -> List[str]:
+    """Summary entries for the points-based seasons this refresh simulated
+    from their last COMPLETE read (#289 follow-up, `sources/_season_store`):
+    "<label> season (using the last complete read from <time>)", one per
+    label (MLS East and West share "MLS"). Informational, not an error: the
+    games were scored, on stakes a little old. A failed season with no kept
+    read never reaches here; `_require_seasons` made its label an outage.
+
+    Reported for a source whose games were scored, or whose read seeded a
+    scored playoff or bracket source (`strength_sources`); a league with
+    nothing on the slate used nothing.
     """
     affected = {id(s) for s in game_sources}
     for s in game_sources:
         affected.update(id(r) for r in getattr(s, "strength_sources", ()))
     by_label: Dict[str, List[str]] = {}
-    fell_back: Dict[str, List[str]] = {}
     for src in sources:
-        failure = getattr(src, "season_fetch_failure", None)
-        err = failure() if callable(failure) and id(src) in affected else None
-        if not (isinstance(err, str) and err):
-            continue
         fallback = getattr(src, "season_fallback", None)
-        read_at = fallback() if callable(fallback) else None
-        if read_at is not None:
-            # Simulated from the last complete read (#289 follow-up): the
-            # stakes are real, a little old, so an informational entry, not
-            # an error.
-            when = read_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
-            reads = fell_back.setdefault(src.sport_label, [])
-            if when not in reads:
-                reads.append(when)
+        read_at = fallback() if callable(fallback) and id(src) in affected else None
+        if read_at is None:
             continue
-        errs = by_label.setdefault(src.sport_label, [])
-        if err not in errs:
-            errs.append(err)
-    # ONE entry per label. Two sources sharing one (MLS East and West) can
-    # split: one falls back, the other has no usable read. That label is an
-    # error, since some of its games got no stakes, and the entry says the
-    # rest used a kept read.
-    out = []
-    for label, errs in by_label.items():
-        reason = "; ".join(errs)
-        if label in fell_back:
-            reason += f"; the rest used the last complete read from {', '.join(fell_back[label])}"
-        out.append(_source_error_entry(f"{label} season (stakes not simulated)", reason))
-    out.extend(f"{label} season (using the last complete read from {', '.join(reads)})"
-               for label, reads in fell_back.items() if label not in by_label)
-    return out
+        when = read_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+        reads = by_label.setdefault(src.sport_label, [])
+        if when not in reads:
+            reads.append(when)
+    return [f"{label} season (using the last complete read from {', '.join(reads)})"
+            for label, reads in by_label.items()]
 
 
 def _seeded_from(regulars: List[Any], *seeded: Any) -> None:
     """Record on each playoff / bracket source in `seeded` the regular-season
-    sources its team strengths came from, so a regular season that failed is
-    reported when only the playoff games are on the slate
-    (`_season_failure_entries`, #289). Call it wherever
-    `set_regular_season_strengths` is fed from a regular source."""
+    sources its team strengths came from, so a regular season that failed
+    holds the playoff label too (`_require_seasons`, #289): its playoff model
+    would otherwise run on the league prior with nothing said. Call it
+    wherever `set_regular_season_strengths` is fed from a regular source."""
     for s in seeded:
         s.strength_sources = tuple(regulars)
 

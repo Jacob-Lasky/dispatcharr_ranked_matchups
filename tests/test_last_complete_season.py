@@ -315,9 +315,15 @@ def test_refresh_reports_the_read_it_simulated(monkeypatch, refresh_env, store):
         else {"events": []}))
     _write_prior, run, read = refresh_env
     run([nba.NbaRegularSource(season_end_year=2027)], weight_importance=1)
-    summary = read()["summary"]
+    cache = read()
+    summary = cache["summary"]
     assert [s for s in summary if "season (" in s] == [
         "NBA season (using the last complete read from 2026-10-12 04:00Z)"]
+    # Scored from this fetch, not held: the kept read stands in, so the label
+    # is no outage (#289's hold applies only with no usable read).
+    assert not any(s.startswith("NBA: error") for s in summary)
+    assert [(g["home"], g["away"]) for g in cache["games"]] == [("Boston", "Denver")]
+    assert not cache["games"][0].get("held_on_air")
 
 
 # ---------------------------------------------------------------------------
@@ -375,25 +381,21 @@ def test_every_points_based_source_falls_back_to_its_last_complete_read(plugin, 
     assert wrong == {}
 
 
-def test_a_label_split_between_a_kept_read_and_none_is_one_error_entry(plugin):
-    """Guard (Codex, round 1): MLS East fell back, West had no kept read;
-    the shared label is one entry, an error, naming both."""
+def test_a_label_shared_by_two_kept_reads_is_one_entry(plugin):
+    """Guard: MLS East and West share "MLS"; both simulating kept reads is one
+    entry naming each read's time once. A source with no kept read is not
+    listed here: its failed season held the label as an outage at fetch
+    (`_require_seasons`), with its own error entry."""
     class _Src:
         sport_label = "MLS"
 
-        def __init__(self, failure, read_at):
-            self._f, self._r = failure, read_at
-
-        def season_fetch_failure(self):
-            return self._f
+        def __init__(self, read_at):
+            self._r = read_at
 
         def season_fallback(self):
             return self._r
 
-    east, west = _Src("lost a day", T0), _Src("map unavailable", None)
-    assert plugin._season_failure_entries([east, west], [east, west]) == [
-        "MLS season (stakes not simulated): error (map unavailable; the rest used "
-        "the last complete read from 2026-10-12 04:00Z)"
-    ]
-    assert plugin._season_failure_entries([east], [east]) == [
-        "MLS season (using the last complete read from 2026-10-12 04:00Z)"]
+    east, west, none = _Src(T0), _Src(T0 + timedelta(hours=1)), _Src(None)
+    assert plugin._season_fallback_entries([east, west, none], [east, west, none]) == [
+        "MLS season (using the last complete read from 2026-10-12 04:00Z, 2026-10-12 05:00Z)"]
+    assert plugin._season_fallback_entries([east], []) == []

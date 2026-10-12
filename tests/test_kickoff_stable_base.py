@@ -1277,7 +1277,7 @@ class TestKeptChannelsKeepTheirNumbers:
         # reap, so they keep nothing here either (#288 review), and the
         # cancellation has already run when the numbers are read.
         assert ast.unparse(held[0].args[3]) == "autorec.cancelled_ids"
-        assert src.index("_autorecord_cancel(autorec, dry_run)") < src.index(
+        assert src.index("_autorecord_cancel_committed(") < src.index(
             "held_for_recordings = _numbers_held_for_recordings(")
         # Order: every plan exists before the reservation, which precedes the floor.
         assert (src.index("prep_by_marker[marker] = SimpleNamespace(")
