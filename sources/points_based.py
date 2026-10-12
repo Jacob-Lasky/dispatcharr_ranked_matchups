@@ -191,7 +191,9 @@ class PointsBasedSportSource(SportSource):
         if failure is not None:
             self._season_failure = failure
             kept = _season_store.recall(key) if key else None
-            if kept is None:
+            if kept is None or not kept.games:
+                # No kept read, or an empty one (an offseason): nothing to
+                # stand in, so `require_season` holds the label (#289).
                 logger.warning("[points_based] %s season not simulated: %s",
                                self.sport_label, failure)
                 return []

@@ -4320,8 +4320,10 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     for label, errs in bracket_failures.items():
         src_summary.append(_source_error_entry(f"{label} bracket (stakes not simulated)", "; ".join(errs)))
     # A points-based season scored from its last complete read (#289
-    # follow-up); one with no kept read was held as an outage at fetch.
-    src_summary.extend(_season_fallback_entries(sources, game_sources))
+    # follow-up); one with no kept read was held as an outage at fetch. Only
+    # when importance ran: a seed read at build time used nothing otherwise.
+    if weights.importance > 0:
+        src_summary.extend(_season_fallback_entries(sources, game_sources))
 
     cache = {
         "refreshed_at": datetime.now(timezone.utc).isoformat(),

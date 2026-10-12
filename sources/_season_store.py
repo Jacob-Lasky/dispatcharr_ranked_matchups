@@ -3,12 +3,13 @@ refreshes, so a failed read can simulate from it instead of from nothing
 (#289 follow-up).
 
 Why it exists. A season read that fails (a lost ESPN walk day, a failed
-club schedule, season request or chunk) is not simulated with holes in it
-(#289), but simulating NOTHING scores every game of the league with no
-standings stakes for that refresh. During an outage those games can fall
-out of the top N and be reaped, then come back on the next good refresh:
-the churn #261/#264 and #283 exist to prevent. Standings stakes move only as
-results come in, so a recent complete read is a far better season than none.
+club schedule, season request or chunk) is never simulated with holes in it
+(#289). With nothing to simulate instead, the refresh holds the league as an
+outage, like a failed rank feed (#283): its published games keep the scores
+they had, and no new game of the league is added until a read succeeds. A
+recent complete read avoids both: standings stakes move only as results come
+in, so a season a few hours old scores the league's games, new ones
+included, much as a fresh one would.
 
 What is kept. One file per season key (`PointsBasedSportSource.
 season_store_key`, which names the class, label and season, so a new season
@@ -109,8 +110,12 @@ def _decode(value: Any) -> Any:
 
 def remember(key: str, games: List[Dict[str, Any]], now: Optional[datetime] = None) -> None:
     """Keep `games`, a COMPLETE season read, as `key`'s last complete read.
-    Call it only for a read with no failure. Never raises: a season that
-    cannot be stored is logged and the refresh goes on."""
+    Call it only for a read with no failure. An empty season is not kept:
+    it cannot stand in for anything (fixtures published after it would be
+    missing), and an offseason source writes nothing. Never raises: a season
+    that cannot be stored is logged and the refresh goes on."""
+    if not games:
+        return
     now = now or _now()
     try:
         os.makedirs(STORE_DIR, exist_ok=True)

@@ -29,6 +29,9 @@ from tests.test_season_walk_failures import _EVERY_SEASON, _answer, _event, _fin
 UTC = timezone.utc
 PKG = "dispatcharr_ranked_matchups.sources"
 T0 = datetime(2026, 10, 12, 4, 0, tzinfo=UTC)
+# A one-game season: an empty one is never kept (it cannot stand in).
+_ONE = [{"id": 1, "home": "A", "away": "B", "home_points": 2, "away_points": 1,
+         "status": "FINISHED", "start_time": datetime(2026, 10, 1, 23, 0, tzinfo=UTC)}]
 
 
 @pytest.fixture
@@ -183,7 +186,9 @@ def test_ncaam_a_read_under_another_poll_does_not_stand_in(monkeypatch, store):
                           for i, t in enumerate(state["poll"])])
         if not state["games_ok"]:
             raise requests.ConnectionError("refused")
-        return _Resp([])
+        return _Resp([{"id": 9, "homeTeam": "Duke", "awayTeam": "UNC", "homePoints": 80,
+                       "awayPoints": 70, "homeWinner": True, "awayWinner": False,
+                       "startDate": "2025-12-01T00:00:00.000Z"}])
 
     stub_requests_get(monkeypatch, get)
     monkeypatch.setattr(ncaam.NcaamSource, "_current_season_year", staticmethod(lambda: 2026))
@@ -197,6 +202,41 @@ def test_ncaam_a_read_under_another_poll_does_not_stand_in(monkeypatch, store):
     same_poll = ncaam.NcaamSource(api_key="k")
     same_poll._fetch_games_cached()
     assert same_poll.season_fallback() == T0
+
+
+def test_an_empty_kept_read_does_not_stand_in(monkeypatch, store):
+    """WITNESS (Codex, round 5): an offseason's complete read is empty. Kept
+    and recalled, it let a failed read 'fall back' to no season, scoring
+    newly published games with no stakes instead of holding the label."""
+    _nba(monkeypatch, games_on=())._fetch_games_cached()
+    store.clock["now"] = T0 + timedelta(hours=6)
+    later = _nba(monkeypatch, dead_day="20261225")
+    assert later._fetch_games_cached() == []
+    assert later.season_fallback() is None
+    from dispatcharr_ranked_matchups.sources.base import SeasonUnavailable
+    with pytest.raises(SeasonUnavailable):
+        later.require_season()
+
+
+def test_no_fallback_entry_when_importance_is_off(monkeypatch, refresh_env, store):
+    """WITNESS (Codex, round 5): with importance off nothing was simulated,
+    so the summary must not say a kept read was used."""
+    src = _nba(monkeypatch)
+    src._fetch_games_cached()
+    store.clock["now"] = T0 + timedelta(hours=6)
+    nba = importlib.import_module(f"{PKG}.nba")
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).replace(hour=23, minute=0, second=0, microsecond=0)
+    game = _event("t1", "Boston", "Denver", tomorrow, "pre")
+    monkeypatch.setattr(nba, "_http_get", lambda url, *a, **k: (
+        None if "dates=20261225" in url
+        else {"events": [game]} if f"dates={tomorrow.strftime('%Y%m%d')}" in url
+        else {"events": []}))
+    seeded = nba.NbaRegularSource(season_end_year=2027)
+    seeded._fetch_games_cached()   # a build-time seed read that fell back
+    assert seeded.season_fallback() == T0
+    _write_prior, run, read = refresh_env
+    run([seeded])   # importance off
+    assert not any("season (" in s for s in read()["summary"])
 
 
 def test_no_prior_read_is_not_simulated(monkeypatch, store):
@@ -258,7 +298,7 @@ def test_an_untrustworthy_file_is_ignored(store, damage):
     """Guard: a file that is unreadable, for another key, from another
     version, or dated in the future (a clock that went backwards) is never
     recalled."""
-    store.remember("K|L|2027", [])
+    store.remember("K|L|2027", _ONE)
     path = store._path("K|L|2027")
     if damage == "garbage":
         with open(path, "wb") as f:
@@ -280,13 +320,13 @@ def test_an_untrustworthy_file_is_ignored(store, damage):
 def test_the_store_is_bounded(store):
     """Guard: one file per key, rewritten in place, and a file older than
     MAX_AGE deleted when another is written."""
-    store.remember("K|L|2027", [])
-    store.remember("K|L|2027", [])
+    store.remember("K|L|2027", _ONE)
+    store.remember("K|L|2027", _ONE)
     old = store._path("K|OLD|2026")
-    store.remember("K|OLD|2026", [])
+    store.remember("K|OLD|2026", _ONE)
     stale = (datetime.now(UTC) - timedelta(hours=37)).timestamp()
     os.utime(old, (stale, stale))
-    store.remember("K|L|2027", [])
+    store.remember("K|L|2027", _ONE)
     assert sorted(os.listdir(store.STORE_DIR)) == [os.path.basename(store._path("K|L|2027"))]
 
 
@@ -314,7 +354,10 @@ def test_refresh_reports_the_read_it_simulated(monkeypatch, refresh_env, store):
         else {"events": [game]} if f"dates={tomorrow.strftime('%Y%m%d')}" in url
         else {"events": []}))
     _write_prior, run, read = refresh_env
-    run([nba.NbaRegularSource(season_end_year=2027)], weight_importance=1)
+    src = nba.NbaRegularSource(season_end_year=2027)
+    run([src], weight_importance=1)
+    # The scorer's population is the kept read (Codex, round 5).
+    assert src.season_fallback() == T0 and _ids(src._fetch_games_cached()) == ["g20261105"]
     cache = read()
     summary = cache["summary"]
     assert [s for s in summary if "season (" in s] == [
