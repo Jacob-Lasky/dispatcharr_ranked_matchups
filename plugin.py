@@ -8301,8 +8301,11 @@ def _season_failure_entries(sources: List[Any], game_sources: List[Any]) -> List
     per label: MLS East and West share "MLS", and one outage must not read
     as two failed sources.
 
-    A season is reported when its games were scored (they got no standings
-    stakes instead of stakes from a season with holes in it), AND when a
+    A season simulated from its last complete read (#289 follow-up) reads
+    "<label> season (using the last complete read from <time>)"; one with no
+    usable read, whose games got no standings stakes, reads "<label> season
+    (stakes not simulated)" as an error. A season is reported when its games
+    were scored, AND when a
     scored playoff or bracket source took its team strengths from it
     (`strength_sources`, recorded by `_seeded_from` while the sources were
     built): that playoff model fell back to its prior, which a playoff-only
@@ -8313,15 +8316,32 @@ def _season_failure_entries(sources: List[Any], game_sources: List[Any]) -> List
     for s in game_sources:
         affected.update(id(r) for r in getattr(s, "strength_sources", ()))
     by_label: Dict[str, List[str]] = {}
+    fell_back: Dict[str, List[str]] = {}
     for src in sources:
         failure = getattr(src, "season_fetch_failure", None)
         err = failure() if callable(failure) and id(src) in affected else None
-        if isinstance(err, str) and err:
-            errs = by_label.setdefault(src.sport_label, [])
-            if err not in errs:
-                errs.append(err)
-    return [_source_error_entry(f"{label} season (stakes not simulated)", "; ".join(errs))
-            for label, errs in by_label.items()]
+        if not (isinstance(err, str) and err):
+            continue
+        fallback = getattr(src, "season_fallback", None)
+        read_at = fallback() if callable(fallback) else None
+        if read_at is not None:
+            # Simulated from the last complete read (#289 follow-up): the
+            # stakes are real, a little old, so an informational entry, not
+            # an error.
+            when = read_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+            reads = fell_back.setdefault(src.sport_label, [])
+            if when not in reads:
+                reads.append(when)
+            continue
+        errs = by_label.setdefault(src.sport_label, [])
+        if err not in errs:
+            errs.append(err)
+    return (
+        [f"{label} season (using the last complete read from {', '.join(reads)})"
+         for label, reads in fell_back.items()]
+        + [_source_error_entry(f"{label} season (stakes not simulated)", "; ".join(errs))
+           for label, errs in by_label.items()]
+    )
 
 
 def _seeded_from(regulars: List[Any], *seeded: Any) -> None:

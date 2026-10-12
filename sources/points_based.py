@@ -32,6 +32,7 @@ from abc import abstractmethod
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from . import _season_store
 from .base import FeedUnavailable, GameRow, MatchResult, SportSource, recording_lost_days
 from .._util import poisson_sample as _poisson
 
@@ -79,6 +80,9 @@ class PointsBasedSportSource(SportSource):
     # own their caches without calling super().__init__(). See
     # `_fetch_games_cached`.
     _season_failure: Optional[str] = None
+    # When a failed read was replaced by the last complete one, that read's
+    # time (`_season_store`); None otherwise. Same class-default reason.
+    _season_fallback_at: Optional[datetime] = None
     _DEFAULT_POINTS_FOR: float = 25.0
     _DEFAULT_POINTS_AGAINST: float = 25.0
 
@@ -128,15 +132,26 @@ class PointsBasedSportSource(SportSource):
     def _fetch_games_cached(self) -> List[Dict[str, Any]]:
         """The season list, fetched ONCE per source instance (one refresh).
 
-        A season that could not be fetched whole is NOT simulated (#289): the
-        list is `[]`, so no game of the league scores standings stakes, and
-        `season_fetch_failure()` says why, which the refresh reports as
-        "<label> season (stakes not simulated)", the way it reports a
-        Football-Data season (#228) or a playoff bracket (#245). Before, a
-        failed request or a lost walk day dropped its games from the list
-        and the simulator replayed the rest as the whole season: standings
-        missing results, a calendar missing fixtures, wrong stakes for every
-        game in the league, and nothing in the summary.
+        A season that could not be fetched whole is never simulated with holes
+        in it (#289). Before, a failed request or a lost walk day dropped its
+        games from the list and the simulator replayed the rest as the whole
+        season: standings missing results, a calendar missing fixtures, wrong
+        stakes for every game in the league, and nothing in the summary.
+        Instead, `season_fetch_failure()` says why, and the list is:
+
+          - the source's last COMPLETE read, if one is no older than
+            `_season_store.MAX_AGE` (`season_fallback()` gives its time; the
+            refresh reports "<label> season (using the last complete read
+            from <time>)"). Scoring nothing would drop every game of the
+            league to no standings stakes for the refresh, and its channels
+            could fall out of the top N and be reaped, then return: the churn
+            #261/#264 and #283 prevent elsewhere.
+          - otherwise `[]`, NOT simulated, reported as "<label> season
+            (stakes not simulated)", the way a Football-Data season (#228)
+            or a playoff bracket (#245) is.
+
+        A complete read is remembered (`_season_store.remember`) and replaces
+        the last one; a failed or partial read never is.
 
         Lost days are read in a record of their OWN, because this runs at
         scoring time (outside any) and at build time for the playoff
@@ -165,13 +180,53 @@ class PointsBasedSportSource(SportSource):
                 days = sorted(lost)
                 failure = (f"no answer for {len(days)} day(s) of the season "
                            f"({days[0].isoformat()}..{days[-1].isoformat()})")
+        key = self.season_store_key()
         if failure is not None:
             self._season_failure = failure
-            logger.warning("[points_based] %s season not simulated: %s",
-                           self.sport_label, failure)
-            return []
+            kept = _season_store.recall(key) if key else None
+            if kept is None:
+                logger.warning("[points_based] %s season not simulated: %s",
+                               self.sport_label, failure)
+                return []
+            logger.warning(
+                "[points_based] %s season read failed (%s); simulating the last "
+                "complete read, from %s", self.sport_label, failure, kept.read_at.isoformat())
+            self._season_fallback_at = kept.read_at
+            self._all_games_cache = kept.games
+            return self._all_games_cache
         self._all_games_cache = out or []
+        if key:
+            _season_store.remember(key, self._all_games_cache)
         return self._all_games_cache
+
+    def season_store_key(self) -> Optional[str]:
+        """The key this source's complete season reads are kept under
+        (`_season_store`): class, label and season, so a new season never
+        reads the last one's games and two sources never share one. None
+        when the source names no season (`_season_store_id`), which keeps
+        nothing."""
+        season = self._season_store_id()
+        if season is None:
+            return None
+        return f"{type(self).__name__}|{self.sport_label}|{season}"
+
+    def _season_store_id(self) -> Optional[str]:
+        """The season this source simulates, for `season_store_key`. The
+        family names it one of three ways (NHL and MLB `season`, the NCAA
+        baseball, softball and soccer and MLS sources `season_year`, NBA,
+        NFL, WNBA and NCAAW `season_end_year`); a source whose population
+        also depends on settings (NCAAF divisions, NCAAM's poll) overrides
+        this to say so."""
+        for attr in ("season", "season_year", "season_end_year"):
+            value = getattr(self, attr, None)
+            if value is not None:
+                return str(value)
+        return None
+
+    def season_fallback(self) -> Optional[datetime]:
+        """When a failed read was replaced by the last complete one, that
+        read's time, else None (see `_fetch_games_cached`)."""
+        return self._season_fallback_at
 
     def season_fetch_failure(self) -> Optional[str]:
         """Why this refresh's season list could not be fetched whole, or None

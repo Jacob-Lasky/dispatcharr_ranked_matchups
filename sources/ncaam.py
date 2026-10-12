@@ -157,6 +157,11 @@ class NcaamSource(PointsBasedSportSource):
         now = datetime.now(timezone.utc)
         return now.year + 1 if now.month >= 11 else now.year
 
+    def _season_store_id(self) -> Optional[str]:
+        """The season AND the poll: the stored population is the games of
+        the poll's teams (`points_based.season_store_key`)."""
+        return f"{self._current_season_year()}|{self.poll_name}"
+
     def _poll(self, season: int) -> Optional[Dict[str, int]]:
         """`_fetch_rankings(season)`, read ONCE per source (#283).
 
