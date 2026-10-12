@@ -522,6 +522,31 @@ def _never_fetches_q():
     )
 
 
+def _reverse_foreign_keys(model) -> List[Any]:
+    """Every foreign key elsewhere that points at `model`, HIDDEN ones
+    included: ChannelOverride's (epg_data, channel_group) are related_name="+",
+    and _meta.related_objects leaves hidden relations out. Whatever
+    Dispatcharr adds later is found the same way."""
+    from django.db import models as dj_models
+    return [
+        rel for rel in model._meta.get_fields(include_hidden=True)
+        if rel.auto_created and not rel.concrete and rel.one_to_many
+        and isinstance(rel.field, dj_models.ForeignKey)
+    ]
+
+
+def _group_is_referenced(group) -> bool:
+    """True while anything still points at `group`: a channel, a stream, an
+    M3U account's settings for it (ChannelGroupM3UAccount, CASCADE: deleting
+    the group deletes them), a channel override (SET_NULL), or whatever
+    Dispatcharr adds. A group is deleted only when this is False."""
+    from apps.channels.models import ChannelGroup
+    return any(
+        rel.related_model._base_manager.filter(**{rel.field.name: group}).exists()
+        for rel in _reverse_foreign_keys(ChannelGroup)
+    )
+
+
 def _move_owned_epg_rows(old_src, new_src) -> int:
     """Move the guide entries we own from `old_src` (a source named after a
     previous live-group name) onto `new_src`, so every channel pointing at one
@@ -553,7 +578,6 @@ def _move_owned_epg_rows(old_src, new_src) -> int:
     """
     from apps.channels.models import Channel
     from apps.epg.models import EPGData, ProgramData
-    from django.db import models as dj_models
 
     ours = EPGData.objects.filter(_owned_tvg_id_q(), epg_source=old_src)
     clashes = dict(
@@ -562,13 +586,7 @@ def _move_owned_epg_rows(old_src, new_src) -> int:
         ).values_list("tvg_id", "id")
     )
     if clashes:
-        # include_hidden: ChannelOverride.epg_data is related_name="+", and
-        # _meta.related_objects leaves hidden relations out.
-        pointers = [
-            rel for rel in EPGData._meta.get_fields(include_hidden=True)
-            if rel.auto_created and not rel.concrete and rel.one_to_many
-            and isinstance(rel.field, dj_models.ForeignKey)
-        ]
+        pointers = _reverse_foreign_keys(EPGData)
         pairs = list(
             ours.filter(tvg_id__in=list(clashes)).values_list("id", "tvg_id", "name")
         )
@@ -1679,7 +1697,7 @@ def _cleanup_empty_archive(recordings_group_name) -> bool:
     under it, so the group exists only while it holds recordings. Returns True if
     anything was removed. Safe: the archive channel is deleted only when it has
     zero Recording rows, so the CASCADE takes nothing with it."""
-    from apps.channels.models import Channel, ChannelGroup, Recording, Stream
+    from apps.channels.models import Channel, ChannelGroup, Recording
     from django.db import transaction
     removed = False
     # Every case variant: an install split by the old exact-name lookup has
@@ -1689,16 +1707,15 @@ def _cleanup_empty_archive(recordings_group_name) -> bool:
     # exact name always was, as before).
     with transaction.atomic():  # the row locks below need one; nests as a savepoint
         for grp in list(_archive_groups(recordings_group_name)):
-            # Row lock before the stream check: see _commit_group_setup.
-            ChannelGroup.objects.select_for_update().filter(pk=grp.pk).exists()
             arch = Channel.objects.filter(channel_group=grp, tvg_id=ARCHIVE_TVG_ID).first()
-            ours = arch is not None or grp.name == recordings_group_name
+            if arch is None and grp.name != recordings_group_name:
+                continue  # never ours: not locked, not touched
+            # Row lock before the reference check: see _commit_group_setup.
+            ChannelGroup.objects.select_for_update().filter(pk=grp.pk).exists()
             if arch is not None and not Recording.objects.filter(channel_id=arch.id).exists():
                 arch.delete()
                 removed = True
-            if (ours and Channel.objects.filter(channel_group=grp).count() == 0
-                    and not Stream.objects.filter(channel_group=grp).exists()):
-                # Not while it holds streams: deleting a group nulls their group.
+            if not _group_is_referenced(grp):
                 grp.delete()
                 removed = True
     return removed
@@ -6745,7 +6762,7 @@ def _commit_group_setup(
     Not for a dry run (nothing here is a preview). Returns the target group,
     the EPGSource, and the counts the summary reports.
     """
-    from apps.channels.models import Channel, ChannelGroup, Stream
+    from apps.channels.models import Channel, ChannelGroup
     from apps.epg.models import EPGData, EPGSource
     from django.db import transaction
 
@@ -6782,14 +6799,14 @@ def _commit_group_setup(
             # this plugin itself would have created. Exact, case-insensitive:
             # see _DELETABLE_LEGACY_GROUP_NAMES for why this is not a substring
             # test and must not become one again (#157).
-            # Kept while it still holds streams: deleting a group nulls the
-            # group of every stream in it (SET_NULL). The row lock first, so a
-            # concurrent stream assignment (an M3U refresh) cannot land between
-            # the check and the delete: on Postgres its foreign-key check
-            # takes a key-share lock on this row, which waits on ours.
+            # Kept while ANYTHING still points at it (_group_is_referenced):
+            # a stream, an M3U account's settings for it, an override. The row
+            # lock first, so a concurrent assignment (an M3U refresh) cannot
+            # land between the check and the delete: on Postgres its
+            # foreign-key check takes a key-share lock on this row, which
+            # waits on ours.
             ChannelGroup.objects.select_for_update().filter(pk=old_g.pk).exists()
-            if (Channel.objects.filter(channel_group=old_g).count() == 0
-                    and not Stream.objects.filter(channel_group=old_g).exists()):
+            if not _group_is_referenced(old_g):
                 if old_g.name.strip().lower() in deletable_group_names:
                     old_g.delete()
                     deleted_old_groups += 1

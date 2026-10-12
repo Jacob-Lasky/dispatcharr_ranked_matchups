@@ -309,6 +309,45 @@ def scenario_witness_split_archives_use_the_one_the_setting_names(env):
     assert not m.ChannelGroup.objects.filter(pk__in=[older.pk, named.pk]).exists()
 
 
+def scenario_witness_a_renamed_away_group_with_m3u_settings_is_kept(env):
+    """Codex review, round 7: "empty" counted channels and streams only. An M3U
+    account's settings for the group (ChannelGroupM3UAccount, CASCADE) went
+    with it, and a channel override naming it (SET_NULL) lost its group."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    old = ours.channel_group
+    acct = m.M3UAccount.objects.create(name="provider")
+    link = m.ChannelGroupM3UAccount.objects.create(channel_group=old, m3u_account=acct,
+                                                    auto_channel_sync=True)
+    override = m.ChannelOverride.objects.create(channel=user_ch, channel_group=old)
+    _write_cache(env, [game])
+    result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+    assert result["status"] == "ok", result
+    ours.refresh_from_db()
+    assert ours.channel_group.name == NEW
+    assert m.ChannelGroupM3UAccount.objects.filter(pk=link.pk, channel_group=old).exists(), (
+        "the M3U account's settings for the group were deleted with it"
+    )
+    override.refresh_from_db()
+    assert override.channel_group_id == old.pk, "the override lost its group"
+
+
+def scenario_every_reference_to_a_group_is_seen(env):
+    """Instrument for _group_is_referenced: it must see the HIDDEN relation
+    (ChannelOverride.channel_group is related_name="+") as well as the rest."""
+    m = env.m
+    from apps.channels.models import ChannelGroup
+    names = {rel.field.model.__name__ for rel in env.plugin._reverse_foreign_keys(ChannelGroup)}
+    assert {"Channel", "Stream", "ChannelOverride", "ChannelGroupM3UAccount"} <= names, names
+    grp = m.ChannelGroup.objects.create(name="probe")
+    assert env.plugin._group_is_referenced(grp) is False
+    user_ch, _ = _seed_source_channel(env)
+    m.ChannelOverride.objects.create(channel=user_ch, channel_group=grp)
+    assert env.plugin._group_is_referenced(grp) is True
+
+
 def scenario_witness_archive_cleanup_keeps_a_group_holding_streams(env):
     """Codex review, round 5: an empty archive group was deleted even while
     streams belonged to it, nulling their group."""
@@ -688,7 +727,7 @@ def _apply_layout(source, module_writers=frozenset()):
 
 
 @pytest.mark.parametrize("fn_name", ["_commit_group_setup", "_cleanup_empty_archive"])
-def test_a_group_is_locked_before_its_streams_are_checked(fn_name):
+def test_a_group_is_locked_before_its_references_are_checked(fn_name):
     """Codex review, round 6: a stream assigned to a group between the
     "does it hold streams?" check and the delete still lost its group. The
     group row is locked first (Postgres serialises the stream's foreign-key
@@ -699,9 +738,14 @@ def test_a_group_is_locked_before_its_streams_are_checked(fn_name):
     calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
     locks = [n.lineno for n in calls if isinstance(n.func, ast.Attribute)
              and n.func.attr == "select_for_update" and "ChannelGroup" in ast.unparse(n.func)]
-    checks = [n.lineno for n in calls if ast.unparse(n).startswith("Stream.objects.filter(")]
+    checks = [n.lineno for n in calls if getattr(n.func, "id", None) == "_group_is_referenced"]
     assert locks and checks, (locks, checks)
-    assert min(locks) < min(checks), f"{fn_name} checks streams before locking the group"
+    assert min(locks) < min(checks), f"{fn_name} checks references before locking the group"
+    if fn_name == "_cleanup_empty_archive":
+        # Codex review, round 7: only OUR groups are locked; a user's group
+        # that merely matches in case is skipped before the lock.
+        skips = [n.lineno for n in ast.walk(fn) if isinstance(n, ast.Continue)]
+        assert skips and min(skips) < min(locks), "cleanup locks groups that are not ours"
 
 
 class TestNothingCommitsBeforeTheLastCheck:
