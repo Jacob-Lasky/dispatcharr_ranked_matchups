@@ -106,6 +106,84 @@ def scenario_witness_a_stopped_rename_leaves_no_two_channels_on_401(env):
     assert _numbers_in(env, NEW) == [401, 402]
 
 
+def scenario_witness_a_refused_rename_leaves_no_two_channels_on_401(env):
+    """Codex review: the full-band refusal (compact, every slot taken) returns
+    after numbering, and the group setup used to have committed by then. A
+    band of ONE slot, 401, held in the new group by the user's own channel:
+    the rename is refused, and must leave our channel where it was."""
+    m = env.m
+    game, ours, stranger = _published_on_401(env)
+    _write_cache(env, [game])
+    one_slot = dict(COMPACT, compact_band_size=1)
+    result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **one_slot))
+    assert result["status"] == "error" and "no free channel numbers" in result["message"], result
+    ours.refresh_from_db()
+    assert ours.channel_group.name == OLD, (
+        f"the refused apply moved our channel into {ours.channel_group.name!r}; "
+        f"{NEW!r} now holds {_numbers_in(env, NEW)}"
+    )
+    assert _numbers_in(env, NEW) == [401]
+    assert m.ChannelGroup.objects.filter(name=OLD).exists()
+
+
+def scenario_witness_a_case_only_archive_rename_keeps_the_archive(env):
+    """Codex review: 'Recordings group name' changed only in case. The archive
+    group matched the protected name exactly, so it looked like a previous
+    LIVE group: its archive channel was moved into the live group and, on
+    the base branch, reaped there (deleted)."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    archive = m.ChannelGroup.objects.create(name="Matchups Recordings")
+    archive_ch = m.Channel.objects.create(
+        name="Matchups Recordings", channel_number=9999, channel_group=archive,
+        tvg_id=env.plugin.ARCHIVE_TVG_ID,
+    )
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    _publish(env, [game], settings=_settings(recordings_group_name="matchups recordings", **COMPACT))
+    row = m.Channel.objects.filter(pk=archive_ch.pk).first()
+    assert row is not None and row.channel_group_id == archive.pk, (
+        "the archive channel was " + ("deleted" if row is None
+                                      else f"moved into {row.channel_group.name!r}")
+    )
+    assert m.ChannelGroup.objects.filter(pk=archive.pk).exists()
+
+
+def scenario_a_rename_keeps_our_numbers(env):
+    """Guard: numbering now runs BEFORE the group move commits, so it must
+    count our channels in the group being renamed away from as ours. Counted
+    as somebody else's, our own 401 reserves 401 against us and the rename
+    renumbers the channel to 402."""
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    _write_cache(env, [game])
+    result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+    assert result["status"] == "ok", result
+    ours.refresh_from_db()
+    assert (ours.channel_group.name, int(ours.channel_number)) == (NEW, 401)
+
+
+def scenario_a_case_only_rename_of_the_live_group_moves_our_channel(env):
+    """Guard: the LIVE name is matched exactly, unlike the archive's. A
+    case-only rename must still move our channel out of the old-case group
+    (same Channel.id); matched ignoring case, the old group was protected,
+    our channel stranded in it, and a second channel was created."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    _write_cache(env, [game])
+    # Not _publish: it counts channels in the literal "Top Matchups" group.
+    first = env.plugin._action_apply(_settings(channel_profile_name="top matchups", **COMPACT))
+    assert first["status"] == "ok", first
+    ours = m.Channel.objects.get(tvg_id=G401)
+    assert ours.channel_group.name == "top matchups"
+    result = env.plugin._action_apply(_settings(channel_profile_name="Top Matchups", **COMPACT))
+    assert result["status"] == "ok", result
+    mine = list(m.Channel.objects.filter(tvg_id=G401))
+    assert [c.pk for c in mine] == [ours.pk], [(c.pk, c.channel_group.name) for c in mine]
+    assert mine[0].channel_group.name == "Top Matchups"
+
+
 def _snapshot(env):
     """Every row of every model, every state file the plugin writes, and the
     logo directory: what a stopped apply must leave exactly as it found it."""
@@ -122,7 +200,10 @@ def _snapshot(env):
             with open(path, "rb") as f:
                 files[attr] = hashlib.sha256(f.read()).hexdigest()
     logos_dir = os.path.join(env.tmp, "logos")
-    files["logos"] = sorted(os.listdir(logos_dir)) if os.path.isdir(logos_dir) else []
+    if os.path.isdir(logos_dir):
+        for name in sorted(os.listdir(logos_dir)):
+            with open(os.path.join(logos_dir, name), "rb") as f:
+                files[f"logos/{name}"] = hashlib.sha256(f.read()).hexdigest()
     return rows, files
 
 
@@ -218,9 +299,12 @@ def _is_atomic(node):
         ast.unparse(i.context_expr) == _ATOMIC for i in node.items)
 
 
-def _write_sites(fn, writers):
+def _write_sites(fn, writers, aliases=None):
     """(line, label) for every write `fn` makes itself, not inside nested
-    defs (those count where they are CALLED, through `writers`)."""
+    defs (those count where they are CALLED, through `writers`). `writers`
+    holds plain names (functions of the same module) and "module.func" names
+    (other plugin modules), resolved through `aliases` ({local name: module})."""
+    aliases = aliases or {}
     querysets = set()
     for n in ast.walk(fn):
         if isinstance(n, ast.Assign) and any(k in ast.unparse(n.value) for k in (".objects", ".filter(")):
@@ -236,6 +320,8 @@ def _write_sites(fn, writers):
             f = n.func
             name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
             receiver = ast.unparse(f.value) if isinstance(f, ast.Attribute) else ""
+            qualified = (f"{aliases[receiver]}.{f.attr}" if isinstance(f, ast.Attribute)
+                         and receiver in aliases else aliases.get(name))
             if isinstance(f, ast.Attribute) and f.attr in _ORM_WRITES and receiver != "os.path":
                 out.append((n.lineno, ast.unparse(f)))
             elif isinstance(f, ast.Attribute) and f.attr == "update" and (
@@ -243,8 +329,8 @@ def _write_sites(fn, writers):
                 out.append((n.lineno, ast.unparse(f)))
             elif isinstance(f, ast.Attribute) and receiver == "os" and f.attr in ("replace", "remove", "unlink"):
                 out.append((n.lineno, ast.unparse(f)))
-            elif name in _FILE_WRITES or name in writers:
-                out.append((n.lineno, name))
+            elif name in _FILE_WRITES or (not receiver and name in writers) or qualified in writers:
+                out.append((n.lineno, qualified or name))
         for c in ast.iter_child_nodes(n):
             visit(c)
 
@@ -252,39 +338,84 @@ def _write_sites(fn, writers):
     return out
 
 
-def _writers(functions, known=()):
+def _writers(functions, known=(), aliases=None):
     """Names among `functions` that write, directly or through each other."""
     found = set(known)
     changed = True
     while changed:
         changed = False
         for name, fn in functions.items():
-            if name not in found and _write_sites(fn, found):
+            if name not in found and _write_sites(fn, found, aliases):
                 found.add(name)
                 changed = True
     return found
 
 
-def _apply_layout(source):
+def _module_writers(repo=os.path.dirname(PLUGIN_PY)):
+    """"module.func" for every module-level function of a plugin module that
+    writes (a file, the database), resolved within each module."""
+    found = set()
+    paths = [os.path.join(repo, n) for n in os.listdir(repo) if n.endswith(".py")]
+    sources = os.path.join(repo, "sources")
+    paths += [os.path.join(sources, n) for n in os.listdir(sources) if n.endswith(".py")]
+    for path in paths:
+        mod = os.path.relpath(path, repo)[:-3].replace(os.sep, ".")
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        found |= {f"{mod}.{name}" for name in _writers(fns)}
+    return found
+
+
+def _aliases(tree):
+    """{local name: module} for `from . import X as Y` and `from .X import f`
+    anywhere in `tree` (apply imports its siblings locally)."""
+    out = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom) and n.level == 1:
+            for a in n.names:
+                if n.module is None:
+                    out[a.asname or a.name] = a.name
+                else:
+                    out[a.asname or a.name] = f"{n.module}.{a.name}"
+    return out
+
+
+def _apply_layout(source, module_writers=frozenset()):
     tree = ast.parse(source)
+    aliases = _aliases(tree)
+    # A `from .X import f` alias names the function itself.
+    func_aliases = {k: v for k, v in aliases.items() if v in module_writers}
     module = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
     apply = module["_action_apply"]
     nested = {n.name: n for n in ast.walk(apply) if isinstance(n, ast.FunctionDef) and n is not apply}
-    writers = _writers(nested, _writers(module))
+    known = set(module_writers) | set(func_aliases)
+    mod_aliases = {k: v for k, v in aliases.items() if k not in func_aliases}
+    writers = _writers(nested, _writers(module, known, mod_aliases), mod_aliases)
     checks = [n.lineno for n in ast.walk(apply) if isinstance(n, ast.Call)
               and getattr(n.func, "id", None) == "_apply_time_short"]
     main = [n.lineno for n in apply.body if _is_atomic(n)]
-    return sorted(set(_write_sites(apply, writers))), checks, main
+    return sorted(set(_write_sites(apply, writers, mod_aliases))), checks, main
 
 
 class TestNothingCommitsBeforeTheLastCheck:
     def _layout(self):
-        return _apply_layout(open(PLUGIN_PY, encoding="utf-8").read())
+        return _apply_layout(open(PLUGIN_PY, encoding="utf-8").read(), _module_writers())
 
     def test_instrument(self):
         sites, checks, main = self._layout()
         assert len(checks) >= 2 and len(main) == 1, (checks, main)
         assert any(label == _ATOMIC for _l, label in sites)
+        # Writes in sibling modules are resolved, not only plugin.py's own.
+        writers = _module_writers()
+        assert {"logos.download_thumb", "recording.save_state", "_util.write_json_atomic"} <= writers
+
+    def test_a_write_through_an_imported_module_is_seen(self):
+        snippet = ("def _action_apply(s):\n    from . import logos as matchup_logos\n"
+                   "    matchup_logos.download_thumb('u', 'p')\n"
+                   "    _apply_time_short('a', False)\n    _apply_time_short('b', False)\n"
+                   "    with transaction.atomic():\n        pass")
+        sites, checks, _main = _apply_layout(snippet, {"logos.download_thumb"})
+        assert [s for s in sites if s[0] < max(checks)], sites
 
     def test_no_write_precedes_the_last_check(self):
         sites, checks, _main = self._layout()

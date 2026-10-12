@@ -6534,6 +6534,7 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 def _reserved_channel_numbers(
     target_group, band_start: int, band_end: Optional[int] = None,
+    pending_groups=(),
 ) -> set:
     """Every channel number in [band_start, band_end] that some OTHER channel
     already publishes under, so numbering can route around it. `band_end=None`
@@ -6580,14 +6581,21 @@ def _reserved_channel_numbers(
     from apps.channels.models import Channel
     from django.db.models import Q
 
+    # Ours: our channels in the target group, and in `pending_groups`, the
+    # previous groups apply's _commit_group_setup is about to move them out
+    # of (in place). Numbering runs BEFORE that move commits, so a full band
+    # refused there leaves nothing moved, and it must reserve exactly what it
+    # would read after the move.
+    ours_in = [g for g in [target_group, *pending_groups] if g is not None]
     reserved = _published_numbers(
-        Channel.objects.exclude(_owned_tvg_id_q() & Q(channel_group=target_group)),
+        Channel.objects.exclude(_owned_tvg_id_q() & Q(channel_group__in=ours_in)),
         band_start, band_end,
     )
-    reserved |= _published_numbers(
-        Channel.objects.filter(channel_group=target_group).exclude(_owned_tvg_id_q()),
-        band_start, band_end, effective=False,
-    )
+    if target_group is not None:
+        reserved |= _published_numbers(
+            Channel.objects.filter(channel_group=target_group).exclude(_owned_tvg_id_q()),
+            band_start, band_end, effective=False,
+        )
     return reserved
 
 
@@ -6819,6 +6827,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from apps.channels.models import Channel, ChannelGroup, ChannelStream, Recording, Stream
     from apps.epg.models import EPGSource, EPGData, ProgramData
     from django.db import transaction
+    from django.db.models import Q
 
     from .scoring import format_channel_name
 
@@ -6969,8 +6978,16 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         set() if _cache_vouched(cache)
         else _guide_kept_ids(_owned_published_channels(), datetime.now(timezone.utc))
     )
+    # The ARCHIVE name is matched ignoring case, as archive_enabled compares
+    # it: changing only the case of 'Recordings group name' made the existing
+    # archive group look like a previous LIVE group, and the setup moved its
+    # archive channel into the live group. The LIVE name stays exact on
+    # purpose: a case-only rename of the live group must still move our
+    # channels out of the old-case group, which this exclusion would block.
+    _protected_q = Q(name__in=_protected_group_names) | Q(
+        name__iexact=recordings_group_name.strip())
     foreign_owned_groups = list(
-        ChannelGroup.objects.exclude(name__in=_protected_group_names)
+        ChannelGroup.objects.exclude(_protected_q)
         .filter(_owned_tvg_id_q("channels__"))
         .distinct()
     )
@@ -6979,7 +6996,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # our marker (a user who added this server's own XMLTV output as a
     # source), so it is never ours to empty or delete.
     foreign_epg_sources = list(
-        EPGSource.objects.exclude(name__in=_protected_group_names)
+        EPGSource.objects.exclude(_protected_q)
         .filter(_owned_tvg_id_q("epgs__"))
         .filter(_never_fetches_q())
         .distinct()
@@ -7033,9 +7050,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # group AND in the previous groups _commit_group_setup will move into it
     # (in place, same Channel.id), so everything decided before the move sees
     # the channels it will act on. A dry run moves nothing, so it never did.
-    owned_groups = ([target_group] if target_group is not None else []) + (
-        [] if dry_run else foreign_owned_groups
-    )
+    moving_groups = [] if dry_run else foreign_owned_groups
+    owned_groups = ([target_group] if target_group is not None else []) + moving_groups
     existing_virtuals = {
         ch.tvg_id: ch for ch in Channel.objects.filter(
             _owned_tvg_id_q(), channel_group__in=owned_groups,
@@ -7549,19 +7565,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     short = _apply_time_short("before cancelling recordings", dry_run)
     if short is not None:
         return short
-    # The LAST time check is behind us: only now may apply commit anything
-    # (tests/test_apply_no_write_before_gate.py). First the group and guide
-    # setup steps 1 and 2 read for, then the cancellations below. Numbering,
-    # further down, reads the channels where this leaves them.
-    if not dry_run:
-        setup = _commit_group_setup(
-            group_name, target_group, foreign_owned_groups, foreign_epg_sources,
-            _deletable_group_names,
-        )
-        target_group, epg_source = setup["target_group"], setup["epg_source"]
-        migrated_from_old_group = setup["migrated"]
-        deleted_old_groups = setup["deleted_groups"]
-        deleted_old_sources = setup["deleted_sources"]
     _autorecord_cancel_committed(
         autorec, dry_run,
         markers={m for m in autorec.ours if m not in prep_by_marker},
@@ -7625,7 +7628,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             default=0,
         )
         reserved_numbers = (
-            _reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings
+            _reserved_channel_numbers(target_group, lowest_kickoff, pending_groups=moving_groups)
+            | held_for_recordings
         )
         remembered_base, remembered_record = _load_numbering_state()
         virtual_base = _resolve_kickoff_base(
@@ -7638,6 +7642,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         virtual_base = _resolve_virtual_base(settings, highest_other)
         reserved_numbers = _reserved_channel_numbers(
             target_group, virtual_base, virtual_base + band_size - 1,
+            pending_groups=moving_groups,
         ) | held_for_recordings
     existing_numbers = {
         marker: int(ch.channel_number)
@@ -7670,12 +7675,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # setting to move.
             band_top = virtual_base + band_size - 1
             # NOT "nothing was changed": by this point apply may already have
-            # created the target group, migrated channels into it after a rename,
-            # and created or upgraded the EPG source, all outside the transaction
-            # below. Claiming otherwise would send someone looking in the
-            # wrong place. (No description or logo has been fetched yet: the
-            # pre-pass's network half runs after numbering, #288.) What is true is that no channel was added, renumbered or
-            # removed, because every one of those happens after this return.
+            # committed the first step's recording cancellations (they run
+            # before numbering on purpose, #288). The group and guide setup
+            # has NOT run: it commits after this refusal, so a refused rename
+            # leaves our channels where they were. (No description or logo
+            # has been fetched yet: the pre-pass's network half runs after
+            # numbering, #288.) What is true is that no channel was added,
+            # renumbered, moved or removed.
             msg = (
                 f"Compact numbering found no free channel numbers in {virtual_base}-"
                 f"{band_top}: every number in that range is already used by another "
@@ -7691,6 +7697,21 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 "no free number in %d-%d",
                 len(placeable), len(decided_games), virtual_base, virtual_base + band_size - 1,
             )
+    # Apply's group and guide setup commits HERE: after its last time check
+    # (tests/test_apply_no_write_before_gate.py) AND after the full-band
+    # refusal above, so neither a stopped apply nor a refused one leaves our
+    # channel moved into the new group beside a channel already on its number.
+    # Numbering above read the channels as this move will leave them
+    # (_reserved_channel_numbers' pending_groups).
+    if not dry_run:
+        setup = _commit_group_setup(
+            group_name, target_group, foreign_owned_groups, foreign_epg_sources,
+            _deletable_group_names,
+        )
+        target_group, epg_source = setup["target_group"], setup["epg_source"]
+        migrated_from_old_group = setup["migrated"]
+        deleted_old_groups = setup["deleted_groups"]
+        deleted_old_sources = setup["deleted_sources"]
     # ONLY NOW is a game genuinely seen: decided by the pre-pass AND given a
     # number. seen_markers drives stale detection, so a marker in it whose game
     # the write loop then skips leaves its channel neither published nor

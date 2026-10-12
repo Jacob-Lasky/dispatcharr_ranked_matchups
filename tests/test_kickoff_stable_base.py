@@ -519,7 +519,9 @@ class TestKeptRecordingChannelsHoldTheirNumbers:
     def test_apply_adds_them_to_the_reservation_in_both_modes(self):
         src, _fn = _apply_fn()
         held = src.index("held_for_recordings = _numbers_held_for_recordings(")
-        kickoff = src.index("_reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings")
+        kickoff = src.index(
+            "_reserved_channel_numbers(target_group, lowest_kickoff, pending_groups=moving_groups)\n"
+            "            | held_for_recordings")
         resolve = src.index("virtual_base = _resolve_kickoff_base(")
         compact = src.index(") | held_for_recordings", resolve)
         assert held < kickoff < resolve < compact
