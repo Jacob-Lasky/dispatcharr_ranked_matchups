@@ -716,6 +716,85 @@ def scenario_a_skipped_games_recording_is_planned_again_with_its_channel(env):
     assert list(m.Recording.objects.values_list("channel_id", flat=True)) == [owned[G431].id]
 
 
+def _allowed_source_channel(env):
+    """A user channel whose one stream sits in group "Allowed" (the seeded
+    ones are all in "Sports")."""
+    m = env.m
+    acct = m.M3UAccount.objects.create(name="acct-allowed", max_streams=4)
+    grp, _ = m.ChannelGroup.objects.get_or_create(name="Allowed")
+    stream = m.Stream.objects.create(name="Allowed HD", m3u_account=acct, channel_group=grp)
+    ch = m.Channel.objects.create(name="Allowed", channel_number=20, channel_group=grp)
+    m.ChannelStream.objects.create(channel=ch, stream=stream, order=0)
+    return ch
+
+
+def scenario_witness_a_kept_recording_whose_only_stream_is_excluded_holds_no_slot(env):
+    """#297: 411's game vanishes from the cache (a source outage) while its
+    team is still Recorded, so its scheduled recording is kept (#224) and its
+    channel with it. The user has excluded the "Sports" group, so apply strips
+    the kept channel's only stream (#206): the recording will capture nothing.
+    It still held the only slot, and 431, playable from an allowed group, got
+    no recording, on this apply and every one after."""
+    m = env.m
+    sports_ch, _ = _seed_source_channel(env)
+    allowed_ch = _allowed_source_channel(env)
+    settings = {"recorded_teams": "Home411, Home431", "recording_slots": 1}
+    kickoff = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(411, kickoff, sports_ch.id, home="Home411", away="Away411")],
+                     settings=_settings(**settings))
+    rec = m.Recording.objects.get(channel=owned[G411])
+    result = _apply(env, [_row(431, kickoff + timedelta(minutes=30), allowed_ch.id,
+                               home="Home431", away="Away431")],
+                    excluded_groups="Sports", **settings)
+    owned = _owned(env)
+    assert G431 in owned, result["message"]
+    recs = list(m.Recording.objects.values_list("channel_id", flat=True))
+    assert recs == [owned[G431].id], (recs, result["message"])
+    assert not m.Recording.objects.filter(pk=rec.pk).exists()
+
+
+def scenario_a_kept_recording_with_an_allowed_stream_left_is_kept(env):
+    """#297's guard: 411's channel carries a stream from "Sports" AND one from
+    "Allowed". Excluding "Sports" leaves it one it can record from, so the
+    outage protection (#224) still keeps the recording, and it still holds
+    the only slot."""
+    m = env.m
+    sports_ch, _ = _seed_source_channel(env)
+    allowed_ch = _allowed_source_channel(env)
+    settings = {"recorded_teams": "Home411, Home431", "recording_slots": 1}
+    kickoff = _now() + timedelta(hours=6)
+    both = _row(411, kickoff, sports_ch.id, home="Home411", away="Away411")
+    both["channel_ids"] = [sports_ch.id, allowed_ch.id]
+    owned = _publish(env, [both], settings=_settings(**settings))
+    assert m.ChannelStream.objects.filter(channel=owned[G411]).count() == 2
+    rec = m.Recording.objects.get(channel=owned[G411])
+    _apply(env, [_row(431, kickoff + timedelta(minutes=30), allowed_ch.id,
+                      home="Home431", away="Away431")],
+           excluded_groups="Sports", **settings)
+    assert m.Recording.objects.filter(pk=rec.pk).exists()
+    assert m.Recording.objects.count() == 1
+    assert m.ChannelStream.objects.filter(channel=owned[G411]).count() == 1
+
+
+def scenario_a_kept_recording_on_a_channel_with_no_stream_is_cancelled(env):
+    """The same rule without any exclusion: 411 was published as a placeholder
+    (a Recorded team, no feed yet) and its game then vanished from the cache.
+    Its channel has nothing to record from, so its recording is not kept as
+    an outage survivor; it is planned again when the game returns."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    settings = {"recorded_teams": "Home411"}
+    kickoff = _now() + timedelta(hours=6)
+    owned = _publish(env, [_row(411, kickoff, 999999, home="Home411", away="Away411")],
+                     settings=_settings(**settings))
+    assert m.ChannelStream.objects.filter(channel=owned[G411]).count() == 0
+    rec = m.Recording.objects.get(channel=owned[G411])
+    _apply(env, [_row(431, kickoff + timedelta(days=1), user_ch.id,
+                      home="Home431", away="Away431")], **settings)
+    assert not m.Recording.objects.filter(pk=rec.pk).exists()
+    assert G411 not in _owned(env)
+
+
 def scenario_a_full_compact_band_still_aborts(env):
     """The abort moved behind the pre-pass (#288). A band of one whose number
     another channel publishes still refuses the new game with an error, and

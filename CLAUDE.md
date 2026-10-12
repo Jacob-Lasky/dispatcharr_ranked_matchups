@@ -1359,7 +1359,11 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   is stopped at the handoff by the live timer (phase C)
 - Recordings survive a source outage (#224): each one stores why it exists, and
   a game that vanished from the whole cache is only cancelled once that reason
-  stops holding under the current settings
+  stops holding under the current settings, OR its channel has no stream left
+  to record from (none, or only excluded-group ones that #206 strips from a
+  kept channel; #297: such a recording captured nothing and still held a slot).
+  One rule, inside `ar.reason_holds`, so the cancel step and the plan's `busy`
+  agree
 - Failed and upstream-starved runs are visible (#227): every background run's
   outcome is persisted to `last_run.json`, **Show current state** ends with that
   verdict (OK / FAILED with the streak and the last good refresh / RUNNING NOW /

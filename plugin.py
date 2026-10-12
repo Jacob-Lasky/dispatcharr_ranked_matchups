@@ -1041,7 +1041,8 @@ def _ranked_eligible(g: Dict[str, Any], leagues: List[str],
 def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
                         bench: Optional[List[Dict[str, Any]]] = None,
                         slate_games: Optional[List[Dict[str, Any]]] = None,
-                        streamed: Optional[set] = None) -> "_AutoRecord":
+                        streamed: Optional[set] = None,
+                        excluded_stream_ids=frozenset()) -> "_AutoRecord":
     """Read-only: build the plan before apply writes anything.
 
     `games` are the CANDIDATES: apply passes only the games it will write a
@@ -1095,9 +1096,26 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
     known = games if slate_games is None else slate_games
     ar.slate = {_build_marker_key(g) for g in list(known) + list(bench or [])}
     from .scoring import match_favorites
-    ar.reason_holds = recording_policy.reason_checker(
+    reason_holds = recording_policy.reason_checker(
         _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, "")), record_ranked,
         _record_leagues(settings), matcher=match_favorites)
+    # A recording kept for a game missing from the slate (#224) is kept only
+    # while its channel still has a stream it can record from: one the group
+    # policy does not exclude (#206 strips excluded links from a kept channel,
+    # and nothing starts from one). DO NOT keep it on its stored reason alone:
+    # its channel left with no stream, it recorded nothing and still held a
+    # slot, so a playable game got no recording (#297). Cancelled instead, it
+    # is planned again when its game returns with a feed. ONE rule, through
+    # reason_holds, so the cancel step and the slot budget (busy) agree.
+    recordable: set = set()
+    if ours_rows:
+        from apps.channels.models import ChannelStream
+        recordable = set(
+            ChannelStream.objects.filter(channel_id__in={r.channel_id for r in ours_rows})
+            .exclude(stream_id__in=excluded_stream_ids)
+            .values_list("channel_id", flat=True)
+        )
+    ar.reason_holds = lambda r: r.channel_id in recordable and reason_holds(r)
     from apps.m3u.models import M3UAccount
 
     post_roll = timedelta(minutes=max(0, _int_setting(
@@ -7351,7 +7369,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     streamed = {m for m, p in prep_by_marker.items() if p.source_streams}
     autorec = _autorecord_prepare(
         decided_games, settings, bench=bench,
-        slate_games=games, streamed=streamed,
+        slate_games=games, streamed=streamed, excluded_stream_ids=excluded_ids,
     )
     # Auto-record (#216), first step: drop our not-yet-started recordings the
     # plan no longer wants on channels apply will NOT write (games the
@@ -7517,7 +7535,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         autorec = _autorecord_prepare(
             [g for g in decided_games if _build_marker_key(g) not in unplaced],
             settings, bench=bench, slate_games=games,
-            streamed=streamed,
+            streamed=streamed, excluded_stream_ids=excluded_ids,
         )
         # Carried over: what the first plan already did (its cancellations)
         # and saw (a recording the user deleted, a tombstone the second plan

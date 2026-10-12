@@ -687,7 +687,11 @@ does not have to be a Favorite, and listing it does not change its score.
     its slot instead.
 - **Outages do not cost recordings.** If a source briefly returns nothing and
   a game drops off the list, its recording is kept as long as the reason for
-  it (the team, or ranked recording for that league) still holds.
+  it (the team, or ranked recording for that league) still holds and its
+  channel still has a stream to record from (one not in an **Excluded
+  groups** group). A recording that could capture nothing is cancelled, so it
+  does not hold a slot another game needs; it is planned again when the game
+  comes back with a feed.
 - **Changing your mind.** Adding or removing a team takes effect on the next
   Apply (a team whose games are not on the list yet needs a Refresh to fetch
   them). Removing a team cancels its recordings that have not
