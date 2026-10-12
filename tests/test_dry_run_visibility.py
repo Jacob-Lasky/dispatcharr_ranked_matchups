@@ -144,6 +144,11 @@ def fake_orm():
      .filter.return_value.distinct.return_value) = []
     # No fetching EPG source shares the group's name (#263 refusal).
     epg_models.EPGSource.objects.filter.return_value.exclude.return_value.first.return_value = None
+    # Name limits as Dispatcharr's schema has them, read by apply's up-front
+    # name check (_setup_name_problem): a bare MagicMock is not a number.
+    models.ChannelGroup._meta.get_field.return_value.max_length = None  # TextField
+    models.Channel._meta.get_field.return_value.max_length = 512
+    epg_models.EPGSource._meta.get_field.return_value.max_length = 255
 
     saved = {name: sys.modules.get(name) for name in created}
     sys.modules.update(created)

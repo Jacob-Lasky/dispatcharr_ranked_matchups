@@ -421,10 +421,13 @@ class TestApplyWiring:
 
     def test_parking_clears_every_number_in_the_group(self):
         src, _fn = _apply_fn()
-        i = src.index("highest_in_group = (")
+        i = src.index("# The group as the setup (first thing in the transaction below) will")
         block = src[i:src.index("park_base = _resolve_park_base(max_target, highest_in_group)", i)]
-        assert "channel_group=target_group" in block
         assert '_Max("channel_number")' in block
+        # Every channel in the group (in_target), plus, #271 follow-up, our
+        # channels the setup (inside the transaction) moves in before then.
+        assert "in_target |" in block and "channel_group__in=moving_groups" in block
+        assert "in_target = Q(channel_group=target_group)" in src[:i]
 
     def test_reserved_numbers_are_collected_in_both_modes(self):
         _src, fn = _apply_fn()
@@ -519,7 +522,9 @@ class TestKeptRecordingChannelsHoldTheirNumbers:
     def test_apply_adds_them_to_the_reservation_in_both_modes(self):
         src, _fn = _apply_fn()
         held = src.index("held_for_recordings = _numbers_held_for_recordings(")
-        kickoff = src.index("_reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings")
+        kickoff = src.index(
+            "_reserved_channel_numbers(target_group, lowest_kickoff, pending_groups=moving_groups)\n"
+            "            | held_for_recordings")
         resolve = src.index("virtual_base = _resolve_kickoff_base(")
         compact = src.index(") | held_for_recordings", resolve)
         assert held < kickoff < resolve < compact

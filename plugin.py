@@ -522,6 +522,31 @@ def _never_fetches_q():
     )
 
 
+def _reverse_foreign_keys(model) -> List[Any]:
+    """Every foreign key elsewhere that points at `model`, HIDDEN ones
+    included: ChannelOverride's (epg_data, channel_group) are related_name="+",
+    and _meta.related_objects leaves hidden relations out. Whatever
+    Dispatcharr adds later is found the same way."""
+    from django.db import models as dj_models
+    return [
+        rel for rel in model._meta.get_fields(include_hidden=True)
+        if rel.auto_created and not rel.concrete and rel.one_to_many
+        and isinstance(rel.field, dj_models.ForeignKey)
+    ]
+
+
+def _group_is_referenced(group) -> bool:
+    """True while anything still points at `group`: a channel, a stream, an
+    M3U account's settings for it (ChannelGroupM3UAccount, CASCADE: deleting
+    the group deletes them), a channel override (SET_NULL), or whatever
+    Dispatcharr adds. A group is deleted only when this is False."""
+    from apps.channels.models import ChannelGroup
+    return any(
+        rel.related_model._base_manager.filter(**{rel.field.name: group}).exists()
+        for rel in _reverse_foreign_keys(ChannelGroup)
+    )
+
+
 def _move_owned_epg_rows(old_src, new_src) -> int:
     """Move the guide entries we own from `old_src` (a source named after a
     previous live-group name) onto `new_src`, so every channel pointing at one
@@ -553,7 +578,6 @@ def _move_owned_epg_rows(old_src, new_src) -> int:
     """
     from apps.channels.models import Channel
     from apps.epg.models import EPGData, ProgramData
-    from django.db import models as dj_models
 
     ours = EPGData.objects.filter(_owned_tvg_id_q(), epg_source=old_src)
     clashes = dict(
@@ -562,13 +586,7 @@ def _move_owned_epg_rows(old_src, new_src) -> int:
         ).values_list("tvg_id", "id")
     )
     if clashes:
-        # include_hidden: ChannelOverride.epg_data is related_name="+", and
-        # _meta.related_objects leaves hidden relations out.
-        pointers = [
-            rel for rel in EPGData._meta.get_fields(include_hidden=True)
-            if rel.auto_created and not rel.concrete and rel.one_to_many
-            and isinstance(rel.field, dj_models.ForeignKey)
-        ]
+        pointers = _reverse_foreign_keys(EPGData)
         pairs = list(
             ours.filter(tvg_id__in=list(clashes)).values_list("id", "tvg_id", "name")
         )
@@ -703,8 +721,8 @@ def _deletable_group_names_for(group_name: str, recordings_group_name: str) -> s
 # Stable tvg_id for the single archive channel. Lives under TVG_ID_PREFIX so it
 # reads as "ours" and is therefore excluded from the matcher (it must never be
 # matched to a game) and from the highest-real-channel scan. It is NOT a game
-# marker, so it is never in seen_markers and is scoped out of existing_virtuals
-# (which is filtered to the live target_group, not the recordings group).
+# marker, so it is never in seen_markers, and _movable_owned_q keeps it out of
+# existing_virtuals and out of "ours" in numbering wherever it sits.
 ARCHIVE_TVG_ID = TVG_ID_PREFIX + "recordings_archive"
 
 # Starting channel number for the single archive channel. It MUST be non-None:
@@ -1427,7 +1445,68 @@ def _first_free_number(used, start: int) -> int:
     return num
 
 
-def _ensure_archive_channel(recordings_group_name):
+def _movable_owned_q() -> Any:
+    """Q for our channels apply may move between groups: every one but the
+    recordings archive channel, which stays in its archive group whatever the
+    settings say (a case-only change of 'Recordings group name' must not move
+    it into the live group, where it was reaped)."""
+    from django.db.models import Q
+    return ~Q(tvg_id=ARCHIVE_TVG_ID)
+
+
+def _archive_group(recordings_group_name):
+    """The recordings group for this setting, or None: the group named
+    exactly as the setting, else a case variant that holds the archive
+    channel (as archive_enabled compares names ignoring case). Without the
+    variant, changing only the case of the setting created a second archive
+    group and channel, splitting the recordings. The exact name wins over a
+    variant holding the archive (_ensure_archive_channel moves the archive
+    in): the variant first, recordings kept going where the setting no
+    longer says, and cleanup could delete the exactly named group. DO NOT
+    fall back to a case variant WITHOUT the archive: a user's own group that
+    only differs in case, adopted as the archive, was later deleted by
+    cleanup as ours."""
+    named = _archive_groups(recordings_group_name)
+    return (named.filter(name=recordings_group_name).first()
+            or named.filter(channels__tvg_id=ARCHIVE_TVG_ID).distinct().order_by("pk").first())
+
+
+def _archive_group_is_ours(group, archive, recordings_group_name, live_group_name="") -> bool:
+    """Whether `group`, holding `archive`, is ours to delete once nothing
+    references it: the one made for the archive (_made_for_archive), or a
+    name this plugin creates (_deletable_group_names_for). Else an old live
+    group that held a stray archive beside our game channel stayed for good:
+    the rename left it for the archive, and the archive's move left it
+    nameless to us. NEVER the live group (`live_group_name`), by either rule:
+    an archive made when the recordings group bore today's live name
+    carries that name, and the live group apply publishes to was deleted."""
+    if group is None:
+        return False
+    name = group.name.strip().lower()
+    if live_group_name and name == str(live_group_name).strip().lower():
+        return False
+    return _made_for_archive(group, archive) or name in _deletable_group_names_for(
+        live_group_name, recordings_group_name)
+
+
+def _made_for_archive(group, archive) -> bool:
+    """True when `group` is the one `archive` was made for: _ensure_archive_channel
+    names the archive channel as its group (and renames it with a move), so
+    the pair agreeing is our mark on the group. DO NOT count a group as ours
+    merely for HOLDING the archive: a user who filed the archive channel in
+    their own group had that group deleted when the archive moved out or
+    was cleaned up. Ignoring case, as the group lookup does."""
+    return (group is not None and archive.name is not None
+            and group.name.casefold() == archive.name.casefold())
+
+
+def _archive_groups(recordings_group_name) -> Any:
+    """Every group whose name matches the setting ignoring case."""
+    from apps.channels.models import ChannelGroup
+    return ChannelGroup.objects.filter(name__iexact=str(recordings_group_name).strip())
+
+
+def _ensure_archive_channel(recordings_group_name, live_group_name=""):
     """Get-or-create the persistent recordings group and its single archive
     channel. The archive channel is stream-less (a recording container only),
     carries a non-null channel_number (a null number truncates the whole Xtream
@@ -1435,11 +1514,22 @@ def _ensure_archive_channel(recordings_group_name):
     is found again on the next apply. Scan-exclusion comes from the owned tvg_id,
     not the number."""
     from apps.channels.models import Channel, ChannelGroup
-    grp, _ = ChannelGroup.objects.get_or_create(name=recordings_group_name)
+    grp = _archive_group(recordings_group_name)
+    if grp is None:
+        grp = ChannelGroup.objects.create(name=recordings_group_name)
     arch = Channel.objects.filter(
         channel_group=grp, tvg_id=ARCHIVE_TVG_ID,
     ).first()
-    if arch is not None and arch.channel_number is not None:
+    moved = False
+    if arch is None:
+        # The recordings group was renamed: the ONE archive moves (with its
+        # recordings) rather than a second one being made beside it.
+        arch = _move_archive_into(grp, live_group_name)
+        moved = arch is not None
+    if arch is not None and arch.channel_number is not None and not (
+        moved and Channel.objects.filter(channel_group=grp, channel_number=arch.channel_number)
+        .exclude(pk=arch.pk).exists()
+    ):
         return arch
 
     # Either a fresh create, or a self-heal of an install whose archive channel
@@ -1476,12 +1566,41 @@ def _ensure_archive_channel(recordings_group_name):
         )
     else:
         # update() bypasses the post_save signal chain (the epg_data-wipe trap).
+        was = arch.channel_number
         Channel.objects.filter(pk=arch.pk).update(channel_number=number)
         arch.channel_number = number
         logger.info(
-            "[ranked_matchups] backfilled archive channel id=%s number=%s (was None)",
-            arch.id, number,
+            "[ranked_matchups] renumbered archive channel id=%s number=%s (was %s)",
+            arch.id, number, was,
         )
+    return arch
+
+
+def _move_archive_into(grp, live_group_name=""):
+    """Move the archive channel kept in another group (the recordings group
+    was renamed) into `grp`, its recordings with it (they point at the
+    channel). Its old group goes once nothing references it, if it is ours
+    (_archive_group_is_ours). None when there is no archive yet."""
+    from apps.channels.models import Channel, ChannelGroup
+    arch = (
+        Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).exclude(channel_group=grp)
+        .order_by("pk").first()
+    )
+    if arch is None:
+        return None
+    # Locked, then judged as it is now (see _commit_group_setup).
+    old = (ChannelGroup.objects.select_for_update().filter(pk=arch.channel_group_id).first()
+           if arch.channel_group_id is not None else None)
+    old_was_ours = _archive_group_is_ours(old, arch, grp.name, live_group_name)
+    # update(), not save(): no Channel post_save (the epg_data-wipe trap).
+    # Renamed with the move, so the new group carries our mark (_made_for_archive).
+    Channel.objects.filter(pk=arch.pk).update(channel_group=grp, name=grp.name)
+    arch.channel_group = grp
+    arch.name = grp.name
+    logger.info("[ranked_matchups] moved recordings archive channel id=%s into group %r",
+                arch.id, grp.name)
+    if old is not None and old_was_ours and not _group_is_referenced(old):
+        old.delete()
     return arch
 
 
@@ -1640,23 +1759,67 @@ def _sync_profile_memberships(settings: Dict[str, Any], dry_run: bool = False) -
     return stats
 
 
-def _cleanup_empty_archive(recordings_group_name) -> bool:
-    """Remove the archive channel (and then the group) once no recordings remain
+def _cleanup_empty_archive(recordings_group_name, live_group_name="") -> bool:
+    """Remove the archive channel (and then its group) once no recordings remain
     under it, so the group exists only while it holds recordings. Returns True if
     anything was removed. Safe: the archive channel is deleted only when it has
-    zero Recording rows, so the CASCADE takes nothing with it."""
+    zero Recording rows, so the CASCADE takes nothing with it.
+
+    The archive is found by WHAT IT IS (ARCHIVE_TVG_ID), wherever it sits, not
+    by the setting's name: after the recordings group was renamed (or only
+    its case changed) a lookup by the new name never saw the old archive, which
+    stayed forever beside a second one. While any archive holds recordings,
+    they all fold into the one in the setting's group (moved there if none
+    is): left apart, split archives (an install the old exact-name lookup
+    split) both stayed for good, and one left in the live group was reaped
+    there with its recordings. A group goes only
+    when nothing references it (_group_is_referenced) and it is ours: one an
+    archive sits in that was made for it or carries a name this plugin
+    creates (_archive_group_is_ours), or named exactly as the setting (as
+    before). A group of the user's, empty or holding the archive
+    they filed there, is never deleted."""
     from apps.channels.models import Channel, ChannelGroup, Recording
-    grp = ChannelGroup.objects.filter(name=recordings_group_name).first()
-    if grp is None:
-        return False
+    from django.db import transaction
     removed = False
-    arch = Channel.objects.filter(channel_group=grp, tvg_id=ARCHIVE_TVG_ID).first()
-    if arch is not None and not Recording.objects.filter(channel_id=arch.id).exists():
-        arch.delete()
-        removed = True
-    if Channel.objects.filter(channel_group=grp).count() == 0:
-        grp.delete()
-        removed = True
+    with transaction.atomic():  # the row locks below need one; nests as a savepoint
+        # Locked before their recordings are checked, so a recording made on
+        # one meanwhile waits (its foreign-key check) rather than being
+        # CASCADEd away with the channel. A list, not .exists(): that locks
+        # one row (LIMIT 1).
+        list(Channel.objects.select_for_update().filter(tvg_id=ARCHIVE_TVG_ID)
+             .values_list("pk", flat=True))
+        # Their groups locked too, before the names ownership is judged by
+        # are read (see _commit_group_setup). By pk: DO NOT lock through the
+        # channels join, Postgres refuses FOR UPDATE on the nullable side of
+        # the outer join an OR across it makes.
+        candidates = set(
+            Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).exclude(channel_group=None)
+            .values_list("channel_group_id", flat=True)
+        ) | set(ChannelGroup.objects.filter(name=recordings_group_name).values_list("pk", flat=True))
+        list(ChannelGroup.objects.select_for_update().filter(pk__in=candidates)
+             .values_list("pk", flat=True))
+        archives = list(Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).select_related("channel_group"))
+        ours = {a.channel_group_id for a in archives
+                if _archive_group_is_ours(a.channel_group, a, recordings_group_name, live_group_name)}
+        ours |= set(ChannelGroup.objects.filter(name=recordings_group_name).values_list("pk", flat=True))
+        if Recording.objects.filter(channel_id__in=[a.id for a in archives]).exists():
+            # Idempotent when the one archive already sits in the setting's
+            # group; otherwise it moves there (_move_archive_into).
+            keep = _ensure_archive_channel(recordings_group_name, live_group_name)
+            others = [a.id for a in archives if a.id != keep.id]
+            if Recording.objects.filter(channel_id__in=others).update(channel_id=keep.id):
+                removed = True
+            archives = list(Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID))
+        for arch in archives:
+            if not Recording.objects.filter(channel_id=arch.id).exists():
+                arch.delete()
+                removed = True
+        for group_id in sorted(ours):
+            # Row lock before the reference check: see _commit_group_setup.
+            grp = ChannelGroup.objects.select_for_update().filter(pk=group_id).first()
+            if grp is not None and not _group_is_referenced(grp):
+                grp.delete()
+                removed = True
     return removed
 
 
@@ -6534,6 +6697,7 @@ def _action_reap(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 def _reserved_channel_numbers(
     target_group, band_start: int, band_end: Optional[int] = None,
+    pending_groups=(),
 ) -> set:
     """Every channel number in [band_start, band_end] that some OTHER channel
     already publishes under, so numbering can route around it. `band_end=None`
@@ -6580,14 +6744,23 @@ def _reserved_channel_numbers(
     from apps.channels.models import Channel
     from django.db.models import Q
 
-    reserved = _published_numbers(
-        Channel.objects.exclude(_owned_tvg_id_q() & Q(channel_group=target_group)),
-        band_start, band_end,
-    )
-    reserved |= _published_numbers(
-        Channel.objects.filter(channel_group=target_group).exclude(_owned_tvg_id_q()),
-        band_start, band_end, effective=False,
-    )
+    # Ours: our game channels in the target group, and in `pending_groups`,
+    # the previous groups apply's _commit_group_setup is about to move them
+    # out of (in place). Numbering runs BEFORE that move commits, so a full
+    # band refused there leaves nothing moved, and it must reserve exactly
+    # what it would read after the move. NOT the recordings archive channel
+    # (_movable_owned_q), wherever it sits: no game owns its number, so an
+    # archive in the live group, unreserved, had a game numbered onto it.
+    in_groups = Q(channel_group__in=list(pending_groups))
+    if target_group is not None:
+        in_groups |= Q(channel_group=target_group)
+    ours = _owned_tvg_id_q() & _movable_owned_q() & in_groups
+    reserved = _published_numbers(Channel.objects.exclude(ours), band_start, band_end)
+    if target_group is not None:
+        reserved |= _published_numbers(
+            Channel.objects.filter(channel_group=target_group).exclude(ours),
+            band_start, band_end, effective=False,
+        )
     return reserved
 
 
@@ -6671,6 +6844,225 @@ def _invalidate_epg_output_cache() -> None:
         )
 
 
+def _name_problem(setting: str, value: str, models) -> Optional[str]:
+    """Why the database would reject `value` as the name of a row of any of
+    `models`, or None: past the field's max_length (read off the model, so it
+    follows Dispatcharr's schema), or holding a NUL, which Postgres refuses
+    in any text. Apply checks the names it writes in its main transaction
+    BEFORE its first committed write: that transaction runs after the
+    recording cancellations commit (_autorecord_cancel_committed), so a name
+    rejected there failed every apply after its cancellations, and a
+    displaced recording's replacement, planned in the rolled-back
+    transaction, was never scheduled."""
+    if "\x00" in value:
+        return f"'{setting}' contains a NUL character, which the database refuses."
+    for model in models:
+        limit = model._meta.get_field("name").max_length
+        if limit is not None and len(value) > limit:
+            return (f"'{setting}' is {len(value)} characters long; Dispatcharr "
+                    f"allows at most {limit} for a {model.__name__} name.")
+    return None
+
+
+def _setup_name_problem(group_name: str) -> Optional[str]:
+    """Apply's refusal for a live-group name the database would reject: the
+    live group and our EPGSource carry it, and every apply writes them."""
+    from apps.channels.models import ChannelGroup
+    from apps.epg.models import EPGSource
+    problem = _name_problem("Target group name", group_name, (ChannelGroup, EPGSource))
+    return None if problem is None else f"{problem} Nothing was changed. Shorten it."
+
+
+def _recordings_name_problem(recordings_group_name: str) -> Optional[str]:
+    """Why the recordings group and its archive channel cannot carry this
+    name, or None. Not a refusal: only an apply that archives writes them, so
+    archiving is switched off instead (as for a name equal to the live
+    group's), and channels with recordings are kept rather than reaped."""
+    from apps.channels.models import Channel, ChannelGroup
+    return _name_problem("Recordings group name", recordings_group_name, (ChannelGroup, Channel))
+
+
+def _fetching_source_message(group_name: str, before_any_write: bool = True) -> str:
+    """Apply's refusal when the live group shares its name with an EPG source
+    that fetches its own guide (see _never_fetches_q). Found again in the main
+    transaction (`before_any_write` False), the recording cancellations
+    committed before it stand, so it says what did not change instead."""
+    unchanged = ("Nothing was changed." if before_any_write
+                 else "No channel or guide was changed.")
+    return (
+        f"The group name {group_name!r} is also the name of an EPG source that "
+        f"fetches its own guide, so the plugin cannot use it for its guide. "
+        f"{unchanged} Rename 'Target group name' (or that EPG source)."
+    )
+
+
+def _commit_group_setup(
+    group_name: str, target_group, foreign_owned_groups, foreign_epg_sources,
+    deletable_group_names,
+) -> Optional[Dict[str, Any]]:
+    """Apply's steps 1 and 2, the COMMITTED half: create the live group if it
+    is missing, move our channels out of groups named after a previous live
+    group, and make our EPGSource exist (and sit out of the joke-filler path),
+    moving our guide rows off sources named after a previous group (#263).
+
+    Call it ONLY as the first step of apply's main transaction. Committed
+    before apply's last _apply_time_short check, a stopped rename left our
+    channel in the new group on its old number beside a channel the user had
+    filed there on that number (the guide binds by the bare number; the UI
+    refuses to save either). Committed before the full-band refusal, a refused
+    one did the same, and committed on its own, an error later in apply (an
+    EPGSource name the database rejects) left the rename half done. Inside the
+    transaction it commits, or rolls back, with the slate it makes room for
+    (tests/test_apply_no_write_before_gate.py).
+
+    Not for a dry run (nothing here is a preview). Returns the target group,
+    the EPGSource, and the counts the summary reports; None, having written
+    nothing, when the source named after the live group fetches its own
+    guide (_fetching_source_message).
+    """
+    from apps.channels.models import Channel, ChannelGroup
+    from apps.epg.models import EPGData, EPGSource
+    from django.db import transaction
+
+    # Read FIRST, row-locked, and re-checked: apply refused a fetching source
+    # before its pre-pass, which can spend minutes on the network; a source
+    # the user pointed at a guide meanwhile was adopted here (switched
+    # inactive, filled with our rows).
+    epg_source = EPGSource.objects.select_for_update().filter(name=group_name).first()
+    if epg_source is not None and not EPGSource.objects.filter(
+            pk=epg_source.pk).filter(_never_fetches_q()).exists():
+        return None
+    # The previous sources, chosen before the pre-pass, re-read the same way:
+    # one the user pointed at a guide meanwhile is theirs (_never_fetches_q),
+    # and was emptied and deleted below. Never the live source: one the user
+    # renamed to the live name meanwhile is both, and its rows, "moved" onto
+    # themselves, each clashed with itself and were deleted.
+    foreign_epg_sources = list(
+        EPGSource.objects.select_for_update()
+        .filter(pk__in=[s.pk for s in foreign_epg_sources]).filter(_never_fetches_q())
+        .exclude(pk__in=[epg_source.pk] if epg_source is not None else [])
+        .order_by("pk")
+    )
+
+    if target_group is None:
+        # Missing before the pre-pass, re-read row-locked: one a user created
+        # meanwhile is adopted (as base's lookup-then-create did). Created
+        # blind, it hit the unique name and failed the transaction after the
+        # recording cancellations had committed.
+        target_group = ChannelGroup.objects.select_for_update().filter(name=group_name).first()
+    if target_group is None:
+        target_group = ChannelGroup.objects.create(name=group_name)
+        logger.info("[ranked_matchups] created ChannelGroup id=%s name=%r",
+                    target_group.id, group_name)
+
+    # Migrate any virtual channels in old groups INTO the target group, in
+    # place. DO NOT delete + recreate: Channel.id is the stable handle that
+    # ChannelProfileMembership, IPTV-client playlist caches, and the user's
+    # pinned-channel state all key off. A delete-then-create cycle silently
+    # orphans every one of those: profile memberships are gone (Dispatcharr
+    # auto-adds new channels to existing profiles ONLY at profile-creation
+    # time, never on channel-creation), and IPTV clients that cached the old
+    # tvg-id render an empty slot for the renamed channel until the user
+    # manually refreshes: exactly what bit us during the #1 live-verify.
+    #
+    # The .update() bypasses Django's post_save signal (mirroring the same
+    # signal-bypass pattern at apps/channels/signals.py:60 / our epg_data
+    # write at the bottom of the loop). The downstream main loop will hit
+    # the "existing" branch keyed by tvg_id and update name / channel_number
+    # / logo / streams in place. ChannelStream rows are FK'd to Channel, so
+    # they survive the channel_group change untouched.
+    migrated_from_old_group = 0
+    deleted_old_groups = 0
+    if foreign_owned_groups:
+        for old_g in foreign_owned_groups:
+            # Row lock and re-read FIRST, so a concurrent assignment (an M3U
+            # refresh) cannot land between the reference check and the delete
+            # below (on Postgres its foreign-key check takes a key-share lock
+            # on this row, which waits on ours), and the group is judged as it
+            # is NOW: chosen before the pre-pass, a group the user renamed
+            # meanwhile was deleted under its old name.
+            old_g = ChannelGroup.objects.select_for_update().filter(pk=old_g.pk).first()
+            if old_g is None:
+                continue
+            old_chans = Channel.objects.filter(_owned_tvg_id_q() & _movable_owned_q(), channel_group=old_g)
+            n = old_chans.count()
+            old_chans.update(channel_group=target_group)
+            migrated_from_old_group += n
+            # Delete the old group only if it is now empty AND its name is one
+            # this plugin itself would have created. Exact, case-insensitive:
+            # see _DELETABLE_LEGACY_GROUP_NAMES for why this is not a substring
+            # test and must not become one again (#157).
+            # Kept while ANYTHING still points at it (_group_is_referenced):
+            # a stream, an M3U account's settings for it, an override.
+            if not _group_is_referenced(old_g):
+                if old_g.name.strip().lower() in deletable_group_names:
+                    old_g.delete()
+                    deleted_old_groups += 1
+                    logger.info("[ranked_matchups] deleted empty old group %r", old_g.name)
+                else:
+                    # A group WE did not name, that happened to hold our channels
+                    # (typically the user filed one there by hand). Our channels
+                    # are migrated out; the empty shell is the user's to remove.
+                    logger.info(
+                        "[ranked_matchups] left empty group %r in place: not a name "
+                        "this plugin creates, so it is not ours to delete",
+                        old_g.name,
+                    )
+
+    if not epg_source:
+        epg_source = EPGSource.objects.create(
+            name=group_name,
+            source_type=EPG_SOURCE_TYPE,
+            is_active=EPG_SOURCE_IS_ACTIVE,
+            refresh_interval=0,
+        )
+        logger.info("[ranked_matchups] created EPGSource id=%s name=%r",
+                    epg_source.id, group_name)
+    else:
+        # Existing source: upgrade away from any prior source_type="dummy" /
+        # is_active=True we may have written. Idempotent for already-correct rows.
+        upgrade_fields = []
+        if epg_source.source_type != EPG_SOURCE_TYPE:
+            upgrade_fields.append("source_type")
+            epg_source.source_type = EPG_SOURCE_TYPE
+        if epg_source.is_active != EPG_SOURCE_IS_ACTIVE:
+            upgrade_fields.append("is_active")
+            epg_source.is_active = EPG_SOURCE_IS_ACTIVE
+        if upgrade_fields:
+            epg_source.save(update_fields=upgrade_fields)
+            logger.info("[ranked_matchups] upgraded EPGSource id=%s fields=%s",
+                        epg_source.id, upgrade_fields)
+
+    # Old EPGSources we own, named after a previous live-group name. AFTER
+    # step 2 on purpose: our rows on them MOVE to the current source rather
+    # than being deleted with it, and that needs the current source to exist
+    # (#263, see _move_owned_epg_rows for why a delete blanks a recording
+    # channel's guide). The old source itself goes only when every row on it
+    # was ours; one that also holds another owner's rows stays theirs.
+    deleted_old_sources = 0
+    if foreign_epg_sources and epg_source is not None:
+        for old_src in foreign_epg_sources:
+            with transaction.atomic():
+                moved = _move_owned_epg_rows(old_src, epg_source)
+                if moved:
+                    logger.info(
+                        "[ranked_matchups] moved %d guide row(s) from old EPGSource %r to %r",
+                        moved, old_src.name, epg_source.name,
+                    )
+                if not EPGData.objects.filter(epg_source=old_src).exists():
+                    old_src.delete()  # empty now, so the cascade takes nothing
+                    deleted_old_sources += 1
+                    logger.info("[ranked_matchups] deleted old EPGSource %r", old_src.name)
+
+    return {
+        "target_group": target_group,
+        "epg_source": epg_source,
+        "migrated": migrated_from_old_group,
+        "deleted_groups": deleted_old_groups,
+        "deleted_sources": deleted_old_sources,
+    }
+
+
 def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Clone-into-group + EPG-overlay strategy:
 
@@ -6691,6 +7083,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from apps.channels.models import Channel, ChannelGroup, ChannelStream, Recording, Stream
     from apps.epg.models import EPGSource, EPGData, ProgramData
     from django.db import transaction
+    from django.db.models import Q
 
     from .scoring import format_channel_name
 
@@ -6750,6 +7143,14 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             "Channels with recordings will be kept rather than reaped.",
             recordings_group_name,
         )
+    recordings_name_problem = _recordings_name_problem(recordings_group_name)
+    if archive_enabled and recordings_name_problem is not None:
+        archive_enabled = False
+        logger.warning(
+            "[ranked_matchups] %s Recording preservation disabled until it is fixed. "
+            "Channels with recordings will be kept rather than reaped.",
+            recordings_name_problem,
+        )
     dry_run = _dry_run_enabled(settings)
     # Our EPGSource is the one named after the live group, and ours never
     # fetches (blank url and file_path, not Schedules Direct: _never_fetches_q).
@@ -6757,15 +7158,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # that DOES fetch, step 2 would adopt the user's source (switch it inactive)
     # and the rename cleanup would write our guide rows into it, replacing
     # programmes on any row that shares a marker. Refuse before any write.
+    name_problem = _setup_name_problem(group_name)
+    if name_problem is not None:
+        logger.error("[ranked_matchups] %s", name_problem)
+        return {"status": "error", "message": name_problem}
     clashing_src = (
         EPGSource.objects.filter(name=group_name).exclude(_never_fetches_q()).first()
     )
     if clashing_src is not None:
-        msg = (
-            f"The group name {group_name!r} is also the name of an EPG source that "
-            f"fetches its own guide, so the plugin cannot use it for its guide. "
-            f"Nothing was changed. Rename 'Target group name' (or that EPG source)."
-        )
+        msg = _fetching_source_message(group_name)
         logger.error("[ranked_matchups] %s", msg)
         return {"status": "error", "message": msg}
     # #206: ordered language preference for each channel's pooled streams. This
@@ -6824,7 +7225,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # sweep: the archive channel is intentionally "ours" (so the matcher skips
     # it), which would otherwise make this sweep migrate it into the live group
     # and delete the archive group out from under preserved recordings.
-    _protected_group_names = [group_name, recordings_group_name]
+    # For GROUPS only the LIVE name is protected by name. DO NOT add the
+    # recordings name back there: the archive is protected per CHANNEL
+    # (_movable_owned_q), and a recordings name equal to the OLD live group's
+    # name, protected by name, stranded that group's game channels beside
+    # copies in the new group.
+    _protected_group_names = [group_name]
+    # For SOURCES the recordings name stays protected, as on base: nothing
+    # per row replaces it, and a swept source named as the recordings group
+    # had its rows merged onto the live source, replacing the programmes of a
+    # row with the same marker there.
+    _protected_source_names = [group_name, recordings_group_name]
     # Names the cleanup sweep may delete once empty. See #157.
     _deletable_group_names = _deletable_group_names_for(
         group_name, recordings_group_name,
@@ -6841,17 +7252,27 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         set() if _cache_vouched(cache)
         else _guide_kept_ids(_owned_published_channels(), datetime.now(timezone.utc))
     )
+    # The archive CHANNEL never moves (_movable_owned_q), wherever it sits:
+    # changing just the case of 'Recordings group name' made the existing
+    # archive group look like a previous live group, and the setup moved its
+    # archive channel into the live group, where it was reaped. Excluded per
+    # CHANNEL, not per group: a previous live group that also holds a stray
+    # archive channel must still give up its game channels. DO NOT protect
+    # names ignoring case instead: an archive name equal (in any case) to the
+    # OLD live group's name then protected the old live group, stranding our
+    # channels in it beside new copies. Names stay exact, so a case-only
+    # rename of the live group still moves our channels.
     foreign_owned_groups = list(
         ChannelGroup.objects.exclude(name__in=_protected_group_names)
-        .filter(_owned_tvg_id_q("channels__"))
-        .distinct()
+        .filter(pk__in=Channel.objects.filter(_owned_tvg_id_q() & _movable_owned_q())
+                .values("channel_group"))
     )
     # Our sources never fetch anything (blank url and file_path, not Schedules
     # Direct, see _never_fetches_q). A source that does is fed from somewhere else, even when its rows carry
     # our marker (a user who added this server's own XMLTV output as a
     # source), so it is never ours to empty or delete.
     foreign_epg_sources = list(
-        EPGSource.objects.exclude(name__in=_protected_group_names)
+        EPGSource.objects.exclude(name__in=_protected_source_names)
         .filter(_owned_tvg_id_q("epgs__"))
         .filter(_never_fetches_q())
         .distinct()
@@ -6863,123 +7284,64 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # group and dry_run defaults on, so apply returns here having
             # written nothing and logged nothing, and the caller discards the
             # message. _dry_run_report puts it in the log too.
+            moving = Channel.objects.filter(
+                _owned_tvg_id_q() & _movable_owned_q(), channel_group__in=foreign_owned_groups,
+            ).count()
             return {
                 "status": "ok",
                 "message": _dry_run_report(
-                    f"[dry] Would create ChannelGroup {group_name!r} + EPGSource and clone "
-                    f"{sum(1 for g in games if g.get('channel_id'))} matched games into it. "
-                    f"Would also clean up {len(foreign_owned_groups)} stale group(s) and "
-                    f"{len(foreign_epg_sources)} stale EPGSource(s) from prior target names.",
+                    f"[dry] Would create ChannelGroup {group_name!r} + EPGSource, move "
+                    f"{moving} existing channel(s) into it in place (same Channel.id) from "
+                    f"{len(foreign_owned_groups)} previous group(s), and publish "
+                    f"{sum(1 for g in games if g.get('channel_id'))} matched games there. "
+                    f"Would also move our guide rows off {len(foreign_epg_sources)} previous "
+                    f"EPGSource(s), and remove a previous group or source once nothing is left in it.",
                     dry_run,
                 ),
             }
-        target_group = ChannelGroup.objects.create(name=group_name)
-        logger.info("[ranked_matchups] created ChannelGroup id=%s name=%r",
-                    target_group.id, group_name)
 
-    # Migrate any virtual channels in old groups INTO the target group, in
-    # place. DO NOT delete + recreate: Channel.id is the stable handle that
-    # ChannelProfileMembership, IPTV-client playlist caches, and the user's
-    # pinned-channel state all key off. A delete-then-create cycle silently
-    # orphans every one of those: profile memberships are gone (Dispatcharr
-    # auto-adds new channels to existing profiles ONLY at profile-creation
-    # time, never on channel-creation), and IPTV clients that cached the old
-    # tvg-id render an empty slot for the renamed channel until the user
-    # manually refreshes: exactly what bit us during the #1 live-verify.
-    #
-    # The .update() bypasses Django's post_save signal (mirroring the same
-    # signal-bypass pattern at apps/channels/signals.py:60 / our epg_data
-    # write at the bottom of the loop). The downstream main loop will hit
-    # the "existing" branch keyed by tvg_id and update name / channel_number
-    # / logo / streams in place. ChannelStream rows are FK'd to Channel, so
-    # they survive the channel_group change untouched.
+    # Steps 1 and 2 only READ here. Their writes (creating the group, moving
+    # our channels and guide rows out of a previous group and source, creating
+    # or upgrading our EPGSource) are _commit_group_setup, the first step of
+    # the main transaction: committed here, a stopped apply left our channel
+    # in the new group on its old number beside a channel the user filed there
+    # (two channels on one number in one group). See _commit_group_setup.
     migrated_from_old_group = 0
     deleted_old_groups = 0
-    if not dry_run and foreign_owned_groups:
-        for old_g in foreign_owned_groups:
-            old_chans = Channel.objects.filter(_owned_tvg_id_q(), channel_group=old_g)
-            n = old_chans.count()
-            old_chans.update(channel_group=target_group)
-            migrated_from_old_group += n
-            # Delete the old group only if it is now empty AND its name is one
-            # this plugin itself would have created. Exact, case-insensitive:
-            # see _DELETABLE_LEGACY_GROUP_NAMES for why this is not a substring
-            # test and must not become one again (#157).
-            if Channel.objects.filter(channel_group=old_g).count() == 0:
-                if old_g.name.strip().lower() in _deletable_group_names:
-                    old_g.delete()
-                    deleted_old_groups += 1
-                    logger.info("[ranked_matchups] deleted empty old group %r", old_g.name)
-                else:
-                    # A group WE did not name, that happened to hold our channels
-                    # (typically the user filed one there by hand). Our channels
-                    # are migrated out; the empty shell is the user's to remove.
-                    logger.info(
-                        "[ranked_matchups] left empty group %r in place: not a name "
-                        "this plugin creates, so it is not ours to delete",
-                        old_g.name,
-                    )
+    deleted_old_sources = 0
 
-    # 2. Ensure our EPGSource exists and is configured to sit out of
-    # Dispatcharr's joke-filler path (see EPG_SOURCE_TYPE comment above).
+    # 2. Our EPGSource, configured to sit out of Dispatcharr's joke-filler path
+    # (see EPG_SOURCE_TYPE comment above). Read here; created or upgraded by
+    # _commit_group_setup. A dry run only reports what it would do.
     epg_source = EPGSource.objects.filter(name=group_name).first()
-    if not epg_source:
-        if dry_run:
+    if dry_run:
+        if not epg_source:
             logger.info("[ranked_matchups] [dry] would create EPGSource name=%r type=%s",
                         group_name, EPG_SOURCE_TYPE)
         else:
-            epg_source = EPGSource.objects.create(
-                name=group_name,
-                source_type=EPG_SOURCE_TYPE,
-                is_active=EPG_SOURCE_IS_ACTIVE,
-                refresh_interval=0,
-            )
-            logger.info("[ranked_matchups] created EPGSource id=%s name=%r",
-                        epg_source.id, group_name)
-    else:
-        # Existing source: upgrade away from any prior source_type="dummy" /
-        # is_active=True we may have written. Idempotent for already-correct rows.
-        upgrade_fields = []
-        if epg_source.source_type != EPG_SOURCE_TYPE:
-            upgrade_fields.append("source_type")
-            epg_source.source_type = EPG_SOURCE_TYPE
-        if epg_source.is_active != EPG_SOURCE_IS_ACTIVE:
-            upgrade_fields.append("is_active")
-            epg_source.is_active = EPG_SOURCE_IS_ACTIVE
-        if upgrade_fields:
-            if dry_run:
+            dry_upgrade = [f for f, ok in (
+                ("source_type", epg_source.source_type == EPG_SOURCE_TYPE),
+                ("is_active", epg_source.is_active == EPG_SOURCE_IS_ACTIVE),
+            ) if not ok]
+            if dry_upgrade:
                 logger.info("[ranked_matchups] [dry] would upgrade EPGSource id=%s fields=%s",
-                            epg_source.id, upgrade_fields)
-            else:
-                epg_source.save(update_fields=upgrade_fields)
-                logger.info("[ranked_matchups] upgraded EPGSource id=%s fields=%s",
-                            epg_source.id, upgrade_fields)
+                            epg_source.id, dry_upgrade)
 
-    # Old EPGSources we own, named after a previous live-group name. AFTER
-    # step 2 on purpose: our rows on them MOVE to the current source rather
-    # than being deleted with it, and that needs the current source to exist
-    # (#263, see _move_owned_epg_rows for why a delete blanks a recording
-    # channel's guide). The old source itself goes only when every row on it
-    # was ours; one that also holds another owner's rows stays theirs.
-    deleted_old_sources = 0
-    if not dry_run and foreign_epg_sources and epg_source is not None:
-        for old_src in foreign_epg_sources:
-            with transaction.atomic():
-                moved = _move_owned_epg_rows(old_src, epg_source)
-                if moved:
-                    logger.info(
-                        "[ranked_matchups] moved %d guide row(s) from old EPGSource %r to %r",
-                        moved, old_src.name, epg_source.name,
-                    )
-                if not EPGData.objects.filter(epg_source=old_src).exists():
-                    old_src.delete()  # empty now, so the cascade takes nothing
-                    deleted_old_sources += 1
-                    logger.info("[ranked_matchups] deleted old EPGSource %r", old_src.name)
-
-    # 3. Existing virtual channels we'll update or delete
+    # 3. Existing virtual channels we'll update or delete: ours in the target
+    # group AND in the previous groups _commit_group_setup will move into it
+    # (in place, same Channel.id), so everything decided before the move sees
+    # the channels it will act on. A dry run counts them too: it previews
+    # what the real apply does (updates, not creates).
+    # NEVER the recordings archive channel, wherever it sits: no game marks
+    # it seen, so it was reaped as stale, its recordings first "re-homed"
+    # onto itself, and the CASCADE took them (an archive left in the live
+    # group by the old case-only rename bug).
+    moving_groups = foreign_owned_groups
+    in_target = Q(channel_group=target_group) if target_group is not None else Q(pk__in=[])
     existing_virtuals = {
         ch.tvg_id: ch for ch in Channel.objects.filter(
-            _owned_tvg_id_q(), channel_group=target_group,
+            _owned_tvg_id_q() & _movable_owned_q()
+            & (in_target | Q(channel_group__in=moving_groups)),
         )
     }
     # Channels made before #217 carry a marker that hashed the kickoff time.
@@ -7495,6 +7857,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         markers={m for m in autorec.ours if m not in prep_by_marker},
     )
 
+    # A live group missing at the lookup above may exist by now (a user, or an
+    # M3U refresh, made it meanwhile), and the setup adopts it: read it again
+    # so numbering reserves the RAW numbers its channels hold. Missed, our
+    # channel was numbered onto a raw number a channel there held under an
+    # override (_reserved_channel_numbers). One made after numbering is the
+    # race any group has with a channel filed during the pre-pass; the next
+    # apply's numbering moves ours off it.
+    if target_group is None:
+        target_group = ChannelGroup.objects.filter(name=group_name).first()
+        if target_group is not None:
+            in_target = Q(channel_group=target_group)
+
     # A channel this apply KEEPS without writing it (an active recording, #146,
     # or kept by its guide, #264) goes back to its number after parking, unless
     # a new game was handed that number, in which case it stays at a parking
@@ -7553,7 +7927,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             default=0,
         )
         reserved_numbers = (
-            _reserved_channel_numbers(target_group, lowest_kickoff) | held_for_recordings
+            _reserved_channel_numbers(target_group, lowest_kickoff, pending_groups=moving_groups)
+            | held_for_recordings
         )
         remembered_base, remembered_record = _load_numbering_state()
         virtual_base = _resolve_kickoff_base(
@@ -7566,6 +7941,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         virtual_base = _resolve_virtual_base(settings, highest_other)
         reserved_numbers = _reserved_channel_numbers(
             target_group, virtual_base, virtual_base + band_size - 1,
+            pending_groups=moving_groups,
         ) | held_for_recordings
     existing_numbers = {
         marker: int(ch.channel_number)
@@ -7598,12 +7974,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             # setting to move.
             band_top = virtual_base + band_size - 1
             # NOT "nothing was changed": by this point apply may already have
-            # created the target group, migrated channels into it after a rename,
-            # and created or upgraded the EPG source, all outside the transaction
-            # below. Claiming otherwise would send someone looking in the
-            # wrong place. (No description or logo has been fetched yet: the
-            # pre-pass's network half runs after numbering, #288.) What is true is that no channel was added, renumbered or
-            # removed, because every one of those happens after this return.
+            # committed the first step's recording cancellations (they run
+            # before numbering on purpose, #288). The group and guide setup
+            # has NOT run: it is the first step of the main transaction, so a
+            # refused rename leaves our channels where they were. (No description or logo
+            # has been fetched yet: the pre-pass's network half runs after
+            # numbering, #288.) What is true is that no channel was added,
+            # renumbered, moved or removed.
             msg = (
                 f"Compact numbering found no free channel numbers in {virtual_base}-"
                 f"{band_top}: every number in that range is already used by another "
@@ -7700,7 +8077,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 cache=llm_cache,
                 boundary_summary=_boundary,
                 marker=marker,
-                allow_network=prepass_budget.allow,
+                # A dry run serves cached prose only: an uncached call costs
+                # money for a description nothing will write or cache.
+                allow_network=(lambda: False) if dry_run else prepass_budget.allow,
                 # Supplies the outcome-band cutoffs the prompt needs to state
                 # each team's exact distance from relegation / Europe rather
                 # than leaving the model to infer it from a table slice (#209).
@@ -7737,10 +8116,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # Park above every number ANY channel in the group holds (see
     # _resolve_park_base): a hand-added channel in our group is reserved from
     # assignment, but not from the parking range.
+    # The group as the setup (first thing in the transaction below) will
+    # leave it: what it holds now, plus our channels it moves in.
     highest_in_group = (
-        Channel.objects.filter(channel_group=target_group)
+        Channel.objects.filter(
+            in_target | (_owned_tvg_id_q() & _movable_owned_q() & Q(channel_group__in=moving_groups)))
         .aggregate(m=_Max("channel_number"))["m"] or 0
-    ) if target_group is not None else 0
+    )
     park_base = _resolve_park_base(max_target, highest_in_group)
     logger.info(
         "[ranked_matchups] virtual_base=%d (highest_other=%s, setting=%r, "
@@ -7756,6 +8138,30 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     profile_stats: Optional[Dict[str, Any]] = None
 
     with transaction.atomic():
+        # Group and guide setup FIRST, inside this transaction: after apply's
+        # last time check and after the full-band refusal above, and atomic
+        # with everything below, so a stopped, refused or FAILED apply never
+        # leaves a rename half done (our channel moved into the new group
+        # beside a channel already on its number, or moved while its guide
+        # stayed on the old source). Numbering above already read the
+        # channels as this leaves them (_reserved_channel_numbers'
+        # pending_groups, and highest_in_group).
+        if not dry_run:
+            setup = _commit_group_setup(
+                group_name, target_group, foreign_owned_groups, foreign_epg_sources,
+                _deletable_group_names,
+            )
+            if setup is None:
+                # Nothing written in this transaction yet, so leaving it
+                # commits nothing.
+                msg = _fetching_source_message(group_name, before_any_write=False)
+                logger.error("[ranked_matchups] %s", msg)
+                return {"status": "error", "message": msg}
+            target_group, epg_source = setup["target_group"], setup["epg_source"]
+            migrated_from_old_group = setup["migrated"]
+            deleted_old_groups = setup["deleted_groups"]
+            deleted_old_sources = setup["deleted_sources"]
+
         # Persist the #217 re-key. Queryset .update(), not ch.save(): only the
         # tvg_id moves, and staying off save() keeps every Channel post_save
         # receiver out of it (see the epg_data signal trap further down). The
@@ -8044,6 +8450,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         if stale and not dry_run:
             now_reap = datetime.now(timezone.utc)
             stale_ids_all = [c.id for c in stale]
+            # Row locks first: a recording made on a stale channel between
+            # this read and the delete below would go with it (CASCADE). On
+            # Postgres its foreign-key check waits on these locks.
+            list(Channel.objects.select_for_update().filter(id__in=stale_ids_all)
+                 .values_list("pk", flat=True))
             recs_by_channel: Dict[int, list] = {}
             for r in Recording.objects.filter(channel_id__in=stale_ids_all):
                 recs_by_channel.setdefault(r.channel_id, []).append(r)
@@ -8054,7 +8465,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 stale, recs_by_channel, now_reap, archive_enabled, guide_kept_ids,
             )
             if rehome_rec_ids:
-                archive_ch = _ensure_archive_channel(recordings_group_name)
+                archive_ch = _ensure_archive_channel(recordings_group_name, group_name)
                 # .update() on the Recording queryset: re-point the FK without
                 # invoking per-row save hooks. Recording carries no destructive
                 # post_save signal (unlike Channel.epg_data), so this is a plain
@@ -8236,7 +8647,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # while it holds recordings. Drop the archive channel and its group once
         # empty (e.g. after the user deletes the last preserved recording).
         if not dry_run and archive_enabled:
-            _cleanup_empty_archive(recordings_group_name)
+            _cleanup_empty_archive(recordings_group_name, group_name)
 
         # 8. Channel Profile membership (#172). LAST inside the transaction, and
         # deliberately so: it reads the set of channels we own, which is only

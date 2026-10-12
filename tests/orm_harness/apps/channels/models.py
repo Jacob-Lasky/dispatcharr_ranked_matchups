@@ -67,6 +67,9 @@ class ChannelOverride(models.Model):
     epg_data = models.ForeignKey(
         "epg.EPGData", on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
     )
+    channel_group = models.ForeignKey(
+        ChannelGroup, on_delete=models.SET_NULL, null=True, blank=True, related_name="+",
+    )
 
 
 class ChannelProfile(models.Model):
@@ -100,3 +103,17 @@ class Recording(models.Model):
     end_time = models.DateTimeField()
     task_id = models.CharField(max_length=255, null=True, blank=True)
     custom_properties = models.JSONField(default=dict, blank=True, null=True)
+
+
+class ChannelGroupM3UAccount(models.Model):
+    """An M3U account's settings for a group (sync, start number). CASCADE:
+    deleting the group deletes them."""
+    channel_group = models.ForeignKey(
+        ChannelGroup, on_delete=models.CASCADE, related_name="m3u_accounts",
+    )
+    m3u_account = models.ForeignKey(
+        "m3u.M3UAccount", on_delete=models.CASCADE, related_name="channel_group",
+    )
+    custom_properties = models.JSONField(default=dict, blank=True, null=True)
+    enabled = models.BooleanField(default=True)
+    auto_channel_sync = models.BooleanField(default=False)
