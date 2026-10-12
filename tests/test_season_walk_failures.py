@@ -16,9 +16,11 @@ it was silent:
 
 Every game in the league then scored stakes from standings missing results
 and a calendar missing fixtures, and the refresh summary said nothing. Now
-the season is not simulated (its games score no standings stakes) and the
-refresh reports "<label> season (stakes not simulated)", as it does for a
-Football-Data season (#228) and a playoff bracket (#245).
+the season is not simulated, and the refresh treats the label as an outage,
+as it does a failed rank feed (#283): `<label>: error`, and the games it
+published last time held with the scores they had, instead of republished
+with no standings stakes. A playoff source seeded from that season is held
+too.
 
 Three layers: per-source WITNESSES with literal days, GUARDS that an
 answered season (an offseason's empty one included) stays quiet and that a
@@ -228,57 +230,184 @@ def test_mls_a_failed_conference_map_fails_the_season(monkeypatch):
 # End to end: the refresh reports it
 # ---------------------------------------------------------------------------
 
-def test_refresh_reports_a_season_that_was_not_simulated(monkeypatch, refresh_env, plugin):
-    """An NBA game tomorrow, and the season walk losing a day: the game is
-    published, with no standings stakes, and the summary says why."""
+def _nba_slate(monkeypatch, dead_day):
+    """NBA with one game tomorrow (Boston v Denver, 23:00Z) and a season
+    walk in which `dead_day` (YYYYMMDD) fails every time. Returns (source,
+    the game's kickoff, the scoreboard days asked for)."""
     nba = importlib.import_module(f"{PKG}.nba")
-    tomorrow = datetime.now(UTC) + timedelta(days=1)
-    game = _event("t1", "Boston", "Denver", tomorrow.replace(hour=23, minute=0), "pre")
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).replace(hour=23, minute=0, second=0, microsecond=0)
+    game = _event("t1", "Boston", "Denver", tomorrow, "pre")
+    asked = []
 
     def http_get(url, *a, **k):
         day = url.split("dates=")[1][:8]
-        if day == "20261225":
+        asked.append(day)
+        if day == dead_day:
             return None
         if day == tomorrow.strftime("%Y%m%d"):
             return {"events": [game]}
         return {"events": []}
 
     monkeypatch.setattr(nba, "_http_get", http_get)
-    src = nba.NbaRegularSource(season_end_year=2027)
-    _write_prior, run, read = refresh_env
+    return nba.NbaRegularSource(season_end_year=2027), tomorrow, asked
+
+
+def _published(start, score, importance):
+    """The NBA game as the previous refresh published it."""
+    return {
+        "sport_prefix": "NBA", "sport_label": "NBA", "home": "Boston", "away": "Denver",
+        "start_time_utc": start.isoformat(), "score": score, "importance_points": importance,
+        "channel_id": 777, "channel_ids": [777], "stream_ids": [],
+        "extra": {"espn_event_id": "t1", "game_id": "t1"},
+    }
+
+
+def test_a_failed_season_holds_the_league_like_a_failed_rank_feed(monkeypatch, refresh_env):
+    """WITNESS: the season walk lost 2026-12-25. The game was republished
+    scored against a season without Christmas Day (and, with #289's first
+    cut, with no standings stakes at all). Now the label is an outage, as a
+    failed rank feed is (#283): the game published last time is held with
+    the score it had, and the summary says why."""
+    src, tomorrow, _asked = _nba_slate(monkeypatch, dead_day="20261225")
+    write_prior, run, read = refresh_env
+    write_prior([_published(tomorrow, 8.5, 4.0)])
     run([src], weight_importance=1)   # refresh_env turns importance off by default
     cache = read()
-    assert [(g["home"], g["away"]) for g in cache["games"]] == [("Boston", "Denver")]
-    assert cache["games"][0]["importance_points"] == 0
-    assert [s for s in cache["summary"] if "season (stakes not simulated)" in s] == [
-        "NBA season (stakes not simulated): error "
-        "(no answer for 1 day(s) of the season (2026-12-25..2026-12-25))"
+    assert [(g["home"], g["away"], g["score"], g.get("importance_points")) for g in cache["games"]] == [
+        ("Boston", "Denver", 8.5, 4.0)]
+    assert [s for s in cache["summary"] if s.startswith("NBA:")] == [
+        "NBA: error (season not fetched whole: no answer for 1 day(s) of the season "
+        "(2026-12-25..2026-12-25))"
     ]
-    problems = plugin._slate_problems(cache["summary"], cache["games"])
-    assert any("NBA season" in p for p in problems)
 
 
-def test_refresh_does_not_report_a_failed_season_with_nothing_on_the_slate(monkeypatch, refresh_env):
-    """Guard: a league with no game in this refresh lost nothing to the
-    failure (a season read only for a playoff seed, an offseason). An NFL
-    game is on the slate, so the refresh reaches the reporting step (an
-    empty slate returns before it) and NFL's answered season stays quiet."""
+def test_an_answered_season_scores_the_game(monkeypatch, refresh_env):
+    """Guard: the same slate with every season day answering is scored
+    afresh, not held."""
+    src, tomorrow, _asked = _nba_slate(monkeypatch, dead_day=None)
+    write_prior, run, read = refresh_env
+    write_prior([_published(tomorrow, 8.5, 4.0)])
+    run([src], weight_importance=1)
+    cache = read()
+    assert [(g["home"], g["away"]) for g in cache["games"]] == [("Boston", "Denver")]
+    assert cache["games"][0]["score"] != 8.5
+    assert not any(s.startswith("NBA: error") for s in cache["summary"])
+
+
+def test_no_season_is_read_with_importance_off(monkeypatch, refresh_env):
+    """Guard (cost): with importance turned off the fetch loop's season
+    check asks for no season, so it never holds the label. (A playoff
+    source's SEEDING season is read when `_build_sources` builds it, as it
+    always was; this source is handed in directly.)"""
+    src, _tomorrow, asked = _nba_slate(monkeypatch, dead_day="20261225")
+    _write_prior, run, read = refresh_env
+    run([src])   # refresh_env's default: importance off
+    cache = read()
+    assert [(g["home"], g["away"]) for g in cache["games"]] == [("Boston", "Denver")]
+    assert "20261225" not in asked
+    assert not any(s.startswith("NBA: error") for s in cache["summary"])
+
+
+def test_no_season_is_read_for_a_league_with_nothing_on_the_slate(monkeypatch, refresh_env):
+    """Guard (cost): a league with no game this refresh has nothing to
+    score, so the fetch loop's check walks no season; an NFL game keeps the
+    slate non-empty so the refresh runs to the end."""
     nba = importlib.import_module(f"{PKG}.nba")
     nfl = importlib.import_module(f"{PKG}.nfl")
-    monkeypatch.setattr(nba, "_http_get", lambda url, *a, **k: (
-        None if "dates=20261225" in url else {"events": []}))
-    tomorrow = datetime.now(UTC) + timedelta(days=1)
-    game = _event("f1", "Buffalo", "Miami", tomorrow.replace(hour=23, minute=0), "pre")
+    asked = []
+
+    def nba_get(url, *a, **k):
+        asked.append(url.split("dates=")[1][:8])
+        return None if "dates=20261225" in url else {"events": []}
+
+    tomorrow = (datetime.now(UTC) + timedelta(days=1)).replace(hour=23, minute=0, second=0, microsecond=0)
+    game = _event("f1", "Buffalo", "Miami", tomorrow, "pre")
+    monkeypatch.setattr(nba, "_http_get", nba_get)
     monkeypatch.setattr(nfl, "_http_get", lambda url, *a, **k: (
         {"events": [game]} if f"dates={tomorrow.strftime('%Y%m%d')}" in url else {"events": []}))
-    idle = nba.NbaRegularSource(season_end_year=2027)
-    idle._fetch_games_cached()
-    assert idle.season_fetch_failure() is not None
     _write_prior, run, read = refresh_env
-    run([idle, nfl.NflRegularSource(season_end_year=2027)], weight_importance=1)
+    run([nba.NbaRegularSource(season_end_year=2027), nfl.NflRegularSource(season_end_year=2027)],
+        weight_importance=1)
     cache = read()
     assert [(g["home"], g["away"]) for g in cache["games"]] == [("Buffalo", "Miami")]
-    assert [s for s in cache["summary"] if "season (stakes not simulated)" in s] == []
+    assert "20261225" not in asked
+    assert not any(s.startswith("NBA: error") for s in cache["summary"])
+
+
+@pytest.mark.parametrize("favorites,held", [("Celtics", False), ("Boston", True)])
+def test_a_league_the_favorites_gate_drops_reads_no_season(monkeypatch, refresh_env, favorites, held):
+    """WITNESS (Codex, #289 round 4): under favorites-only, a league whose
+    games the gate drops is never scored, but its season was still walked
+    (three requests for NCAAM) and a failure held the label. Now the check
+    asks the same gate first. A favorite's game is still checked, and held."""
+    src, tomorrow, asked = _nba_slate(monkeypatch, dead_day="20261225")
+    write_prior, run, read = refresh_env
+    write_prior([_published(tomorrow, 8.5, 4.0)])
+    run([src], weight_importance=1, favorites_only="strict", favorites=favorites)
+    cache = read()
+    assert ("20261225" in asked) is held
+    assert any(s.startswith("NBA: error") for s in cache["summary"]) is held
+
+
+def test_a_playoff_seeded_from_a_failed_season_is_held_in_the_refresh(monkeypatch, refresh_env):
+    """WITNESS, end to end: a playoff source with a game on the slate whose
+    seeding season failed (`strength_sources`) is an outage in the fetch
+    loop, and the game it published last time is held."""
+    from dispatcharr_ranked_matchups.sources.base import GameRow, SportSource
+    reg, tomorrow, _asked = _nba_slate(monkeypatch, dead_day="20261225")
+    reg._fetch_games_cached()   # read when the sources were built
+
+    class _Finals(SportSource):
+        sport_prefix = "NBA"
+        sport_label = "NBA Playoffs"
+        strength_sources = (reg,)
+
+        def fetch_upcoming(self, days_ahead=7):
+            return [GameRow(sport_prefix="NBA", sport_label="NBA Playoffs", home="Boston",
+                            away="Denver", rank_home=None, rank_away=None,
+                            start_time=tomorrow, extra={"game_id": "p1"})]
+
+    prior = {**_published(tomorrow, 9.0, 5.0), "sport_label": "NBA Playoffs",
+             "extra": {"game_id": "p1"}}
+    write_prior, run, read = refresh_env
+    write_prior([prior])
+    run([_Finals()], weight_importance=1)
+    cache = read()
+    assert [(g["sport_label"], g["score"]) for g in cache["games"]] == [("NBA Playoffs", 9.0)]
+    assert [s for s in cache["summary"] if s.startswith("NBA Playoffs:")] == [
+        "NBA Playoffs: error (season not fetched whole: no answer for 1 day(s) of the "
+        "season (2026-12-25..2026-12-25))"
+    ]
+
+
+def test_a_postseason_game_kept_by_its_round_still_checks_its_season(monkeypatch, refresh_env):
+    """WITNESS (Codex, #289 round 5): under favorites_only=postseason a
+    non-favorite playoff game is kept only once the bracket stamps its round.
+    The season check asked the gate before placement, dropped the game,
+    skipped its failed seeding season, and the game was then kept and scored
+    on the league prior. Placement now runs first, so the label is held."""
+    from dispatcharr_ranked_matchups.sources.base import GameRow, SportSource
+    reg, tomorrow, _asked = _nba_slate(monkeypatch, dead_day="20261225")
+    reg._fetch_games_cached()
+
+    class _Finals(SportSource):
+        sport_prefix = "NBA"
+        sport_label = "NBA Playoffs"
+        strength_sources = (reg,)
+
+        def fetch_upcoming(self, days_ahead=7):
+            return [GameRow(sport_prefix="NBA", sport_label="NBA Playoffs", home="Boston",
+                            away="Denver", rank_home=None, rank_away=None,
+                            start_time=tomorrow, extra={"game_id": "p1"})]
+
+        def place_upcoming(self, rows, for_scoring=False):
+            for r in rows:
+                r.extra["stage"] = "FINALS"
+            return 0
+
+    _write_prior, run, read = refresh_env
+    run([_Finals()], weight_importance=1, favorites_only="postseason", favorites="Lakers")
+    assert any(s.startswith("NBA Playoffs: error (season not fetched whole") for s in read()["summary"])
 
 
 # ---------------------------------------------------------------------------
@@ -428,50 +557,38 @@ def test_a_season_read_at_build_time_reports_too(plugin, monkeypatch):
 # ---------------------------------------------------------------------------
 
 class _Season:
-    def __init__(self, label, failure):
-        self.sport_label, self._failure = label, failure
+    def __init__(self, failure):
+        self._failure, self.read = failure, 0
 
-    def season_fetch_failure(self):
-        return self._failure
+    def require_season(self):
+        from dispatcharr_ranked_matchups.sources.base import SeasonUnavailable
+        self.read += 1
+        if self._failure:
+            raise SeasonUnavailable(f"season not fetched whole: {self._failure}")
 
 
 class _Playoff:
-    sport_label = "NFL Playoffs"
-
     def __init__(self, *seeds):
         if seeds:
             self.strength_sources = seeds
 
 
-def test_a_scored_playoff_reports_the_season_its_strengths_came_from(plugin):
-    """WITNESS (Codex, #289 round 1): only playoff games on the slate, and the
-    regular season they took their team strengths from failed at build time.
-    The playoff model ran on its prior and nothing said so, because the
-    regular source had no game in the slate."""
-    reg = _Season("NFL", "no answer for 1 day(s) of the season (2026-12-25..2026-12-25)")
-    po = _Playoff(reg)
-    assert plugin._season_failure_entries([reg, po], [po]) == [
-        "NFL season (stakes not simulated): error "
-        "(no answer for 1 day(s) of the season (2026-12-25..2026-12-25))"
-    ]
+def test_a_playoff_seeded_from_a_failed_season_is_held_too(plugin):
+    """WITNESS (Codex, #289 round 1): only playoff games on the slate, and
+    the regular season they took their team strengths from failed when the
+    sources were built. The playoff model ran on its league prior and
+    nothing said so. The playoff label is held like its season's."""
+    from dispatcharr_ranked_matchups.sources.base import SeasonUnavailable
+    with pytest.raises(SeasonUnavailable, match="2026-12-25"):
+        plugin._require_seasons(_Playoff(_Season("no answer for 1 day(s) (2026-12-25..2026-12-25)")))
 
 
-def test_an_unrelated_or_unscored_season_is_not_reported(plugin):
-    """Guard: a failed season with no game in the slate, and none in a
-    playoff seeded from it, lost nothing to report."""
-    reg = _Season("NFL", "boom")
-    assert plugin._season_failure_entries([reg, _Playoff()], [_Playoff()]) == []
-    assert plugin._season_failure_entries([reg], []) == []
-
-
-def test_two_conferences_sharing_a_label_report_one_entry(plugin):
-    """Guard: MLS East and West share "MLS"; both failing, and the MLS Cup
-    seeded from both, is one entry listing each distinct reason once."""
-    east, west = _Season("MLS", "map"), _Season("MLS", "map")
-    cup = _Playoff(east, west)
-    assert plugin._season_failure_entries([east, west, cup], [cup]) == [
-        "MLS season (stakes not simulated): error (map)"
-    ]
+def test_a_source_with_answered_seasons_passes(plugin):
+    """Guard: an answered seeding season, and a source with none, pass."""
+    east, west = _Season(None), _Season(None)
+    plugin._require_seasons(_Playoff(east, west))
+    plugin._require_seasons(_Playoff())
+    assert (east.read, west.read) == (1, 1)
 
 
 def test_every_seeded_playoff_records_its_strength_sources(plugin, monkeypatch):
