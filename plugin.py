@@ -7857,6 +7857,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         markers={m for m in autorec.ours if m not in prep_by_marker},
     )
 
+    # A live group missing at the lookup above may exist by now (a user, or an
+    # M3U refresh, made it meanwhile), and the setup adopts it: read it again
+    # so numbering reserves the RAW numbers its channels hold. Missed, our
+    # channel was numbered onto a raw number a channel there held under an
+    # override (_reserved_channel_numbers). One made after numbering is the
+    # race any group has with a channel filed during the pre-pass; the next
+    # apply's numbering moves ours off it.
+    if target_group is None:
+        target_group = ChannelGroup.objects.filter(name=group_name).first()
+        if target_group is not None:
+            in_target = Q(channel_group=target_group)
+
     # A channel this apply KEEPS without writing it (an active recording, #146,
     # or kept by its guide, #264) goes back to its number after parking, unless
     # a new game was handed that number, in which case it stays at a parking

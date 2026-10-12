@@ -245,6 +245,46 @@ def scenario_witness_a_live_group_created_during_the_prepass_is_adopted(env):
     assert m.ChannelGroup.objects.filter(name=NEW).count() == 1
 
 
+def scenario_witness_a_live_group_created_before_numbering_has_its_raw_numbers_reserved(env):
+    """Codex review, round 22: numbering reads raw numbers only in a live
+    group that existed at apply's early lookup. One created after it (by a
+    user, or an M3U refresh) and adopted by the setup could hold a channel at
+    raw 401 published under an override (8888): 401 stayed free, and our
+    channel was numbered 401 beside it in that group (the UI then refuses to
+    save either). The harness has no with_effective_values; a stand-in
+    publishes that channel at 8888."""
+    import sys
+    import types
+    from django.db.models import Case, F, Value, When
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    _write_cache(env, [game])
+    managers = types.ModuleType("apps.channels.managers")
+    managers.with_effective_values = lambda qs: qs.annotate(effective_channel_number=Case(
+        When(name="Mine", then=Value(8888.0)), default=F("channel_number")))
+    cancel = env.plugin._autorecord_cancel_committed
+
+    def group_appears(*a, **k):
+        grp, made = m.ChannelGroup.objects.get_or_create(name=NEW)  # once, on the first call
+        if made:
+            m.Channel.objects.create(name="Mine", channel_number=401, channel_group=grp)
+        return cancel(*a, **k)
+
+    sys.modules["apps.channels.managers"] = managers
+    env.plugin._autorecord_cancel_committed = group_appears
+    try:
+        result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+    finally:
+        env.plugin._autorecord_cancel_committed = cancel
+        del sys.modules["apps.channels.managers"]
+    assert result["status"] == "ok", result
+    ours.refresh_from_db()
+    assert ours.channel_group.name == NEW
+    assert int(ours.channel_number) != 401, "our channel took raw 401 beside 'Mine' in the group"
+
+
 def scenario_witness_an_old_source_renamed_to_the_live_name_keeps_its_guide(env):
     """Codex review, round 14: the previous live group's source, renamed by
     the user to the NEW live name during the pre-pass, was both the live
