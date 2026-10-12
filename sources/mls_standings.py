@@ -78,14 +78,20 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
 from ._odds import fetch_odds_events
-from .base import GameRow
+from .base import GameRow, SeasonUnavailable
 from .points_based import PointsBasedSportSource
 from .mls import (
     _h2h_to_closeness,
     _team_canonical_name,
 )
 from .._util import http_get_json
-from ._espn import extract_espn_scoreboard_event, fetch_scoreboard_days, sweep_upcoming_events
+from ._espn import (
+    dedupe_events,
+    event_identity,
+    extract_espn_scoreboard_event,
+    fetch_scoreboard_days,
+    sweep_upcoming_events,
+)
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.mls_standings")
 
@@ -411,7 +417,8 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
                 ),
                 extra={
                     "espn_event_id": eid,
-                    # Same ESPN event id under the key the importance
+                    # The event's identity (its ESPN id when it has one,
+                    # `_espn.event_identity`) under the key the importance
                     # simulator uses for match identity. DO NOT drop
                     # this in favour of `espn_event_id` alone:
                     # `PointsBasedSportSource.apply_result` records
@@ -422,7 +429,7 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
                     # season the moment the fixture pool holds a
                     # date-less row (#65). `espn_event_id` stays for
                     # the cache.json consumers already reading it.
-                    "game_id": eid,
+                    "game_id": event_identity(event),
                     "fd_competition_code": self.league_context_code,
                     "season_slug": rec.get("season_slug"),
                 },
@@ -459,8 +466,10 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         """
         own_conf = self._own_conf_teams()
         if not own_conf:
-            return []
-        seen: Dict[Any, Dict[str, Any]] = {}
+            # The conference map failed (see `_fetch_conference_map`), so the
+            # season cannot be cut to this conference: a failed season, not
+            # an empty one (#289).
+            raise SeasonUnavailable("standings conference map unavailable")
         season_start = datetime(
             self.season_year, SEASON_START_MONTH, 1, tzinfo=timezone.utc
         ).date()
@@ -468,21 +477,22 @@ class MlsStandingsSourceBase(PointsBasedSportSource):
         season_end = (datetime(
             self.season_year, SEASON_END_MONTH + 1, 1, tzinfo=timezone.utc
         ).date()) - timedelta(days=1)
-        for event in _fetch_scoreboard_range(season_start, season_end):
+
+        def keep(event: Dict[str, Any], key: Any) -> Optional[Dict[str, Any]]:
             rec = _extract_game_record(event)
-            if rec is None or rec["id"] is None:
-                continue
-            if rec["id"] in seen:
-                continue
+            if rec is None:
+                return None
             # Intra-conference regular season only.
             if rec.get("season_slug") != REGULAR_SEASON_SLUG:
-                continue
+                return None
             if rec["home"] not in own_conf:
-                continue
+                return None
             if rec["away"] not in own_conf:
-                continue
-            seen[rec["id"]] = rec
-        return list(seen.values())
+                return None
+            rec["id"] = key  # the event's identity, never None: see dedupe_events
+            return rec
+
+        return dedupe_events(_fetch_scoreboard_range(season_start, season_end), keep)
 
     # ---------- sample_result (allows draws: soccer rules) ----------
 

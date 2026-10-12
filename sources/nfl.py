@@ -39,9 +39,12 @@ from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, http_get_json
 from ._espn import (
+    dedupe_events,
+    event_identity,
     fetch_scoreboard_day,
     fetch_scoreboard_days,
     scoreboard_event_over,
+    scoreboard_events,
     sweep_upcoming_events,
 )
 
@@ -230,7 +233,7 @@ class NflRegularSource(PointsBasedSportSource):
                 extra={
                     "nfl_game_id": eid,
                     # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                    "game_id": eid,
+                    "game_id": event_identity(event),
                     "fd_competition_code": self.league_context_code,
                 },
             )
@@ -242,7 +245,6 @@ class NflRegularSource(PointsBasedSportSource):
         season.type == 2 so playoffs don't leak into the win-count
         importance signal: the playoff source covers that separately.
         """
-        seen: Dict[Any, Dict[str, Any]] = {}
         # NFL season starts early-September of (end_year - 1).
         season_start = datetime(
             self.season_end_year - 1, SEASON_START_MONTH, 1, tzinfo=timezone.utc,
@@ -257,24 +259,20 @@ class NflRegularSource(PointsBasedSportSource):
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = regular_end
 
-        for _day, data in fetch_scoreboard_days(
-            _http_get, f"{ESPN_BASE}/scoreboard", season_start, end,
-        ):
-            if data:
-                for event in data.get("events") or []:
-                    rec = _extract_game_record(event)
-                    if rec is None or rec["id"] is None:
-                        continue
-                    if rec.get("season_type") != 2:
-                        # Skip preseason (type=1), Pro Bowl, postseason.
-                        continue
-                    if rec["id"] in seen:
-                        continue
-                    seen[rec["id"]] = {
-                        k: v for k, v in rec.items()
-                        if k not in ("season_type", "notes")
-                    }
-        return list(seen.values())
+        def keep(event: Dict[str, Any], key: Any) -> Optional[Dict[str, Any]]:
+            rec = _extract_game_record(event)
+            if rec is None or rec.get("season_type") != 2:
+                # Skip preseason (type=1), Pro Bowl, postseason.
+                return None
+            game = {k: v for k, v in rec.items() if k not in ("season_type", "notes")}
+            game["id"] = key  # the event's identity, never None: see dedupe_events
+            return game
+
+        return dedupe_events(scoreboard_events(
+            data for _day, data in fetch_scoreboard_days(
+                _http_get, f"{ESPN_BASE}/scoreboard", season_start, end,
+            )
+        ), keep)
 
 
 # =====================================================================
@@ -343,7 +341,7 @@ class NflPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
                 start_time=start,
                 extra={
                     "nfl_game_id": eid,
-                    "game_id": eid,
+                    "game_id": event_identity(event),
                     "fd_competition_code": self._league_context_code(),
                 },
             )
@@ -376,8 +374,6 @@ class NflPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         if self._bracket_games_cache is not None:
             return self._bracket_games_cache
 
-        out: List[Dict[str, Any]] = []
-        seen_ids: set = set()
         start = datetime(self.season_end_year, 1, 1, tzinfo=timezone.utc).date()
         end = datetime(self.season_end_year, 2, 28, tzinfo=timezone.utc).date()
         payloads = self._sweep_bracket_days(
@@ -387,33 +383,29 @@ class NflPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         if payloads is None:
             # A day failed: NOT cached (#245; see BracketSportSource).
             return []
-        for data in payloads:
-            for event in data.get("events") or []:
-                rec = _extract_game_record(event)
-                if rec is None or rec["id"] is None:
-                    continue
-                if rec.get("season_type") != 3:
-                    continue
-                if rec["id"] in seen_ids:
-                    continue
-                headline = None
-                notes = rec.get("notes") or []
-                if notes:
-                    headline = (notes[0] or {}).get("headline")
-                parsed = _parse_stage_from_headline(headline)
-                if parsed is None:
-                    continue
-                seen_ids.add(rec["id"])
-                out.append({
-                    "game_id": rec["id"],
-                    "stage": parsed["stage"],
-                    "matchday": parsed["matchday"],
-                    "home": rec["home"],
-                    "away": rec["away"],
-                    "home_goals": rec["home_points"],
-                    "away_goals": rec["away_points"],
-                    "status": rec["status"],
-                    "start_time": rec["start_time"],
-                    "extra": {"headline": headline},
-                })
-        return self._cache_bracket_games(out)
+
+        def keep(event: Dict[str, Any], key: Any) -> Optional[Dict[str, Any]]:
+            rec = _extract_game_record(event)
+            if rec is None or rec.get("season_type") != 3:
+                return None
+            headline = None
+            notes = rec.get("notes") or []
+            if notes:
+                headline = (notes[0] or {}).get("headline")
+            parsed = _parse_stage_from_headline(headline)
+            if parsed is None:
+                return None
+            return {
+                "game_id": key,  # the event's identity, never None: see dedupe_events
+                "stage": parsed["stage"],
+                "matchday": parsed["matchday"],
+                "home": rec["home"],
+                "away": rec["away"],
+                "home_goals": rec["home_points"],
+                "away_goals": rec["away_points"],
+                "status": rec["status"],
+                "start_time": rec["start_time"],
+                "extra": {"headline": headline},
+            }
+
+        return self._cache_bracket_games(dedupe_events(scoreboard_events(payloads), keep))

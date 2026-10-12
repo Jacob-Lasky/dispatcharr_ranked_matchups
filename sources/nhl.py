@@ -42,7 +42,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, MatchResult, report_lost_days
+from .base import GameRow, MatchResult, SeasonUnavailable, report_lost_days
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, poisson_sample as _poisson, http_get_json
@@ -269,9 +269,14 @@ class NhlRegularSource(PointsBasedSportSource):
             data = _http_get(
                 f"{NHL_API_BASE}/club-schedule-season/{abbrev}/{self.season}"
             )
-            if not data:
-                continue
-            for g in data.get("games", []) or []:
+            if not (isinstance(data, dict) and isinstance(data.get("games"), list)):
+                # A club whose schedule did not answer is a hole in the
+                # season, not a club with no games: skipping it (as this did)
+                # dropped its results and fixtures from every simulation
+                # (#289). All 32 answer with a `games` list (measured
+                # 2026-10-11 for 20262027).
+                raise SeasonUnavailable(f"club-schedule-season/{abbrev} did not answer")
+            for g in data["games"]:
                 if g.get("gameType") != 2:
                     continue
                 gid = g.get("id")

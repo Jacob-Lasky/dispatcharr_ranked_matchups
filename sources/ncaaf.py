@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow, RankingsUnavailable
+from .base import GameRow, RankingsUnavailable, SeasonUnavailable
 from .points_based import PointsBasedSportSource
 from .._http import get_within_deadline
 from .._util import parse_iso_utc
@@ -304,12 +304,21 @@ class NcaafSource(PointsBasedSportSource):
                 timeout=60,
             )
             r.raise_for_status()
-            data = r.json() or []
+            data = r.json()
+            if not isinstance(data, list):
+                # /games answers with a list of games, `[]` included; an
+                # error object or null is a failure, not an empty season.
+                raise ValueError(f"/games answered {str(data)[:80]!r}, not a list")
         except Exception as e:
             logger.error("[ncaaf] /games failed: %s", e)
             # DO NOT cache a failure: a transient error must not freeze an
-            # empty season for the life of the source instance.
-            return []
+            # empty season for the life of the source instance. And DO NOT
+            # return [] for it either (#289): `fetch_upcoming` read that as
+            # no games, and the season walk as an empty season, so NCAAF's
+            # stakes went to zero with nothing in the summary. Raised, it is
+            # an outage the refresh holds the label for (#240) and a season
+            # failure the refresh reports.
+            raise SeasonUnavailable(f"/games failed: {e}") from e
         self._raw_season_cache[year] = data
         return data
 
@@ -445,6 +454,11 @@ class NcaafSource(PointsBasedSportSource):
         the cupcake win, and nobody is measured against a league they are
         not in.
         """
+        if self.season_fetch_failure() is not None:
+            # The season is not simulated this refresh (#289); asking CFBD
+            # again from here, once per importance call, would cost a 60 s
+            # timeout each time the outage persists.
+            return frozenset()
         raw = self._fetch_raw_season(self._current_season_year())
         allowed = self._allowed_classifications
         eligible = set()
