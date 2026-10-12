@@ -7562,8 +7562,6 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         migrated_from_old_group = setup["migrated"]
         deleted_old_groups = setup["deleted_groups"]
         deleted_old_sources = setup["deleted_sources"]
-        for ch in existing_virtuals.values():
-            ch.channel_group = target_group  # what the move just wrote, same row
     _autorecord_cancel_committed(
         autorec, dry_run,
         markers={m for m in autorec.ours if m not in prep_by_marker},
