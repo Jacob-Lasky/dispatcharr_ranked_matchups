@@ -271,6 +271,26 @@ def scenario_witness_an_old_group_renamed_during_the_prepass_is_judged_by_its_ne
     assert m.ChannelGroup.objects.filter(pk=old.pk, name="Kept").exists(), "the user's 'Kept' was deleted"
 
 
+def scenario_witness_a_source_named_as_the_recordings_group_is_left_alone(env):
+    """Codex review, round 16: narrowing the by-name protection to the live
+    name (right for GROUPS, whose archive is protected per channel) also
+    unprotected a SOURCE named as the recordings group, which base's sweep
+    excludes (#146). Swept, its rows were merged onto the live source,
+    replacing the programmes of a row with the same marker there."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    _publish(env, [game], settings=_settings(**COMPACT))
+    _write_cache(env, [game])
+    rec_src = m.EPGSource.objects.create(name="Matchups Recordings", source_type="xmltv",
+                                         is_active=False)
+    row = m.EPGData.objects.create(tvg_id=G401, name="kept", epg_source=rec_src)
+    result = env.plugin._action_apply(_settings(**COMPACT))
+    assert result["status"] == "ok", result
+    assert m.EPGSource.objects.filter(pk=rec_src.pk).exists(), "the recordings-named source was deleted"
+    assert m.EPGData.objects.filter(pk=row.pk, epg_source=rec_src).exists(), "its row was moved"
+
+
 def scenario_a_rename_keeps_our_numbers(env):
     """Guard: numbering now runs BEFORE the group move commits, so it must
     count our channels in the group being renamed away from as ours. Counted

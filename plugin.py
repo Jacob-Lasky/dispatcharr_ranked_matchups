@@ -7169,11 +7169,17 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # sweep: the archive channel is intentionally "ours" (so the matcher skips
     # it), which would otherwise make this sweep migrate it into the live group
     # and delete the archive group out from under preserved recordings.
-    # Only the LIVE name is protected by name. DO NOT add the recordings name
-    # back: the archive is protected per CHANNEL (_movable_owned_q), and a
-    # recordings name equal to the OLD live group's name, protected by name,
-    # stranded that group's game channels beside copies in the new group.
+    # For GROUPS only the LIVE name is protected by name. DO NOT add the
+    # recordings name back there: the archive is protected per CHANNEL
+    # (_movable_owned_q), and a recordings name equal to the OLD live group's
+    # name, protected by name, stranded that group's game channels beside
+    # copies in the new group.
     _protected_group_names = [group_name]
+    # For SOURCES the recordings name stays protected, as on base: nothing
+    # per row replaces it, and a swept source named as the recordings group
+    # had its rows merged onto the live source, replacing the programmes of a
+    # row with the same marker there.
+    _protected_source_names = [group_name, recordings_group_name]
     # Names the cleanup sweep may delete once empty. See #157.
     _deletable_group_names = _deletable_group_names_for(
         group_name, recordings_group_name,
@@ -7210,7 +7216,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # our marker (a user who added this server's own XMLTV output as a
     # source), so it is never ours to empty or delete.
     foreign_epg_sources = list(
-        EPGSource.objects.exclude(name__in=_protected_group_names)
+        EPGSource.objects.exclude(name__in=_protected_source_names)
         .filter(_owned_tvg_id_q("epgs__"))
         .filter(_never_fetches_q())
         .distinct()
