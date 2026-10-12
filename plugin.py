@@ -1679,24 +1679,28 @@ def _cleanup_empty_archive(recordings_group_name) -> bool:
     under it, so the group exists only while it holds recordings. Returns True if
     anything was removed. Safe: the archive channel is deleted only when it has
     zero Recording rows, so the CASCADE takes nothing with it."""
-    from apps.channels.models import Channel, Recording, Stream
+    from apps.channels.models import Channel, ChannelGroup, Recording, Stream
+    from django.db import transaction
     removed = False
     # Every case variant: an install split by the old exact-name lookup has
     # an archive in each, and each empties on its own schedule.
     # A case variant goes only if it held our archive channel: an empty group
     # of the user's that merely differs in case is not ours to delete (the
     # exact name always was, as before).
-    for grp in list(_archive_groups(recordings_group_name)):
-        arch = Channel.objects.filter(channel_group=grp, tvg_id=ARCHIVE_TVG_ID).first()
-        ours = arch is not None or grp.name == recordings_group_name
-        if arch is not None and not Recording.objects.filter(channel_id=arch.id).exists():
-            arch.delete()
-            removed = True
-        if (ours and Channel.objects.filter(channel_group=grp).count() == 0
-                and not Stream.objects.filter(channel_group=grp).exists()):
-            # Not while it holds streams: deleting a group nulls their group.
-            grp.delete()
-            removed = True
+    with transaction.atomic():  # the row locks below need one; nests as a savepoint
+        for grp in list(_archive_groups(recordings_group_name)):
+            # Row lock before the stream check: see _commit_group_setup.
+            ChannelGroup.objects.select_for_update().filter(pk=grp.pk).exists()
+            arch = Channel.objects.filter(channel_group=grp, tvg_id=ARCHIVE_TVG_ID).first()
+            ours = arch is not None or grp.name == recordings_group_name
+            if arch is not None and not Recording.objects.filter(channel_id=arch.id).exists():
+                arch.delete()
+                removed = True
+            if (ours and Channel.objects.filter(channel_group=grp).count() == 0
+                    and not Stream.objects.filter(channel_group=grp).exists()):
+                # Not while it holds streams: deleting a group nulls their group.
+                grp.delete()
+                removed = True
     return removed
 
 
@@ -6779,7 +6783,11 @@ def _commit_group_setup(
             # see _DELETABLE_LEGACY_GROUP_NAMES for why this is not a substring
             # test and must not become one again (#157).
             # Kept while it still holds streams: deleting a group nulls the
-            # group of every stream in it (SET_NULL).
+            # group of every stream in it (SET_NULL). The row lock first, so a
+            # concurrent stream assignment (an M3U refresh) cannot land between
+            # the check and the delete: on Postgres its foreign-key check
+            # takes a key-share lock on this row, which waits on ours.
+            ChannelGroup.objects.select_for_update().filter(pk=old_g.pk).exists()
             if (Channel.objects.filter(channel_group=old_g).count() == 0
                     and not Stream.objects.filter(channel_group=old_g).exists()):
                 if old_g.name.strip().lower() in deletable_group_names:

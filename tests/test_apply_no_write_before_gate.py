@@ -687,6 +687,23 @@ def _apply_layout(source, module_writers=frozenset()):
     return sorted(set(_write_sites(apply, writers, mod_aliases))), checks, main
 
 
+@pytest.mark.parametrize("fn_name", ["_commit_group_setup", "_cleanup_empty_archive"])
+def test_a_group_is_locked_before_its_streams_are_checked(fn_name):
+    """Codex review, round 6: a stream assigned to a group between the
+    "does it hold streams?" check and the delete still lost its group. The
+    group row is locked first (Postgres serialises the stream's foreign-key
+    check behind it); a sqlite harness cannot show the race, so this pins the
+    order in the source."""
+    tree = ast.parse(open(PLUGIN_PY, encoding="utf-8").read())
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == fn_name)
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+    locks = [n.lineno for n in calls if isinstance(n.func, ast.Attribute)
+             and n.func.attr == "select_for_update" and "ChannelGroup" in ast.unparse(n.func)]
+    checks = [n.lineno for n in calls if ast.unparse(n).startswith("Stream.objects.filter(")]
+    assert locks and checks, (locks, checks)
+    assert min(locks) < min(checks), f"{fn_name} checks streams before locking the group"
+
+
 class TestNothingCommitsBeforeTheLastCheck:
     def _layout(self):
         return _apply_layout(open(PLUGIN_PY, encoding="utf-8").read(), _module_writers())
