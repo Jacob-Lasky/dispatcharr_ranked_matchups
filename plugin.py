@@ -3977,7 +3977,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     #     outcomes out of contention.
     from .scoring import (
         match_favorites, LEAGUE_CONTEXTS, build_impact_narratives,
-        compute_match_importance, wc_knockout_importance,
+        compute_match_importance, knockout_importance, knockout_premium_note,
     )
     importance_seasons = _importance_seasons(settings)
     scored: List[Tuple[Any, GameSignals, Any]] = []
@@ -4070,17 +4070,18 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                     g.home, g.away, e,
                 )
 
-        # World Cup knockout premium. A knockout tie is win-or-go-home, but the
-        # Monte Carlo above scores it 0 (binary outcome, no standings leverage to
-        # simulate), so a marquee Round-of-32 game would otherwise rank at the
-        # bottom and fall under placeholder_min_score. Override with a round-
-        # scaled importance premium; the gate (WC competition + knockout stage)
-        # lives in the pure, unit-tested wc_knockout_importance so WC group games
-        # keep their simulated importance and no other competition is affected.
-        _ko_premium = wc_knockout_importance(comp_code, extra.get("stage"))
+        # International-tournament knockout premium (World Cup, EURO). A
+        # knockout tie is win-or-go-home, but the Monte Carlo above scores it 0
+        # (binary outcome, no standings leverage to simulate), so a marquee
+        # knockout game would otherwise rank at the bottom and fall under
+        # placeholder_min_score. Override with a round-scaled importance
+        # premium; the gate (competition + knockout stage) lives in the pure,
+        # unit-tested scoring.knockout_importance, so group games keep their
+        # simulated importance and club and domestic cups are not affected.
+        _ko_premium = knockout_importance(comp_code, extra.get("stage"))
         if _ko_premium is not None:
             importance_pts = _ko_premium
-            importance_notes = ["World Cup knockout: win or go home"]
+            importance_notes = [knockout_premium_note(comp_code)]
             importance_thresholds_hit = []
 
         # Rivalry detection: source-set is_rivalry takes precedence (no adapter
@@ -4301,7 +4302,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
 
     # A competition whose season list could not be fetched had no standings
     # stakes simulated for its games; report it like a failed source (#228).
-    # "Not simulated", not "scored 0": a World Cup knockout tie still gets its
+    # "Not simulated", not "scored 0": a World Cup or EURO knockout tie still gets its
     # round premium. Before the cache write, so Show current state sees it.
     for code, err in _soccer_season_fetch_failures().items():
         src_summary.append(_source_error_entry(f"{code} season fixtures (stakes not simulated)", err))

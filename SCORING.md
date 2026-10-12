@@ -539,6 +539,21 @@ EURO knockout cascade (`round_of_16` through `winner`) next to
 only over a context's bands, so the cascade is what makes the chain
 visible in the score.
 
+The knockout games themselves are the other half. A knockout tie has no
+standings for the simulation to replay (the outcome is binary), so its
+Monte Carlo importance is 0 and, with only its tournament-stage band, it
+would score below the 5.0 `placeholder_min_score` and get no channel when
+its stream is unmatched. World Cup and EURO knockout games therefore get a
+round-scaled importance premium instead (`scoring._KNOCKOUT_IMPORTANCE`:
+round of 32 2.8, round of 16 3.4, quarter-final 4.0, semi-final 4.6, final
+6.0, third place 3.4), one map for both, displayed about 5.5 / 6.5 / 7.5 /
+8.3 / 9.2 at the default weights. Measured on EURO 2024's real fixtures, a
+quarter-final went from 2.3 to 7.5 and the final from 4.4 to 9.2 (#250).
+The competitions granted it are listed in
+`scoring._KNOCKOUT_PREMIUM_COMPETITIONS`; club and domestic cups use the
+same stage labels and are deliberately not in it. A tournament whose chain
+is wired must be listed there (`tests/test_knockout_premium.py`).
+
 Each competition's bracket lives in one `_CHAIN_BRACKETS` entry in
 `sources/soccer.py`. The chain stays off when a season's group letters
 are not that format's (an older World Cup, a draw not made yet), or

@@ -10,8 +10,8 @@ from dispatcharr_ranked_matchups.scoring import (
     TEAM_QUALIFIER_TOKENS,
     TEAM_SUFFIX_TOKENS,
     _compress_to_10,
-    _WC_KNOCKOUT_IMPORTANCE,
-    wc_knockout_importance,
+    _KNOCKOUT_IMPORTANCE,
+    knockout_importance,
     build_impact_narratives,
     compute_match_importance,
     format_channel_name,
@@ -1456,7 +1456,7 @@ class TestAdaptiveCompress:
 
 
 class TestWorldCupKnockoutPremium:
-    """The WC knockout importance premium (_WC_KNOCKOUT_IMPORTANCE) is the
+    """The WC knockout importance premium (_KNOCKOUT_IMPORTANCE) is the
     lever that makes a marquee Round-of-32 tie (France vs Sweden) rank as
     premium content instead of scoring ~0.9 and never getting a placeholder
     channel. plugin.py's scoring loop applies these values as importance_points
@@ -1474,44 +1474,45 @@ class TestWorldCupKnockoutPremium:
         sig = GameSignals(
             team_a="A", team_b="B",
             tournament_stage=stage,
-            importance_points=_WC_KNOCKOUT_IMPORTANCE[stage],
+            importance_points=_KNOCKOUT_IMPORTANCE[stage],
             importance_notes=["World Cup knockout: win or go home"],
         )
         return score_game(sig, Weights()).final
 
-    # --- the pure gate (wc_knockout_importance), the runtime string match that
+    # --- the pure gate (knockout_importance), the runtime string match that
     # decides WHEN the premium applies. Untested, a drift in the fd_competition_
     # code value or stage casing silently no-ops and WC games regress. ---
 
     def test_gate_returns_premium_for_each_wc_knockout_stage(self):
-        for stage, pts in _WC_KNOCKOUT_IMPORTANCE.items():
-            assert wc_knockout_importance("WC", stage) == pts
+        for stage, pts in _KNOCKOUT_IMPORTANCE.items():
+            assert knockout_importance("WC", stage) == pts
 
     def test_gate_is_case_insensitive_on_stage(self):
         # The source emits UPPER stages today, but the gate upper-cases so a
         # lower/mixed-case label still resolves.
-        assert wc_knockout_importance("WC", "last_32") == _WC_KNOCKOUT_IMPORTANCE["LAST_32"]
-        assert wc_knockout_importance("WC", "Quarter_Finals") == _WC_KNOCKOUT_IMPORTANCE["QUARTER_FINALS"]
+        assert knockout_importance("WC", "last_32") == _KNOCKOUT_IMPORTANCE["LAST_32"]
+        assert knockout_importance("WC", "Quarter_Finals") == _KNOCKOUT_IMPORTANCE["QUARTER_FINALS"]
 
     def test_gate_none_for_non_wc_competition(self):
-        # A UEFA / domestic-cup knockout emits the same stage labels but must
-        # NOT get the WC premium (Jake's ask is World Cup only).
-        assert wc_knockout_importance("CL", "QUARTER_FINALS") is None
-        assert wc_knockout_importance("PL", "LAST_16") is None
+        # A UEFA club or domestic-cup knockout emits the same stage labels but
+        # must NOT get the premium: it is for international tournaments only
+        # (the World Cup, and the EURO since #250, tests/test_knockout_premium.py).
+        assert knockout_importance("CL", "QUARTER_FINALS") is None
+        assert knockout_importance("PL", "LAST_16") is None
 
     def test_gate_none_for_wc_group_stage(self):
         # WC group games keep their Monte Carlo advancement importance; the
         # premium must not clobber it.
-        assert wc_knockout_importance("WC", "GROUP_STAGE") is None
+        assert knockout_importance("WC", "GROUP_STAGE") is None
 
     def test_gate_none_for_missing_or_unknown_stage(self):
-        assert wc_knockout_importance("WC", None) is None
-        assert wc_knockout_importance("WC", "") is None
-        assert wc_knockout_importance("WC", "REPLAY") is None
-        assert wc_knockout_importance(None, "LAST_32") is None
+        assert knockout_importance("WC", None) is None
+        assert knockout_importance("WC", "") is None
+        assert knockout_importance("WC", "REPLAY") is None
+        assert knockout_importance(None, "LAST_32") is None
 
     def test_every_knockout_stage_clears_placeholder_bar(self):
-        for stage in _WC_KNOCKOUT_IMPORTANCE:
+        for stage in _KNOCKOUT_IMPORTANCE:
             assert self._final(stage) >= self.PLACEHOLDER_MIN, (
                 f"{stage} scored {self._final(stage)} < placeholder bar "
                 f"{self.PLACEHOLDER_MIN}; it would be skipped when unmatched"
