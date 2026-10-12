@@ -854,10 +854,11 @@ expected before judging the whole guide.
   Article 20.02 penalty shoot-out between two level teams that draw
   their last group match against each other (when no third team is on
   the same points).
-- **A failed season fetch zeroes importance for that competition**, for
-  the run. The simulator replays the competition's full fixture list, so
-  if football-data.org cannot be reached for it the games score no
-  standings stakes (other signals still count). The fetch is retried at
+- **A failed season fetch zeroes simulated importance for that
+  competition**, for the run. The simulator replays the competition's full
+  fixture list, so if football-data.org cannot be reached for it the games
+  score no simulated standings stakes (other signals still count, and a
+  World Cup or EURO knockout game still gets its round's floor). The fetch is retried at
   most twice per refresh rather than once per simulated season, and a
   competition that gives up is reported in the refresh summary as
   `<code> season fixtures (stakes not simulated)`, so the zero is visible
