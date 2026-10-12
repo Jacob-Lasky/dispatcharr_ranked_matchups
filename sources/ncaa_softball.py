@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow
+from .base import GameRow, attach_poll_ranks
 from .bracket import BestOfNSeriesSource, DoubleEliminationSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import (
@@ -57,6 +57,7 @@ from .._util import (
 from ._espn import (
     dedupe_events,
     event_identity,
+    fetch_espn_poll,
     fetch_scoreboard_day,
     fetch_scoreboard_days,
     scoreboard_event_over,
@@ -194,10 +195,9 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         """Upcoming regular-season games through
         `_espn.sweep_upcoming_events` (window, lookback day, FINISHED and
-        stale drops, dedupe; #256). Attaches AP-style softball rank from the
-        rankings endpoint when available."""
-        rankings = self._fetch_rankings()
-
+        stale drops, dedupe; #256). Attaches the softball poll's ranks after
+        the sweep, only when it found a game (`base.attach_poll_ranks`); a
+        failed poll raises (#283)."""
         def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
             if _is_postseason_event(event):
                 # Owned by NcaaSoftballPlayoffSource.
@@ -214,8 +214,8 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
                 sport_label=self.sport_label,
                 home=rec["home"],
                 away=rec["away"],
-                rank_home=rankings.get(rec["home"]),
-                rank_away=rankings.get(rec["away"]),
+                rank_home=None,
+                rank_away=None,
                 start_time=start,
                 extra={
                     "ncaasbl_game_id": eid,
@@ -224,32 +224,16 @@ class NcaaSoftballRegularSource(PointsBasedSportSource):
                     "fd_competition_code": self.league_context_code,
                 },
             )
-        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
+        return attach_poll_ranks(
+            sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row),
+            self._fetch_rankings,
+        )
 
     def _fetch_rankings(self) -> Dict[str, int]:
-        """Return {school: rank} from ESPN's softball poll. Empty
-        dict if missing."""
-        data = _http_get(f"{ESPN_BASE}/rankings")
-        if not data:
-            return {}
-        ranks_by_team: Dict[str, int] = {}
-        polls = data.get("rankings") or []
-        if not polls:
-            return ranks_by_team
-        # Softball has one canonical poll: ESPN.com/USA Softball Collegiate
-        # Top 25. Take the first poll entry; if ESPN ever adds more we'd
-        # pick the official one explicitly.
-        poll = polls[0]
-        for r in poll.get("ranks") or []:
-            team_obj = r.get("team") or {}
-            name = _team_canonical_name(team_obj)
-            try:
-                rank = int(r.get("current") or 0)
-            except (TypeError, ValueError):
-                continue
-            if name and rank > 0:
-                ranks_by_team[name] = rank
-        return ranks_by_team
+        """{school: rank} from the ESPN.com/USA Softball Collegiate Top 25,
+        the one poll ESPN exposes. Raises `RankingsUnavailable` when it did
+        not answer (#283; see `_espn.fetch_espn_poll`)."""
+        return fetch_espn_poll(_http_get, f"{ESPN_BASE}/rankings", _team_canonical_name)
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
         """Per-day iteration from season start (Feb 1) through the end

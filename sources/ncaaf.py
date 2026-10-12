@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from .base import GameRow
+from .base import GameRow, RankingsUnavailable
 from .points_based import PointsBasedSportSource
 from .._http import get_within_deadline
 from .._util import parse_iso_utc
@@ -136,14 +136,15 @@ class NcaafSource(PointsBasedSportSource):
             return []
 
         season_year = self._current_season_year()
+        # RAISES RankingsUnavailable for a failed request (#283), so the
+        # refresh reports NCAAF as errored and holds its previous games
+        # (#240). None is a poll that is not published yet, logged at INFO by
+        # _fetch_rankings. DO NOT re-log that as "offseason", and DO NOT catch
+        # the raise back into []: a transient CFBD failure in September once
+        # zeroed the whole slate, and calling it an offseason sent a real
+        # 2026-08-28 outage to the wrong diagnosis for a full day.
         rank_by_team = self._fetch_rankings(season_year)
         if rank_by_team is None:
-            # _fetch_rankings already logged the specific cause at the
-            # right level (ERROR for a failed request, INFO for a poll
-            # that simply is not published yet). DO NOT re-log this as
-            # "offseason": a transient CFBD failure in September zeroes
-            # the whole slate, and calling that an offseason sent a real
-            # 2026-08-28 outage to the wrong diagnosis for a full day.
             return []
 
         games = self._fetch_games(season_year, days_ahead)
@@ -224,7 +225,9 @@ class NcaafSource(PointsBasedSportSource):
 
     def _fetch_rankings(self, year: int) -> Optional[Dict[str, int]]:
         """Return {team_name → rank} for the latest snapshot, or None if no
-        poll has been published yet (preseason)."""
+        poll has been published yet (preseason). RAISES `RankingsUnavailable`
+        when the request failed or did not answer with a list of weekly
+        snapshots (#283)."""
         try:
             r = get_within_deadline(
                 requests, f"{CFBD_BASE}/rankings",
@@ -234,12 +237,18 @@ class NcaafSource(PointsBasedSportSource):
             )
             r.raise_for_status()
             data = r.json()
+            if not isinstance(data, list) or (data and not (
+                    isinstance(data[-1], dict) and isinstance(data[-1].get("polls"), list))):
+                # /rankings is a list of weekly snapshots, each with a `polls`
+                # list, `[]` before the first poll; anything else (an error
+                # object, null) is a failure, not a preseason.
+                raise ValueError(f"/rankings answered {str(data)[:80]!r}, not a list of snapshots")
         except Exception as e:
             logger.error(
-                "[ncaaf] /rankings request failed (%s); NCAAF contributes "
-                "0 games to this refresh", e,
+                "[ncaaf] /rankings request failed (%s); NCAAF's previous games "
+                "are held this refresh", e,
             )
-            return None
+            raise RankingsUnavailable(f"/rankings failed: {e}") from e
         if not data:
             logger.info(
                 "[ncaaf] no %s snapshot published for %d yet (preseason); "
@@ -247,13 +256,29 @@ class NcaafSource(PointsBasedSportSource):
             )
             return None
         latest = data[-1]
-        for p in latest.get("polls", []):
+        if not all(isinstance(p, dict) for p in latest["polls"]):
+            raise RankingsUnavailable("/rankings: a listed poll is not an object")
+        for p in latest["polls"]:
             if p.get("poll") == self.poll_name:
-                return {r["school"]: r["rank"] for r in p.get("ranks", [])}
+                ranks = p.get("ranks")
+                if not isinstance(ranks, list):
+                    raise RankingsUnavailable(f"/rankings: {self.poll_name} has no ranks list")
+                out: Dict[str, int] = {}
+                for r in ranks:
+                    try:
+                        if isinstance(r, dict) and r.get("school"):
+                            out[r["school"]] = int(r["rank"])
+                    except (KeyError, TypeError, ValueError):
+                        continue   # a row without a usable rank ("NR", null)
+                if ranks and not out:
+                    # Rows listed, none readable: a changed row shape, not an
+                    # empty poll.
+                    raise RankingsUnavailable(f"/rankings: {self.poll_name} has no readable rank")
+                return out
         logger.info(
             "[ncaaf] poll %r absent from the latest snapshot (polls present: "
             "%s); skipping", self.poll_name,
-            ", ".join(str(p.get("poll")) for p in latest.get("polls", [])) or "none",
+            ", ".join(str(p.get("poll")) for p in latest["polls"]) or "none",
         )
         return None
 

@@ -75,17 +75,20 @@ def _published(plugin, games, numbers):
 
 def _apply_numbers(plugin, games, settings, highest_other, existing, tz=timezone.utc):
     """The numbering half of _action_apply in kickoff mode, minus the ORM:
-    resolve the floor (reading and writing the state file exactly as apply
-    does), then assign."""
-    remembered = plugin._load_kickoff_base()
+    resolve the floor, assign with the record when it was written under that
+    floor, then save the floor and the record of what was numbered (reading
+    and writing the state file as apply does; every game counts as written)."""
+    remembered, record = plugin._load_numbering_state()
     base = plugin._resolve_kickoff_base(
         settings, highest_other, remembered, _published(plugin, games, existing), tz,
     )
-    if base != remembered:
-        plugin._save_kickoff_base(base)
-    return base, plugin._assign_channel_numbers(
+    got = plugin._assign_channel_numbers(
         games, base, tz, existing_numbers=existing,
+        numbered_for=plugin._numbered_for_floor(record, base),
     )
+    offsets = dict(plugin._kickoff_offsets(games, tz))
+    plugin._save_numbering_state(base, {m: (offsets[m], n, base) for m, n in got.items()})
+    return base, got
 
 
 class TestLineupChangeDoesNotRenumber:
@@ -107,11 +110,11 @@ class TestLineupChangeDoesNotRenumber:
         games = _slate()
         # Published by the old code at floor 6892 (highest other was 6891).
         old = plugin._assign_channel_numbers(games, 6892, timezone.utc)
-        assert plugin._load_kickoff_base() is None
+        assert plugin._load_numbering_state() == (None, {})
         base, again = _apply_numbers(plugin, games, {}, 6838, old)
         assert base == 6892
         assert again == old
-        assert plugin._load_kickoff_base() == 6892
+        assert plugin._load_numbering_state()[0] == 6892
 
     def test_a_lineup_that_grows_does_not_move_them_either(self, plugin):
         games = _slate()
@@ -232,10 +235,17 @@ class TestInferKickoffBase:
 
 class TestStateFile:
     def test_round_trip(self, plugin):
-        plugin._save_kickoff_base(6892)
-        assert plugin._load_kickoff_base() == 6892
+        plugin._save_numbering_state(
+            6892, {"ranked_matchups:EPL:fd_8": (6672015, 6678908, 6892)},
+        )
+        assert plugin._load_numbering_state() == (
+            6892, {"ranked_matchups:EPL:fd_8": (6672015, 6678908, 6892)},
+        )
         with open(plugin.NUMBERING_STATE_PATH, encoding="utf-8") as f:
-            assert json.load(f) == {"kickoff_base": 6892}
+            assert json.load(f) == {
+                "kickoff_base": 6892,
+                "numbered_for": {"ranked_matchups:EPL:fd_8": [6672015, 6678908, 6892]},
+            }
 
     @pytest.mark.parametrize("content", [
         "not json", "[]", '{"kickoff_base": "6892"}', '{"kickoff_base": true}',
@@ -244,13 +254,59 @@ class TestStateFile:
     def test_a_bad_file_reads_as_nothing(self, plugin, content):
         with open(plugin.NUMBERING_STATE_PATH, "w", encoding="utf-8") as f:
             f.write(content)
-        assert plugin._load_kickoff_base() is None
+        assert plugin._load_numbering_state() == (None, {})
 
     def test_missing_file(self, plugin):
-        assert plugin._load_kickoff_base() is None
+        assert plugin._load_numbering_state() == (None, {})
 
     def test_an_unwritable_path_is_logged_not_raised(self, plugin, tmp_path):
-        plugin._save_kickoff_base(6892, path=str(tmp_path / "no" / "such" / "dir.json"))
+        plugin._save_numbering_state(6892, {}, path=str(tmp_path / "no" / "such" / "dir.json"))
+
+    def test_a_failed_save_removes_the_old_file(self, plugin, monkeypatch):
+        """Second opinion (#278 round 1): the file says floor 11, an apply
+        under explicit base 100 commits and its save fails. Left in place, the
+        old file would be read back by the next auto apply as the current
+        floor, renumbering every game from 100 onto 11."""
+        plugin._save_numbering_state(11, {})
+
+        def fail(path, data, **kw):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(plugin, "write_json_atomic", fail)
+        plugin._save_numbering_state(100, {})
+        assert not os.path.exists(plugin.NUMBERING_STATE_PATH)
+        assert plugin._load_numbering_state() == (None, {})
+
+    def test_a_failed_save_under_the_same_floor_keeps_the_old_file(self, plugin, monkeypatch):
+        """Second opinion (#278 round 2): deleting a file whose floor is still
+        right threw away the record, and the next apply's chain rule moved
+        fd_8 from 6672116 to 6672115 once fd_61 left. The old record is only
+        older, so it is kept, and the next apply still holds fd_8."""
+        games, mk = _rows(plugin, {29: _T0, 61: _T0, 8: _T0})
+        live = {mk[29]: 6672114, mk[61]: 6672115, mk[8]: 6672116}
+        old = {m: (off, n, 100) for m, (off, n) in _record(plugin, games, live).items()}
+        plugin._save_numbering_state(100, old)
+
+        def fail(path, data, **kw):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(plugin, "write_json_atomic", fail)
+        plugin._save_numbering_state(100, {})
+        base, record = plugin._load_numbering_state()
+        assert (base, record) == (100, old)
+        games, mk = _rows(plugin, {29: _T0, 8: _T0})
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers=live,
+            numbered_for=plugin._numbered_for_floor(record, 100),
+        )
+        assert _numbers(got, mk) == {29: 6672114, 8: 6672116}
+
+    def test_a_failed_removal_is_logged_not_raised(self, plugin, monkeypatch, tmp_path):
+        def fail(path, data, **kw):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(plugin, "write_json_atomic", fail)
+        plugin._save_numbering_state(100, {}, path=str(tmp_path))  # a directory
 
     def test_the_state_file_is_gitignored(self):
         with open(os.path.join(REPO_ROOT, ".gitignore"), encoding="utf-8") as f:
@@ -334,7 +390,7 @@ class TestApplyWiring:
         branch = self._kickoff_branch()
         body = ast.Module(body=branch.body, type_ignores=[])
         assert _calls(body, "_resolve_kickoff_base")
-        assert _calls(body, "_load_kickoff_base")
+        assert _calls(body, "_load_numbering_state")
         assert not _calls(body, "_resolve_virtual_base"), (
             "kickoff must not re-derive the floor from the lineup (#219)"
         )
@@ -349,17 +405,17 @@ class TestApplyWiring:
         floor on disk no published channel uses, and the next auto apply would
         renumber every game onto it (review finding)."""
         src, fn = _apply_fn()
-        saves = _calls(fn, "_save_kickoff_base")
+        saves = _calls(fn, "_save_numbering_state")
         assert len(saves) == 1
         guards = [
             n for n in ast.walk(fn)
-            if isinstance(n, ast.If) and _calls(n, "_save_kickoff_base")
+            if isinstance(n, ast.If) and _calls(n, "_save_numbering_state")
         ]
         assert guards and "not dry_run" in ast.unparse(guards[-1].test)
         assert "NUMBERING_MODE_KICKOFF" in ast.unparse(guards[-1].test)
         for w in ast.walk(fn):
             if isinstance(w, ast.With):
-                assert not _calls(w, "_save_kickoff_base"), "must run after the transaction"
+                assert not _calls(w, "_save_numbering_state"), "must run after the transaction"
         (invalidate,) = _calls(fn, "_invalidate_epg_output_cache")
         assert saves[0].lineno > invalidate.lineno
 
@@ -691,6 +747,9 @@ class TestInferenceRunsTheRealPlacement:
         kw = {k.arg: ast.unparse(k.value) for k in call.keywords}
         assert kw.get("unpublished") == "unpublished"
         assert kw.get("reserved") == "reserved_numbers"
+        # ...and its slate is the games apply will place: the decided ones (#288).
+        src, _fn = _apply_fn()
+        assert "for marker, g in decided_by_marker.items():" in src
 
     def test_one_placement_implementation(self):
         """_assign_channel_numbers and the inference must share the placement:
@@ -729,8 +788,9 @@ class TestANudgedChannelPastItsBlockIsHeld:
     channel moved, and the guide binds by the bare number (#117). It is now held
     when its number is exactly where an upward nudge from its computed number
     lands over the numbers that stay. A game rescheduled one minute EARLIER
-    must still be released, since apply cannot see the kickoff a channel was
-    numbered for."""
+    must still be released. These run with NO record of what each channel was
+    numbered for (#278): the first apply after upgrading, or a lost file, where
+    the chain rule is all apply has."""
 
     def test_the_fixture_slots_are_what_the_literals_assume(self, plugin):
         tz = timezone.utc
@@ -824,8 +884,10 @@ class TestANudgedChannelPastItsBlockIsHeld:
 
     def test_a_gap_below_it_still_releases_it(self, plugin):
         """fd_61 left the slate, so 6672115 is free and fd_8's nudge is no longer
-        explained: it is placed afresh, as before #267 (it cannot be told from a
-        game rescheduled earlier, see the DO NOT in _place_kickoff_numbers)."""
+        explained: with no record it is placed afresh, as before #267 (without
+        one it cannot be told from a game rescheduled earlier, see the DO NOT in
+        _place_kickoff_numbers). TestTheRecordHoldsANudgedChannel has the same
+        slate with the record."""
         games, mk = _rows(plugin, {29: _T0, 8: _T0})
         live = {mk[29]: 6672114, mk[8]: 6672116}
         got = plugin._assign_channel_numbers(games, 100, timezone.utc, existing_numbers=live)
@@ -916,3 +978,350 @@ class TestANudgedChannelPastItsBlockIsHeld:
         assert plugin._INFER_RESERVED_RUN == 64
         assert 0 < len(calls) <= 2 * (16 + 64 + 1)
 
+
+
+def _record(plugin, games, live, tz=timezone.utc):
+    """What apply records after publishing `live`: marker -> (offset, number)."""
+    offsets = dict(plugin._kickoff_offsets(games, tz))
+    return {m: (offsets[m], n) for m, n in live.items()}
+
+
+class TestTheRecordHoldsANudgedChannel:
+    """#278: with the chain rule alone, a channel nudged past its block is
+    released as soon as a game in the chain below it leaves the slate (same-
+    minute games finish at different times), so it renumbers while its own game
+    is on. Apply now records the (kickoff offset, number) each channel was
+    numbered for, and a channel whose game still has that offset keeps its
+    number while it is free. Offsets at floor 100: fd_29 / fd_61 / fd_11
+    6672014, fd_8 / fd_16 / fd_105 6672015, the 14:01 games 6672016 up."""
+
+    def test_witness_a_gap_below_it_no_longer_releases_it(self, plugin):
+        """The slate test_a_gap_below_it_still_releases_it pins, with the
+        record of the apply that published fd_61 too."""
+        games, mk = _rows(plugin, {29: _T0, 61: _T0, 8: _T0})
+        live = {mk[29]: 6672114, mk[61]: 6672115, mk[8]: 6672116}
+        record = _record(plugin, games, live)
+        assert record[mk[8]] == (6672015, 6672116)
+        games, mk = _rows(plugin, {29: _T0, 8: _T0})
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers=live, numbered_for=record,
+        )
+        assert _numbers(got, mk) == {29: 6672114, 8: 6672116}
+
+    def test_witness_the_freed_number_goes_to_a_newcomer(self, plugin):
+        """fd_61 leaves as fd_850 (same slot as fd_8, marker sorting after it)
+        arrives: fd_850 takes the 6672115 fd_61 freed. Released, fd_8 took it
+        and fd_850 got 6672116, so two numbers changed hands at once."""
+        games, mk = _rows(plugin, {29: _T0, 61: _T0, 8: _T0})
+        live = {mk[29]: 6672114, mk[61]: 6672115, mk[8]: 6672116}
+        record = _record(plugin, games, live)
+        games, mk = _rows(plugin, {29: _T0, 8: _T0, 850: _T0})
+        assert plugin.stable_channel_number(100, _T0, mk[850], timezone.utc) == 6672115
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers=live, numbered_for=record,
+        )
+        assert _numbers(got, mk) == {29: 6672114, 8: 6672116, 850: 6672115}
+
+    def test_witness_two_recorded_channels_above_one_gap(self, plugin):
+        """fd_8 and fd_16 were both nudged past the block over fd_61, which
+        leaves. Both keep their numbers; released, they slid down to 6672115
+        and 6672116."""
+        games, mk = _rows(plugin, {29: _T0, 61: _T0, 8: _T0, 16: _T0})
+        live = {mk[29]: 6672114, mk[61]: 6672115, mk[8]: 6672116, mk[16]: 6672117}
+        record = _record(plugin, games, live)
+        games, mk = _rows(plugin, {29: _T0, 8: _T0, 16: _T0})
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers=live, numbered_for=record,
+        )
+        assert _numbers(got, mk) == {29: 6672114, 8: 6672116, 16: 6672117}
+
+    def test_witness_no_slate_of_the_generator_moves_a_published_number_when_one_leaves(self, plugin):
+        """The issue's measurement: the #267 generator published at floor 6892,
+        then one random published game leaves. Without the record a published
+        channel moved in 91 of these 3000 slates (the PR #274 verifier's own
+        variant counted 56); with it, in none."""
+        import random
+        tz = timezone.utc
+        moved = []
+        for trial in range(3000):
+            rng = random.Random(trial)
+            n = rng.randint(3, 14)
+            games = [
+                _epl_row(800000 + trial * 20 + i, _T0 + timedelta(minutes=rng.choice([0, 0, 0, 1])))
+                for i in range(n)
+            ]
+            plain = plugin._assign_channel_numbers(games, 6892, tz)
+            rest = games[rng.randint(0, 2):]
+            held = set(rng.sample(sorted(plain.values()), rng.randint(0, 3)))
+            old = plugin._assign_channel_numbers(rest, 6892, tz, reserved_numbers=held)
+            record = _record(plugin, rest, old)
+            drop = rng.randrange(len(rest))
+            gone = plugin._build_marker_key(rest[drop])
+            live = {m: v for m, v in old.items() if m != gone}
+            again = plugin._assign_channel_numbers(
+                [g for i, g in enumerate(rest) if i != drop], 6892, tz,
+                existing_numbers=live, reserved_numbers=held, numbered_for=record,
+            )
+            if any(again[m] != v for m, v in live.items()):
+                moved.append(trial)
+        assert moved == []
+
+    def test_a_rescheduled_game_is_still_released(self, plugin):
+        """The case the DO NOT exists for, now WITH a record: fd_8 was numbered
+        for 14:01 (offset 6672031, slot 15 of that minute) and sits on 6672119
+        after a #217 re-key left it below its hash slot. It now kicks off at
+        14:00 (offset 6672015). The record's offset no longer matches, so it is
+        not a nudge: released to its new number, as without a record."""
+        games, mk = _rows(plugin, {8: _T0, 26: _T1})
+        live = {mk[8]: 6672119, mk[26]: 6672116}
+        record = {mk[8]: (6672031, 6672119), mk[26]: (6672016, 6672116)}
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers=live, numbered_for=record,
+        )
+        assert _numbers(got, mk) == {8: 6672115, 26: 6672116}
+
+    def test_a_reschedule_into_the_block_holding_its_number_keeps_it(self, plugin):
+        """Second opinion (#278 round 4): fd_8 was nudged to 6672116 at 14:00,
+        then moves to 14:01, whose block (6672116-6672131) holds that number.
+        The record's minute no longer matches, but the #217 in-block hold keeps
+        a number already inside the game's own minute, record or not: the
+        channel sorts correctly there and moving it would rebind the guide."""
+        games, mk = _rows(plugin, {8: _T1})
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers={mk[8]: 6672116},
+            numbered_for={mk[8]: (6672015, 6672116)},
+        )
+        assert _numbers(got, mk) == {8: 6672116}
+
+    def test_a_record_for_another_number_is_not_trusted(self, plugin):
+        """The record says fd_8 was given 6672116 but its channel carries
+        6672117 (moved by hand, or by an older release that rewrote the file's
+        floor and left a stale record). Not what was recorded, so the chain rule
+        decides: a gap at 6672115, released."""
+        games, mk = _rows(plugin, {29: _T0, 8: _T0})
+        live = {mk[29]: 6672114, mk[8]: 6672117}
+        record = {mk[29]: (6672014, 6672114), mk[8]: (6672015, 6672116)}
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers=live, numbered_for=record,
+        )
+        assert _numbers(got, mk) == {29: 6672114, 8: 6672115}
+
+    def test_a_recorded_number_now_reserved_is_released(self, plugin):
+        """The reservation wins over the recorded hold too: another channel now
+        publishes 6672116, so fd_8 is placed afresh around it."""
+        games, mk = _rows(plugin, {29: _T0, 8: _T0})
+        live = {mk[29]: 6672114, mk[8]: 6672116}
+        record = _record(plugin, games, live)
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers=live, reserved_numbers={6672116},
+            numbered_for=record,
+        )
+        assert _numbers(got, mk) == {29: 6672114, 8: 6672115}
+
+    def test_a_recorded_number_a_kept_channel_holds_is_released(self, plugin):
+        """Nothing in the database stops two channels sharing a number
+        (_PER_GROUP_NUMBER_NOTE). fd_26 (14:01, on its own slot 6672116) and
+        fd_8 (recorded on 6672116) both carry it: the in-block hold is decided
+        first, so fd_8 does not keep it and is placed afresh on 6672115."""
+        games, mk = _rows(plugin, {26: _T1, 8: _T0})
+        live = {mk[26]: 6672116, mk[8]: 6672116}
+        record = {mk[8]: (6672015, 6672116)}
+        got = plugin._assign_channel_numbers(
+            games, 100, timezone.utc, existing_numbers=live, numbered_for=record,
+        )
+        assert _numbers(got, mk) == {26: 6672116, 8: 6672115}
+
+    def test_the_inference_runs_the_placement_without_a_record(self, plugin):
+        """The inference only runs with no floor remembered, when the loader
+        hands back no record either, so it judges each floor by the record-free
+        placement, which is then also what apply runs."""
+        tree = ast.parse(open(os.path.join(REPO_ROOT, "plugin.py")).read())
+        fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        calls = _calls(fns["_infer_kickoff_base"], "_place_kickoff_numbers")
+        assert calls and all(len(c.args) == 4 and not c.keywords for c in calls)
+        with open(plugin.NUMBERING_STATE_PATH, "w", encoding="utf-8") as f:
+            f.write('{"numbered_for": {"m": [6672015, 6678908, 6892]}}')
+        assert plugin._load_numbering_state() == (None, {})
+
+    def test_apply_passes_the_record_for_its_floor(self):
+        _src, fn = _apply_fn()
+        (filt,) = _calls(fn, "_numbered_for_floor")
+        assert [ast.unparse(a) for a in filt.args] == [
+            "remembered_record", "virtual_base", "marker_renames",
+        ]
+        (assign,) = _calls(fn, "_assign_channel_numbers")
+        kw = {k.arg: ast.unparse(k.value) for k in assign.keywords}
+        assert kw.get("numbered_for") == "numbered_for"
+        assert kw.get("existing_numbers") == "existing_numbers"
+        assert ast.unparse(assign.args[0]) == "decided_games"
+
+    def test_only_entries_numbered_from_this_floor_are_trusted(self, plugin):
+        """A kept recording channel keeps the number floor 6892 gave it after
+        the user moves the floor to 7000; its entry stays in the file, but is
+        trusted only when the floor is 6892 again."""
+        record = {"a": (6672015, 6678908, 6892), "b": (6672016, 6679016, 7000)}
+        assert plugin._numbered_for_floor(record, 6892) == {"a": (6672015, 6678908)}
+        assert plugin._numbered_for_floor(record, 7000) == {"b": (6672016, 6679016)}
+        assert plugin._numbered_for_floor(record, 100) == {}
+
+    def test_a_re_keyed_channel_keeps_its_entry(self, plugin):
+        """Second opinion (#278 round 1): a channel published under its legacy
+        marker (teams + kickoff hash, before #217) and nudged to 6672116 over a
+        number reserved then is re-keyed to its source-id marker on the apply
+        where that reservation is gone. Its entry follows it through the real
+        re-key, and is matched on the kickoff MINUTE: the two markers hash to
+        different slots, so the offsets differ although the kickoff did not."""
+        from types import SimpleNamespace
+        tz = timezone.utc
+        game = _cache_row(_gamerow_cls()(
+            sport_prefix="EPL", sport_label="Premier League", home="Home23",
+            away="Away23", rank_home=None, rank_away=None, start_time=_T0,
+            extra={"espn_event_id": 17},
+        ))
+        new, legacy = plugin._build_marker_key(game), plugin._legacy_marker_key(game)
+        assert new == "ranked_matchups:EPL:espn_17"
+        channel = SimpleNamespace(tvg_id=legacy, channel_number=6672116)
+        existing = {legacy: channel}
+        renames = plugin._rekey_legacy_virtuals(existing, [game])
+        assert renames == [(channel, legacy, new)]
+        legacy_offset = plugin.stable_channel_number(0, _T0, legacy, tz)
+        assert legacy_offset != plugin.stable_channel_number(0, _T0, new, tz)
+        record = plugin._numbered_for_floor({legacy: (legacy_offset, 6672116, 100)}, 100, renames)
+        assert record == {new: (legacy_offset, 6672116)}
+        got = plugin._assign_channel_numbers(
+            [game], 100, tz, existing_numbers={new: 6672116}, numbered_for=record,
+        )
+        assert got == {new: 6672116}
+        released = plugin._assign_channel_numbers([game], 100, tz, existing_numbers={new: 6672116})
+        assert released == {new: 6672114}  # espn_17's slot is 14: the chain rule moves it
+
+
+class TestTheRecordFile:
+    """numbering_state.json grows a `numbered_for` key (#278) beside
+    `kickoff_base`, and both directions of an upgrade must keep working."""
+
+    def test_a_file_from_before_the_record_keeps_its_floor(self, plugin):
+        with open(plugin.NUMBERING_STATE_PATH, "w", encoding="utf-8") as f:
+            f.write('{"kickoff_base": 6892}')
+        assert plugin._load_numbering_state() == (6892, {})
+
+    def test_the_pre_record_loader_still_reads_the_floor(self, plugin):
+        """A downgrade: the loader as it was before #278 (copied verbatim),
+        reading a file this version wrote, still gets the floor."""
+        plugin._save_numbering_state(
+            6892, {"ranked_matchups:EPL:fd_8": (6672015, 6678908, 6892)},
+        )
+
+        def old_load_kickoff_base(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                return None
+            base = data.get("kickoff_base") if isinstance(data, dict) else None
+            if isinstance(base, bool) or not isinstance(base, int) or base < 1:
+                return None
+            return base
+
+        assert old_load_kickoff_base(plugin.NUMBERING_STATE_PATH) == 6892
+
+    def test_damaged_entries_are_dropped_one_by_one(self, plugin):
+        with open(plugin.NUMBERING_STATE_PATH, "w", encoding="utf-8") as f:
+            json.dump({"kickoff_base": 6892, "numbered_for": {
+                "good": [6672015, 6678908, 6892],
+                "string": "6678908", "short": [6672015, 6678908], "long": [1, 2, 3, 4],
+                "bool": [True, 6678908, 6892], "float": [6672015, 6678908.0, 6892],
+                "negative_offset": [-1, 6678908, 6892], "zero_number": [6672015, 0, 6892],
+                "zero_floor": [6672015, 6678908, 0], "zero_offset": [0, 6892, 6892],
+            }}, f)
+        assert plugin._load_numbering_state() == (
+            6892, {"good": (6672015, 6678908, 6892), "zero_offset": (0, 6892, 6892)},
+        )
+
+    @pytest.mark.parametrize("raw", ['[]', '"x"', 'null', '7'])
+    def test_a_record_that_is_not_a_map_reads_as_none(self, plugin, raw):
+        with open(plugin.NUMBERING_STATE_PATH, "w", encoding="utf-8") as f:
+            f.write('{"kickoff_base": 6892, "numbered_for": %s}' % raw)
+        assert plugin._load_numbering_state() == (6892, {})
+
+    def test_a_record_without_a_floor_is_not_trusted(self, plugin):
+        """The record only means something under the floor it was written with."""
+        with open(plugin.NUMBERING_STATE_PATH, "w", encoding="utf-8") as f:
+            f.write('{"kickoff_base": 0, "numbered_for": {"m": [6672015, 6678908, 6892]}}')
+        assert plugin._load_numbering_state() == (None, {})
+
+
+class TestKeptChannelsKeepTheirNumbers:
+    """#286, the class: a channel apply keeps without writing it (an active
+    recording, #146, or kept by its guide, #264) must not lose its number to
+    another game, whatever the reason it is not written (its game left the
+    slate, or the write loop skipped it). The numbers held back come from the
+    SAME stale set and the SAME keep policy as the reap, so a new keep reason
+    or a new skip in the write loop is covered without touching this."""
+
+    def test_the_reap_and_the_second_placement_share_the_stale_set(self):
+        """The reservation and the reap share _unwritten_channels and the keep
+        arguments. Since #288 there is one placement, after the pre-pass: the
+        reservation takes the channels whose game has no plan, the reap the
+        channels whose game is not seen, and seen_markers is the plans that got
+        a number, so the two differ only by a compact game left without a slot."""
+        src, fn = _apply_fn()
+        stale_calls = {ast.unparse(c.args[1]) for c in _calls(fn, "_unwritten_channels")
+                       if ast.unparse(c.args[0]) == "existing_virtuals"}
+        assert stale_calls == {"seen_markers", "prep_by_marker"}
+        held = [c for c in _calls(fn, "_numbers_held_for_recordings")
+                if ast.unparse(c.args[0]).startswith("_unwritten_channels(")]
+        assert len(held) == 1
+        assert [ast.unparse(a) for a in held[0].args[1:3]] == ["archive_enabled", "guide_kept_ids"]
+        # The recordings this apply's auto-record cancelled keep nothing at the
+        # reap, so they keep nothing here either (#288 review), and the
+        # cancellation has already run when the numbers are read.
+        assert ast.unparse(held[0].args[3]) == "autorec.cancelled_ids"
+        assert src.index("_autorecord_cancel(autorec, dry_run)") < src.index(
+            "held_for_recordings = _numbers_held_for_recordings(")
+        # Order: every plan exists before the reservation, which precedes the floor.
+        assert (src.index("prep_by_marker[marker] = SimpleNamespace(")
+                < src.index("held_for_recordings = _numbers_held_for_recordings(")
+                < src.index("virtual_base = _resolve_kickoff_base("))
+        partitions = _calls(fn, "_partition_stale_for_recordings")
+        assert partitions and all(
+            ast.unparse(c.args[3]) == "archive_enabled" and ast.unparse(c.args[4]) == "guide_kept_ids"
+            for c in partitions
+        )
+
+    def test_every_keep_reason_of_the_reap_is_held(self, plugin, monkeypatch):
+        """Second opinion on #286: the AST guard above shows both sites pass
+        the keep arguments, not that the helper honours them. Channel 1 is
+        recording, channel 2 is kept by its guide (#264), channel 3 neither:
+        exactly what _partition_stale_for_recordings keeps is held."""
+        import sys
+        import types
+        from types import SimpleNamespace as NS
+
+        now = datetime.now(timezone.utc)
+        recording = NS(id=11, channel_id=1, start_time=now - timedelta(minutes=30),
+                       end_time=now + timedelta(hours=1), custom_properties={"status": "recording"})
+
+        class _Objects:
+            def filter(self, channel_id__in):
+                return [r for r in (recording,) if r.channel_id in channel_id__in]
+
+        models = types.ModuleType("apps.channels.models")
+        models.Recording = NS(objects=_Objects())
+        for name in ("apps", "apps.channels"):
+            monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
+        monkeypatch.setitem(sys.modules, "apps.channels.models", models)
+
+        stale = [NS(id=1, channel_number=33772827.0), NS(id=2, channel_number=33772840.0),
+                 NS(id=3, channel_number=33772841.0)]
+        held = plugin._numbers_held_for_recordings(stale, True, keep_ids={2})
+        _reapable, kept, _rehome = plugin._partition_stale_for_recordings(
+            stale, {1: [recording]}, now, True, {2},
+        )
+        assert held == {int(c.channel_number) for c in kept} == {33772827, 33772840}
+
+    def test_the_stale_set_is_every_channel_not_written(self, plugin):
+        kept, written = object(), object()
+        assert plugin._unwritten_channels(
+            {"a": kept, "b": written}, {"b"},
+        ) == [kept]

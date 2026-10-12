@@ -558,21 +558,25 @@ handed on between games kicking off in the same minute (or, once a game has
 been pushed past its minute's last number, to a game in a later minute).
 Two games in one minute that land on the same tiebreak get neighbouring
 numbers, and each keeps its number on later refreshes, even when another game
-joins that minute. One exception: a game pushed past its minute's last number
-keeps it only while every number between its own tiebreak and it stays taken,
-by a channel still on the slate (a game kicking off a minute later included) or
-by one of your other channels. If one of those games leaves first, for example
-by finishing earlier, the pushed game is placed again from its tiebreak and
-usually moves. A rescheduled game moves
-to its new time slot on the same channel: channels are identified by the source's
+joins that minute or one of them finishes and leaves first. That includes a
+game pushed past its minute's last number: the plugin remembers the start time
+each channel was numbered for (in `numbering_state.json`, beside the floor
+below), and a game whose start time has not changed keeps its number while no
+other channel holds that number. Without that file (the first refresh after upgrading,
+or if it is deleted), such a game keeps its number only while every number
+between its own tiebreak and it stays taken; if one of those games leaves first,
+it is placed again from its tiebreak and usually moves. A rescheduled game moves
+to its new time slot on the same channel (unless its old number already falls
+among its new minute's numbers, where it stays): channels are identified by the source's
 own event id (for every source that publishes one), not by kickoff time, so a
 reschedule does not create a second channel. The cost is that the numbers are
 large, around 7 digits, and the **Starting channel number** setting is only a
 floor: the time-based term is in the millions, so setting it to 400 lands you
 near 5,548,000 rather than at 400. Left at 0 (auto), the floor is picked once,
 just above your highest existing channel, and then remembered, so adding or
-removing your own channels never renumbers the games. Upgrading keeps the floor
-your channels already use. If one of your other channels ever sits on a number a
+removing your own channels never renumbers the games. Upgrading (or losing that
+file) picks the floor that keeps the most of your channels on their numbers,
+normally all of them. If one of your other channels ever sits on a number a
 game would get, the game takes the next free number instead, because the guide
 identifies a channel by its number alone.
 

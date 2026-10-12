@@ -68,7 +68,7 @@ from typing import (
 )
 
 from .._util import parse_iso_utc
-from .base import report_lost_days
+from .base import RankingsUnavailable, report_lost_days
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.espn")
 
@@ -136,18 +136,83 @@ def fetch_scoreboard_day(
 
     `http_get` is injected for the same reason as everywhere in this module:
     it is the source's own `_http_get`, the patch point its tests stub.
-    Returns whatever `http_get` returned (a dict, or None on failure).
+    Returns the page, or None when the day got no answer: the request failed,
+    or the body carries no `events` list (#282).
+
+    A day with no games answers `"events": []` (measured 2026-10-11 on NFL,
+    NBA, NHL, FA Cup, college baseball and softball, NCAAW, NCAA soccer, UFC,
+    F1, NASCAR, PGA and friendlies, on dates without games), and ESPN's error
+    bodies carry no `events` key (`{"code": 404}` on a bad path). DO NOT read
+    a body without the list as a quiet day: the per-day walk would not report
+    the day lost (#261) and a bracket sweep would cache it as played (#245).
+    None makes both callers treat it as the failure it is.
     """
     data = http_get(scoreboard_day_url(scoreboard_url, day))
-    if isinstance(data, dict):
-        n = len(data.get("events") or [])
-        if n >= SCOREBOARD_EVENT_LIMIT:
+    if not isinstance(data, dict) or not isinstance(data.get("events"), list):
+        if data is not None:
             logger.warning(
-                "[espn] %s dates=%s returned %d events, at the page limit of "
-                "%d: that day may be truncated",
-                scoreboard_url, day.strftime("%Y%m%d"), n, SCOREBOARD_EVENT_LIMIT,
+                "[espn] %s dates=%s answered without an events list (%.80r); "
+                "treating the day as not answered",
+                scoreboard_url, day.strftime("%Y%m%d"), data,
             )
+        return None
+    n = len(data["events"])
+    if n >= SCOREBOARD_EVENT_LIMIT:
+        logger.warning(
+            "[espn] %s dates=%s returned %d events, at the page limit of "
+            "%d: that day may be truncated",
+            scoreboard_url, day.strftime("%Y%m%d"), n, SCOREBOARD_EVENT_LIMIT,
+        )
     return data
+
+
+def fetch_espn_poll(
+    http_get: Callable[[str], Optional[Dict[str, Any]]],
+    rankings_url: str,
+    team_namer: Callable[[Dict[str, Any]], str],
+    prefer: Optional[Callable[[Dict[str, Any]], bool]] = None,
+) -> Dict[str, int]:
+    """{team: rank} from one poll of an ESPN `/rankings` page: the first poll
+    `prefer` accepts, else the first listed. `{}` when the page answered with
+    no polls. RAISES `base.RankingsUnavailable` when it did not answer: the
+    request failed, or the body has no `rankings` list, or the chosen poll no
+    `ranks` list (#283). An answered page always has the list (NCAAW, NCAAM
+    and both NCAA soccer polls, measured 2026-10-11); a failed one is None,
+    which is what `_http_get` makes of every 4xx/5xx, including the offseason
+    404 college baseball and softball answer (see `base.attach_poll_ranks`,
+    which never asks then). A listed poll that is not an object, or a chosen
+    poll whose rows none of which reads as a team and rank, is a failure too.
+    The ONE parser for the four ESPN college polls;
+    `http_get` is injected for the reason given in `sweep_upcoming_scoreboard`.
+    """
+    data = http_get(rankings_url)
+    polls = data.get("rankings") if isinstance(data, dict) else None
+    if not isinstance(polls, list):
+        raise RankingsUnavailable(f"{rankings_url} did not answer with a rankings list")
+    if not polls:
+        return {}
+    if not all(isinstance(p, dict) for p in polls):
+        raise RankingsUnavailable(f"{rankings_url}: a listed poll is not an object")
+    poll = next((p for p in polls if prefer is not None and prefer(p)), polls[0])
+    ranks = poll.get("ranks")
+    if not isinstance(ranks, list):
+        raise RankingsUnavailable(f"{rankings_url}: poll {poll.get('name')!r} has no ranks list")
+    out: Dict[str, int] = {}
+    for r in ranks:
+        if not isinstance(r, dict):
+            continue
+        name = team_namer(r.get("team") or {})
+        try:
+            rank = int(r.get("current") or 0)
+        except (TypeError, ValueError):
+            continue
+        if name and rank > 0:
+            out[name] = rank
+    if ranks and not out:
+        # Rows listed, none readable: the row shape changed, not a poll with
+        # nobody in it. Unranked games from it would be the #283 defect again.
+        raise RankingsUnavailable(f"{rankings_url}: poll {poll.get('name')!r} has no readable rank")
+    return out
 
 
 # How many extra days BEHIND today-UTC every upcoming sweep reaches. ESPN

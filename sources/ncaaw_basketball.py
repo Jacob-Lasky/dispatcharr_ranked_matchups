@@ -38,13 +38,14 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from .base import GameRow
+from .base import GameRow, attach_poll_ranks
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc, http_get_json
 from ._espn import (
     dedupe_events,
     event_identity,
+    fetch_espn_poll,
     fetch_scoreboard_day,
     fetch_scoreboard_days,
     scoreboard_event_over,
@@ -232,9 +233,8 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
         """Upcoming games with the AP Top 25 attached as ranks, through
         `_espn.sweep_upcoming_events`, which owns the window (including the
         US-Eastern lookback day, #256), the FINISHED and stale drops and the
-        dedupe."""
-        ranks = self._fetch_rankings()
-
+        dedupe. The poll is read after the sweep, only when it found a game
+        (`base.attach_poll_ranks`); a failed one raises (#283)."""
         def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
             rec = _extract_game_record(event)
             if rec is None:
@@ -253,8 +253,8 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
                 sport_label=self.sport_label,
                 home=rec["home"],
                 away=rec["away"],
-                rank_home=ranks.get(rec["home"]),
-                rank_away=ranks.get(rec["away"]),
+                rank_home=None,
+                rank_away=None,
                 start_time=start,
                 extra={
                     "ncaaw_game_id": eid,
@@ -263,33 +263,20 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
                     "fd_competition_code": self.league_context_code,
                 },
             )
-        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
+        return attach_poll_ranks(
+            sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row),
+            self._fetch_rankings,
+        )
 
     def _fetch_rankings(self) -> Dict[str, int]:
-        """Return {team_location: rank} from ESPN's AP poll. Empty
-        dict if missing: rank-pair signal sits out the cycle."""
-        data = _http_get(f"{ESPN_BASE}/rankings")
-        if not data:
-            return {}
-        ranks_by_team: Dict[str, int] = {}
-        polls = data.get("rankings") or []
-        if not polls:
-            return ranks_by_team
-        # Prefer AP Top 25; fall back to first poll otherwise.
-        poll = next(
-            (p for p in polls if "ap" in (p.get("shortName") or "").lower()),
-            polls[0],
+        """{team_location: rank} from ESPN's AP poll, else the first poll
+        listed (the page also carries the Coaches Poll). Raises
+        `RankingsUnavailable` when it did not answer (#283; see
+        `_espn.fetch_espn_poll`)."""
+        return fetch_espn_poll(
+            _http_get, f"{ESPN_BASE}/rankings", _team_canonical_name,
+            prefer=lambda poll: "ap" in (poll.get("shortName") or "").lower(),
         )
-        for r in poll.get("ranks") or []:
-            team_obj = r.get("team") or {}
-            name = _team_canonical_name(team_obj)
-            try:
-                rank = int(r.get("current") or 0)
-            except (TypeError, ValueError):
-                continue
-            if name and rank > 0:
-                ranks_by_team[name] = rank
-        return ranks_by_team
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
         """Walk every day from season start through the regular season's

@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, TypedDict
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, TypedDict
 
 
 # ---------- partial-fetch accounting (#261) ----------
@@ -70,6 +70,45 @@ def recording_lost_days() -> Iterator[Set[date]]:
         yield sink
     finally:
         _LOST_DAYS.reset(token)
+
+
+# ---------- rankings polls (#283) ----------
+#
+# A college source ranks its games from a poll it fetches separately. A FAILED
+# poll request used to read as "no poll": every game went out unranked, its
+# rank-pair signal fell away and ranked matchups dropped down or off the slate,
+# with nothing in the refresh summary. A failed poll now RAISES
+# `RankingsUnavailable` out of `fetch_upcoming`, so the refresh counts the
+# source as an outage (#240) and keeps the games it published last time,
+# scored against the last poll it had, instead of republishing them flattened.
+# An answered poll with no rankings in it (preseason) is not a failure.
+
+
+class RankingsUnavailable(RuntimeError):
+    """A source's rankings poll did not answer: raised out of
+    `fetch_upcoming` so the refresh holds the source's previous games."""
+
+
+def attach_poll_ranks(
+    rows: List["GameRow"], fetch_ranks: Callable[[], Dict[str, int]],
+) -> List["GameRow"]:
+    """`rows` with `rank_home` / `rank_away` read from `fetch_ranks()`, which
+    returns {team: rank} and RAISES when the poll did not answer.
+
+    The poll is asked for only when there is a game to rank. That is not just
+    a saved request: ESPN's college baseball and softball `/rankings` answer
+    HTTP 404 all offseason ("Unable to get sport data", measured 2026-10-11,
+    when neither scoreboard lists a game from the end of June to February), so
+    asking with nothing to rank would report an outage on every offseason
+    refresh. DO NOT hoist the fetch above the sweep for that reason.
+    """
+    if not rows:
+        return rows
+    ranks = fetch_ranks()
+    for row in rows:
+        row.rank_home = ranks.get(row.home)
+        row.rank_away = ranks.get(row.away)
+    return rows
 
 
 class SoccerTeamRow(TypedDict):

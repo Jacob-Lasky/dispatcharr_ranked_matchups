@@ -285,12 +285,27 @@ class TestApplyWiring:
     def test_prepare_runs_after_dedupe_and_before_the_prepass(self, src):
         body = self._body(src, "_action_apply")
         assert body.index("_unique_by_marker(") < body.index("autorec = _autorecord_prepare(games, settings") \
-            < body.index("seen_markers.add(marker)")
+            < body.index("seen_markers = set(prep_by_marker)")
 
     def test_cancel_runs_inside_the_transaction_before_the_stale_reap(self, src):
+        """In a transaction of its own (its re-check locks the row), before the
+        numbers held for kept channels are read and before the stale reap
+        (#288 review: read first and cancelled later, an unwanted recording
+        held a slot a full compact band then refused a new game)."""
+        import ast
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_action_apply")
+        holders = [
+            w for w in ast.walk(fn) if isinstance(w, ast.With)
+            and ast.unparse(w.items[0].context_expr) == "transaction.atomic()"
+            and any(isinstance(c, ast.Call) and ast.unparse(c.func) == "_autorecord_cancel"
+                    for c in ast.walk(w))
+        ]
+        assert len(holders) == 1 and len(holders[0].body) == 1, "its own transaction"
         body = self._body(src, "_action_apply")
-        atomic = body.index("with transaction.atomic():")
-        assert atomic < body.index("_autorecord_cancel(autorec, dry_run)") < body.index("stale = [ch for marker")
+        cancel = body.index("_autorecord_cancel(autorec, dry_run)")
+        assert cancel < body.index("held_for_recordings = _numbers_held_for_recordings(") < body.index(
+            "stale = _unwritten_channels(existing_virtuals, seen_markers)")
 
     def test_game_write_precedes_the_dot_read(self, src):
         body = self._body(src, "_action_apply")
