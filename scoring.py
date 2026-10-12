@@ -311,13 +311,30 @@ _EC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
     ("WINNER",         "winner",       10.0),
 ]
 
-# FIFA World Cup knockout importance premium (pre-weight importance_points),
-# keyed by the UPPER-cased tournament stage. A knockout game is win-or-go-home:
-# maximal stakes. But compute_match_importance returns 0 for it (there is no
-# standings distribution to Monte-Carlo: the outcome is binary), so without this
-# a marquee Round-of-32 tie (e.g. France vs Sweden) scored only its tournament-
-# stage band (raw 1.5 -> ~0.95/10) and ranked BELOW a random regular-season game
-# AND below placeholder_min_score, so it never even got a placeholder channel.
+# International-tournament knockout importance FLOOR (pre-weight
+# importance_points), keyed by the UPPER-cased tournament stage. A knockout
+# game is win-or-go-home: maximal stakes. compute_match_importance scores it
+# from the simulated bracket once the row is placed in it (#243), and then it
+# is usually far ABOVE these values: EURO 2024's knockouts replayed through the
+# real KnockoutSoccerSource scored round of 16 6.5-13.1, quarter-finals
+# 10.7-16.9 and the final 18.4 (measured 2026-10-12). But when the game cannot
+# be placed (the bracket fetch gave up, the fixture's teams are not in the
+# simulated bracket yet, no chain) it scores 0, and without a floor a marquee
+# World Cup Round-of-32 tie (e.g. France vs Sweden) scored only its
+# tournament-stage band (raw 1.5 -> ~0.95/10), BELOW a random regular-season
+# game AND below placeholder_min_score, so it never even got a placeholder
+# channel. EURO knockouts had no floor at all until #250.
+#
+# A FLOOR, never an override: plugin.py applies it only when it beats the
+# simulated value. DO NOT turn it back into an override; that cut a placed
+# EURO final from 18.4 to 6.0 (displayed 10.0 -> 9.2) and threw away its
+# explanation (#250 review).
+#
+# ONE map for every competition granted the premium
+# (`_KNOCKOUT_PREMIUM_COMPETITIONS`): a round is worth the same in any of them,
+# and a competition simply never emits the rounds it does not have (the EURO has
+# no LAST_32 and no THIRD_PLACE). DO NOT add a per-competition table; the next
+# tournament is one line in `_KNOCKOUT_PREMIUM_COMPETITIONS`.
 #
 # DO NOT move this into the shared `stage_score` tournament ladder in score_game:
 # that ladder caps at a FINAL (5.0 x tournament weight 1.5 = 7.5 raw -> 4.37/10,
@@ -326,8 +343,7 @@ _EC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
 # would silently boost those sports too. The importance channel is the design's
 # top-priority signal (see the ScoringWeights docstring: "importance > rank >
 # favorites > tournament"), is uncapped, and is applied per-competition in
-# plugin.py's scoring loop scoped to fd_competition_code == "WC", so only the
-# World Cup is affected.
+# plugin.py's scoring loop, so only the competitions named below are affected.
 #
 # Values chosen so that, at the default `importance` scoring weight (3.0) plus each stage's
 # tournament band, the displayed 0-10 score escalates R32~5.5 -> R16~6.5 ->
@@ -335,7 +351,7 @@ _EC_KNOCKOUT_THRESHOLDS: List[Tuple[str, str, float]] = [
 # THIRD_PLACE has no tournament band, so its premium is set to still clear 5.0.
 # If the importance weight is retuned, these displayed targets shift proportionally,
 # which is the intended, coherent behavior of an importance weight.
-_WC_KNOCKOUT_IMPORTANCE: Dict[str, float] = {
+_KNOCKOUT_IMPORTANCE: Dict[str, float] = {
     "LAST_32":        2.8,
     "LAST_16":        3.4,
     "QUARTER_FINALS": 4.0,
@@ -344,32 +360,47 @@ _WC_KNOCKOUT_IMPORTANCE: Dict[str, float] = {
     "THIRD_PLACE":    3.4,
 }
 
-# FD.org competition code for the FIFA World Cup. Matches the fd_code on the WC
-# SoccerCompetitionConfig and the LEAGUE_CONTEXTS key; named here so the scoring
-# gate below and any future WC-scoped logic compare against one symbol instead
-# of a bare "WC" literal scattered across modules.
-WC_COMPETITION_CODE = "WC"
+# The competitions whose knockout games get `_KNOCKOUT_IMPORTANCE`, by FD.org
+# competition code (the `fd_competition_code` a row carries and the
+# LEAGUE_CONTEXTS key), with the name the score note uses. International
+# tournaments only: club and domestic cups (CL, the English cups) emit the same
+# stage labels but keep their Monte Carlo importance, which is what the
+# original World-Cup-only scoping protected. EURO reuses the World Cup's values
+# (#250, a decided call: the alternative was scaling them to the lower EURO
+# band weights). `tests/test_knockout_premium.py` fails a competition whose
+# knockout bracket chain is wired (`soccer._CHAIN_BRACKETS`) and is missing here.
+_KNOCKOUT_PREMIUM_COMPETITIONS: Dict[str, str] = {
+    "WC": "World Cup",
+    "EC": "EURO",
+}
 
 
-def wc_knockout_importance(
+def knockout_importance(
     comp_code: Optional[str], stage: Optional[str]
 ) -> Optional[float]:
-    """Importance-points premium for a FIFA World Cup knockout game, or None.
+    """Importance-points premium for an international-tournament knockout
+    game, or None.
 
-    Pure gate for the WC knockout premium so plugin.py's `_action_refresh`
+    Pure gate for the knockout premium so plugin.py's `_action_refresh`
     scoring loop stays a thin caller and this runtime string match (competition
-    code + stage label) is unit-testable in isolation — a silent drift in the
-    `fd_competition_code` value or the stage casing would otherwise regress WC
-    games back to their bare ~0.9 tournament-band score with no test to catch it.
+    code + stage label) is unit-testable in isolation: a silent drift in the
+    `fd_competition_code` value or the stage casing would otherwise regress
+    knockout games back to their bare ~0.9 tournament-band score with no test
+    to catch it.
 
-    Returns None for anything that is NOT a World Cup knockout game (a different
-    competition, or a WC group-stage game, whose importance is left to the Monte
-    Carlo simulation). See _WC_KNOCKOUT_IMPORTANCE for the why and the calibrated
-    displayed-score targets.
+    Returns None for anything that is NOT such a game (a competition not in
+    `_KNOCKOUT_PREMIUM_COMPETITIONS`, or a group-stage game, whose importance
+    is left to the Monte Carlo simulation). See _KNOCKOUT_IMPORTANCE for the
+    why and the calibrated displayed-score targets.
     """
-    if comp_code != WC_COMPETITION_CODE:
+    if comp_code not in _KNOCKOUT_PREMIUM_COMPETITIONS:
         return None
-    return _WC_KNOCKOUT_IMPORTANCE.get((stage or "").upper())
+    return _KNOCKOUT_IMPORTANCE.get((stage or "").upper())
+
+
+def knockout_premium_note(comp_code: str) -> str:
+    """The score note for a game `knockout_importance` gave a premium."""
+    return f"{_KNOCKOUT_PREMIUM_COMPETITIONS[comp_code]} knockout: win or go home"
 
 
 LEAGUE_CONTEXTS: Dict[str, LeagueContext] = {

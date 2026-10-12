@@ -539,6 +539,25 @@ EURO knockout cascade (`round_of_16` through `winner`) next to
 only over a context's bands, so the cascade is what makes the chain
 visible in the score.
 
+The knockout games themselves score from the simulated bracket once each
+is placed in it (#243): EURO 2024's knockouts replayed through the real
+knockout source scored round of 16 6.5-13.1, quarter-finals 10.7-16.9 and
+the final 18.4 importance points. A knockout game that cannot be placed
+(the bracket fetch gave up, its teams are not in the simulated bracket)
+scores 0 and, with only its tournament-stage band, would fall below the
+5.0 `placeholder_min_score` and get no channel when its stream is
+unmatched. World Cup and EURO knockout games therefore get a round-scaled
+importance FLOOR (`scoring._KNOCKOUT_IMPORTANCE`: round of 32 2.8, round
+of 16 3.4, quarter-final 4.0, semi-final 4.6, final 6.0, third place 3.4),
+one map for both, displayed about 5.5 / 6.5 / 7.5 / 8.3 / 9.2 at the
+default weights. It applies only when it beats the simulated value; an
+unplaced EURO 2024 quarter-final goes from 2.3 to 7.5 and the final from
+4.4 to 9.2 (#250).
+The competitions granted it are listed in
+`scoring._KNOCKOUT_PREMIUM_COMPETITIONS`; club and domestic cups use the
+same stage labels and are deliberately not in it. A tournament whose chain
+is wired must be listed there (`tests/test_knockout_premium.py`).
+
 Each competition's bracket lives in one `_CHAIN_BRACKETS` entry in
 `sources/soccer.py`. The chain stays off when a season's group letters
 are not that format's (an older World Cup, a draw not made yet), or
@@ -835,10 +854,11 @@ expected before judging the whole guide.
   Article 20.02 penalty shoot-out between two level teams that draw
   their last group match against each other (when no third team is on
   the same points).
-- **A failed season fetch zeroes importance for that competition**, for
-  the run. The simulator replays the competition's full fixture list, so
-  if football-data.org cannot be reached for it the games score no
-  standings stakes (other signals still count). The fetch is retried at
+- **A failed season fetch zeroes simulated importance for that
+  competition**, for the run. The simulator replays the competition's full
+  fixture list, so if football-data.org cannot be reached for it the games
+  score no simulated standings stakes (other signals still count, and a
+  World Cup or EURO knockout game still gets its round's floor). The fetch is retried at
   most twice per refresh rather than once per simulated season, and a
   competition that gives up is reported in the refresh summary as
   `<code> season fixtures (stakes not simulated)`, so the zero is visible

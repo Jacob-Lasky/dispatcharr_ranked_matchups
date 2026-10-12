@@ -76,6 +76,10 @@ NOT_PREFIX_KEYED = {
     # Keyed on the FD.org competition code of a chained group stage ("WC",
     # "EC"), read by GroupStageSoccerSource.cross_source_chain (#53, #78).
     ("sources.soccer", "_CHAIN_BRACKETS"),
+    # Keyed on the FD.org competition code of an international tournament
+    # ("WC", "EC") granted the knockout premium (#250); its own coverage guard
+    # is tests/test_knockout_premium.py::test_every_chained_tournament_gets_the_premium.
+    ("scoring", "_KNOCKOUT_PREMIUM_COMPETITIONS"),
     # Keyed on a LEAGUE_CONTEXTS outcome-band label; "UCL" is the
     # Champions-League-places band, not the UCL prefix.
     ("plugin", "_BAND_DISPLAY"),
