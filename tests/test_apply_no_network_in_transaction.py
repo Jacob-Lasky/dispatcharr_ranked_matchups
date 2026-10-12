@@ -93,21 +93,29 @@ class TestNoNetworkInsideApplyTransaction:
             f"{offenders} -- resolve these in the pre-pass before the transaction (#136)")
 
     def test_the_cancellation_transaction_makes_no_network_call(self, apply_fn):
-        """Every other atomic block in apply (the #288 auto-record cancellation)
-        holds no network call either."""
+        """Every other atomic block apply opens, its own and the auto-record
+        cancellation's (#288, in _autorecord_cancel_committed, which apply
+        calls), holds no network call either."""
+        tree = ast.parse(open(PLUGIN_PY, encoding="utf-8").read(), filename=PLUGIN_PY)
+        committed = next(n for n in tree.body
+                         if isinstance(n, ast.FunctionDef) and n.name == "_autorecord_cancel_committed")
+        assert any(isinstance(c, ast.Call) and _called_name(c) == "_autorecord_cancel_committed"
+                   for c in ast.walk(apply_fn)), "apply no longer cancels through it"
         main = _atomic_lineno(apply_fn)
-        others = [
-            node for node in ast.walk(apply_fn) if isinstance(node, ast.With)
-            and node.lineno != main
-            and any(isinstance(i.context_expr, ast.Call)
-                    and isinstance(i.context_expr.func, ast.Attribute)
-                    and i.context_expr.func.attr == "atomic" for i in node.items)
-        ]
-        assert any(
-            isinstance(c, ast.Call) and _called_name(c) == "_autorecord_cancel"
-            for node in others for c in ast.walk(node)
-        ), "the cancellation's own transaction is gone"
-        for node in others:
+
+        def atomics(fn):
+            return [
+                node for node in ast.walk(fn) if isinstance(node, ast.With)
+                and any(isinstance(i.context_expr, ast.Call)
+                        and isinstance(i.context_expr.func, ast.Attribute)
+                        and i.context_expr.func.attr == "atomic" for i in node.items)
+            ]
+
+        cancel_blocks = atomics(committed)
+        assert any(isinstance(c, ast.Call) and _called_name(c) == "_autorecord_cancel"
+                   for node in cancel_blocks for c in ast.walk(node)), (
+            "the cancellation's own transaction is gone")
+        for node in cancel_blocks + [n for n in atomics(apply_fn) if n.lineno != main]:
             names = {_called_name(c) for c in ast.walk(node) if isinstance(c, ast.Call)}
             assert not names & NETWORK_CALLS, (node.lineno, names & NETWORK_CALLS)
 

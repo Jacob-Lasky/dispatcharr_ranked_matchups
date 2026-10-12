@@ -106,7 +106,12 @@ class TestWiring:
         assert 'settings.get("auto_refresh_enabled", False)' in between
 
     def test_apply_passes_the_bench_as_part_of_the_slate(self, src):
-        assert "_autorecord_prepare(games, settings, bench=cache.get(\"bench\") or [])" in src
+        # Both plans apply builds carry the bench AND the whole cache as their
+        # slate (#291: the candidates are only the games apply writes, but a
+        # game it does not write is still known), so neither a benched game
+        # nor a skipped one reads as missing.
+        assert src.count("slate_games=games,") == 2
+        assert src.count('bench=cache.get("bench") or []') == 2
 
     def test_cancel_uses_the_slate_and_the_reason_check(self, src):
         body = _body(src, "_autorecord_cancel")
