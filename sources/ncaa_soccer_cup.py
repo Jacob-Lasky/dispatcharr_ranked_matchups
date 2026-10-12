@@ -72,9 +72,12 @@ from .base import GameRow
 from .bracket import BestOfNSeriesSource, ForcedWinnerPoissonSampler
 from ._espn import (
     SeasonTypeWindow,
+    dedupe_events,
+    event_identity,
     extract_espn_scoreboard_event,
     fetch_scoreboard_day,
     fetch_season_type_windows,
+    scoreboard_events,
     season_type_at,
     sweep_upcoming_scoreboard,
 )
@@ -139,6 +142,7 @@ def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
 # import from this module.
 from ._soccer_bracket_helpers import (
     dedupe_pk_shootout_pairs as _dedupe_pk_shootout_pairs,
+    pk_pair_identity,
 )
 
 
@@ -280,6 +284,7 @@ class NcaaSoccerCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
             extras_fn=lambda event: {
                 "_routed": self._stage_for_event(event),
                 "_season_year": self._event_season_year(event),
+                "_identity": event_identity(event),
             },
             base=ESPN_BASE,
         )
@@ -314,7 +319,7 @@ class NcaaSoccerCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
                 extra={
                     "espn_event_id": eid,
                     # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                    "game_id": eid,
+                    "game_id": rec["_identity"],
                     "fd_competition_code": self._league_context_code(),
                     "stage": routed[0],
                 },
@@ -353,8 +358,6 @@ class NcaaSoccerCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         if self._season_windows(self.season_year) is None:
             return []
 
-        candidates: List[Dict[str, Any]] = []
-        seen_ids: set = set()
         # Tournament window: Nov 1 - Dec 31 of season_year.
         start = datetime(
             self.season_year, TOURNAMENT_START_MONTH, 1, tzinfo=timezone.utc,
@@ -373,16 +376,14 @@ class NcaaSoccerCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         if payloads is None:
             # A day failed: NOT cached (#245; see BracketSportSource).
             return []
-        for data in payloads:
-            for event in data.get("events") or []:
-                rec = self._extract_bracket_record(event)
-                if rec is None or rec["game_id"] is None:
-                    continue
-                if rec["game_id"] in seen_ids:
-                    continue
-                seen_ids.add(rec["game_id"])
-                candidates.append(rec)
 
+        # The record's game_id is already the event's identity. Every round
+        # is one game, so every record goes through the PK-pair selector,
+        # which must see an id-less pair's two records (pk_pair_identity).
+        candidates = dedupe_events(
+            scoreboard_events(payloads), lambda event, _key: self._extract_bracket_record(event),
+            pk_pair_identity,
+        )
         return self._cache_bracket_games(_dedupe_pk_shootout_pairs(candidates))
 
     # ---------- round routing ----------
@@ -470,7 +471,7 @@ class NcaaSoccerCupSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
             return None
 
         return {
-            "game_id": rec["id"],
+            "game_id": event_identity(event),  # never None: see _espn.dedupe_events
             "stage": stage,
             # SERIES_LENGTH=1 means each game is its own one-game series.
             # matchday is always 1; BracketSportSource clinches at first win.

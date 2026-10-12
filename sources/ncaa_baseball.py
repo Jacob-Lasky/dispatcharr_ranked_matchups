@@ -58,11 +58,14 @@ from .._util import (
     http_get_json,
 )
 from ._espn import (
+    dedupe_events,
+    event_identity,
     extract_espn_scoreboard_event,
     fetch_espn_poll,
     fetch_scoreboard_day,
     fetch_scoreboard_days,
     scoreboard_event_over,
+    scoreboard_events,
     sweep_upcoming_events,
 )
 
@@ -222,7 +225,7 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
                 extra={
                     "espn_event_id": eid,
                     # Identity key the simulator compares on; see GameRow.extra in base.py. #181
-                    "game_id": eid,
+                    "game_id": event_identity(event),
                     "fd_competition_code": self.league_context_code,
                 },
             )
@@ -245,7 +248,6 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
         day goes through `fetch_scoreboard_day` and its explicit `limit`.
         ~150 days, fetched concurrently by `fetch_days`.
         """
-        seen: Dict[Any, Dict[str, Any]] = {}
         season_start = datetime(self.season_year, SEASON_START_MONTH, 1, tzinfo=timezone.utc).date()
         # End of season is the last day of SEASON_END_MONTH.
         season_end_first = datetime(self.season_year, SEASON_END_MONTH, 1, tzinfo=timezone.utc).date()
@@ -258,24 +260,23 @@ class NcaaBaseballRegularSource(PointsBasedSportSource):
         # MLS in mls_standings.py; tests/test_full_season_window.py guards all.
         end = season_end
 
-        for _day, data in fetch_scoreboard_days(
-            _http_get, f"{ESPN_BASE}/scoreboard", season_start, end,
-        ):
-            if data:
-                for event in data.get("events") or []:
-                    if _is_postseason_event(event):
-                        # Postseason win/loss counts must NOT flow into
-                        # the regular-season Monte Carlo: would corrupt
-                        # the win-count threshold bands. See class
-                        # docstring.
-                        continue
-                    rec = _extract_game_record(event)
-                    if rec is None or rec["id"] is None:
-                        continue
-                    if rec["id"] in seen:
-                        continue
-                    seen[rec["id"]] = rec
-        return list(seen.values())
+        def keep(event: Dict[str, Any], key: Any) -> Optional[Dict[str, Any]]:
+            if _is_postseason_event(event):
+                # Postseason win/loss counts must NOT flow into
+                # the regular-season Monte Carlo: would corrupt
+                # the win-count threshold bands. See class
+                # docstring.
+                return None
+            rec = _extract_game_record(event)
+            if rec is not None:
+                rec["id"] = key  # the event's identity, never None: see dedupe_events
+            return rec
+
+        return dedupe_events(scoreboard_events(
+            data for _day, data in fetch_scoreboard_days(
+                _http_get, f"{ESPN_BASE}/scoreboard", season_start, end,
+            )
+        ), keep)
 
     # ---------- Rankings (D1Baseball.com poll) ----------
 
@@ -490,7 +491,7 @@ class NcaaBaseballPlayoffSource(_BaseballPlayoffStrengthsMixin, BestOfNSeriesSou
             start_time=start,
             extra={
                 "espn_event_id": event.get("id"),
-                "game_id": event.get("id"),
+                "game_id": event_identity(event),
                 "fd_competition_code": self._league_context_code(),
                 "stage": stage,
                 "matchday": game_num,
@@ -579,7 +580,7 @@ class NcaaBaseballPlayoffSource(_BaseballPlayoffStrengthsMixin, BestOfNSeriesSou
             ar = None
 
         return {
-            "game_id": event.get("id"),
+            "game_id": event_identity(event),  # never None: see _espn.dedupe_events
             "stage": stage,
             "matchday": game_num,
             "home": home_team,
@@ -737,7 +738,7 @@ def _classify_mcws_sub_brackets(
 
 
 def _mcws_meta_from_raw_events(
-    raw_events: List[Tuple[Dict[str, Any], str, Optional[str]]],
+    raw_events: List[Tuple[Dict[str, Any], str, Optional[str], Any]],
 ) -> List[Dict[str, Any]]:
     """Pluck the (home, away, start_time) projection from raw ESPN
     events tagged MCWS, suitable for feeding `_classify_mcws_sub_brackets`.
@@ -745,7 +746,7 @@ def _mcws_meta_from_raw_events(
     fetch_upcoming does not classify (its window cannot see opening day;
     see `_event_to_game_row`)."""
     out: List[Dict[str, Any]] = []
-    for event, stage, _key in raw_events:
+    for event, stage, _partial_key, _identity in raw_events:
         if stage != "MCWS":
             continue
         comps = event.get("competitions") or []
@@ -906,7 +907,7 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
             start_time=start,
             extra={
                 "espn_event_id": event.get("id"),
-                "game_id": event.get("id"),
+                "game_id": event_identity(event),
                 "fd_competition_code": self._league_context_code(),
                 "stage": stage,
                 "grouping_key": grouping_key,
@@ -923,10 +924,8 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
         if self._bracket_games_cache is not None:
             return self._bracket_games_cache
 
-        raw: List[Tuple[Dict[str, Any], str, Optional[str]]] = []
         season_start = datetime(self.season_year, 5, 25, tzinfo=timezone.utc).date()
         season_end = datetime(self.season_year, 7, 1, tzinfo=timezone.utc).date()
-        seen_ids: set = set()
         payloads = self._sweep_bracket_days(
             season_start, season_end,
             lambda d: fetch_scoreboard_day(_http_get, f"{ESPN_BASE}/scoreboard", d),
@@ -934,34 +933,34 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
         if payloads is None:
             # A day failed: NOT cached (#245; see BracketSportSource).
             return []
-        for data in payloads:
-            for event in data.get("events") or []:
-                if not _is_postseason_event(event):
-                    continue
-                eid = event.get("id")
-                if eid in seen_ids:
-                    continue
-                comps = event.get("competitions") or []
-                if not comps:
-                    continue
-                headline = ""
-                for note in (comps[0].get("notes") or []):
-                    if note.get("type") == "event":
-                        headline = note.get("headline") or ""
-                        break
-                stage, partial_key = _parse_baseball_bracket_headline(headline)
-                if stage is None:
-                    continue
-                seen_ids.add(eid)
-                raw.append((event, stage, partial_key))
+
+        def keep(
+            event: Dict[str, Any], key: Any,
+        ) -> Optional[Tuple[Dict[str, Any], str, Optional[str], Any]]:
+            if not _is_postseason_event(event):
+                return None
+            comps = event.get("competitions") or []
+            if not comps:
+                return None
+            headline = ""
+            for note in (comps[0].get("notes") or []):
+                if note.get("type") == "event":
+                    headline = note.get("headline") or ""
+                    break
+            stage, partial_key = _parse_baseball_bracket_headline(headline)
+            if stage is None:
+                return None
+            return (event, stage, partial_key, key)
+
+        raw = dedupe_events(scoreboard_events(payloads), keep)
 
         mcws_sub_by_team = _classify_mcws_sub_brackets(
             _mcws_meta_from_raw_events(raw)
         )
 
         out: List[Dict[str, Any]] = []
-        for event, stage, partial_key in raw:
-            rec = self._event_to_bracket_record(event, stage, partial_key, mcws_sub_by_team)
+        for event, stage, partial_key, key in raw:
+            rec = self._event_to_bracket_record(event, stage, partial_key, mcws_sub_by_team, key)
             if rec is not None:
                 out.append(rec)
         return self._cache_bracket_games(out)
@@ -972,6 +971,7 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
         stage: str,
         partial_key: Optional[str],
         mcws_sub_by_team: Dict[str, str],
+        key: Any,
     ) -> Optional[Dict[str, Any]]:
         comps = event.get("competitions") or []
         if not comps:
@@ -1013,7 +1013,7 @@ class NcaaBaseballPlayoffBracketSource(_BaseballPlayoffStrengthsMixin, DoubleEli
             ar = None
 
         return {
-            "game_id": event.get("id"),
+            "game_id": key,  # the event's identity, never None: see _espn.dedupe_events
             "stage": stage,
             "matchday": 1,    # double-elim has no fixed matchday; default 1
             "home": home_team,
