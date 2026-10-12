@@ -163,8 +163,40 @@ def test_ncaam_reads_and_keys_one_season_however_the_clock_moves(monkeypatch, st
     years = iter([2026, 2027, 2027, 2027, 2027])
     monkeypatch.setattr(src, "_current_season_year", lambda: next(years))
     src._fetch_games_cached()
-    assert src.season_store_key() == "NcaamSource|NCAA Men's Basketball|2026|AP Top 25"
+    assert src.season_store_key().startswith("NcaamSource|NCAA Men's Basketball|2026|AP Top 25|")
     assert asked == ["2025-11-01", "2026-01-01", "2026-02-16"]
+
+
+def test_ncaam_a_read_under_another_poll_does_not_stand_in(monkeypatch, store):
+    """WITNESS (Codex, round 3): NCAAM simulates only the games of the teams
+    its poll ranks. A read kept under last week's poll lacks a newly ranked
+    team's games, so it must not stand in for this week's."""
+    import requests
+
+    from tests.test_hold_failed_days import _Resp
+    ncaam = importlib.import_module(f"{PKG}.ncaam")
+    state = {"poll": ["Duke"], "games_ok": True}
+
+    def get(url, **k):
+        if url.endswith("/rankings"):
+            return _Resp([{"pollType": "AP Top 25", "week": 1, "team": t, "ranking": i + 1}
+                          for i, t in enumerate(state["poll"])])
+        if not state["games_ok"]:
+            raise requests.ConnectionError("refused")
+        return _Resp([])
+
+    stub_requests_get(monkeypatch, get)
+    monkeypatch.setattr(ncaam.NcaamSource, "_current_season_year", staticmethod(lambda: 2026))
+    ncaam.NcaamSource(api_key="k")._fetch_games_cached()
+    state.update(poll=["Duke", "Kansas"], games_ok=False)
+    store.clock["now"] = T0 + timedelta(hours=6)
+    later = ncaam.NcaamSource(api_key="k")
+    assert later._fetch_games_cached() == []
+    assert later.season_fallback() is None
+    state["poll"] = ["Duke"]
+    same_poll = ncaam.NcaamSource(api_key="k")
+    same_poll._fetch_games_cached()
+    assert same_poll.season_fallback() == T0
 
 
 def test_no_prior_read_is_not_simulated(monkeypatch, store):
@@ -325,8 +357,13 @@ def test_every_points_based_source_falls_back_to_its_last_complete_read(plugin, 
         assert s._fetch_games_cached() == [game]
         expected[s.season_store_key()] = [game]
 
-    def refuse(url, **_k):
-        raise requests.ConnectionError("every request fails in this test")
+    def refuse(url, **k):
+        # NCAAM's poll still answers: it DEFINES the population (the kept
+        # read is keyed by it), so with no poll there is nothing to recall
+        # by design (`test_ncaam_a_read_under_another_poll_does_not_stand_in`).
+        if "collegebasketballdata" in url and url.endswith("/rankings"):
+            return _answer(url, k.get("params") or {})
+        raise requests.ConnectionError("every other request fails in this test")
 
     store.clock["now"] = T0 + timedelta(hours=6)
     later = _build(plugin, monkeypatch, refuse)

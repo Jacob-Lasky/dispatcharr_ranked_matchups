@@ -23,6 +23,7 @@ March Madness). Calls in May-October return [] cleanly.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -168,9 +169,20 @@ class NcaamSource(PointsBasedSportSource):
         return self._season_memo
 
     def _season_store_id(self) -> Optional[str]:
-        """The season AND the poll: the stored population is the games of
-        the poll's teams (`points_based.season_store_key`)."""
-        return f"{self._season()}|{self.poll_name}"
+        """The season AND the poll's teams: the stored population is the games
+        of the teams the poll ranks (`_fetch_full_season_games`), so a read
+        filtered by last week's poll must not stand in for this week's,
+        where a newly ranked team's games would be missing and score no
+        stakes (Codex, #289 follow-up round 3). None when the poll did not
+        answer: then the season cannot be read either, and nothing is kept
+        or recalled."""
+        try:
+            ranked = self._poll(self._season())
+        except RankingsUnavailable:
+            return None
+        teams = ",".join(sorted(ranked or ()))
+        digest = hashlib.sha256(teams.encode("utf-8")).hexdigest()[:12]
+        return f"{self._season()}|{self.poll_name}|{digest}"
 
     def _poll(self, season: int) -> Optional[Dict[str, int]]:
         """`_fetch_rankings(season)`, read ONCE per source (#283).
