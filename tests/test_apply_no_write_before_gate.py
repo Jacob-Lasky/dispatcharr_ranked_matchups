@@ -183,6 +183,33 @@ def scenario_witness_a_source_made_to_fetch_during_the_prepass_is_not_adopted(en
     assert src.is_active is True, "the user's fetching source was switched inactive"
 
 
+def scenario_witness_an_old_source_made_to_fetch_during_the_prepass_is_kept(env):
+    """Codex review, round 13: the previous live group's EPG source is chosen
+    for cleanup before the pre-pass and emptied and deleted in the main
+    transaction. A user who pointed it at a guide meanwhile lost it. The
+    setup re-reads the sources it acts on, row-locked, and a fetching one is
+    not ours (_never_fetches_q)."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    _publish(env, [game], settings=_settings(**COMPACT))
+    _write_cache(env, [game])
+    old_src = m.EPGSource.objects.get(name=OLD)
+    prepare = env.plugin._autorecord_prepare
+
+    def user_edits_the_old_source(*a, **k):
+        m.EPGSource.objects.filter(pk=old_src.pk).update(url="http://guide.example/xmltv.xml")
+        return prepare(*a, **k)
+
+    env.plugin._autorecord_prepare = user_edits_the_old_source
+    try:
+        result = env.plugin._action_apply(_settings(channel_profile_name=NEW, **COMPACT))
+    finally:
+        env.plugin._autorecord_prepare = prepare
+    assert result["status"] == "ok", result
+    assert m.EPGSource.objects.filter(pk=old_src.pk).exists(), "the user's fetching source was deleted"
+
+
 def scenario_a_rename_keeps_our_numbers(env):
     """Guard: numbering now runs BEFORE the group move commits, so it must
     count our channels in the group being renamed away from as ours. Counted

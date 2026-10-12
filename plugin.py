@@ -6884,6 +6884,14 @@ def _commit_group_setup(
     if epg_source is not None and not EPGSource.objects.filter(
             pk=epg_source.pk).filter(_never_fetches_q()).exists():
         return None
+    # The previous sources, chosen before the pre-pass, re-read the same way:
+    # one the user pointed at a guide meanwhile is theirs (_never_fetches_q),
+    # and was emptied and deleted below.
+    foreign_epg_sources = list(
+        EPGSource.objects.select_for_update()
+        .filter(pk__in=[s.pk for s in foreign_epg_sources]).filter(_never_fetches_q())
+        .order_by("pk")
+    )
 
     if target_group is None:
         target_group = ChannelGroup.objects.create(name=group_name)
