@@ -793,6 +793,10 @@ def scenario_a_kept_recording_on_a_channel_with_no_stream_is_cancelled(env):
                       home="Home431", away="Away431")], **settings)
     assert not m.Recording.objects.filter(pk=rec.pk).exists()
     assert G411 not in _owned(env)
+    # Back on the list with a feed: planned and recorded again.
+    _apply(env, [_row(411, kickoff, user_ch.id, home="Home411", away="Away411")], **settings)
+    owned = _owned(env)
+    assert list(m.Recording.objects.values_list("channel_id", flat=True)) == [owned[G411].id]
 
 
 def scenario_a_full_compact_band_still_aborts(env):
