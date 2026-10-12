@@ -721,8 +721,8 @@ def _deletable_group_names_for(group_name: str, recordings_group_name: str) -> s
 # Stable tvg_id for the single archive channel. Lives under TVG_ID_PREFIX so it
 # reads as "ours" and is therefore excluded from the matcher (it must never be
 # matched to a game) and from the highest-real-channel scan. It is NOT a game
-# marker, so it is never in seen_markers and is scoped out of existing_virtuals
-# (which is filtered to the live target_group, not the recordings group).
+# marker, so it is never in seen_markers, and _movable_owned_q keeps it out of
+# existing_virtuals and out of "ours" in numbering wherever it sits.
 ARCHIVE_TVG_ID = TVG_ID_PREFIX + "recordings_archive"
 
 # Starting channel number for the single archive channel. It MUST be non-None:
@@ -1471,6 +1471,18 @@ def _archive_group(recordings_group_name):
             or named.filter(name=recordings_group_name).first())
 
 
+def _archive_group_is_ours(group, archive, deletable_names=frozenset()) -> bool:
+    """Whether `group`, holding `archive`, is ours to delete once nothing
+    references it: the one made for the archive (_made_for_archive), or a
+    name this plugin creates (`deletable_names`, _deletable_group_names_for
+    without the current live group). Else an old live group that held a
+    stray archive beside our game channel stayed for good: the rename left
+    it for the archive, and the archive's move left it nameless to us."""
+    return group is not None and (
+        _made_for_archive(group, archive) or group.name.strip().lower() in deletable_names
+    )
+
+
 def _made_for_archive(group, archive) -> bool:
     """True when `group` is the one `archive` was made for: _ensure_archive_channel
     names the archive channel as its group (and renames it with a move), so
@@ -1488,7 +1500,7 @@ def _archive_groups(recordings_group_name) -> Any:
     return ChannelGroup.objects.filter(name__iexact=str(recordings_group_name).strip())
 
 
-def _ensure_archive_channel(recordings_group_name):
+def _ensure_archive_channel(recordings_group_name, deletable_names=frozenset()):
     """Get-or-create the persistent recordings group and its single archive
     channel. The archive channel is stream-less (a recording container only),
     carries a non-null channel_number (a null number truncates the whole Xtream
@@ -1506,7 +1518,7 @@ def _ensure_archive_channel(recordings_group_name):
     if arch is None:
         # The recordings group was renamed: the ONE archive moves (with its
         # recordings) rather than a second one being made beside it.
-        arch = _move_archive_into(grp)
+        arch = _move_archive_into(grp, deletable_names)
         moved = arch is not None
     if arch is not None and arch.channel_number is not None and not (
         moved and Channel.objects.filter(channel_group=grp, channel_number=arch.channel_number)
@@ -1558,12 +1570,11 @@ def _ensure_archive_channel(recordings_group_name):
     return arch
 
 
-def _move_archive_into(grp):
+def _move_archive_into(grp, deletable_names=frozenset()):
     """Move the archive channel kept in another group (the recordings group
     was renamed) into `grp`, its recordings with it (they point at the
-    channel). Its old group goes once nothing references it, if it was the
-    one made for the archive (_made_for_archive). None when there is no
-    archive yet."""
+    channel). Its old group goes once nothing references it, if it is ours
+    (_archive_group_is_ours). None when there is no archive yet."""
     from apps.channels.models import Channel, ChannelGroup
     arch = (
         Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).exclude(channel_group=grp)
@@ -1572,7 +1583,7 @@ def _move_archive_into(grp):
     if arch is None:
         return None
     old_group_id = arch.channel_group_id
-    old_was_ours = _made_for_archive(arch.channel_group, arch)
+    old_was_ours = _archive_group_is_ours(arch.channel_group, arch, deletable_names)
     # update(), not save(): no Channel post_save (the epg_data-wipe trap).
     # Renamed with the move, so the new group carries our mark (_made_for_archive).
     Channel.objects.filter(pk=arch.pk).update(channel_group=grp, name=grp.name)
@@ -1742,7 +1753,7 @@ def _sync_profile_memberships(settings: Dict[str, Any], dry_run: bool = False) -
     return stats
 
 
-def _cleanup_empty_archive(recordings_group_name) -> bool:
+def _cleanup_empty_archive(recordings_group_name, deletable_names=frozenset()) -> bool:
     """Remove the archive channel (and then its group) once no recordings remain
     under it, so the group exists only while it holds recordings. Returns True if
     anything was removed. Safe: the archive channel is deleted only when it has
@@ -1756,21 +1767,29 @@ def _cleanup_empty_archive(recordings_group_name) -> bool:
     is): left apart, split archives (an install the old exact-name lookup
     split) both stayed for good, and one left in the live group was reaped
     there with its recordings. A group goes only
-    when nothing references it (_group_is_referenced) and it is ours: the one
-    an archive was made for (_made_for_archive), or named exactly as the
-    setting (as before). A group of the user's, empty or holding the archive
+    when nothing references it (_group_is_referenced) and it is ours: one an
+    archive sits in that was made for it or carries a name this plugin
+    creates (_archive_group_is_ours), or named exactly as the setting (as
+    before). A group of the user's, empty or holding the archive
     they filed there, is never deleted."""
     from apps.channels.models import Channel, ChannelGroup, Recording
     from django.db import transaction
     removed = False
     with transaction.atomic():  # the row locks below need one; nests as a savepoint
+        # Locked before their recordings are checked, so a recording made on
+        # one meanwhile waits (its foreign-key check) rather than being
+        # CASCADEd away with the channel. A list, not .exists(): that locks
+        # one row (LIMIT 1).
+        list(Channel.objects.select_for_update().filter(tvg_id=ARCHIVE_TVG_ID)
+             .values_list("pk", flat=True))
         archives = list(Channel.objects.filter(tvg_id=ARCHIVE_TVG_ID).select_related("channel_group"))
-        ours = {a.channel_group_id for a in archives if _made_for_archive(a.channel_group, a)}
+        ours = {a.channel_group_id for a in archives
+                if _archive_group_is_ours(a.channel_group, a, deletable_names)}
         ours |= set(ChannelGroup.objects.filter(name=recordings_group_name).values_list("pk", flat=True))
         if Recording.objects.filter(channel_id__in=[a.id for a in archives]).exists():
             # Idempotent when the one archive already sits in the setting's
             # group; otherwise it moves there (_move_archive_into).
-            keep = _ensure_archive_channel(recordings_group_name)
+            keep = _ensure_archive_channel(recordings_group_name, deletable_names)
             others = [a.id for a in archives if a.id != keep.id]
             if Recording.objects.filter(channel_id__in=others).update(channel_id=keep.id):
                 removed = True
@@ -6709,19 +6728,21 @@ def _reserved_channel_numbers(
     from apps.channels.models import Channel
     from django.db.models import Q
 
-    # Ours: our channels in the target group, and in `pending_groups`, the
-    # previous groups apply's _commit_group_setup is about to move them out
-    # of (in place). Numbering runs BEFORE that move commits, so a full band
-    # refused there leaves nothing moved, and it must reserve exactly what it
-    # would read after the move.
-    ours = (
-        _owned_tvg_id_q() & Q(channel_group=target_group) if target_group is not None
-        else Q(pk__in=[])
-    ) | (_owned_tvg_id_q() & _movable_owned_q() & Q(channel_group__in=list(pending_groups)))
+    # Ours: our game channels in the target group, and in `pending_groups`,
+    # the previous groups apply's _commit_group_setup is about to move them
+    # out of (in place). Numbering runs BEFORE that move commits, so a full
+    # band refused there leaves nothing moved, and it must reserve exactly
+    # what it would read after the move. NOT the recordings archive channel
+    # (_movable_owned_q), wherever it sits: no game owns its number, so an
+    # archive in the live group, unreserved, had a game numbered onto it.
+    in_groups = Q(channel_group__in=list(pending_groups))
+    if target_group is not None:
+        in_groups |= Q(channel_group=target_group)
+    ours = _owned_tvg_id_q() & _movable_owned_q() & in_groups
     reserved = _published_numbers(Channel.objects.exclude(ours), band_start, band_end)
     if target_group is not None:
         reserved |= _published_numbers(
-            Channel.objects.filter(channel_group=target_group).exclude(_owned_tvg_id_q()),
+            Channel.objects.filter(channel_group=target_group).exclude(ours),
             band_start, band_end, effective=False,
         )
     return reserved
@@ -7106,6 +7127,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     _deletable_group_names = _deletable_group_names_for(
         group_name, recordings_group_name,
     )
+    # Names an archive's group may be deleted under: never the live group's.
+    archive_deletable_names = _deletable_group_names - {group_name.strip().lower()}
     # A slate the cache cannot vouch for may omit a channel that must stay
     # (#264: cache.json lost, and the channel published before apply stamped
     # its row, so the refresh could not hold it). Those are kept by their own
@@ -8298,6 +8321,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         if stale and not dry_run:
             now_reap = datetime.now(timezone.utc)
             stale_ids_all = [c.id for c in stale]
+            # Row locks first: a recording made on a stale channel between
+            # this read and the delete below would go with it (CASCADE). On
+            # Postgres its foreign-key check waits on these locks.
+            list(Channel.objects.select_for_update().filter(id__in=stale_ids_all)
+                 .values_list("pk", flat=True))
             recs_by_channel: Dict[int, list] = {}
             for r in Recording.objects.filter(channel_id__in=stale_ids_all):
                 recs_by_channel.setdefault(r.channel_id, []).append(r)
@@ -8308,7 +8336,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 stale, recs_by_channel, now_reap, archive_enabled, guide_kept_ids,
             )
             if rehome_rec_ids:
-                archive_ch = _ensure_archive_channel(recordings_group_name)
+                archive_ch = _ensure_archive_channel(recordings_group_name, archive_deletable_names)
                 # .update() on the Recording queryset: re-point the FK without
                 # invoking per-row save hooks. Recording carries no destructive
                 # post_save signal (unlike Channel.epg_data), so this is a plain
@@ -8490,7 +8518,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # while it holds recordings. Drop the archive channel and its group once
         # empty (e.g. after the user deletes the last preserved recording).
         if not dry_run and archive_enabled:
-            _cleanup_empty_archive(recordings_group_name)
+            _cleanup_empty_archive(recordings_group_name, archive_deletable_names)
 
         # 8. Channel Profile membership (#172). LAST inside the transaction, and
         # deliberately so: it reads the set of channels we own, which is only

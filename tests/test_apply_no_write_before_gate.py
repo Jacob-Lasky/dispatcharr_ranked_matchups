@@ -290,6 +290,10 @@ def scenario_witness_a_stray_archive_channel_does_not_strand_the_old_live_group(
     stray.refresh_from_db()
     assert stray.channel_group.name == "Matchups Recordings", stray.channel_group.name
     assert m.Recording.objects.filter(channel=stray).count() == 1
+    # Codex review, round 10: the rename left the old group for the archive,
+    # and the archive's move then left it for good (nothing of ours in it
+    # any more, so no later apply found it). A name we create, it goes.
+    assert not m.ChannelGroup.objects.filter(pk=old.pk).exists(), "the old live group was stranded"
 
 
 def scenario_witness_split_archives_use_the_one_the_setting_names(env):
@@ -426,6 +430,90 @@ def scenario_witness_an_archive_in_the_live_group_keeps_its_recordings(env):
     rec = m.Recording.objects.get(pk=rec.pk)
     assert rec.channel.channel_group.name == "Matchups Recordings", rec.channel.channel_group.name
     assert m.Channel.objects.filter(tvg_id=env.plugin.ARCHIVE_TVG_ID).count() == 1
+
+
+def scenario_witness_an_archive_in_the_live_group_keeps_its_number(env):
+    """Codex review, round 10: numbering counted every channel of ours in the
+    live group as a game's, the archive included, so its 9999 was not
+    reserved: a game moved onto 9999, and the archive kept 9999 when it was
+    folded into the recordings group. Two channels published on 9999."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+    ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+    arch = m.Channel.objects.create(name="Matchups Recordings", channel_number=9999,
+                                    channel_group=ours.channel_group,
+                                    tvg_id=env.plugin.ARCHIVE_TVG_ID)
+    m.Recording.objects.create(
+        channel=arch, start_time=_now() - timedelta(days=2),
+        end_time=_now() - timedelta(days=2, hours=-3), custom_properties={"status": "completed"},
+    )
+    _write_cache(env, [game])
+    result = env.plugin._action_apply(_settings(**dict(COMPACT, virtual_channel_base=9999)))
+    assert result["status"] == "ok", result
+    ours.refresh_from_db()
+    arch.refresh_from_db()
+    assert int(ours.channel_number) != int(arch.channel_number), (
+        f"our game and the archive both publish on {int(arch.channel_number)}"
+    )
+
+
+def scenario_the_live_group_is_never_deleted_as_the_archives(env):
+    """Guard: a name this plugin creates makes an archive's group ours
+    (_archive_group_is_ours), but never the live group's own name. Reaping
+    the last game empties the live group while a stray archive sits in it;
+    folding the archive out must not delete the group apply is publishing to."""
+    m = env.m
+    user_ch, _ = _seed_source_channel(env)
+    ours = _publish(env, [_row(401, _now() - timedelta(hours=10), user_ch.id)])[G401]
+    live = ours.channel_group
+    _archive = m.Channel.objects.create(name="Matchups Recordings", channel_number=9999,
+                                        channel_group=live, tvg_id=env.plugin.ARCHIVE_TVG_ID)
+    m.Recording.objects.create(
+        channel=_archive, start_time=_now() - timedelta(days=2),
+        end_time=_now() - timedelta(days=2, hours=-3), custom_properties={"status": "completed"},
+    )
+    result = env.plugin._action_reap(_settings())
+    assert result["status"] == "ok" and result["reaped"] == 1, result
+    _archive.refresh_from_db()
+    assert _archive.channel_group.name == "Matchups Recordings"
+    assert m.ChannelGroup.objects.filter(pk=live.pk).exists(), "the live group was deleted"
+
+
+def scenario_an_overridden_archive_in_the_live_group_keeps_its_raw_number(env):
+    """Guard: the archive is not ours for numbering in either half of
+    _reserved_channel_numbers. Published under an override (8888), its RAW
+    9999 must still be reserved in its group (Channel.clean() compares raw
+    numbers). The harness has no with_effective_values, so a stand-in
+    publishes the archive at 8888 and everything else at its raw number."""
+    import sys
+    import types
+    from django.db.models import Case, F, Value, When
+    m = env.m
+    managers = types.ModuleType("apps.channels.managers")
+    managers.with_effective_values = lambda qs: qs.annotate(effective_channel_number=Case(
+        When(tvg_id=env.plugin.ARCHIVE_TVG_ID, then=Value(8888.0)), default=F("channel_number")))
+    sys.modules["apps.channels.managers"] = managers
+    try:
+        user_ch, _ = _seed_source_channel(env)
+        game = _row(401, _now() + timedelta(hours=6), user_ch.id)
+        ours = _publish(env, [game], settings=_settings(**COMPACT))[G401]
+        arch = m.Channel.objects.create(name="Matchups Recordings", channel_number=9999,
+                                        channel_group=ours.channel_group,
+                                        tvg_id=env.plugin.ARCHIVE_TVG_ID)
+        _write_cache(env, [game])
+        # Recordings named as the live group: archiving is off, the archive stays put.
+        result = env.plugin._action_apply(_settings(
+            recordings_group_name=OLD, **dict(COMPACT, virtual_channel_base=9999)))
+        assert result["status"] == "ok", result
+    finally:
+        del sys.modules["apps.channels.managers"]
+    ours.refresh_from_db()
+    arch.refresh_from_db()
+    assert ours.channel_group_id == arch.channel_group_id
+    assert int(ours.channel_number) != int(arch.channel_number), (
+        f"our game took the archive's raw {int(arch.channel_number)} in its group"
+    )
 
 
 def scenario_witness_a_users_group_the_archive_was_moved_into_is_kept(env):
@@ -860,6 +948,26 @@ def test_a_group_is_locked_before_its_references_are_checked(fn_name):
     checks = [n.lineno for n in calls if getattr(n.func, "id", None) == "_group_is_referenced"]
     assert locks and checks, (locks, checks)
     assert min(locks) < min(checks), f"{fn_name} checks references before locking the group"
+
+
+@pytest.mark.parametrize("fn_name,lock_needle,check_needle", [
+    ("_cleanup_empty_archive", "ARCHIVE_TVG_ID", "channel_id"),
+    ("_action_apply", "stale_ids_all", "stale_ids_all"),
+])
+def test_a_channel_is_locked_before_its_recordings_are_checked(fn_name, lock_needle, check_needle):
+    """Codex review, round 10: a recording made on a channel between the "has
+    it any recordings?" read and its delete went with it (CASCADE). The rows
+    are locked first; sqlite cannot show the race, so the order is pinned in
+    the source."""
+    tree = ast.parse(open(PLUGIN_PY, encoding="utf-8").read())
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == fn_name)
+    calls = [(n.lineno, ast.unparse(n)) for n in ast.walk(fn) if isinstance(n, ast.Call)]
+    locks = [ln for ln, src in calls
+             if src.startswith("Channel.objects.select_for_update().filter(") and lock_needle in src]
+    checks = [ln for ln, src in calls
+              if src.startswith("Recording.objects.filter(") and check_needle in src]
+    assert locks and checks, (locks, checks)
+    assert min(locks) < min(checks), f"{fn_name} reads recordings before locking the channels"
 
 
 class TestNothingCommitsBeforeTheLastCheck:
