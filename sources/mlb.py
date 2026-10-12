@@ -102,6 +102,17 @@ _WS_TOP_SENTINEL = "LCS_AL_WINNER"
 _WS_BOT_SENTINEL = "LCS_NL_WINNER"
 
 
+def _is_schedule(data: Any) -> bool:
+    """Whether a statsapi `/schedule` body is a schedule: a `dates` list
+    (`[]` when nothing is scheduled, measured 2026-10-11) whose every entry
+    carries its `games` list. statsapi lists a date only for the games on
+    it, so a date entry without the list is a damaged answer, not a day off,
+    and reading it as one loses that day's games quietly."""
+    dates = data.get("dates") if isinstance(data, dict) else None
+    return isinstance(dates, list) and all(
+        isinstance(d, dict) and isinstance(d.get("games"), list) for d in dates)
+
+
 def _http_get(url: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
     """Patch point for this module's HTTP; the body is `_util.http_get_json`.
 
@@ -190,7 +201,7 @@ class MlbRegularSource(PointsBasedSportSource):
             f"&startDate={window.first_day.isoformat()}&endDate={window.last_day.isoformat()}"
         )
         data = _http_get(url)
-        if not (isinstance(data, dict) and isinstance(data.get("dates"), list)):
+        if not _is_schedule(data):
             # The ONE request for every day of the window failed (None) or
             # answered something that is not a schedule: each of those days is
             # lost, not quiet, so the refresh keeps the games it had published
@@ -201,7 +212,7 @@ class MlbRegularSource(PointsBasedSportSource):
             return []
         by_pk: Dict[Any, GameRow] = {}
         for date_entry in data["dates"]:
-            for g in date_entry.get("games", []) or []:
+            for g in date_entry["games"]:
                 gid = g.get("gamePk")
                 if gid is None or gid in by_pk:
                     continue
@@ -245,13 +256,13 @@ class MlbRegularSource(PointsBasedSportSource):
         )
         data = _http_get(url)
         out: List[Dict[str, Any]] = []
-        if not (isinstance(data, dict) and isinstance(data.get("dates"), list)):
+        if not _is_schedule(data):
             # Failed, or not a schedule: NOT an empty season (#289). A season
             # with no games still answers `"dates": []` (measured 2026-10-11
             # for season=2031).
             raise SeasonUnavailable("regular-season schedule did not answer")
         for date_entry in data["dates"]:
-            for g in date_entry.get("games", []) or []:
+            for g in date_entry["games"]:
                 gid = g.get("gamePk")
                 if gid is None:
                     continue
@@ -354,15 +365,18 @@ class MlbPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
         """
         out: List[GameRow] = []
         data = _http_get(f"{MLB_API_BASE}/schedule/postseason?season={self.season}")
-        if not data:
+        if not _is_schedule(data):
+            # Failed or damaged: the label comes back empty, which the refresh
+            # holds as an outage (#240), rather than parsing an error object
+            # as a postseason with no games in it.
             return out
         now = datetime.now(timezone.utc)
         # DO NOT use now.fromordinal(...): it is a classmethod that drops the
         # tzinfo, and comparing its naive result against the aware start_time
         # raised TypeError, so the whole postseason contributed nothing (#213).
         horizon = now + timedelta(days=days_ahead)
-        for date_entry in data.get("dates", []) or []:
-            for g in date_entry.get("games", []) or []:
+        for date_entry in data["dates"]:
+            for g in date_entry["games"]:
                 gid = g.get("gamePk")
                 if gid is None:
                     continue
@@ -433,16 +447,18 @@ class MlbPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSource):
             return []
 
         data = _http_get(f"{MLB_API_BASE}/schedule/postseason?season={self.season}")
-        if not data:
-            # NOT cached: a failed request is not an empty postseason, and
+        if not _is_schedule(data):
+            # NOT cached: a failed request (or a 200 error object, which used
+            # to parse as a postseason with no games and be cached, #289's
+            # review) is not an empty postseason, and
             # caching it would keep the scoring-time retry (#243) from ever
             # seeing the bracket. Counted, so a refresh that gives up says so
             # (#245; see BracketSportSource).
             return self._bracket_fetch_failed("postseason schedule did not answer")
 
         out: List[Dict[str, Any]] = []
-        for date_entry in data.get("dates", []) or []:
-            for g in date_entry.get("games", []) or []:
+        for date_entry in data["dates"]:
+            for g in date_entry["games"]:
                 gid = g.get("gamePk")
                 if gid is None:
                     continue

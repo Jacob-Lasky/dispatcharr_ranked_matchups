@@ -389,3 +389,139 @@ def test_every_answered_season_is_quiet(plugin, monkeypatch):
     made, _failed, failures = _drive_every_season(plugin, monkeypatch, lambda url, params: False)
     assert _classes(made) == _EVERY_SEASON
     assert {n: f for n, f in failures.items() if f is not None} == {}
+
+
+def test_a_season_read_at_build_time_reports_too(plugin, monkeypatch):
+    """CLASS guard, the production order: the sources are BUILT with every
+    request failing, so the playoff strength seeds read their regular seasons
+    then (and fail), and every other season fails on its first read after.
+    Every points-based source must report its season, whichever read it was."""
+    import requests
+
+    from dispatcharr_ranked_matchups.sources.points_based import PointsBasedSportSource
+    from tests.test_mapped_prefixes import _all_on_settings
+
+    def refuse(url, **_k):
+        raise requests.ConnectionError("every request fails in this test")
+
+    stub_requests_get(monkeypatch, refuse)
+    sources = [s for s in plugin._build_sources(_all_on_settings())
+               if isinstance(s, PointsBasedSportSource)]
+    assert {type(s).__name__ for s in sources} == _EVERY_SEASON
+    for src in sources:
+        src._fetch_games_cached()
+    assert sorted(f"{type(s).__name__}:{s.sport_label}" for s in sources
+                  if s.season_fetch_failure() is None) == []
+
+
+# ---------------------------------------------------------------------------
+# Reporting: a playoff slate whose strengths came from a failed season
+# ---------------------------------------------------------------------------
+
+class _Season:
+    def __init__(self, label, failure):
+        self.sport_label, self._failure = label, failure
+
+    def season_fetch_failure(self):
+        return self._failure
+
+
+class _Playoff:
+    sport_label = "NFL Playoffs"
+
+    def __init__(self, *seeds):
+        if seeds:
+            self.strength_sources = seeds
+
+
+def test_a_scored_playoff_reports_the_season_its_strengths_came_from(plugin):
+    """WITNESS (Codex, #289 round 1): only playoff games on the slate, and the
+    regular season they took their team strengths from failed at build time.
+    The playoff model ran on its prior and nothing said so, because the
+    regular source had no game in the slate."""
+    reg = _Season("NFL", "no answer for 1 day(s) of the season (2026-12-25..2026-12-25)")
+    po = _Playoff(reg)
+    assert plugin._season_failure_entries([reg, po], [po]) == [
+        "NFL season (stakes not simulated): error "
+        "(no answer for 1 day(s) of the season (2026-12-25..2026-12-25))"
+    ]
+
+
+def test_an_unrelated_or_unscored_season_is_not_reported(plugin):
+    """Guard: a failed season with no game in the slate, and none in a
+    playoff seeded from it, lost nothing to report."""
+    reg = _Season("NFL", "boom")
+    assert plugin._season_failure_entries([reg, _Playoff()], [_Playoff()]) == []
+    assert plugin._season_failure_entries([reg], []) == []
+
+
+def test_two_conferences_sharing_a_label_report_one_entry(plugin):
+    """Guard: MLS East and West share "MLS"; both failing, and the MLS Cup
+    seeded from both, is one entry listing each distinct reason once."""
+    east, west = _Season("MLS", "map"), _Season("MLS", "map")
+    cup = _Playoff(east, west)
+    assert plugin._season_failure_entries([east, west, cup], [cup]) == [
+        "MLS season (stakes not simulated): error (map)"
+    ]
+
+
+def test_every_seeded_playoff_records_its_strength_sources(plugin, monkeypatch):
+    """CLASS guard for the wiring: every source `_build_sources` builds that
+    takes regular-season strengths names, through `strength_sources`, the
+    built points-based sources they came from (`plugin._seeded_from`). A new
+    playoff pair that skips it would hide its regular season's failure on a
+    playoff-only slate."""
+    from dispatcharr_ranked_matchups.sources.points_based import PointsBasedSportSource
+    from tests.test_mapped_prefixes import _all_on_settings
+    stub_requests_get(monkeypatch, lambda url, **k: _answer(url, k.get("params") or {}))
+    sources = plugin._build_sources(_all_on_settings())
+    built = {id(s) for s in sources}
+    seeded = [s for s in sources if hasattr(s, "set_regular_season_strengths")]
+    assert len(seeded) >= 11   # the instrument found the playoff family
+    missing = sorted(type(s).__name__ for s in seeded if not getattr(s, "strength_sources", ()))
+    assert missing == []
+    for s in seeded:
+        assert all(isinstance(r, PointsBasedSportSource) and id(r) in built
+                   for r in s.strength_sources), type(s).__name__
+
+
+# ---------------------------------------------------------------------------
+# MLB: a date entry without its games list
+# ---------------------------------------------------------------------------
+
+_DAMAGED_SCHEDULE = {"dates": [{"date": "2026-04-01", "games": None}]}
+
+
+def test_mlb_a_date_without_its_games_fails_the_season(monkeypatch):
+    """WITNESS (Codex, #289 round 1): statsapi lists a date only for the
+    games on it, and a date entry with `games: null` was read as a day off."""
+    mlb = importlib.import_module(f"{PKG}.mlb")
+    monkeypatch.setattr(mlb, "_http_get", lambda url, *a, **k: _DAMAGED_SCHEDULE)
+    src = mlb.MlbRegularSource(season=2026)
+    assert src._fetch_games_cached() == []
+    assert src.season_fetch_failure() == "regular-season schedule did not answer"
+
+
+def test_mlb_upcoming_a_date_without_its_games_loses_the_window(monkeypatch):
+    """WITNESS: the same damage in the upcoming request lost that day's
+    games quietly; it now reports the request's days, like a failed one."""
+    from dispatcharr_ranked_matchups.sources.base import recording_lost_days
+    from tests.test_hold_failed_days import NOON, _pin_window
+    mlb = importlib.import_module(f"{PKG}.mlb")
+    _pin_window(monkeypatch, NOON)
+    monkeypatch.setattr(mlb, "_http_get", lambda url, *a, **k: _DAMAGED_SCHEDULE)
+    with recording_lost_days() as lost:
+        assert mlb.MlbRegularSource(season=2026).fetch_upcoming(days_ahead=2) == []
+    assert lost == {date(2026, 10, 10), date(2026, 10, 11), date(2026, 10, 12), date(2026, 10, 13)}
+
+
+@pytest.mark.parametrize("body", [{"message": "rate limited"}, _DAMAGED_SCHEDULE])
+def test_mlb_postseason_a_damaged_answer_is_not_an_empty_bracket(monkeypatch, body):
+    """WITNESS: a truthy 200 error object (or a damaged date) parsed as a
+    postseason with no games and was CACHED, so scoring's retry (#243)
+    never asked again and nothing was reported."""
+    mlb = importlib.import_module(f"{PKG}.mlb")
+    monkeypatch.setattr(mlb, "_http_get", lambda url, *a, **k: body)
+    src = mlb.MlbPlayoffSource(season=2026)
+    assert src._fetch_bracket_games() == []
+    assert src._bracket_games_cache is None
