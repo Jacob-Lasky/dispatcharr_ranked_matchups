@@ -605,6 +605,13 @@
       "help_text": "Sonarr/Radarr-style template for the channel name. Plain text is literal; a {group} holds one variable plus any literal characters glued to it, and the whole group disappears when the variable is blank (so an unranked team or a game with no tagline leaves no stray parens or separators). Variables: {league_short} {league_full} {away_team} {home_team} {rank_away} {rank_home} {rank_pair} {score} {favorite_star} {tagline} {tournament} {venue} {game_date} {start_time} {kickoff} {rivalry}. Use the 'Test naming convention' button to preview before applying. Leave blank for the default shown above."
     },
     {
+      "id": "description_template",
+      "type": "string",
+      "label": "EPG description template (optional)",
+      "default": "",
+      "help_text": "Blank keeps the built-in description. Uses the channel-name variables plus {why}, which inserts the plugin's existing explanation, placeholder warning, and source details. Write \\n for line breaks. Empty variables collapse their surrounding {group}; malformed templates fall back to the built-in description. Example: {league_full}{ · tournament} · ★{score}/10\\n{away_team}{ (rank_away)} v {home_team}{ (rank_home)}\\n{kickoff}{ · venue}\\n\\n{why}"
+    },
+    {
       "id": "_section_apply",
       "type": "info",
       "label": "Apply Behavior",
