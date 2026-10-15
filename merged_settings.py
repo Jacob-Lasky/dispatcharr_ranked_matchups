@@ -200,6 +200,27 @@ def league_enabled(settings: Dict[str, Any], toggle_id: str) -> bool:
     return league_pair_value(settings, select_id) in (option, PAIR_BOTH)
 
 
+def _name_number_entries(text: Any) -> List[Tuple[str, str, str]]:
+    """Split "a=1, b: 2; c=3" into (entry, name, value) triples, the one
+    tokenizer behind every "name=number" setting (Scoring weights, League
+    weights). Entries split on commas, semicolons or newlines and take `=` or
+    `:` as the separator. `name` is stripped but keeps its case, and is ""
+    when the entry has no separator at all, so each caller reports a
+    malformed entry in its own vocabulary."""
+    out: List[Tuple[str, str, str]] = []
+    if text is None:
+        return out
+    for chunk in str(text).replace(";", ",").replace("\n", ",").split(","):
+        entry = chunk.strip()
+        if not entry:
+            continue
+        name, sep, value = entry.partition("=")
+        if not sep:
+            name, sep, value = entry.partition(":")
+        out.append((entry, name.strip() if sep else "", value.strip()))
+    return out
+
+
 def parse_weight_overrides(text: Any) -> Tuple[Dict[str, float], List[str]]:
     """Parse "favorite=8, spread=1" into {name: value}.
 
@@ -210,27 +231,65 @@ def parse_weight_overrides(text: Any) -> Tuple[Dict[str, float], List[str]]:
     in `problems` rather than failing the refresh."""
     overrides: Dict[str, float] = {}
     problems: List[str] = []
-    if text is None:
-        return overrides, problems
-    for chunk in str(text).replace(";", ",").replace("\n", ",").split(","):
-        entry = chunk.strip()
-        if not entry:
-            continue
-        name, sep, value = entry.partition("=")
-        if not sep:
-            name, sep, value = entry.partition(":")
-        name = name.strip().lower()
+    for entry, name, value in _name_number_entries(text):
+        name = name.lower()
         if name.startswith(LEGACY_WEIGHT_PREFIX):
             name = name[len(LEGACY_WEIGHT_PREFIX):]
-        if not sep or name not in WEIGHT_NAMES:
+        if name not in WEIGHT_NAMES:
             problems.append(f"{entry!r} (expected one of {', '.join(WEIGHT_NAMES)} as name=number)")
             continue
-        number = _finite(value.strip())
+        number = _finite(value)
         if number is None:
-            problems.append(f"{entry!r} ({value.strip()!r} is not a number)")
+            problems.append(f"{entry!r} ({value!r} is not a number)")
             continue
         overrides[name] = number
     return overrides, problems
+
+
+# ---------------------------------------------------------------------------
+# League weights (#309). Not a #208 merge: it lives here because it shares the
+# "name=number" tokenizer with Scoring weights above, and one parser for both
+# settings is what keeps their accepted syntax from drifting apart.
+# ---------------------------------------------------------------------------
+LEAGUE_WEIGHTS_SETTING = "league_weights"
+
+# The largest multiplier accepted. Not a taste limit: the 0-10 compression
+# saturates by raw ~48, so anything past this already pins a scored game at 10,
+# while a huge finite value (1e308) overflows raw * weight to inf, which lands in
+# cache.json and turns adaptive scoring's median into NaN for the whole batch.
+MAX_LEAGUE_WEIGHT = 100.0
+
+
+def parse_league_weights(text: Any) -> Tuple[Dict[str, float], List[str]]:
+    """Parse "NFL=1.5, epl=0.7" into {casefolded league code: multiplier}.
+
+    Codes are casefolded because the real ones are mixed case ("LaLiga",
+    "SerieA") and a user typing "laliga" means the same league. Whether a code
+    is a league that exists is NOT decided here (that needs the sources this
+    refresh builds); this only rejects what can never be a weight: a missing
+    code or value, a value that is not a finite number, a negative one (a
+    negative multiplier would flip the sign of every score in the league and
+    sort its best game last), and one above MAX_LEAGUE_WEIGHT. 0 is allowed
+    and scores the league at 0, which still lets its games fill an otherwise
+    short list."""
+    weights: Dict[str, float] = {}
+    problems: List[str] = []
+    for entry, name, value in _name_number_entries(text):
+        if not name:
+            problems.append(f"{entry!r} (expected LEAGUE=number, e.g. NFL=1.5)")
+            continue
+        number = _finite(value)
+        if number is None:
+            problems.append(f"{entry!r} ({value!r} is not a number)")
+            continue
+        if number < 0:
+            problems.append(f"{entry!r} (a league weight cannot be negative)")
+            continue
+        if number > MAX_LEAGUE_WEIGHT:
+            problems.append(f"{entry!r} (a league weight cannot be above {MAX_LEAGUE_WEIGHT:g})")
+            continue
+        weights[name.casefold()] = number
+    return weights, problems
 
 
 def _finite(raw: Any) -> Optional[float]:

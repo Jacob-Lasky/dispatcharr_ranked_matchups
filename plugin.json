@@ -579,6 +579,14 @@
       "help_text": "Blank = defaults. Override any signal's weight as name=number, comma-separated. Names and defaults: rank=1 (rank pair: both ranked > one ranked > neither), spread=3 (close game: devigged moneyline coin-flip-ness for soccer, normalized point spread for NCAAF / NCAAM), favorite=6 (flat boost per favorite-team game), rivalry=2 (flat boost on a known rivalry), tournament=1.5 (knockout-stage cup games), importance=3 (Monte Carlo importance for titles, playoff spots and relegation, including in-league favorites' stakes; 0 disables it), narrative=0 (LLM-judged storyline score; > 0 enables Claude narrative scoring and needs the Anthropic key). Ignored unless Curation preset is 'manual'."
     },
     {
+      "id": "league_weights",
+      "label": "League weights",
+      "type": "string",
+      "default": "",
+      "placeholder": "e.g. NFL=1.5, EPL=0.7",
+      "help_text": "Blank = every league counts the same. Make some leagues count more (or less) than others as LEAGUE=number, comma-separated. The league is the code at the start of each channel name (NFL, NHL, CFB, EPL, UCL, LaLiga...), in any case. The number multiplies every game in that league before the 0-10 score is worked out, so NFL=1.5 lifts NFL games up the list and EPL=0.5 pushes Premier League games down; 0 scores a league at zero, so its games rank below every scored game on the same day (games with a favorite team still come first, and are never dropped). Leagues you leave out stay at 1; the most a weight can be is 100. Applies whatever the Curation preset is, from the next Refresh."
+    },
+    {
       "id": "adaptive_scoring",
       "type": "boolean",
       "label": "Adaptive (season-relative) scoring",
