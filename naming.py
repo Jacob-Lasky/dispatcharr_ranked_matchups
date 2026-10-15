@@ -152,6 +152,13 @@ def template_problem_summary(errors: List[str]) -> str:
     )
 
 
+def format_score(score_final: Optional[float]) -> str:
+    """The 0-10 score as channel names show it ({score}), one decimal. The ONE
+    formatter: the Minimum score setting (#313) compares this displayed value,
+    so a game named \u26052.0 is never left out by a floor of 2."""
+    return f"{score_final:.1f}" if score_final is not None else ""
+
+
 def _fmt_rank(rank: Optional[int], is_poll: bool) -> str:
     # Poll ranks (AP / Coaches Top 25) are meaningful absolute numbers; a
     # standings "rank" is just a league-table position every team has, so it
@@ -221,7 +228,7 @@ def build_context(
         "rank_away": ra,
         "rank_home": rh,
         "rank_pair": rank_pair,
-        "score": f"{score_final:.1f}" if score_final is not None else "",
+        "score": format_score(score_final),
         "favorite_star": _FAVORITE_STAR if favorite else "",
         "recording_dot": _RECORDING_DOT if recording else "",
         "tagline": tagline or "",

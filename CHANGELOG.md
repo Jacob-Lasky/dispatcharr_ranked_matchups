@@ -19,6 +19,11 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   scores are multiplied before the 0-10 rating is worked out, so the weighted
   leagues move up (or down) the list. It applies whatever the Curation preset
   is, and the score breakdown shows what it changed. (#309)
+- **Minimum score.** A new setting, off by default, leaves out games scoring
+  below a number you choose, so a quiet day shows fewer channels rather than
+  low-stakes filler. It works together with Max curated games (games at or
+  above the score, up to that maximum) and never leaves out your Favorite
+  teams, Recorded teams or a game already on air. (#313)
 
 ### Changed
 

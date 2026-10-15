@@ -779,12 +779,14 @@ ordering (scores are worked out at Refresh; **Apply** alone reuses them).
 | **More NFL, less Premier League** (any preset) | League weights: `NFL=1.5, EPL=0.7` | Every NFL game's raw score is multiplied by 1.5 and every EPL game's by 0.7 before compression, so NFL games climb the list and EPL games sink, without touching how anything inside either league ranks against itself. |
 | **Early-season weeks feel flat / late-season everything is ★10** | turn ON `adaptive_scoring` | Switches compression from a fixed curve to a per-refresh one keyed off the batch median, so the top games of any week always read as top games. |
 | **More games on the guide, including smaller stakes** | `curation_preset` → `high_coverage` (or on `manual`, raise `max_games`) | `high_coverage` widens the cap to ~50 and softens the weights so lower-leverage games clear the bar. |
-| **Same curation, just a different list length** | on `manual`, change only `max_games` | `max_games` is the only list-length lever; it trims from the bottom of the sorted list without changing how anything is scored. Games involving a favorite or a recorded team, and games already on air, are never trimmed, so the list can run slightly longer than the cap. |
+| **Same curation, just a different list length** | on `manual`, change only `max_games` | `max_games` trims from the bottom of the sorted list without changing how anything is scored. Games involving a favorite or a recorded team, and games already on air, are never trimmed, so the list can run slightly longer than the cap. |
+| **Every game above a score, however many that is** | `min_score` (e.g. `2`), with `max_games` raised to its maximum | Off (0) by default. Leaves out games whose displayed score is below it, list and bench alike, then `max_games` still caps what is left. The same games as `max_games` are never left out (favorites, recorded teams, games on air). Applies whatever the preset, from the next Refresh. |
 
-A note on "fewer games": the only length control is `max_games` (or a
-tighter preset). There is intentionally no "hide games below score N"
-floor. Low-scored games filling otherwise-empty slots on a quiet week is
-the design, not a bug: this is the one place games show up.
+A note on "fewer games": by default the only length control is `max_games`
+(or a tighter preset), and low-scored games filling otherwise-empty slots on
+a quiet week is the design, not a bug: this is the one place games show up.
+`min_score` (#313) is the one opt-in exception, off unless you set it, for
+people who would rather see an empty slot than a low-stakes game.
 
 ### What the presets actually set
 

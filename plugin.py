@@ -2797,6 +2797,9 @@ def _read_cache() -> Dict[str, Any]:
 # True on a cache whose writer KNEW what the slate it replaced held, which is
 # what makes an EMPTY `games` list safe to publish (#241). See _cache_has_slate.
 _EMPTY_SLATE_KNOWN_KEY = "empty_slate_known"
+# How many games the last refresh left out for scoring below the Minimum score
+# (#313), so Show current state can say why a list is short or empty.
+_BELOW_MIN_SCORE_KEY = "below_min_score"
 
 
 def _cache_has_slate(cache: Dict[str, Any]) -> bool:
@@ -3271,6 +3274,31 @@ def _apply_time_short(before: str, dry_run: bool) -> Optional[Dict[str, Any]]:
 # TestSchedulerLockOwnership::test_ttl_exceeds_the_subprocess_timeout fails if
 # the two stop being consistent.
 MAX_GAMES_CEILING = 60
+
+
+# Minimum score (#313): an OPT-IN floor on the displayed 0-10 score, default 0 =
+# off. Low-scored filler games are intended by default (a thin slate should fill
+# the list, not empty it), so DO NOT make this default-on, and DO NOT apply it to
+# favorites, recorded teams or a game held on air: the cap's own forced set.
+MIN_SCORE_SETTING = "min_score"
+MAX_MIN_SCORE = 10.0
+
+
+def _meets_min_score(final: Optional[float], min_score: float) -> bool:
+    """Whether a game's score clears `min_score`, judged on the score as the
+    channel name DISPLAYS it (naming.format_score), so 1.96, shown as 2.0,
+    clears a floor of 2. Always true when the setting is off."""
+    if min_score <= 0:
+        return True
+    from .naming import format_score
+    return float(format_score(final or 0.0)) >= min_score
+
+
+def _resolve_min_score(settings: Dict[str, Any]) -> float:
+    """`min_score`, clamped to [0, 10]; blank, non-numeric or non-finite reads
+    as 0 (off) instead of raising out of refresh. Independent of Curation
+    preset: a preset bundles signal weights and a list length, not a floor."""
+    return max(0.0, min(_float_setting(settings, MIN_SCORE_SETTING, 0.0), MAX_MIN_SCORE))
 
 
 def _resolve_max_games(settings: Dict[str, Any]) -> int:
@@ -4483,6 +4511,21 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         return (bool(item[1].favorite_match) or bool(recorded_by_game.get(id(item[0])))
                 or id(item[0]) in held_ids)
 
+    # The minimum score (#313) runs BEFORE the cap, so it trims the list and the
+    # bench alike (a bench game is promoted straight onto the list later), and
+    # after adaptive scoring, so it compares the score the user sees.
+    min_score = _resolve_min_score(settings)
+    below_min_score = 0
+    if min_score > 0:
+        kept = [s for s in scored if _forced(s) or _meets_min_score(s[2].final, min_score)]
+        below_min_score = len(scored) - len(kept)
+        scored = kept
+        if below_min_score:
+            logger.info(
+                "[ranked_matchups] refresh: dropped %d game(s) scoring below the "
+                "minimum score %g", below_min_score, min_score,
+            )
+
     if len(scored) > retain:
         forced = [s for s in scored if _forced(s)]
         rest = [s for s in scored if not _forced(s)]
@@ -4575,6 +4618,27 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         if rescued:
             bench_payload = [r for r in bench_payload if _build_marker_key(r) not in held]
             applied_payload.extend({**r, _HELD_ON_AIR: True} for r in rescued)
+    # A carried game that has not started is held only because its source
+    # failed (#240, #261); the minimum score still applies to it, with the
+    # same exemptions as above (second-opinion finding). One that is on air
+    # stays whatever it scored.
+    if carried_rows and min_score > 0:
+        from .scoring import match_favorites as _match_carried
+        now_utc = datetime.now(timezone.utc)
+
+        def _carried_keeps(row) -> bool:
+            start = parse_iso_utc(row.get("start_time_utc"))
+            teams = (row.get("home") or "", row.get("away") or "")
+            return (
+                (start is not None and start <= now_utc)
+                or bool(favorites and _match_carried(*teams, favorites))
+                or bool(recorded_teams and _match_carried(*teams, recorded_teams))
+                or _meets_min_score(row.get("score"), min_score)
+            )
+
+        kept_rows = [r for r in carried_rows if _carried_keeps(r)]
+        below_min_score += len(carried_rows) - len(kept_rows)
+        carried_rows = kept_rows
     if carried_rows:
         carried = _carry_forward(carried_rows, epg_lookup, api_key, model, widen)
         applied_payload.extend(carried)
@@ -4621,6 +4685,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         "weights": asdict(weights),
         "games": applied_payload,
         "bench": bench_payload,
+        _BELOW_MIN_SCORE_KEY: below_min_score,
         _EMPTY_SLATE_KNOWN_KEY: slate_known,
     }
     _write_cache(cache)
@@ -4646,6 +4711,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         "message": (
             lead
             + f"Refreshed: {len(games_payload)} games scored, {matched} matched to a broadcast. "
+            + (f"{below_min_score} below the minimum score left out. " if below_min_score else "")
             + " | ".join(src_summary)
         ),
     }
@@ -9421,10 +9487,12 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
             # overflow the toast, and it also carries filter lines
             # ("favorites-only: dropped N"), so its length is not a source
             # count either. Errored sources are named in the warning below.
-            msg = (
-                f"Last refresh ({_fmt_run_time(cache['refreshed_at'], status_tz)}) "
-                "found no games to list in the lookahead window."
+            below = cache.get(_BELOW_MIN_SCORE_KEY) or 0
+            found = (
+                f"found no games at or above your Minimum score ({below} left out)."
+                if below else "found no games to list in the lookahead window."
             )
+            msg = f"Last refresh ({_fmt_run_time(cache['refreshed_at'], status_tz)}) {found}"
         else:
             msg = "No completed refresh yet. Click 'Refresh + apply now'."
         if inflight_line:

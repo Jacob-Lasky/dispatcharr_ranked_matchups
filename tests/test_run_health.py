@@ -154,6 +154,15 @@ class TestShowStatusVerdict:
         assert "1 source(s) failed to fetch (NFL)" in msg
         assert "found no games to list in the lookahead window" in msg
 
+    def test_a_list_emptied_by_the_minimum_score_says_so(self, plugin_mod):
+        """#313: 'nothing in the lookahead window' would send the user looking
+        at their sources when the Minimum score is what emptied the list."""
+        cache = {"games": [], "refreshed_at": "2026-10-10T08:00:00+00:00",
+                 "summary": ["NHL: 4 games"], "below_min_score": 4}
+        msg = _status(plugin_mod, cache, None)
+        assert "found no games at or above your Minimum score (4 left out)" in msg
+        assert "lookahead window" not in msg
+
     def test_ok_run_reports_duration(self, plugin_mod):
         ok = dict(_FAILED, status="ok", duration_s=1260, consecutive_failures=0)
         cache = {"games": [dict(_GAME, channel_id=7)], "summary": ["NHL: 1 games"]}
