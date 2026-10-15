@@ -14,7 +14,6 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   first numbers when the range fills. Numbers still never move while a game is
   on air, so the guide stays bound to the right game, Xtream Codes included.
   (#310)
-
 - **League weights.** A new **League weights** setting lets you make some
   leagues count more than others, e.g. `NFL=1.5, EPL=0.7`. Each league's
   scores are multiplied before the 0-10 rating is worked out, so the weighted
