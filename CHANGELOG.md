@@ -15,6 +15,11 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   on air, so the guide stays bound to the right game, Xtream Codes included.
   (#310)
 
+### Changed
+
+- **Lookahead window is capped at 400 days**, and a cleared or non-numeric
+  value now reads as the default 7 instead of failing the refresh. (#310)
+
 ## [1.34.0] - 2026-10-12
 
 A large reliability release: every issue open when it started, plus the
