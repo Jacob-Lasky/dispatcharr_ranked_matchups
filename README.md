@@ -587,6 +587,21 @@ channels, so 400 with 25 channels is 400-424 and nothing else; raise it only if
 you want headroom. A published game holds its slot until it finishes, so numbers
 do not shuffle underneath you on a refresh.
 
+**Favorites first** (off by default) puts games involving your **Favorite
+teams** at the top of the list while still showing every other game. In Kickoff
+time it is exact: favorites keep the plain kickoff numbers and every other game
+moves up by 10,000,000, so both blocks stay in start-time order. In Compact
+range a published game never changes slot, so favorites get the first numbers
+when the range fills, but a favorite added later takes the next free number
+like any other new game. A game's favorite status only changes when you edit
+the list, so a game's number still never moves while it is on air; turning the
+setting on or off, editing your favorites, or a game's teams changing to or
+from a favorite (a knockout slot filled by your team) renumbers the affected
+games once (Kickoff time only), just as a rescheduled game moves. There is deliberately no "order by score": a score changes
+on every refresh, and the guide finds each game by its channel number, so
+numbers that follow the score show one game's name over another game's
+programme ([#117](https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/issues/117)).
+
 **Pick a stretch of your lineup that is empty.** Channel numbers identify a
 channel to the guide *on their own*, with no group attached, so if one of your
 existing channels already sits at 401 and we put a game there too, the guide

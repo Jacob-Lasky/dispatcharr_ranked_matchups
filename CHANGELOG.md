@@ -5,6 +5,16 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+### Added
+
+- **Favorites first.** A new setting puts games involving your Favorite teams
+  at the top of the channel list while every other game is still shown below
+  them. In Kickoff-time numbering favorites always come first and every other
+  game's number moves up by 10,000,000; in Compact range favorites take the
+  first numbers when the range fills. Numbers still never move while a game is
+  on air, so the guide stays bound to the right game, Xtream Codes included.
+  (#310)
+
 ## [1.34.0] - 2026-10-12
 
 A large reliability release: every issue open when it started, plus the

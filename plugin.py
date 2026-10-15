@@ -1860,6 +1860,43 @@ _NUMBERING_MODES = frozenset({NUMBERING_MODE_KICKOFF, NUMBERING_MODE_COMPACT})
 # the user exactly the range they asked for and accepts constant slot reuse.
 DEFAULT_COMPACT_BAND_SIZE = 0
 
+# Favorites first (#310): the `favorites_first` setting numbers every favorite
+# game below every other game. The ordering key has to be one that does NOT
+# change while a game is on the list, because the guide binds by the bare
+# channel number (#117, #121). Favorite status qualifies (it changes only when
+# the user edits the favorites list); the score does not, which is why ordering
+# by rating is not offered.
+#
+# KICKOFF mode adds FAVORITES_FIRST_SHIFT to the kickoff offset of every
+# NON-favorite, so favorites keep the plain kickoff numbers and everything else
+# sits one fixed block above them, both blocks still chronological. It MUST be a
+# multiple of CHANNEL_NUMBER_TIEBREAK_SLOTS (the placement finds a game's minute
+# block as `number - offset % SLOTS`) and wider than the kickoff spread of any
+# one slate: 10,000,000 is 434 days of minutes, and MAX_LOOKAHEAD_DAYS keeps
+# every slate inside that (a favorite kicking off more than 434 days after a
+# non-favorite would number after it). The shift depends on the setting and the
+# game, never on whether the slate happens to contain a favorite, so a favorite
+# arriving does not move anyone else. A game DOES move once when its own teams
+# change to or from a favorite (a knockout slot filled by the user's team), the
+# same way a reschedule moves it: a fact about the game changed, and keeping
+# it in the wrong block would break the ordering the user asked for.
+FAVORITES_SETTING = "favorites"
+FAVORITES_FIRST_SETTING = "favorites_first"
+FAVORITES_FIRST_SHIFT = 10_000_000
+
+# Upper bound on `lookahead_days`. Load-bearing for FAVORITES_FIRST_SHIFT
+# above: DO NOT raise it past 434 days without raising the shift too.
+DEFAULT_LOOKAHEAD_DAYS = 7
+MAX_LOOKAHEAD_DAYS = 400
+
+
+def _resolve_lookahead_days(settings: Dict[str, Any]) -> int:
+    """`lookahead_days`, clamped to [0, MAX_LOOKAHEAD_DAYS]. A cleared or
+    non-numeric field reads as the default instead of raising out of the
+    refresh (the bare int() this replaces did)."""
+    days = _int_setting(settings, "lookahead_days", DEFAULT_LOOKAHEAD_DAYS)
+    return max(0, min(days, MAX_LOOKAHEAD_DAYS))
+
 # EPGSource fields. DO NOT use source_type="dummy": Dispatcharr's
 # EPGGridAPIView treats every channel attached to a dummy source as needing
 # joke filler ("Rush Hour - X's alternative to traffic", "What's For Dinner?
@@ -3535,7 +3572,7 @@ def _build_sources(settings: Dict[str, Any]):
     # reach the list, or it cannot be recorded. The sources only use this list
     # to gate, never to score, so the union changes nothing else.
     friendlies_favorites = _dedup_names(
-        _parse_favorites(settings.get("favorites", ""))
+        _parse_favorites(settings.get(FAVORITES_SETTING, ""))
         + _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, ""))
     )
     friendlies_favorites_only_setting = bool(settings.get("friendlies_favorites_only", True))
@@ -3997,10 +4034,10 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # serve stale data on the second and subsequent refreshes.
     _clear_fd_caches()
 
-    favorites = _parse_favorites(settings.get("favorites", ""))
+    favorites = _parse_favorites(settings.get(FAVORITES_SETTING, ""))
     recorded_teams = _parse_favorites(settings.get(RECORDED_TEAMS_SETTING, ""))
     weights = _build_weights(settings)
-    lookahead = int(settings.get("lookahead_days", 7))
+    lookahead = _resolve_lookahead_days(settings)
     max_games = _resolve_max_games(settings)
 
     sources = _build_sources(settings)
@@ -5111,6 +5148,7 @@ def _infer_kickoff_base(
     hint: Optional[int] = None,
     unpublished: Sequence[Tuple[datetime, str]] = (),
     reserved: Optional[set] = None,
+    leaders: Optional[frozenset] = None,
 ) -> Optional[int]:
     """Recover the floor the published KICKOFF channels were numbered from.
 
@@ -5118,8 +5156,10 @@ def _infer_kickoff_base(
     every game that already has a channel; `unpublished` is (kickoff, marker)
     for the slate's games that do not have one yet, and `reserved` the numbers
     apply will hold back (other channels' numbers, and those of channels kept
-    for a recording; apply collects both before the floor for this reason). A
-    kickoff number is ``base + minutes * SLOTS + slot``, so each channel admits
+    for a recording; apply collects both before the floor for this reason), and
+    `leaders` the Favorites first leaders apply numbers with (#310). A kickoff
+    number is ``base + minutes * SLOTS + slot`` (plus FAVORITES_FIRST_SHIFT for
+    a game behind the leaders, a multiple of SLOTS), so each channel admits
     SLOTS candidate floors that put it inside its own kickoff minute's block.
 
     Each candidate is scored by RUNNING the placement apply will run
@@ -5156,10 +5196,10 @@ def _infer_kickoff_base(
     for number, start_dt, marker in published:
         if number is None or start_dt is None:
             continue
-        offset = stable_channel_number(0, start_dt, marker, tz)
+        offset = _kickoff_offset(start_dt, marker, tz, leaders)
         rows.append((marker, int(number), offset, offset - offset % slots))
     entries = [(m, off) for m, _n, off, _blk in rows] + [
-        (marker, stable_channel_number(0, start_dt, marker, tz))
+        (marker, _kickoff_offset(start_dt, marker, tz, leaders))
         for start_dt, marker in unpublished if start_dt is not None
     ]
     held = {m: n for m, n, _off, _blk in rows}
@@ -5248,6 +5288,7 @@ def _resolve_kickoff_base(
     tz,
     unpublished: Sequence[Tuple[datetime, str]] = (),
     reserved: Optional[set] = None,
+    leaders: Optional[frozenset] = None,
 ) -> int:
     """The floor for KICKOFF numbering, which must not follow the user's lineup.
 
@@ -5286,6 +5327,7 @@ def _resolve_kickoff_base(
     lineup_floor = _resolve_virtual_base(settings, highest_non_virtual)
     inferred = _infer_kickoff_base(
         published, tz, hint=lineup_floor, unpublished=unpublished, reserved=reserved,
+        leaders=leaders,
     )
     return inferred if inferred is not None else lineup_floor
 
@@ -5305,7 +5347,7 @@ def _load_numbering_state(
 
     The record maps each published channel's marker to the (kickoff offset,
     channel number, floor) it was numbered for, offset meaning
-    ``stable_channel_number(0, ...)`` as in _place_kickoff_numbers. Each entry
+    _kickoff_offset's value as in _place_kickoff_numbers. Each entry
     names its own floor because a channel kept for a recording keeps the number
     an earlier floor gave it (see _numbered_for_floor). The floor is None when
     the file is missing, unreadable or holds anything but a positive integer,
@@ -5461,8 +5503,8 @@ def _place_kickoff_numbers(
     candidate floor, so the floor it recovers is judged by what apply will really
     do; DO NOT give the inference its own copy of these rules).
 
-    `entries` is (marker, offset) per game, offset being
-    ``stable_channel_number(0, ...)``: the number is ``virtual_base + offset``.
+    `entries` is (marker, offset) per game, offset being _kickoff_offset's
+    value: the number is ``virtual_base + offset``.
     `held` maps a marker to the number its live channel carries. `numbered_for`
     is the record apply kept of the (offset, number) each channel was numbered
     for FROM THIS SAME FLOOR (numbering_state.json, #278, filtered by
@@ -5567,9 +5609,45 @@ def _place_kickoff_numbers(
     return assigned, collisions, blocked
 
 
-def _kickoff_offsets(games: List[Dict[str, Any]], tz) -> List[Tuple[str, int]]:
-    """(marker, offset) per game with a parseable kickoff, offset being
-    ``stable_channel_number(0, ...)``: what _place_kickoff_numbers places, and
+def _numbering_leaders(
+    games: List[Dict[str, Any]], settings: Dict[str, Any],
+) -> Optional[frozenset]:
+    """The markers numbered ahead of every other game, or None when Favorites
+    first (#310) is off. An empty set is NOT the same as None: with the setting
+    on and no favorite in the slate, every game still takes the shifted numbers,
+    so a favorite arriving later does not move them.
+
+    Matched against the CURRENT favorites setting rather than the cache's
+    `favorites_matched`, for the reason _rematch_recorded_teams gives (#221): an
+    edit should take effect on the next apply, not the next refresh."""
+    if not bool(settings.get(FAVORITES_FIRST_SETTING, False)):
+        return None
+    from .scoring import match_favorites
+    teams = _parse_favorites(settings.get(FAVORITES_SETTING, ""))
+    if not teams:
+        return frozenset()
+    return frozenset(
+        _build_marker_key(g) for g in games
+        if match_favorites(g.get("home", ""), g.get("away", ""), teams)
+    )
+
+
+def _kickoff_offset(start_dt: datetime, marker: str, tz,
+                    leaders: Optional[frozenset] = None) -> int:
+    """A game's kickoff offset: ``stable_channel_number(0, ...)``, plus
+    FAVORITES_FIRST_SHIFT for a game Favorites first puts behind the favorites.
+    The ONE place an offset is computed, used by the placement, the floor
+    inference and apply's record (#278), so the three cannot disagree."""
+    offset = stable_channel_number(0, start_dt, marker, tz)
+    if leaders is not None and marker not in leaders:
+        offset += FAVORITES_FIRST_SHIFT
+    return offset
+
+
+def _kickoff_offsets(games: List[Dict[str, Any]], tz,
+                     leaders: Optional[frozenset] = None) -> List[Tuple[str, int]]:
+    """(marker, offset) per game with a parseable kickoff, offset as
+    _kickoff_offset computes it: what _place_kickoff_numbers places, and
     what apply records each published channel was numbered for (#278). One
     helper for both, so the record compares like with like."""
     entries: List[Tuple[str, int]] = []
@@ -5578,7 +5656,7 @@ def _kickoff_offsets(games: List[Dict[str, Any]], tz) -> List[Tuple[str, int]]:
         if start_dt is None:
             continue
         marker = _build_marker_key(g)
-        entries.append((marker, stable_channel_number(0, start_dt, marker, tz)))
+        entries.append((marker, _kickoff_offset(start_dt, marker, tz, leaders)))
     return entries
 
 
@@ -5616,6 +5694,7 @@ def _assign_channel_numbers(
     existing_numbers: Optional[Dict[str, int]] = None,
     reserved_numbers: Optional[set] = None,
     numbered_for: Optional[Dict[str, Tuple[int, int]]] = None,
+    leaders: Optional[frozenset] = None,
 ) -> Dict[str, int]:
     """Map each game's marker to its channel number for this apply.
 
@@ -5650,20 +5729,31 @@ def _assign_channel_numbers(
 
     COMPACT hands the ordering job to `allocate_compact_numbers`, which keeps
     every number inside a band the user names. Games are passed in kickoff order
-    so an empty band fills chronologically, and `existing_numbers` (marker -> the
+    (behind any `leaders`, see below) so an empty band fills chronologically,
+    and `existing_numbers` (marker -> the
     number that game's live channel already carries) is honoured so a published
     game never moves. A marker may be MISSING from the returned map when the band
     is narrower than the slate; the caller must skip those games.
+
+    `leaders` (from _numbering_leaders; None = Favorites first is off, #310)
+    are numbered ahead of every other game. KICKOFF does it exactly and for
+    good: every other game's offset is shifted a fixed block up
+    (_kickoff_offset). COMPACT can only do it for games not yet published,
+    because a published game never changes slot: leaders are handed out
+    before the rest, so a band filled in one apply puts them first, but a
+    favorite that arrives later takes the next free slot like any newcomer.
     """
     if mode == NUMBERING_MODE_COMPACT:
-        by_start: List[Tuple[datetime, str]] = []
+        by_start: List[Tuple[int, datetime, str]] = []
         for g in games:
             start_dt = parse_iso_utc(g.get("start_time_utc"))
             if start_dt is None:
                 continue
-            by_start.append((start_dt, _build_marker_key(g)))
-        by_start.sort(key=lambda sm: (sm[0], sm[1]))
-        ordered = [marker for _, marker in by_start]
+            marker = _build_marker_key(g)
+            behind = 0 if leaders is None or marker in leaders else 1
+            by_start.append((behind, start_dt, marker))
+        by_start.sort()
+        ordered = [marker for _, _, marker in by_start]
         size = band_size if band_size is not None else len(ordered)
         reserved = reserved_numbers or set()
         assigned = allocate_compact_numbers(
@@ -5693,7 +5783,7 @@ def _assign_channel_numbers(
 
     # The hold, the reservation and the nudge live in _place_kickoff_numbers.
     assigned, collisions, blocked = _place_kickoff_numbers(
-        _kickoff_offsets(games, tz), virtual_base, existing_numbers or {},
+        _kickoff_offsets(games, tz, leaders), virtual_base, existing_numbers or {},
         reserved_numbers, numbered_for,
     )
     if blocked:
@@ -7792,6 +7882,9 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         .aggregate(m=_Max("channel_number"))["m"] or 0
     )
     numbering_mode = _resolve_numbering_mode(settings)
+    # Over the whole slate, not only the decided games: apply's record below
+    # is built from `games`, and must use the offsets placement used (#278).
+    numbering_leaders = _numbering_leaders(games, settings)
     remembered_base = None
     remembered_record: Dict[str, Tuple[int, int, int]] = {}
     numbered_for: Dict[str, Tuple[int, int]] = {}
@@ -7921,7 +8014,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         starts = [(start_dt, marker) for _n, start_dt, marker in published] + unpublished
         lowest_kickoff = 1 + min(
             (
-                stable_channel_number(0, start_dt, marker, apply_tz)
+                _kickoff_offset(start_dt, marker, apply_tz, numbering_leaders)
                 for start_dt, marker in starts if start_dt is not None
             ),
             default=0,
@@ -7934,6 +8027,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         virtual_base = _resolve_kickoff_base(
             settings, highest_other, remembered_base, published, apply_tz,
             unpublished=unpublished, reserved=reserved_numbers,
+            leaders=numbering_leaders,
         )
         # What each channel was numbered for (#278), from this floor only.
         numbered_for = _numbered_for_floor(remembered_record, virtual_base, marker_renames)
@@ -7955,6 +8049,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         existing_numbers=existing_numbers,
         reserved_numbers=reserved_numbers,
         numbered_for=numbered_for,
+        leaders=numbering_leaders,
     )
     if numbering_mode == NUMBERING_MODE_COMPACT and decided_games:
         # A game with no slot cannot be published: a null channel_number
@@ -8672,7 +8767,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # no published channel uses, and the next auto apply would renumber every
     # game onto it. The record is rebuilt from what this run WROTE (plus kept
     # channels still on their number), so a game no longer published drops out.
-    offsets = dict(_kickoff_offsets(games, apply_tz))
+    offsets = dict(_kickoff_offsets(games, apply_tz, numbering_leaders))
     kickoff_record = {
         m: (offsets[m], n, virtual_base) for m, n in written_numbers.items() if m in offsets
     }
