@@ -176,8 +176,10 @@ def allocate_compact_numbers(
     one keeps every number inside `[band_start, band_start + band_size - 1]` so a
     user who asks for "my games live in 400-424" gets exactly that.
 
-    `ordered_markers` MUST arrive in kickoff order: a band with nothing in it yet
-    is filled straight down that order, so a fresh slate comes out chronological.
+    `ordered_markers` MUST arrive in the order an empty band should fill:
+    kickoff order, with Favorites first's leaders ahead of the rest (#310). A
+    band with nothing in it yet is filled straight down that order, so a fresh
+    slate comes out favorites first, then chronological.
 
     **A PUBLISHED GAME NEVER MOVES.** `existing` maps marker -> the number the
     game's live channel currently carries, and pass 1 hands each of those back

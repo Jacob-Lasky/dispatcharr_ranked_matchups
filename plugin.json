@@ -11,7 +11,7 @@
       "id": "_section_client_setup",
       "type": "info",
       "label": "Guide binding & sorting: no client setup needed",
-      "description": "Load the M3U/EPG URLs (or connect via Xtream Codes) as-is; no special TVG-ID Source is required. Each channel's number is derived from its kickoff time, so the list sorts strictly by day then start time (soonest games first) and a game keeps the same number for as long as its kickoff time holds (a rescheduled game moves to its new time slot on the same channel). Because the number does not move, the guide binds to the right game in both the default output and the Xtream Codes API. Channel numbers are large (time-encoded, e.g. 235000+) by design; that is what keeps them stable and integer-clean for Xtream Codes."
+      "description": "Load the M3U/EPG URLs (or connect via Xtream Codes) as-is; no special TVG-ID Source is required. Each channel's number is derived from its kickoff time, so the list sorts strictly by day then start time (soonest games first; with Favorites first on, your favorites' games come before the rest) and a game keeps the same number for as long as its kickoff time holds (a rescheduled game moves to its new time slot on the same channel). Because the number does not move, the guide binds to the right game in both the default output and the Xtream Codes API. Channel numbers are large (time-encoded, e.g. 235000+) by design; that is what keeps them stable and integer-clean for Xtream Codes."
     },
     {
       "id": "_section_sources",
@@ -548,7 +548,7 @@
       "type": "number",
       "label": "Lookahead window (days)",
       "default": 7,
-      "help_text": "How far ahead to pull games. 7 = next week. Bigger = more games to score."
+      "help_text": "How far ahead to pull games. 7 = next week. Bigger = more games to score. Capped at 400."
     },
     {
       "id": "local_timezone",
@@ -662,6 +662,13 @@
       "label": "Compact range size (0 = exactly the channel count)",
       "default": 0,
       "help_text": "Compact mode only. How many channel numbers to reserve, counting up from the starting number. Leave it at 0 and it reserves exactly as many as you have channels, so a start of 400 with 25 channels gives you 400-424 and nothing else. Set it higher only if you want headroom, either to raise 'Maximum channels' later without moving everything, or because that stretch of your lineup is partly occupied and the plugin needs somewhere to put the games it cannot fit. Ignored in Kickoff-time mode."
+    },
+    {
+      "id": "favorites_first",
+      "type": "boolean",
+      "label": "Favorites first",
+      "default": false,
+      "help_text": "Gives games involving your Favorite teams the lowest channel numbers, so they sit at the top of the list, while every other game is still shown below them. Kickoff-time numbering: favorites always come first, each block still sorted by start time, and the other games' numbers move up by 10,000,000 to make room. Compact range: a game never changes number once it has one, so favorites take the first numbers when the range fills, but one added later takes the next free number. In Kickoff-time mode, turning this on or off, or editing Favorite teams, renumbers the affected games once, and so does a game whose teams change to or from a favorite (a knockout slot filled by your team). Ordering by score is not offered, because scores change every refresh and the guide finds each game by its channel number, so the guide would show the wrong game."
     },
     {
       "id": "placeholder_min_score",

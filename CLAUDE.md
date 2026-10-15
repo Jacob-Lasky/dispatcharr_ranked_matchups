@@ -125,7 +125,18 @@ to sort to the top of group lists):
   supported configuration and the docs must NOT tell users to widen it for
   safety. Compact CAN omit a marker when the band is narrower than the slate;
   the apply loop skips those games. `9000 + cache_index` was the pre-#119
-  scheme, gone
+  scheme, gone. `favorites_first` (#310, off by default) numbers favorite
+  games below every other game: `_numbering_leaders` (matched against the
+  CURRENT `favorites` setting, not the cache's `favorites_matched`; None =
+  off, an empty set = on with no favorite, which still shifts everyone) feeds
+  `_kickoff_offset`, the ONE offset computation shared by placement, the floor
+  inference and the #278 record, which adds `FAVORITES_FIRST_SHIFT`
+  (10,000,000, a multiple of SLOTS) to every non-favorite in kickoff mode;
+  compact only hands leaders slots first (a published game never moves). The
+  shift must stay wider than any slate's kickoff spread, which is why
+  `lookahead_days` is capped at `MAX_LOOKAHEAD_DAYS` (400,
+  `_resolve_lookahead_days`): DO NOT raise one without the other. Ordering by
+  score is deliberately not offered (#117: the guide binds by number)
 - `streams` = cloned via `ChannelStream` from the matched source channel, plus
   the Path C stream-name matches. `_stream_sort_key` orders the stack
   outside-in: group policy (`fallback_only_groups` demotes a group below
