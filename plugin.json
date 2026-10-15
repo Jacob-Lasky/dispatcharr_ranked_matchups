@@ -530,6 +530,15 @@
       "help_text": "How many games the curated list keeps, highest-scored first. Capped at 60: above that, the per-game preview and logo lookups that run during Apply can outlast the internal run lock and let a second run start against the same channels. Ignored when a Curation preset other than Manual is selected."
     },
     {
+      "id": "min_score",
+      "type": "number",
+      "label": "Minimum score (0 = off)",
+      "default": 0,
+      "min": 0,
+      "max": 10,
+      "help_text": "Leaves out games scoring below this (the ★ score in each channel name, 0-10), so a quiet day shows fewer channels instead of filling up with low-stakes games. Works together with 'Max curated games': you get the games at or above this score, up to that maximum, so for \"every game above 2.0\" set this to 2 and raise the maximum. Favorite teams, Recorded teams and a game already on air are always kept. 0 (the default) turns it off. Takes effect on the next Refresh, and applies whatever the Curation preset. Not the same as 'Placeholder threshold', which decides which games get a channel before a broadcast is found."
+    },
+    {
       "id": "remove_finished_after_minutes",
       "type": "number",
       "label": "Remove finished games after (minutes)",
