@@ -277,8 +277,9 @@ not worth what a Champions League round-of-16 leg is worth.
 
 An early-round cup tie scoring LOW is intended, not a bug: an EFL Cup
 second-round Wednesday is ~25 fixtures, and they belong at the bottom
-of the list where `max_games` trims them. There is deliberately NO
-minimum-score threshold that would drop them instead.
+of the list where `max_games` trims them. By default no minimum-score
+threshold drops them instead; the opt-in `min_score` setting (#313, off
+unless set) does.
 
 ### Signal: rivalry
 
@@ -644,7 +645,9 @@ After every game has a ★ score:
    channels (default 25). Beyond that, games drop off the bottom —
    except games involving a favorite or a recorded team, and games
    already on air, which are applied however far down the sorted list
-   they land.
+   they land. When `min_score` is set (off by default, #313), games whose
+   displayed ★ is below it are left out first, list and bench alike, with
+   the same exemptions.
 4. **Names**: channel names follow the template `<SPORT> <RANKS>
    <FAV?> ★<SCORE>: <AWAY> at <HOME>`, e.g. `EPL 3v9 ⭐ ★8.4:
    Brentford at Manchester United`. ⭐ marks games with a favorite.
