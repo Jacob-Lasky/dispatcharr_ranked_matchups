@@ -757,11 +757,16 @@ Picking any preset other than `manual` IGNORES the **Scoring weights**
 setting and `max_games`. If you have hand-tuned weights you want to keep,
 stay on `manual`.
 
+**League weights** sit beside both layers and are honoured under every
+preset: they say how much you care about a league, not how a signal is
+weighed. See [League weights](#league-weights).
+
 ### Recipes: "I want X, so I change Y"
 
 Each recipe is a starting point, not a law. The arrows show the change
-from the default (`balanced`) values. Re-apply after changing settings,
-or wait for the next scheduled refresh, to see the new ordering.
+from the default (`balanced`) values. Run **Refresh + apply now** after
+changing settings, or wait for the next scheduled refresh, to see the new
+ordering (scores are worked out at Refresh; **Apply** alone reuses them).
 
 | I want... | Change | Why it works |
 |---|---|---|
@@ -771,6 +776,7 @@ or wait for the next scheduled refresh, to see the new ordering.
 | **Marquee names only, ignore standings context** | Scoring weights: `rank=3, importance=0` (defaults 1, 3) | A 1-vs-1 ranked pair jumps from 10 → 30 raw; with importance off, ranking is the dominant driver. Good for a "big names" guide. |
 | **Fewer random cup knockouts crowding the league** | Scoring weights: `tournament=0.5` (default 1.5) | A Final drops from 7.5 → 2.5 raw, a Round-of-16 from 2.25 → 0.75, so league games with real stakes stop getting pushed down by early-round cup ties. |
 | **Importance feels too dominant** | Scoring weights: `importance=1` (default 3) | The Monte Carlo signal scales linearly with this knob; thirding it lets rank, closeness, and favorites compete on a more even footing. |
+| **More NFL, less Premier League** (any preset) | League weights: `NFL=1.5, EPL=0.7` | Every NFL game's raw score is multiplied by 1.5 and every EPL game's by 0.7 before compression, so NFL games climb the list and EPL games sink, without touching how anything inside either league ranks against itself. |
 | **Early-season weeks feel flat / late-season everything is ★10** | turn ON `adaptive_scoring` | Switches compression from a fixed curve to a per-refresh one keyed off the batch median, so the top games of any week always read as top games. |
 | **More games on the guide, including smaller stakes** | `curation_preset` → `high_coverage` (or on `manual`, raise `max_games`) | `high_coverage` widens the cap to ~50 and softens the weights so lower-leverage games clear the bar. |
 | **Same curation, just a different list length** | on `manual`, change only `max_games` | `max_games` is the only list-length lever; it trims from the bottom of the sorted list without changing how anything is scored. Games involving a favorite or a recorded team, and games already on air, are never trimmed, so the list can run slightly longer than the cap. |
@@ -828,14 +834,39 @@ elevates rank-pair games while ignoring stakes leverage entirely:
 useful for purely "marquee matchup" guides without season-context
 sensitivity.
 
+### League weights
+
+The **League weights** setting (#309) multiplies the whole raw score of every
+game in a league, written as `LEAGUE=number` entries separated by commas, for
+example `NFL=1.5, EPL=0.7`. The league is the code at the start of each channel
+name (`sport_prefix`: `NFL`, `NHL`, `CFB`, `EPL`, `UCL`, `LaLiga`...), matched
+in any case. A league you do not name stays at 1.
+
+- The multiplier applies to raw BEFORE the 0-10 compression (and before
+  `adaptive_scoring` re-compresses), so the displayed ★, the sort order and
+  the `max_games` cut all move together.
+- It shows in the score breakdown as `league_weight`, worth
+  `raw x (weight - 1)` (negative for a weight below 1), so the breakdown still
+  sums to raw and Show current state tells you exactly what the weight did.
+- `0` scores the league at zero: its games rank below every scored game of
+  the same day. Two things still outrank the score, as they always do: a game
+  with a favorite team sorts first and is never cut, and today's games come
+  before later days'. A negative weight, a weight above 100 (the 0-10 scale is
+  already saturated long before that), a value that is not a number, or a code
+  no enabled league uses is skipped and logged, never fatal.
+- Scores are worked out at Refresh, so a change takes effect on the next
+  **Refresh** (or **Refresh + apply now**); **Apply** alone republishes the
+  scores already in `cache.json`.
+- Unlike Scoring weights, a Curation preset does NOT override it.
+
 ### Seeing the effect of a change
 
 Every game's pre-compression breakdown is stored per-refresh in
 `cache.json` (`score_breakdown`, `score_raw`, `score`, and the
-per-signal `score_notes`). After you change a weight and re-apply, open
-`cache.json` (or read a curated channel's EPG description, which prints
-the same breakdown) and the per-signal contributions will reflect the
-new weights. That is the fastest way to confirm a knob did what you
+per-signal `score_notes`). After you change a weight and run **Refresh +
+apply now**, open `cache.json` (or run **Show current state**, which prints
+the same breakdown per game; the EPG description deliberately leaves it out)
+and the per-signal contributions will reflect the new weights. That is the fastest way to confirm a knob did what you
 expected before judging the whole guide.
 
 

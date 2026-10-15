@@ -202,6 +202,9 @@ form will collect everything needed to scope it.
    - Tune **Scoring weights** if a signal feels under/over-weighted (one
      line of `name=number` entries, e.g. `favorite=8, spread=1`; blank keeps
      the defaults, see [SCORING.md](SCORING.md#tuning))
+   - Set **League weights** to favour some leagues over others (e.g.
+     `NFL=1.5, EPL=0.7`; the code is the one at the start of each channel
+     name, see [SCORING.md](SCORING.md#league-weights))
 
 4. Turn off **Dry run on Apply** (on by default; it prevents channel creation),
    then run **Refresh + apply now** to populate.

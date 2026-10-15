@@ -3157,6 +3157,33 @@ def _build_weights(settings: Dict[str, Any]):
                       for name in merged_settings.WEIGHT_NAMES})
 
 
+def _league_weights(settings: Dict[str, Any], sources: Sequence[Any]) -> Dict[str, float]:
+    """The League weights setting (#309) as {casefolded sport_prefix:
+    multiplier}, keeping only codes one of THIS refresh's `sources` emits.
+
+    Read whatever the Curation preset: a preset bundles signal weights and a
+    list length, and how much the user cares about a league is neither.
+
+    A code no built source emits is logged and dropped, not applied: it is a
+    typo or a league switched off, and saying which is the only feedback the
+    user gets (an unknown code otherwise does nothing, silently). Every
+    problem is a warning, never a raise, so a bad entry costs that entry and
+    not the refresh."""
+    weights, problems = merged_settings.parse_league_weights(
+        settings.get(merged_settings.LEAGUE_WEIGHTS_SETTING))
+    for problem in problems:
+        logger.warning("[ranked_matchups] ignoring league weight %s", problem)
+    emitted = {str(getattr(src, "sport_prefix", "") or "").casefold() for src in sources}
+    unknown = sorted(code for code in weights if code not in emitted)
+    if unknown:
+        logger.warning(
+            "[ranked_matchups] ignoring league weight(s) for %s: no enabled league "
+            "uses that code (the code is the one at the start of each channel name)",
+            ", ".join(unknown),
+        )
+    return {code: w for code, w in weights.items() if code in emitted}
+
+
 DEFAULT_MAX_GAMES = 25
 
 # Seconds of network time apply's pre-pass may spend per game, ENFORCED as a
@@ -4043,6 +4070,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     sources = _build_sources(settings)
     if not sources:
         return {"status": "error", "message": "No sport sources enabled."}
+    league_weights = _league_weights(settings, sources)
 
     # 1. Fetch. Keep the (source, game) association: compute_match_importance
     # needs the source object per game to run the season-replay simulator. Plain
@@ -4387,7 +4415,11 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             importance_notes=importance_notes,
             importance_thresholds_hit=importance_thresholds_hit,
         )
-        score = score_game(signals, weights)
+        score = score_game(
+            signals, weights,
+            league_weight=league_weights.get(str(g.sport_prefix or "").casefold(), 1.0),
+            league=str(g.sport_prefix or ""),
+        )
         scored.append((g, signals, score))
 
     # Adaptive normalization (#7): re-derive each game's final score from

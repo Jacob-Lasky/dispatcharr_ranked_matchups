@@ -15,6 +15,12 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   on air, so the guide stays bound to the right game, Xtream Codes included.
   (#310)
 
+- **League weights.** A new **League weights** setting lets you make some
+  leagues count more than others, e.g. `NFL=1.5, EPL=0.7`. Each league's
+  scores are multiplied before the 0-10 rating is worked out, so the weighted
+  leagues move up (or down) the list. It applies whatever the Curation preset
+  is, and the score breakdown shows what it changed. (#309)
+
 ### Changed
 
 - **Lookahead window is capped at 400 days**, and a cleared or non-numeric

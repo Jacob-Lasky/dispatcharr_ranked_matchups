@@ -1299,8 +1299,16 @@ def _rank_note(rank: int, strength: float, pool: int, field: Optional[int],
     return f"#{rank} {scale} (strength {strength:.2f})"
 
 
-def score_game(signals: GameSignals, weights: Weights) -> GameScore:
-    """Compute interestingness score with full breakdown."""
+def score_game(signals: GameSignals, weights: Weights, *,
+               league_weight: float = 1.0, league: str = "") -> GameScore:
+    """Compute interestingness score with full breakdown.
+
+    `league_weight` (#309, the user's League weights entry for this game's
+    league, named by `league`) multiplies the raw sum of every signal, BEFORE
+    the 0-10 compression, so the rank order, the displayed score and the
+    max_games cut all move together. It is recorded as one more breakdown
+    entry, `league_weight`, worth raw * (weight - 1), so the breakdown still
+    sums to raw and shows the user exactly how much the weight moved."""
     breakdown: Dict[str, float] = {}
     notes: List[str] = []
 
@@ -1427,6 +1435,15 @@ def score_game(signals: GameSignals, weights: Weights) -> GameScore:
             notes.append(f"importance: {line}")
 
     raw = sum(breakdown.values())
+    # `!= 0`, not `> 0`: a negative Scoring weight (favorite=-6) can make raw
+    # negative, and the weight must scale that too, or League weights 0 would
+    # leave such a game at -6 instead of zeroing it.
+    if league_weight != 1.0 and raw != 0:
+        breakdown["league_weight"] = round(raw * (league_weight - 1.0), 2)
+        notes.append(f"league weight x{league_weight:g} ({league})")
+        # Re-summed from the rounded entry rather than raw * weight, so the
+        # breakdown sums to raw exactly, as it does for every other signal.
+        raw = sum(breakdown.values())
     return GameScore(
         raw=round(raw, 2),
         final=round(_compress_to_10(raw), 2),
