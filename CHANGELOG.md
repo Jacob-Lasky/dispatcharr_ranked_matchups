@@ -5,6 +5,13 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.35.0] - 2026-10-15
+
+Three settings a user asked for: weigh some leagues above others, leave out
+games below a score, and give your favorite teams' games the first channel
+numbers. All three are off by default, so apart from the lookahead cap below,
+nothing changes until you turn one on.
+
 ### Added
 
 - **Favorites first.** A new setting puts games involving your Favorite teams
