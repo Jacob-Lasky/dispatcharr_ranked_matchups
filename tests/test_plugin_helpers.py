@@ -2914,40 +2914,44 @@ class TestPreviewDescriptionTemplate:
         assert len(r["message"].splitlines()) <= 12
 
 
-class TestRenderDescriptionTemplate:
-    """#317: apply's per-game description when a template is set."""
+class TestComposeDescription:
+    """#317: the per-game description apply writes."""
+
+    def test_no_template_keeps_the_pre_317_behaviour(self, plugin):
+        assert plugin._compose_description(None, self.CTX, self.G, "BUILT-IN", "Prose.", False) == "Prose."
+        assert plugin._compose_description(None, self.CTX, self.G, "BUILT-IN", "", False) == "BUILT-IN"
 
     CTX = {"home_team": "Chiefs", "away_team": "Bills", "tagline": "title race"}
     G = {"channel_name_current": "ESPN 2"}
 
     def test_variables_and_llm(self, plugin):
-        out = plugin._render_description_template(
+        out = plugin._compose_description(
             "{away_team} at {home_team}{ - llm}{\n\nsource_channel}",
             self.CTX, self.G, "BUILT-IN", "A big one.", False)
         assert out == "Bills at Chiefs - A big one.\n\nESPN 2"
 
     def test_failed_llm_collapses_its_group(self, plugin):
-        out = plugin._render_description_template(
+        out = plugin._compose_description(
             "{away_team} at {home_team}{ - llm}", self.CTX, self.G, "BUILT-IN", "", False)
         assert out == "Bills at Chiefs"
 
     def test_empty_render_falls_back_to_built_in(self, plugin):
-        assert plugin._render_description_template(
+        assert plugin._compose_description(
             "{llm}", self.CTX, self.G, "BUILT-IN", "", False) == "BUILT-IN"
 
     def test_placeholder_keeps_the_pending_note(self, plugin):
-        out = plugin._render_description_template(
+        out = plugin._compose_description(
             "{away_team} at {home_team}", self.CTX, self.G, "BUILT-IN", "", True)
         assert out.startswith(plugin._PLACEHOLDER_NOTE) and out.endswith("Bills at Chiefs")
 
     def test_placeholder_note_not_doubled_by_the_empty_render_fallback(self, plugin):
         details = plugin._build_description({}, "", placeholder=True)
-        out = plugin._render_description_template("{llm}", self.CTX, self.G, details, "", True)
+        out = plugin._compose_description("{llm}", self.CTX, self.G, details, "", True)
         assert out == details and out.count(plugin._PLACEHOLDER_NOTE) == 1
 
     def test_placeholder_note_not_doubled_by_details(self, plugin):
         details = plugin._build_description({}, "", placeholder=True)
-        out = plugin._render_description_template(
+        out = plugin._compose_description(
             "{details}", self.CTX, self.G, details, "", True)
         assert out.count(plugin._PLACEHOLDER_NOTE) == 1
 

@@ -6516,22 +6516,25 @@ def _build_description(
     return "\n\n".join(sections)
 
 
-def _render_description_template(
-    template: str,
+def _compose_description(
+    template: Optional[str],
     name_ctx: Dict[str, str],
     g: Dict[str, Any],
     details: str,
     llm_prose: str,
     placeholder: bool,
 ) -> str:
-    """Render the user's description template (#317) for one game.
+    """The guide description apply writes for one game.
 
-    `name_ctx` is the channel name's token map (scoring.name_context), so a
+    No template (None): Claude's prose when there is any, else the built-in
+    text, exactly as before #317. With the user's template: `name_ctx` is the channel name's token map (scoring.name_context), so a
     variable means the same thing in both templates. A placeholder always
     carries the match-pending note, which the template cannot drop: it is
     prepended unless the output already holds it (via {details}, or the
     built-in fallback naming.render_description applies to an empty render).
     """
+    if template is None:
+        return llm_prose or details
     from . import naming
     rendered = naming.render_description(template, {
         **name_ctx,
@@ -8331,14 +8334,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 llm_used += 1
             else:
                 llm_failed += 1
-        if description_template is None:
-            description = llm_prose or details
-        else:
-            description = _render_description_template(
-                description_template,
-                name_context(*name_args, **name_kwargs),
-                g, details, llm_prose, placeholder,
-            )
+        description = _compose_description(
+            description_template,
+            name_context(*name_args, **name_kwargs),
+            g, details, llm_prose, placeholder,
+        )
 
         resolved_logo_id, logo_outcome = _resolve_matchup_logo_id(g, marker, source)
         if matchup_logos_enabled and not dry_run:
