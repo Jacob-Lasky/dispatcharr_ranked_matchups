@@ -146,6 +146,24 @@ class TestPreviewLines:
             "NFL ★7.2 · Buffalo Bills at Kansas City Chiefs"
         )
 
+    def test_time_and_venue_variables_preview_filled_in(self):
+        # Every sample used to have no kickoff, so a template built on
+        # {game_date} / {start_time} / {kickoff} / {venue} previewed blank.
+        _, lines = naming.preview_lines("{game_date}|{start_time}|{kickoff}")
+        for _label, name in lines:
+            date, time, kickoff = name.split("|")
+            assert date and time == "7:00 PM" and kickoff.startswith("Tomorrow 7:00 PM")
+        _, lines = naming.preview_lines("{away_team}{ @ venue}")
+        assert dict(lines)["Ranked vs unranked, favorite, college"] == "Alabama @ Madison Square Garden"
+
+    def test_preview_cleans_up_like_apply(self):
+        # A sparse custom template leaves double spaces; apply squeezes them
+        # (format_channel_name), so the preview must too or it shows a name
+        # that will never be written. Measured on a live template, 2026-10-16.
+        tmpl = "{away_team}  {rivalry}  at {home_team}"
+        _, lines = naming.preview_lines(tmpl)
+        assert dict(lines)["Ranked vs unranked, favorite, college"] == "Alabama at St. John's"
+
     def test_invalid_template_surfaces_errors(self):
         errors, _ = naming.preview_lines("{bogus} {away_team}")
         assert errors and any("bogus" in e for e in errors)
@@ -291,10 +309,123 @@ class TestResolveTemplate:
         s = naming.template_problem_summary(["Unbalanced { } braces."])
         assert "Unbalanced { } braces." in s
         assert "DEFAULT" in s
-        assert "Channel Naming" in s, "must tell the user WHERE to fix it"
+        # Must tell the user WHERE to fix it, by the section's real UI label.
+        assert _naming_section_label() in s
 
     def test_unknown_variable_group_also_reports(self):
         tmpl, errors, is_default = naming.resolve_template("{away_team}{ nonsense}")
         assert tmpl == naming.DEFAULT_NAME_TEMPLATE
         assert is_default is True
         assert any("nonsense" in e for e in errors)
+
+
+# --------------------------------------------------------------------------- #
+# Description template (#317)                                                  #
+# --------------------------------------------------------------------------- #
+
+def _manifest():
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return json.load(open(os.path.join(repo_root, "plugin.json"), encoding="utf-8"))
+
+
+def _naming_section_label():
+    return next(f["label"] for f in _manifest()["fields"] if f["id"] == "_section_naming")
+
+
+class TestDescriptionTemplate:
+    def test_blank_means_built_in_and_is_not_an_error(self):
+        assert naming.resolve_description_template("  ") == (None, [])
+        assert naming.resolve_description_template(None) == (None, [])
+
+    def test_valid_template_is_used(self):
+        assert naming.resolve_description_template(" {home_team} - {llm} ") == ("{home_team} - {llm}", [])
+
+    def test_broken_template_falls_back_and_reports(self):
+        tmpl, errors = naming.resolve_description_template("{home_team} {bogus}")
+        assert tmpl is None
+        assert any("bogus" in e for e in errors)
+
+    def test_description_variables_are_not_name_variables(self):
+        # {llm} in the channel NAME template must still be rejected.
+        assert naming.validate_template("{llm}")
+        assert naming.validate_template("{llm}", naming.KNOWN_DESCRIPTION_TOKENS) == []
+
+    def test_summary_names_the_setting_and_where_to_fix_it(self):
+        s = naming.description_template_problem_summary(["Unbalanced { } braces."])
+        assert "description_template" in s and _naming_section_label() in s
+        # Apply falls back to the built-in description, not a "DEFAULT" template.
+        assert "built-in description" in s and "DEFAULT" not in s
+        assert naming.description_template_problem_summary([]) == ""
+
+    def test_two_variables_in_one_group_are_rejected(self):
+        # render_name substitutes only the first, so this printed the word
+        # "llm" and skipped the Claude call (second-opinion finding, #317).
+        errors = naming.validate_template("{source_channel: llm}", naming.KNOWN_DESCRIPTION_TOKENS)
+        assert any("More than one variable" in e for e in errors)
+        assert naming.validate_template("{(rank_away) v rank_home}")
+
+    @pytest.mark.parametrize("tmpl", ["{home_team}}{", "{{home_team}}", "}{home_team}{"])
+    def test_misordered_or_nested_braces_are_rejected(self, tmpl):
+        # Balanced counts used to pass and render a stray "}{" into the output.
+        assert naming.validate_template(tmpl)
+
+    def test_real_templates_still_validate(self):
+        # The shipped default and a live user's custom template (2026-10-16)
+        # must survive the stricter validator untouched.
+        live = ("{league_short} {favorite_star} · {away_team}{ (rank_away)} at {home_team}"
+                "{ (rank_home)} | {game_date} at {start_time} { | tagline} ({score})")
+        assert naming.validate_template(naming.DEFAULT_NAME_TEMPLATE) == []
+        assert naming.validate_template(live) == []
+
+    def test_empty_render_yields_the_built_in(self):
+        assert naming.render_description("{llm}", {"llm": "", "details": "BUILT-IN"}) == "BUILT-IN"
+
+    def test_preview_matches_apply_fallback_and_is_capped(self):
+        # {llm} alone with the LLM off: apply writes the built-in text, so the
+        # preview must show it rather than an empty line.
+        assert naming.preview_description("{llm}", llm_on=False) == "A top-25 matchup: toss-up. / Source: ESPN+ 12."
+        long = naming.preview_description("x" * 10_000 + "{home_team}", llm_on=False)
+        assert len(long) == 200 and long.endswith("…")
+
+    def test_line_breaks_are_kept_and_empty_groups_leave_no_gap(self):
+        tmpl = "{away_team} at {home_team}{ · tagline}\n\n{llm}\n\n{source_channel}"
+        out = naming.render_description(tmpl, {
+            "away_team": "Bills", "home_team": "Chiefs", "tagline": "",
+            "llm": "", "source_channel": "ESPN 2",
+        })
+        assert out == "Bills at Chiefs\n\nESPN 2"
+
+    def test_a_group_can_carry_its_own_paragraph_break(self):
+        tmpl = "{home_team}{\n\nllm}"
+        assert naming.render_description(tmpl, {"home_team": "A", "llm": ""}) == "A"
+        assert naming.render_description(tmpl, {"home_team": "A", "llm": "Big game."}) == "A\n\nBig game."
+
+    def test_description_needs_llm(self):
+        assert naming.description_needs_llm(None), "built-in layout swaps in the prose"
+        assert naming.description_needs_llm("{home_team}{ - llm}")
+        assert not naming.description_needs_llm("{home_team} at {away_team}")
+
+    def test_template_uses(self):
+        known = naming.KNOWN_DESCRIPTION_TOKENS
+        assert naming.template_uses("{home_team}{ - llm}", "llm", known)
+        assert not naming.template_uses("{home_team} llm", "llm", known), "bare text is not a variable"
+
+    def test_preview_is_one_line_and_honours_the_llm_toggle(self):
+        tmpl = "{away_team} at {home_team}\n\n{llm}"
+        on = naming.preview_description(tmpl, llm_on=True)
+        assert "\n" not in on and on.startswith("Alabama at St. John's / ")
+        assert naming.preview_description(tmpl, llm_on=False) == "Alabama at St. John's"
+
+    def test_name_help_text_names_every_variable(self):
+        # {recording_dot} shipped (#216) without ever reaching the help text.
+        field = next(f for f in _manifest()["fields"] if f["id"] == "name_template")
+        assert "{away_team}" in field["help_text"], "instrument: help text not loaded"
+        for token in naming.TOKENS:
+            assert "{" + token + "}" in field["help_text"], token
+
+    def test_help_text_names_every_description_only_variable(self):
+        field = next(f for f in _manifest()["fields"] if f["id"] == "description_template")
+        assert field["type"] == "text" and field["default"] == ""
+        for token in naming.DESCRIPTION_ONLY_TOKENS:
+            assert "{" + token + "}" in field["help_text"], token
+

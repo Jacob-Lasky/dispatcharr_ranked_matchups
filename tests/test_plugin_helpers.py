@@ -1714,6 +1714,17 @@ class TestBuildDescription:
         # ("Top 4 → UCL · 5-7 → Europa · bottom 3 → relegation").
         assert "Champions League places" in out and "goes down" in out
 
+    @pytest.mark.parametrize("code", ["NHL", "NFL", "NCAA_MSOC", "CFB", "MLB"])
+    def test_non_league_formats_never_show_the_arrow_legend(self, plugin, code):
+        # #317: the raw "95+ pts → playoff bubble · ..." legend reached viewers
+        # for every points- and win-count league. Fail on the instrument too:
+        # each code must really be a shipped non-league context with a legend.
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS
+        ctx = LEAGUE_CONTEXTS[code]
+        assert ctx.format != "league" and "→" in ctx.boundary_summary
+        out = plugin._build_description(self._g(extra={"fd_competition_code": code}), "", False)
+        assert "→" not in out and ctx.boundary_summary not in out
+
     def test_matchday_without_total_omits_line(self, plugin):
         # If neither extra.matchdays_total nor league_ctx.matchdays_total
         # are available, no matchday line is emitted (we don't want
@@ -2852,6 +2863,97 @@ class TestActionPreviewNames:
         assert "bogus" in r["message"]
         # the DEFAULT is still previewed so the user sees working output
         assert "Alabama (15) at St. John's" in r["message"]
+
+
+class TestPreviewDescriptionTemplate:
+    """#317: the same action previews the description template, and keeps its
+    verdict on the LAST line because the result is an upward-growing toast."""
+
+    def test_blank_template_reports_the_built_in(self, plugin):
+        r = plugin._action_preview_names({})
+        assert "built-in" in r["message"]
+        assert r["message"].splitlines()[-1] == "Templates OK."
+
+    def test_custom_template_is_rendered(self, plugin):
+        r = plugin._action_preview_names({"description_template": "{away_team} at {home_team}"})
+        assert r["status"] == "ok"
+        assert "  Alabama at St. John's" in r["message"].splitlines()
+
+    def test_llm_without_the_toggle_is_flagged_last(self, plugin):
+        r = plugin._action_preview_names({"description_template": "{home_team}{ - llm}"})
+        assert "{llm} stays blank" in r["message"].splitlines()[-1]
+        on = plugin._action_preview_names({"description_template": "{home_team}{ - llm}",
+                                           "llm_descriptions_enabled": True,
+                                           "anthropic_api_key": "sk-test"})
+        assert on["message"].splitlines()[-1] == "Templates OK."
+        assert "St. John's - Alabama brings" in on["message"]
+
+    def test_llm_on_without_a_key_is_flagged(self, plugin, monkeypatch):
+        # Apply drops the LLM when no key resolves; the preview must say so
+        # rather than promise prose (same gate, _resolve_key).
+        monkeypatch.setattr(plugin, "ANTHROPIC_KEY_PATH", "/nonexistent/anthropic_api_key")
+        r = plugin._action_preview_names({"description_template": "{home_team}{ - llm}",
+                                          "llm_descriptions_enabled": True})
+        assert "no Anthropic API key" in r["message"].splitlines()[-1]
+        r = plugin._action_preview_names({"llm_descriptions_enabled": True})
+        assert "no Anthropic API key" in r["message"].splitlines()[-1]
+
+    def test_broken_template_is_an_error_on_the_last_line(self, plugin):
+        r = plugin._action_preview_names({"description_template": "{home_team} {bogus}"})
+        assert r["status"] == "error"
+        assert "bogus" in r["message"].splitlines()[-1]
+
+    def test_an_error_outranks_a_note_for_the_last_line(self, plugin):
+        r = plugin._action_preview_names({"description_template": "{llm}", "name_template": "{bogus}"})
+        assert r["status"] == "error"
+        assert r["message"].splitlines()[-1].startswith("Name template problems")
+
+    def test_stays_toast_sized(self, plugin):
+        r = plugin._action_preview_names({"description_template": "{home_team}{ - llm}",
+                                           "name_template": "{bogus}"})
+        assert len(r["message"].splitlines()) <= 12
+
+
+class TestComposeDescription:
+    """#317: the per-game description apply writes."""
+
+    def test_no_template_keeps_the_pre_317_behaviour(self, plugin):
+        assert plugin._compose_description(None, self.CTX, self.G, "BUILT-IN", "Prose.", False) == "Prose."
+        assert plugin._compose_description(None, self.CTX, self.G, "BUILT-IN", "", False) == "BUILT-IN"
+
+    CTX = {"home_team": "Chiefs", "away_team": "Bills", "tagline": "title race"}
+    G = {"channel_name_current": "ESPN 2"}
+
+    def test_variables_and_llm(self, plugin):
+        out = plugin._compose_description(
+            "{away_team} at {home_team}{ - llm}{\n\nsource_channel}",
+            self.CTX, self.G, "BUILT-IN", "A big one.", False)
+        assert out == "Bills at Chiefs - A big one.\n\nESPN 2"
+
+    def test_failed_llm_collapses_its_group(self, plugin):
+        out = plugin._compose_description(
+            "{away_team} at {home_team}{ - llm}", self.CTX, self.G, "BUILT-IN", "", False)
+        assert out == "Bills at Chiefs"
+
+    def test_empty_render_falls_back_to_built_in(self, plugin):
+        assert plugin._compose_description(
+            "{llm}", self.CTX, self.G, "BUILT-IN", "", False) == "BUILT-IN"
+
+    def test_placeholder_keeps_the_pending_note(self, plugin):
+        out = plugin._compose_description(
+            "{away_team} at {home_team}", self.CTX, self.G, "BUILT-IN", "", True)
+        assert out.startswith(plugin._PLACEHOLDER_NOTE) and out.endswith("Bills at Chiefs")
+
+    def test_placeholder_note_not_doubled_by_the_empty_render_fallback(self, plugin):
+        details = plugin._build_description({}, "", placeholder=True)
+        out = plugin._compose_description("{llm}", self.CTX, self.G, details, "", True)
+        assert out == details and out.count(plugin._PLACEHOLDER_NOTE) == 1
+
+    def test_placeholder_note_not_doubled_by_details(self, plugin):
+        details = plugin._build_description({}, "", placeholder=True)
+        out = plugin._compose_description(
+            "{details}", self.CTX, self.G, details, "", True)
+        assert out.count(plugin._PLACEHOLDER_NOTE) == 1
 
 
 class TestDetectStreamLanguage:
@@ -4400,7 +4502,7 @@ class TestBoundaryProse:
 
     def test_non_league_formats_get_nothing(self, plugin):
         """Win-count and knockout bands do not describe table positions, so
-        the caller falls back to boundary_summary unchanged."""
+        the description has no boundary line for them (#317)."""
         assert plugin._boundary_prose(self._ctx(plugin, "CFB"), None) is None
 
     def test_an_unmapped_label_degrades_to_the_raw_label(self, plugin):
