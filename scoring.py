@@ -127,10 +127,10 @@ class GameSignals:
     # Lahvička Monte Carlo importance, pre-weight. Sources that don't
     # implement compute_match_importance leave these at 0 / empty; the
     # importance block in score_game then contributes nothing.
-    # `importance_thresholds_hit` is the deduped list of outcome bands
-    # with nonzero leverage on any queried team (the playing teams plus
-    # in-league favorites). pick_tagline uses it for editorial taglines
-    # ("relegation race" / "title race").
+    # `importance_thresholds_hit` is the outcome bands this game is about,
+    # biggest first (see importance_points: a leverage floor, then ranked by
+    # points, over the playing teams plus in-league favorites). pick_tagline
+    # uses it for editorial taglines ("relegation race" / "title race").
     importance_points: float = 0.0
     importance_notes: List[str] = field(default_factory=list)
     importance_thresholds_hit: List[str] = field(default_factory=list)
@@ -1474,9 +1474,9 @@ def compute_match_importance(
       - `raw_points` is the sum of (leverage × weight) over all queries.
       - `notes` lists nonzero contributions sorted by descending magnitude,
         formatted "{team} {label}: 0.42 leverage × 5.0 = 2.10".
-      - `thresholds_hit` is the deduped list of band labels with nonzero
-        leverage on any queried team. Used by pick_tagline to surface
-        "relegation race" / "title race" type editorial taglines.
+      - `thresholds_hit` is the bands this game is about, biggest first
+        (see importance_points for the floor and ranking). Used by
+        pick_tagline to surface "relegation race" / "title race" taglines.
 
     Returns (0.0, [], []) immediately when the source doesn't support
     importance simulation (caller should also gate, but defense in depth).
@@ -1517,7 +1517,7 @@ def compute_match_importance(
             source, match, queries, n_sims=n_sims, rng=rng,
         )
 
-    return importance_points(leverages, league_ctx)
+    return importance_points(leverages, league_ctx, (match.home, match.away))
 
 
 def compute_league_importance(
@@ -1548,7 +1548,8 @@ def compute_league_importance(
     favs = list(favorites_by_match) if favorites_by_match is not None else [None] * n
     queries = [importance_queries(m, league_ctx, f) for m, f in zip(matches, favs)]
     leverages = monte_carlo_importance_shared(source, matches, queries, n_sims=n_sims, rng=rng)
-    return [importance_points(lv, league_ctx) if lv is not None else None for lv in leverages]
+    return [importance_points(lv, league_ctx, (m.home, m.away)) if lv is not None else None
+            for m, lv in zip(matches, leverages)]
 
 
 def importance_queries(
@@ -1576,13 +1577,41 @@ def importance_queries(
     ]
 
 
+# Which outcome bands a game is "about" (#319): the bands that name its stakes
+# in the tagline ("title race") and in the LLM prompt ("Outcome bands in
+# play"). Leverage is how far this result moves a team's chance of reaching the
+# band, a probability swing, so the floor means the same in every league;
+# contribution sizes do not (measured 2026-10-16: the top band of a curated
+# La Liga game ~0.3 points, of a CFB game ~2.3). Before this, every band with
+# ANY leverage counted, in query order rather than by size, so in October every
+# NHL game read "playoff bubble / playoff secured race", Detroit's at 0.01 and
+# 0.00 leverage included. Every band that clears the floor is listed: the floor
+# alone is what makes a band a real stake, and a share-of-the-top cut dropped a
+# 24%-leverage relegation fight from a title-race game's prompt.
+IMPORTANCE_BAND_MIN_LEVERAGE = 0.05
+
+
 def importance_points(
     leverages: Dict[Tuple[str, str], float],
     league_ctx: "LeagueContext",
+    playing: Optional[Tuple[str, str]] = None,
 ) -> Tuple[float, List[str], List[str]]:
     """Turn `{(team, label): |tau_c|}` into compute_match_importance's
     `(raw_points, notes, thresholds_hit)`: leverage x consequence weight,
-    summed, with one note per nonzero contribution. Shared by both paths."""
+    summed, with one note per nonzero contribution. Shared by both paths.
+
+    `thresholds_hit` is NOT every band with leverage: it is the bands this
+    game is about, biggest first (pick_tagline names the first two). A band
+    qualifies when one team's leverage on it reaches
+    IMPORTANCE_BAND_MIN_LEVERAGE. Bands the two PLAYING teams carry come
+    first, ranked by their points; bands only a non-playing favorite carries
+    follow, so a favorite's title race cannot headline two other clubs'
+    relegation fight (its stake reaches the prose as an impact narrative).
+    `playing` is (home, away); None treats every queried team as playing.
+    A group stage's knockout-cascade labels never qualify: they are there so
+    importance counts the chain (#53), not to tag a group game "Championship".
+    Empty when nothing clears the floor, so pick_tagline falls through to rank
+    / toss-up / favorite. `raw_points` and `notes` still count everything."""
     # Map label → weight once so the contribution loop is single-pass.
     weight_by_label: Dict[str, float] = {
         label: weight for _, label, weight in league_ctx.thresholds
@@ -1590,8 +1619,6 @@ def importance_points(
 
     raw = 0.0
     notes: List[str] = []
-    labels_hit: List[str] = []
-    seen_labels: set = set()
     for (team, label), leverage in leverages.items():
         if leverage <= 0:
             continue
@@ -1607,14 +1634,41 @@ def importance_points(
             f"{strip_team_suffix(team)} {label}: "
             f"{leverage:.2f} leverage × {weight:.1f} = {contrib:.2f}"
         )
-        if label not in seen_labels:
-            seen_labels.add(label)
-            labels_hit.append(label)
     # Sort notes by descending contribution so the biggest signals lead.
     # Parse the trailing "= X.XX" since the contrib isn't in scope here;
     # cheap enough at 2-32 lines per game (depends on favorite count).
     notes.sort(key=lambda s: -float(s.rsplit("= ", 1)[1]))
-    return raw, notes, labels_hit
+    return raw, notes, _bands_the_game_is_about(leverages, league_ctx, weight_by_label, playing)
+
+
+def _bands_the_game_is_about(
+    leverages: Dict[Tuple[str, str], float],
+    league_ctx: "LeagueContext",
+    weight_by_label: Dict[str, float],
+    playing: Optional[Tuple[str, str]],
+) -> List[str]:
+    """importance_points' `thresholds_hit`; the rules are in its docstring."""
+    playing_lc = {t.lower() for t in playing} if playing else None
+    own_labels = None
+    if getattr(league_ctx, "format", None) == "group_advance":
+        own_labels = {label for cutoff, label, _ in league_ctx.thresholds
+                      if cutoff == _GROUP_ADVANCE_SENTINEL}
+    # tier 0 = carried by a playing team, tier 1 = only by a favorite.
+    points: Dict[Tuple[int, str], float] = {}
+    for (team, label), leverage in leverages.items():
+        weight = weight_by_label.get(label, 0.0)
+        if leverage < IMPORTANCE_BAND_MIN_LEVERAGE or weight <= 0:
+            continue
+        if own_labels is not None and label not in own_labels:
+            continue
+        tier = 0 if playing_lc is None or team.lower() in playing_lc else 1
+        points[(tier, label)] = points.get((tier, label), 0.0) + leverage * weight
+    ranked = sorted(points, key=lambda key: (key[0], -points[key]))
+    out: List[str] = []
+    for _tier, label in ranked:
+        if label not in out:
+            out.append(label)
+    return out
 
 
 def strip_team_suffix(name: str) -> str:
@@ -1794,6 +1848,44 @@ def pick_tagline(
     return ""
 
 
+def name_context(
+    sport_prefix: str,
+    signals: GameSignals,
+    score: GameScore,
+    home: str,
+    away: str,
+    tagline: str = "",
+    *,
+    rank_source: str = "poll",
+    sport_label: str = "",
+    venue: Optional[str] = None,
+    start_dt: Optional[datetime] = None,
+    tz=None,
+    recording: bool = False,
+) -> Dict[str, str]:
+    """The template token map for one game: format_channel_name renders it as
+    the channel name, and apply extends it for the description template
+    (#317), so both templates see the same values for the same variable."""
+    return naming.build_context(
+        sport_prefix=sport_prefix,
+        sport_label=sport_label,
+        home=strip_team_suffix(home),
+        away=strip_team_suffix(away),
+        rank_home=signals.rank_a,
+        rank_away=signals.rank_b,
+        rank_source=rank_source,
+        score_final=score.final,
+        favorite=bool(signals.favorite_match),
+        recording=bool(recording),
+        tagline=tagline,
+        tournament=tournament_stage_label(getattr(signals, "tournament_stage", None)),
+        venue=venue,
+        is_rivalry=bool(getattr(signals, "is_rivalry", False)),
+        start_dt=start_dt,
+        tz=tz,
+    )
+
+
 def format_channel_name(
     sport_prefix: str,
     signals: GameSignals,
@@ -1827,31 +1919,12 @@ def format_channel_name(
     `rank_source == "poll"`. Team-name corporate suffixes (FC / AFC / ...) are
     stripped here before the names enter the template context.
     """
-    ctx = naming.build_context(
-        sport_prefix=sport_prefix,
-        sport_label=sport_label,
-        home=strip_team_suffix(home),
-        away=strip_team_suffix(away),
-        rank_home=signals.rank_a,
-        rank_away=signals.rank_b,
-        rank_source=rank_source,
-        score_final=score.final,
-        favorite=bool(signals.favorite_match),
-        recording=bool(recording),
-        tagline=tagline,
-        tournament=tournament_stage_label(getattr(signals, "tournament_stage", None)),
-        venue=venue,
-        is_rivalry=bool(getattr(signals, "is_rivalry", False)),
-        start_dt=start_dt,
-        tz=tz,
+    ctx = name_context(
+        sport_prefix, signals, score, home, away, tagline,
+        rank_source=rank_source, sport_label=sport_label, venue=venue,
+        start_dt=start_dt, tz=tz, recording=recording,
     )
-    name = naming.render_name(template or naming.DEFAULT_NAME_TEMPLATE, ctx)
-    # render_name collapses empty {groups}; this mops up any double space a
-    # sparse CUSTOM template leaves between bare-literal separators.
-    name = re.sub(r"\s{2,}", " ", name).strip()
-    if len(name) > 250:
-        name = name[:247] + "..."
-    return name
+    return naming.finish_name(naming.render_name(template or naming.DEFAULT_NAME_TEMPLATE, ctx))
 
 
 def render_favorite_impact(

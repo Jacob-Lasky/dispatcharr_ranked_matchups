@@ -6197,7 +6197,7 @@ def _boundary_prose(league_ctx: Any, table_size: Optional[int]) -> Optional[str]
 
     Returns None for any non-league format (win-count and knockout bands do
     not describe table positions) and when there are no usable thresholds, in
-    which case the caller falls back to `boundary_summary` unchanged.
+    which case the description has no boundary line at all (#317).
     """
     if getattr(league_ctx, "format", "league") != "league":
         return None
@@ -6343,6 +6343,15 @@ def _build_standings_posture_line(g: Dict[str, Any]) -> Optional[str]:
     return f"{home_str}, {away_str}, {gap}."
 
 
+# Leads a placeholder's description, built-in or templated: it is the only
+# thing telling the viewer why the channel has no stream yet.
+_PLACEHOLDER_NOTE = (
+    "_Channel match pending: broadcaster's EPG hasn't published "
+    "this fixture yet. Will activate on the next refresh once it "
+    "appears._"
+)
+
+
 def _build_description(
     g: Dict[str, Any],
     tagline: str,
@@ -6358,7 +6367,7 @@ def _build_description(
       2c. Group-stage state (WC / EURO group games only): round + group
           standings + finished results + advancement rule. Renders nothing
           for non-group fixtures.
-      3. Matchday + league boundary summary (where applicable)
+      3. Matchday + league boundary sentence (league tables only)
       4. Standings posture line (league fixtures only: see #10)
       5. Favorite-impact narratives (rooting framing, both deltas)
       6. "Favorite is your team" line if the favorite is playing this game
@@ -6383,11 +6392,7 @@ def _build_description(
 
     # 1. Placeholder note.
     if placeholder:
-        sections.append(
-            "_Channel match pending: broadcaster's EPG hasn't published "
-            "this fixture yet. Will activate on the next refresh once it "
-            "appears._"
-        )
+        sections.append(_PLACEHOLDER_NOTE)
 
     # 2. Headline: tagline + spread descriptor. Drop the closeness tail for a
     # final so the headline reads "A Final." not "A Final: close spread." See
@@ -6485,13 +6490,16 @@ def _build_description(
                 )
             else:
                 matchday_line_parts.append("The final matchday.")
+    # Only a league table's bands become a sentence. DO NOT fall back to
+    # `boundary_summary` for the other formats: it is an arrow legend
+    # ("95+ pts → playoff bubble · 100+ → comfortable ...") written for the
+    # settings help and the LLM context, identical on every game of a league,
+    # and viewers read it as unexplained math (#317).
     if league_ctx:
         table_size = len(current_standings_table(extra)) or None
         prose = _boundary_prose(league_ctx, table_size)
         if prose:
             matchday_line_parts.append(prose)
-        elif league_ctx.boundary_summary:
-            matchday_line_parts.append(league_ctx.boundary_summary + ".")
     if matchday_line_parts:
         sections.append(" ".join(matchday_line_parts))
 
@@ -6522,6 +6530,37 @@ def _build_description(
         sections.append(f"Source: {src_name}.")
 
     return "\n\n".join(sections)
+
+
+def _compose_description(
+    template: Optional[str],
+    name_ctx: Dict[str, str],
+    g: Dict[str, Any],
+    details: str,
+    llm_prose: str,
+    placeholder: bool,
+) -> str:
+    """The guide description apply writes for one game.
+
+    No template (None): Claude's prose when there is any, else the built-in
+    text, exactly as before #317. With the user's template: `name_ctx` is the channel name's token map (scoring.name_context), so a
+    variable means the same thing in both templates. A placeholder always
+    carries the match-pending note, which the template cannot drop: it is
+    prepended unless the output already holds it (via {details}, or the
+    built-in fallback naming.render_description applies to an empty render).
+    """
+    if template is None:
+        return llm_prose or details
+    from . import naming
+    rendered = naming.render_description(template, {
+        **name_ctx,
+        "llm": llm_prose,
+        "details": details,
+        "source_channel": g.get("channel_name_current") or "",
+    })
+    if placeholder and _PLACEHOLDER_NOTE not in rendered:
+        return f"{_PLACEHOLDER_NOTE}\n\n{rendered}"
+    return rendered
 
 
 # ---------- reap finished games + backfill from the bench (#196 / #197) ----------
@@ -7289,7 +7328,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from django.db import transaction
     from django.db.models import Q
 
-    from .scoring import format_channel_name
+    from .scoring import format_channel_name, name_context
 
     cache = _read_cache()
     # Return early ONLY when there is no slate at all (see _cache_has_slate).
@@ -7415,6 +7454,18 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # Downstream still signals "use the default" with None, so preserve that
     # rather than threading the resolved string through every call site.
     name_template = None if _tmpl_is_default else resolved_template
+    # Same contract for the description (#317): None is the built-in layout,
+    # and a broken template is reported in this action's message, not just
+    # logged.
+    description_template, desc_tmpl_errors = naming.resolve_description_template(
+        settings.get("description_template")
+    )
+    desc_tmpl_problem = naming.description_template_problem_summary(desc_tmpl_errors)
+    if desc_tmpl_errors:
+        logger.warning(
+            "[ranked_matchups] invalid description_template (%s); using the built-in description",
+            "; ".join(desc_tmpl_errors),
+        )
     apply_tz = _resolve_tz(settings.get("local_timezone", "UTC"))
 
     # 1. Ensure target ChannelGroup. Also detect any old groups/sources we own
@@ -8256,12 +8307,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             0.0, min(prepass_allowance, child_seconds_left - APPLY_WRITE_RESERVE_SECONDS),
         )
     prepass_budget = NetworkBudget(prepass_allowance)
+    # An LLM call is paid for only when its prose will be written.
+    llm_wanted = llm_enabled and naming.description_needs_llm(description_template)
     for marker, prep in prep_by_marker.items():
         g, source, placeholder, tagline = prep.g, prep.source, prep.placeholder, prep.tagline
-        new_name = format_channel_name(
-            g["sport_prefix"], prep.signals, prep.score, g["home"], g["away"],
-            tagline=tagline,
-            template=name_template,
+        name_args = (g["sport_prefix"], prep.signals, prep.score, g["home"], g["away"], tagline)
+        name_kwargs = dict(
             rank_source=prep.rank_source,
             sport_label=g.get("sport_label", ""),
             venue=g.get("venue"),
@@ -8269,18 +8320,19 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             tz=apply_tz,
             recording=autorec.will_record(marker),
         )
+        new_name = format_channel_name(*name_args, template=name_template, **name_kwargs)
 
-        description = _build_description(g=g, tagline=tagline, placeholder=placeholder)
+        details = _build_description(g=g, tagline=tagline, placeholder=placeholder)
         # Optional Claude-rewritten prose (network, cached). Placeholders keep the
-        # deterministic "match pending" note. Failures fall back to `description`.
-        if llm_enabled and not placeholder:
+        # deterministic "match pending" note. A failure leaves `llm_prose` empty.
+        llm_prose = ""
+        if llm_wanted and not placeholder:
             _ctx = _league_context_for(g)
             _boundary = _ctx.boundary_summary if _ctx else ""
-            before = description
-            description = llm_descriptions.llm_describe_or_fallback(
+            llm_prose = llm_descriptions.llm_describe_or_fallback(
                 g=g,
                 tagline=tagline,
-                fallback_description=description,
+                fallback_description="",
                 api_key=llm_api_key,
                 model=llm_model,
                 cache=llm_cache,
@@ -8294,10 +8346,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
                 # than leaving the model to infer it from a table slice (#209).
                 league_context=_ctx,
             )
-            if description is before:
-                llm_failed += 1
-            else:
+            if llm_prose:
                 llm_used += 1
+            else:
+                llm_failed += 1
+        description = _compose_description(
+            description_template,
+            name_context(*name_args, **name_kwargs),
+            g, details, llm_prose, placeholder,
+        )
 
         resolved_logo_id, logo_outcome = _resolve_matchup_logo_id(g, marker, source)
         if matchup_logos_enabled and not dry_run:
@@ -8957,8 +9014,12 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # counted there. Report as "(placeholders=N included)" to avoid the
     # "10 created + 3 placeholders == 13?" misread.
     llm_msg = ""
-    if llm_enabled:
-        llm_msg = f" LLM descriptions: {llm_used} written, {llm_failed} fell back to deterministic."
+    if llm_wanted:
+        llm_msg = (
+            f" LLM descriptions: {llm_used} written, {llm_failed} "
+            + ("fell back to the built-in text." if description_template is None
+               else "left {llm} blank.")
+        )
     # Only worth a line when the user narrowed the setting or fat-fingered a
     # name; the default (all profiles, nothing to choose) says nothing. The
     # toast clips, so an unknown name reports the count and the first few names
@@ -9018,6 +9079,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # The "[dry] " prefix alone reads as a label, not as "and therefore your
     # channels do not exist"; state the consequence and the fix (#170).
     msg = _dry_run_report(msg, dry_run)
+    if desc_tmpl_problem:
+        msg = f"WARNING: {desc_tmpl_problem}\n\n{msg}"
     if tmpl_problem:
         # Lead with it: the channel names the user is about to look at are NOT
         # the ones they configured, and that is the most important thing in
@@ -9161,41 +9224,61 @@ def _action_apply_locked(settings: Dict[str, Any]) -> Dict[str, Any]:
 # ---------- preview / test naming convention ----------
 
 def _action_preview_names(settings: Dict[str, Any]) -> Dict[str, Any]:
-    """Render the current name_template against canned sample games so a user
-    can eyeball the layout before applying it to live channels (issue #100).
+    """Render the name and description templates against canned sample games
+    so a user can eyeball the layout before applying (issues #100, #317).
 
     On an empty or invalid template it previews the DEFAULT (clearly labeled)
     and lists the validation problems, so a broken template is caught here and
-    never reaches the channel list.
+    never reaches the channel list or the guide.
+
+    The result is a toast that grows upward with no scrollback, so the message
+    stays short and the verdict is the LAST line. The variable catalogue lives
+    in each template field's help text, not here.
     """
     from . import naming
 
     tz = _resolve_tz(settings.get("local_timezone", "UTC"))
-    # Shared resolver (#126), so this action and apply can never disagree about
-    # whether a template is usable.
+    # Shared resolvers (#126), so this action and apply can never disagree
+    # about whether a template is usable.
     template, errors, using_default = naming.resolve_template(
         settings.get("name_template")
     )
+    desc_template, desc_errors = naming.resolve_description_template(
+        settings.get("description_template")
+    )
+    # The same two gates apply uses: the toggle, and a key it can resolve.
+    llm_toggle = bool(settings.get("llm_descriptions_enabled", False))
+    llm_on = llm_toggle and bool(_resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH))
 
     _, rendered = naming.preview_lines(template, tz=tz)
 
-    lines: List[str] = []
-    if errors:
-        lines.append("Template problems (the DEFAULT is previewed below):")
-        lines += [f"  - {e}" for e in errors]
-        lines.append("")
-    lines.append(f"Previewing {'DEFAULT template' if using_default else 'your template'}:")
-    lines.append(f"  {template}")
-    lines.append("")
-    for label, name in rendered:
-        lines.append(f"  {name}")
-        lines.append(f"      ({label})")
-    lines.append("")
-    lines.append("Variables (wrap optional ones in { } so the group vanishes when blank):")
-    for token, desc in naming.TOKENS.items():
-        lines.append(f"  {{{token}}}: {desc}")
+    lines: List[str] = [f"Channel names ({'DEFAULT template' if using_default else 'your template'}):"]
+    lines += [f"  {name}" for _label, name in rendered]
+    if desc_template is None:
+        lines.append(
+            "Description: Claude's preview (built-in text if a call fails)." if llm_on
+            else "Description: the built-in one (why it ranked, standings, source)."
+        )
+    else:
+        lines.append("Description (your template), first game:")
+        lines.append(f"  {naming.preview_description(desc_template, llm_on, tz=tz)}")
 
-    return {"status": "error" if errors else "ok", "message": "\n".join(lines)}
+    # Notes first, errors last: the last line is the one the toast always shows.
+    verdict: List[str] = []
+    if desc_template is not None and not llm_on and naming.description_needs_llm(desc_template):
+        verdict.append(
+            "{llm} stays blank until 'LLM-rewritten EPG descriptions' is on." if not llm_toggle
+            else "{llm} stays blank: LLM descriptions are on but no Anthropic API key is set."
+        )
+    elif desc_template is None and llm_toggle and not llm_on:
+        verdict.append("LLM descriptions are on but no Anthropic API key is set; built-in text is used.")
+    if errors:
+        verdict.append(f"Name template problems, DEFAULT shown: {'; '.join(errors)}")
+    if desc_errors:
+        verdict.append(f"Description template problems, built-in used: {'; '.join(desc_errors)}")
+    lines.append("")
+    lines += verdict or ["Templates OK."]
+    return {"status": "error" if (errors or desc_errors) else "ok", "message": "\n".join(lines)}
 
 
 # ---------- show status ----------
@@ -9457,6 +9540,10 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
         (settings or {}).get("name_template")
     )
     tmpl_problem = naming.template_problem_summary(tmpl_errors)
+    _desc_tmpl, desc_tmpl_errors = naming.resolve_description_template(
+        (settings or {}).get("description_template")
+    )
+    desc_tmpl_problem = naming.description_template_problem_summary(desc_tmpl_errors)
     dry_run = _dry_run_enabled(settings)
     cache = _read_cache()
     inflight = tasks.read_inflight()
@@ -9484,6 +9571,8 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     notices: List[str] = []
     if tmpl_problem:
         notices.append(f"WARNING: {tmpl_problem}")
+    if desc_tmpl_problem:
+        notices.append(f"WARNING: {desc_tmpl_problem}")
     if dry_run:
         notices.append(f"NOTE: {DRY_RUN_NOTICE}")
 
