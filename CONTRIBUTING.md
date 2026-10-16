@@ -254,10 +254,17 @@ For the score signals to work fully:
   recent first, as `{"date", "home", "away", "home_goals", "away_goals",
   "season"}`. Build it with `sources.soccer.build_h2h_entries`.
 - `extra["record_home"]` / `extra["record_away"]` — for **win-count** sports
-  (`LeagueContext.format == "win_count"`), `{"wins", "losses"}` or `None` if
+  (`LeagueContext.format == "win_count"`), and for **points-count** leagues
+  with no table in the row (NHL, MLS, NCAA soccer), `{"wins", "losses"}` plus
+  optional `played`, `draws` / `ties` / `ot_losses` and `points`, or `None` if
   the team has not played. Without it a preview can only say a team is
   "chasing bowl eligibility", which is true of every team in week 1 and
-  therefore says nothing.
+  therefore says nothing. A `PointsBasedSportSource` gets this for free:
+  the refresh stamps `record_extra(home, away)` from the season list it
+  already read (never a fetch of its own; nothing is stamped with importance
+  off or on a fallback season), unless the source stamped its own (ncaaf.py).
+  A stamped `None` means "has not played" and BOTH `None` means the season
+  opener, so leave a key OUT for a team whose record is unknown (#318).
 
 ### If your source reads ESPN's site API
 
