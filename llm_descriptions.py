@@ -24,6 +24,7 @@ import logging
 import re
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ._util import (
@@ -298,7 +299,7 @@ def season_progress_line(
         total_i = None
     phase = season_phase(played, total_i)
     if played <= 0:
-        base = f"Season progress: no {unit} played yet, this is the opener."
+        base = f"Season progress: no {unit} played yet, {_OPENER_MARKER}."
     elif total_i:
         base = f"Season progress: {played} of {total_i} {unit} played."
     else:
@@ -319,23 +320,77 @@ def _played_from_record(extra: Dict[str, Any]) -> Optional[int]:
     """
     best: Optional[int] = None
     for key in ("record_home", "record_away"):
-        rec = extra.get(key)
-        if not isinstance(rec, dict):
-            continue
-        w, l = rec.get("wins"), rec.get("losses")
-        if isinstance(w, int) and isinstance(l, int):
-            best = max(best or 0, w + l)
+        played = _games_in_record(extra.get(key))
+        if played is not None:
+            best = max(best or 0, played)
+    # A source that stamps records writes None for a team with no completed
+    # game and leaves a team it could not find out. BOTH stamped None is the
+    # season opener, which must be SAID ("no games played yet, this is the
+    # opener"): without that line the opener guard rejects a true opener
+    # preview. One key alone proves nothing, so the week fallback applies.
+    if best is None and all(key in extra for key in ("record_home", "record_away")):
+        return 0
     return best
 
 
+def _games_in_record(rec: Any) -> Optional[int]:
+    """Games a record covers: its `played` count when the source stamps one
+    (points_based.record_extra, #318), else wins + losses (ncaaf.py, where a
+    tie cannot happen). `played` wins because a draw or an NFL tie is in
+    neither column."""
+    if not isinstance(rec, dict):
+        return None
+    played = rec.get("played")
+    if isinstance(played, int) and played >= 0:
+        return played
+    w, l = rec.get("wins"), rec.get("losses")
+    if isinstance(w, int) and isinstance(l, int):
+        return w + l
+    return None
+
+
 def _record_text(rec: Optional[Dict[str, Any]]) -> Optional[str]:
-    """"5-4" for a record dict, or None when the team has not played."""
+    """"5-4" for a record dict ("5-4-2" with draws, then " (17 pts)" where the
+    league counts standings points), or None when the team has not played."""
     if not isinstance(rec, dict):
         return None
     w, l = rec.get("wins"), rec.get("losses")
     if not isinstance(w, int) or not isinstance(l, int):
         return None
-    return f"{w}-{l}"
+    # The third column is whichever the league has: soccer draws, an NFL tie,
+    # an NHL overtime loss. A league only ever produces one of them.
+    third = next((rec[k] for k in ("draws", "ties", "ot_losses")
+                  if isinstance(rec.get(k), int) and rec[k] > 0), None)
+    text = f"{w}-{l}-{third}" if third is not None else f"{w}-{l}"
+    pts = rec.get("points")
+    if isinstance(pts, int):
+        text += f" ({pts} pt{'s' if pts != 1 else ''})"
+    return text
+
+
+def points_record_lines(g: Dict[str, Any], total_games: Any) -> List[str]:
+    """For a points league with no table in the row (NHL, MLS, NCAA soccer;
+    #318): each team's record and points, and games left. No distance to the
+    point thresholds: a game is worth up to 2 or 3 points depending on the
+    league, so "N more points" has no honest games-left check the way
+    win_count_posture_lines' "N more wins" does."""
+    total_i = total_games if isinstance(total_games, int) and total_games > 0 else None
+    out: List[str] = []
+    for team, key in ((g.get("home"), "record_home"), (g.get("away"), "record_away")):
+        if not team or key not in (g.get("extra") or {}):
+            continue  # unknown, not "has not played" (points_based.record_extra)
+        rec = (g.get("extra") or {}).get(key)
+        text = _record_text(rec)
+        played = _games_in_record(rec)
+        if text is None or not played:
+            out.append(f"  - {team}: has not played yet this season.")
+            continue
+        line = f"  - {team}: {text}"
+        if total_i is not None and total_i >= played:
+            left = total_i - played
+            line += f", {left} game{'s' if left != 1 else ''} left"
+        out.append(line)
+    return out
 
 
 def win_count_posture_lines(
@@ -357,8 +412,8 @@ def win_count_posture_lines(
     total_i = total_games if isinstance(total_games, int) and total_games > 0 else None
     out: List[str] = []
     for team, key in ((g.get("home"), "record_home"), (g.get("away"), "record_away")):
-        if not team:
-            continue
+        if not team or key not in (g.get("extra") or {}):
+            continue  # unknown, not "has not played" (points_based.record_extra)
         rec = (g.get("extra") or {}).get(key)
         text = _record_text(rec)
         wins = rec.get("wins") if isinstance(rec, dict) else None
@@ -367,15 +422,15 @@ def win_count_posture_lines(
         # producer emits None for a team with no completed games, so 0-0 can
         # only arrive from a malformed row, and reporting it as a record
         # contradicts the opener rule in the same prompt.
+        played = _games_in_record(rec)
         if (
             text is None
             or not isinstance(wins, int) or not isinstance(losses, int)
             or wins < 0 or losses < 0
-            or wins + losses == 0
+            or not played
         ):
             out.append(f"  - {team}: has not played yet this season.")
             continue
-        played = wins + losses
         # Same inconsistency guard as season_progress_line: a record showing
         # more games than the season length means the length is wrong, and
         # "0 games left" would then be asserted as fact.
@@ -985,7 +1040,13 @@ def build_llm_context(
     thresholds = getattr(league_context, "thresholds", None) or []
     teams = [t for t in (home, away) if t and t != "?"]
     current = current_standings_table(extra)
-    is_win_count = getattr(league_context, "format", None) == "win_count"
+    league_format = getattr(league_context, "format", None)
+    is_win_count = league_format == "win_count"
+    # A points league with no table in the row (NHL, MLS, NCAA soccer) reads
+    # its progress off the stamped records, like a win-count sport (#318).
+    # With neither, the context had no "Season progress" at all and a week-7
+    # NFL game came back as "both teams kick off their seasons".
+    reads_records = is_win_count or (league_format == "points_count" and not current)
 
     # How far into the season we are, and what that means for how the stakes
     # should be framed. Applies to BOTH sport shapes: a league reads its
@@ -993,7 +1054,7 @@ def build_llm_context(
     # it the model framed a week-1 opener as a run-in ("chasing bowl
     # eligibility"), which is true of every team in September and is the whole
     # story in November. See #209.
-    if is_win_count:
+    if reads_records:
         played_games = _played_from_record(extra)
         if played_games is None and isinstance(week, int):
             played_games = max(0, week - 1)
@@ -1005,9 +1066,13 @@ def build_llm_context(
 
     if is_win_count:
         records = win_count_posture_lines(g, thresholds, matchdays_total)
-        if records:
-            lines.append("Where the two teams stand this season:")
-            lines.extend(records)
+    elif reads_records and _played_from_record(extra) is not None:
+        records = points_record_lines(g, matchdays_total)
+    else:
+        records = []
+    if records:
+        lines.append("Where the two teams stand this season:")
+        lines.extend(records)
 
     # A table where nobody has played is an ORDERING, not a standing: FD.org
     # still assigns positions, so rendering it lets the model read "Currently
@@ -1253,6 +1318,86 @@ def names_an_ungrounded_season_stage(prose: str, context: str) -> Optional[str]:
     return None
 
 
+# Phrases that call this game the START of a season. Unlike the stage phrases
+# above, a "Season progress" line does not license them: it licenses them only
+# when it says nothing has been played. Measured 2026-10-16 (#318): a week-7
+# NFL game, both teams six games in, previewed as "Two Super Bowl-winning
+# franchises kick off their seasons ... both start from scratch tonight".
+_OPENER_MARKER = "this is the opener"
+#
+# Kept narrow on purpose, because a rejection costs the viewer the preview:
+# "kick off their season SERIES" (two teams' first meeting, mid-season) and
+# "unbeaten SINCE the start of the season" are true mid-season sentences, and
+# a player's "season debut" says nothing about the team's calendar.
+# Every alternative names the TEAMS' season starting. DO NOT add "first game
+# of the season" (a captain back from injury plays his) or "start of the
+# season" ("unbeaten since the very start of the season"): both are true
+# mid-season sentences, and a false rejection costs the viewer the preview.
+_SEASON_WORD = r"(?:[\w\u2013-]+ )?seasons?\b(?![- ](?:series|tickets?))"
+_OPENER_CLAIMS = re.compile(
+    r"\b(?:kick(?:s|ing)? off|launch(?:es|ing)?|open(?:s|ing)?|begin(?:s|ning)?|start(?:s|ing)?)"
+    r" (?:their|its|the|a new) " + _SEASON_WORD
+    + r"|\bseason[- ]open(?:er|ing)\b"
+    r"|\bopening (?:game|night|weekend|day|fixture|match) of the " + _SEASON_WORD
+    + r"|\bstart(?:s|ing)? from scratch\b",
+    re.IGNORECASE,
+)
+# "Since their season opener, six straight wins" looks BACK at the opener.
+_OPENER_LOOKBACK = re.compile(r"\b(?:since|after|from)\s+(?:\w+\s+){0,2}$", re.IGNORECASE)
+
+
+def claims_an_opener_it_is_not(prose: str, context: str) -> Optional[str]:
+    """The first season-opener claim made when the context does not say no
+    games have been played, or None. A mention introduced by "since",
+    "after" or "from" is history, not a claim that this game opens it."""
+    if _OPENER_MARKER in context:
+        return None
+    for m in _OPENER_CLAIMS.finditer(prose):
+        if not _OPENER_LOOKBACK.search(prose[:m.start()]):
+            return m.group(0)
+    return None
+
+
+# Claims about LAST season. Only true when the context carried last season's
+# facts: the "Last season's final table" block, or a previous meeting labelled
+# "(last season)". DO NOT test `"last season" in context`: the early-phase
+# guidance line in every early prompt mentions last season itself. Measured
+# 2026-10-16 (#318 live run): an NHL context with records and progress and
+# nothing about last season came back "Colorado has stumbled to an uneven
+# start after last season's push".
+#
+# Presence, not truth: a context with last season's table licenses any
+# last-season sentence, as the other guards license by what was supplied.
+# Calendar wording ("last year", "a year ago") is also licensed by a previous
+# meeting dated LAST calendar year, which may still be this season.
+_LAST_SEASON_CLAIMS = re.compile(
+    r"\blast (?:season|campaign|term)\b|\b(?:previous|prior) (?:season|campaign)\b"
+    r"|\ba season ago\b",
+    re.IGNORECASE,
+)
+_LAST_YEAR_CLAIMS = re.compile(r"\blast year\b|\ba year ago\b|\bprior year\b", re.IGNORECASE)
+_LAST_SEASON_FACT_MARKERS = ("Last season's final table:", "(last season)")
+_MEETING_DATE = re.compile(r"^\s+- (\d{4})-\d{2}-\d{2}\b", re.MULTILINE)
+
+
+def claims_last_season_without_facts(
+    prose: str, context: str, today: Optional[datetime] = None,
+) -> Optional[str]:
+    """The first claim about last season made with no last-season fact in the
+    context, or None. `today` is injectable for tests; previews are written
+    for games days away, so the calendar year is the writer's."""
+    if any(marker in context for marker in _LAST_SEASON_FACT_MARKERS):
+        return None
+    m = _LAST_SEASON_CLAIMS.search(prose)
+    if m:
+        return m.group(0)
+    last_year = (today or datetime.now(timezone.utc)).year - 1
+    if any(int(y) == last_year for y in _MEETING_DATE.findall(context)):
+        return None
+    m = _LAST_YEAR_CLAIMS.search(prose)
+    return m.group(0) if m else None
+
+
 def looks_like_non_preview(prose: str) -> bool:
     """True when the model answered the operator instead of writing a preview.
 
@@ -1359,6 +1504,12 @@ def reject_reason(prose: str, context: str) -> Optional[str]:
     stage = names_an_ungrounded_season_stage(prose, context)
     if stage:
         return f"ungrounded season stage: {stage}"
+    opener = claims_an_opener_it_is_not(prose, context)
+    if opener:
+        return f"not a season opener: {opener}"
+    last = claims_last_season_without_facts(prose, context)
+    if last:
+        return f"ungrounded last-season claim: {last}"
     rank = claims_a_rank_it_does_not_have(prose, context)
     if rank:
         return f"inflated ranking: {rank}"

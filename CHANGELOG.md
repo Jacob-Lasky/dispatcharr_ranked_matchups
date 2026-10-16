@@ -46,6 +46,17 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   odds the stake is left out (the tagline then falls back to a ranked matchup,
   toss-up or favorite). The Claude descriptions get the same list, so cached
   ones are rewritten once on the next apply. (#319)
+- **Claude previews know where the season is.** For the NFL, NHL, MLB, NBA,
+  WNBA, MLS, college basketball, college baseball and softball, and NCAA
+  soccer, the Claude-written description was given no team records and no
+  sense of how far the season had gone, and it guessed: a week-7 NFL game was
+  previewed as both teams kicking off their seasons. Each game now carries
+  both teams' records (with draws and standings points where the league
+  counts them), taken from the season the plugin already reads to score
+  importance, and the preview is told how many games have been played. Two
+  new checks throw out a preview that calls a game a season opener when it is
+  not, or that claims something about last season the plugin never gave it;
+  the built-in description is used instead. (#318)
 
 ## [1.35.0] - 2026-10-15
 

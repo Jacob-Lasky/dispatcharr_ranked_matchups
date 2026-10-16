@@ -426,6 +426,60 @@ class PointsBasedSportSource(SportSource):
             new_state["_applied"] = state.get("_applied", frozenset()) | {gid}
         return new_state
 
+    def record_extra(self, home: str, away: str) -> Dict[str, Any]:
+        """Each team's season record, for the description writer (#318):
+        `{"record_home": {...} | None, "record_away": {...} | None}` in the
+        shape ncaaf.py already stamps (wins, losses), plus `played`, and
+        `draws` / `points` where the league counts them (soccer draws, NHL
+        and soccer standings points). None for a team with no completed game,
+        which the prompt states as a season opener rather than 0-0.
+
+        Reads only a season list this refresh ALREADY fetched (the refresh's
+        require_season, right after fetch_upcoming, whenever importance is
+        on), so tallying it costs no request. DO NOT let this trigger a
+        fetch: with importance off the season is deliberately never read, and
+        a read that failed with nothing to stand in has no list. Either way
+        this returns {}, so the row says nothing rather than a false 0-0.
+
+        Two cases stamp nothing, because the prompt reads a stamped None as
+        "has not played", and both teams None as the season OPENER:
+          - a team the season list does not name (a spelling the upcoming feed
+            and the season walk disagree on) is unknown, so its key is left
+            out rather than set to None;
+          - a season simulated from the last complete read (season_fallback)
+            can predate games already played, so the whole row is left out.
+
+        Without this, NFL / NHL / MLB / NBA / NCAA soccer rows reached the LLM
+        with no record and no season progress at all, and a week-7 NFL game
+        was previewed as both teams kicking off their seasons."""
+        if self._initial_state_cache is None and not self._all_games_cache:
+            return {}
+        if self._season_fallback_at is not None:
+            return {}
+        teams = self.initial_state().get("_teams") or {}
+        out: Dict[str, Any] = {}
+        for key, team in (("record_home", home), ("record_away", away)):
+            if team in teams:
+                out[key] = self._record_of(teams[team])
+        return out
+
+    def _record_of(self, row: Dict[str, int]) -> Optional[Dict[str, int]]:
+        """One team's record; None when it has no completed game. `ties` is
+        whatever `played` holds that no column does (an NFL tie: the base
+        _record_result_into_state counts the game but neither W nor L)."""
+        played = row.get("games_played") or 0
+        if not played:
+            return None
+        rec = {"wins": row.get("wins", 0), "losses": row.get("losses", 0), "played": played}
+        if row.get("draws"):
+            rec["draws"] = row["draws"]
+        ties = played - rec["wins"] - rec["losses"] - rec.get("draws", 0)
+        if ties > 0:
+            rec["ties"] = ties
+        if self._count_field != "wins":
+            rec["points"] = row.get(self._count_field, 0)
+        return rec
+
     def _record_result_into_state(
         self,
         teams: Dict[str, Dict[str, int]],

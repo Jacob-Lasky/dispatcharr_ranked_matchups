@@ -1459,10 +1459,19 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   final table with an explicit "newly promoted" for absent teams, previous
   meetings, the season phase (opener / early / midseason / run-in) with
   guidance, and for win-count sports the record plus distance to each still
-  reachable win threshold. The arithmetic is precomputed in
+  reachable win threshold. Points-based sources (NFL, NHL, MLB, NBA, WNBA,
+  MLS, college basketball/baseball/softball, NCAA soccer) get each team's
+  record stamped by the refresh from `PointsBasedSportSource.record_extra`
+  (#318), which tallies the season `require_season` already read and never
+  fetches; a points-count league with no table reads its progress and
+  records off them (`points_record_lines`). The arithmetic is precomputed in
   `llm_descriptions.py` rather than left to the model, and `SYSTEM_PROMPT`
   forbids stating any position, record, gap or zone proximity that is not in
-  those lines. `show_status` suffixes a seeded rank pair with `~`
+  those lines; `reject_reason` also throws out a season-opener claim unless
+  the context says nothing has been played (`claims_an_opener_it_is_not`)
+  and a last-season claim with no last-season fact in the context
+  (`claims_last_season_without_facts`). `show_status` suffixes a seeded rank
+  pair with `~`
 - Stream-stack ordering and per-group stream policy (#206):
   `language_preferences` (ordered codes, default `en`), `fallback_only_groups`
   (demote but keep playable), `excluded_groups` (never attach), plus
