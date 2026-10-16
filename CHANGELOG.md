@@ -35,6 +35,17 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
   word) and braces in the wrong order such as `{home_team}}{` used to pass and
   show up in the channel name. Both are now reported, and the default is used
   until they are fixed, the same as any other broken template. (#317)
+- **Taglines say what a game is actually about.** The "race" tagline on a
+  channel name and in the guide listed the first outcome bands a game touched
+  at all, so early in a season nearly every NHL game read "playoff bubble /
+  playoff secured race", including games where the result barely moved
+  anything. It now names the stakes this result moves most for the two teams
+  playing, biggest first; a favorite's own race no longer headlines two other
+  clubs' game; a group-stage game is tagged with its group stake, never a
+  later round such as "Championship"; and when the game hardly changes anyone's
+  odds the stake is left out (the tagline then falls back to a ranked matchup,
+  toss-up or favorite). The Claude descriptions get the same list, so cached
+  ones are rewritten once on the next apply. (#319)
 
 ## [1.35.0] - 2026-10-15
 

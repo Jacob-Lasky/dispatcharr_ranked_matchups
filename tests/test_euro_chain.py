@@ -395,16 +395,25 @@ class TestEuroGroupGameGetsKnockoutLeverage:
             rng=random.Random(78),
         )
 
+    @staticmethod
+    def _labels_with_leverage(notes):
+        """Every band with nonzero leverage, read from the notes ("Romania
+        quarterfinal: 0.46 leverage × 2.5 = 1.14"). NOT from thresholds_hit,
+        which since #319 holds only the bands a game is about, biggest first."""
+        return {n.split(":", 1)[0].rsplit(" ", 1)[1] for n in notes}
+
     def test_chain_active_gives_nonzero_knockout_leverage(self, monkeypatch):
         _pts, notes, hit = self._score(monkeypatch, paired=True)
-        knockout_hit = [lbl for lbl in hit if lbl in self.KNOCKOUT_LABELS]
-        assert {"round_of_16", "quarterfinal", "semifinal", "final", "winner"} <= set(
-            knockout_hit), (notes, hit)
+        knockout = self._labels_with_leverage(notes) & set(self.KNOCKOUT_LABELS)
+        assert {"round_of_16", "quarterfinal", "semifinal", "final", "winner"} <= knockout, notes
         assert any("quarterfinal:" in n for n in notes), notes
+        # The cascade counts in points, but a group game's tagline names only
+        # its own stake (#319): never "Championship / advance race".
+        assert hit == ["advance"], hit
 
     def test_unpaired_source_scores_advance_only(self, monkeypatch):
-        _pts, _notes, hit = self._score(monkeypatch, paired=False)
-        assert not [lbl for lbl in hit if lbl in self.KNOCKOUT_LABELS]
+        _pts, notes, hit = self._score(monkeypatch, paired=False)
+        assert not self._labels_with_leverage(notes) & set(self.KNOCKOUT_LABELS)
         assert "advance" in hit
 
 

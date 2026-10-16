@@ -1604,3 +1604,97 @@ class TestTournamentStageNoteIsUserFacing:
         )
         note = next(n for n in res.notes if n.startswith("tournament stage:"))
         assert note.strip() != "tournament stage:"
+
+
+class TestImportanceBandsAGameIsAbout:
+    """#319: thresholds_hit (the tagline's bands) is ranked by points and
+    floored by leverage, not every band with any leverage in query order.
+    Literals throughout (live 2026-10-15 NHL slate; the second-opinion cases
+    for PL and EC_GS), so a change to the floor cannot move both sides of an
+    assertion."""
+
+    @staticmethod
+    def _bands(leverages, code="NHL", playing=None):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, importance_points
+        return importance_points(leverages, LEAGUE_CONTEXTS[code], playing)
+
+    def test_negligible_stakes_name_no_band(self):
+        # Detroit vs Philadelphia: "playoff bubble / playoff secured race" at
+        # 0.01 and 0.004 leverage. Nothing clears the floor, so no tagline.
+        raw, notes, hit = self._bands({
+            ("Detroit Red Wings", "playoff_bubble"): 0.01,
+            ("Detroit Red Wings", "playoff_secured"): 0.004,
+        })
+        assert hit == []
+        assert len(notes) == 2 and raw > 0, "points and notes still count every band"
+
+    def test_bands_rank_by_points_not_query_order(self):
+        # Minnesota vs St. Louis. Query order puts playoff_bubble first; by
+        # points: playoff_secured 0.375+0.275=0.65, division_pace 0.36 (St.
+        # Louis's 0.03 is under the floor), playoff_bubble 0.135+0.18=0.315.
+        _raw, _notes, hit = self._bands({
+            ("Minnesota Wild", "playoff_bubble"): 0.09,
+            ("Minnesota Wild", "playoff_secured"): 0.15,
+            ("Minnesota Wild", "division_pace"): 0.09,
+            ("St. Louis Blues", "playoff_bubble"): 0.12,
+            ("St. Louis Blues", "playoff_secured"): 0.11,
+            ("St. Louis Blues", "division_pace"): 0.03,
+        }, playing=("Minnesota Wild", "St. Louis Blues"))
+        assert hit == ["playoff_secured", "division_pace", "playoff_bubble"]
+
+    def test_every_band_over_the_floor_is_listed(self):
+        # Arsenal v Wolves: title 2.5 points, relegation 1.2. A share-of-the-
+        # top cut dropped Wolves' 24%-leverage relegation fight entirely.
+        _raw, _notes, hit = self._bands({
+            ("Arsenal", "title"): 0.50, ("Wolves", "relegation"): 0.24,
+        }, code="PL", playing=("Arsenal", "Wolves"))
+        assert hit == ["title", "relegation"]
+
+    def test_a_non_playing_favorite_cannot_headline(self):
+        # Everton v Wolves with Liverpool a favorite: Liverpool's title stake
+        # outscores the relegation fight but must not lead its tagline.
+        _raw, _notes, hit = self._bands({
+            ("Everton", "relegation"): 0.10, ("Wolves", "relegation"): 0.10,
+            ("Liverpool", "title"): 0.50,
+        }, code="PL", playing=("Everton", "Wolves"))
+        assert hit == ["relegation", "title"]
+
+    def test_the_playing_teams_own_points_decide_the_lead(self):
+        # Second-opinion case, kept by design: Liverpool (a favorite, not
+        # playing) has 3.0 title points riding on Arsenal v Wolves, but for
+        # the two teams on the field Wolves' relegation swing (1.0) beats
+        # Arsenal's title swing (0.3). Both are named.
+        _raw, _notes, hit = self._bands({
+            ("Arsenal", "title"): 0.06, ("Wolves", "relegation"): 0.20,
+            ("Liverpool", "title"): 0.60,
+        }, code="PL", playing=("Arsenal", "Wolves"))
+        assert hit == ["relegation", "title"]
+
+    def test_a_group_game_is_never_tagged_with_a_knockout_round(self):
+        # The cascade bands exist so the #53 chain counts in importance; they
+        # rendered a group game as "Championship / advance race".
+        _raw, notes, hit = self._bands({
+            ("Slovakia", "advance"): 0.20, ("Slovakia", "round_of_16"): 0.20,
+            ("Slovakia", "quarterfinal"): 0.06, ("Slovakia", "semifinal"): 0.06,
+            ("Slovakia", "final"): 0.07, ("Slovakia", "winner"): 0.10,
+        }, code="EC_GS", playing=("Slovakia", "Romania"))
+        assert hit == ["advance"]
+        assert len(notes) == 6, "the cascade still counts in points and notes"
+
+    def test_floor_is_per_team_leverage_not_summed(self):
+        # Two teams at 0.03 each: neither result moves anyone's odds by 5
+        # points, so the band is not what the game is about.
+        _raw, _notes, hit = self._bands({
+            ("A", "presidents_trophy"): 0.03,
+            ("B", "presidents_trophy"): 0.03,
+        })
+        assert hit == []
+
+    def test_tagline_names_the_top_two(self):
+        from dispatcharr_ranked_matchups.scoring import pick_tagline
+        tag = pick_tagline({"importance": 1.0}, [], None,
+                           ["playoff_secured", "division_pace", "playoff_bubble"],
+                           None, None, None, rank_source="standings")
+        assert tag == "playoff secured / division pace race"
+        assert pick_tagline({"importance": 1.0}, [], None, [], None, None, None,
+                            rank_source="standings") == ""
