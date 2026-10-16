@@ -349,6 +349,20 @@ class NhlRegularSource(PointsBasedSportSource):
             extra={"last_period_type": last_period},
         )
 
+    def _record_of(self, row):
+        """NHL records read W-L-OTL. The state's `losses` counts every loss
+        (that keeps the W/L classification honest), and an overtime or
+        shootout loss is the only result worth exactly 1 standings point, so
+        OTL = points - 2 x wins, exactly."""
+        rec = super()._record_of(row)
+        if rec is None:
+            return None
+        otl = rec.get("points", 0) - 2 * rec["wins"]
+        if 0 < otl <= rec["losses"]:
+            rec["ot_losses"] = otl
+            rec["losses"] -= otl
+        return rec
+
     # ---------- standings_points-aware record override ----------
 
     def _record_result_into_state(

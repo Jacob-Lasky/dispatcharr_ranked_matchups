@@ -315,18 +315,16 @@ def _played_from_record(extra: Dict[str, Any]) -> Optional[int]:
     the week only when neither side has a record yet.
     """
     best: Optional[int] = None
-    stamped = False
     for key in ("record_home", "record_away"):
-        if key in extra:
-            stamped = True
         played = _games_in_record(extra.get(key))
         if played is not None:
             best = max(best or 0, played)
     # A source that stamps records writes None for a team with no completed
-    # game. Both None is the season opener, which must be SAID ("no games
-    # played yet, this is the opener"): without that line the opener guard
-    # rejects a true opener preview, and the stage guard every stage phrase.
-    if best is None and stamped:
+    # game and leaves a team it could not find out. BOTH stamped None is the
+    # season opener, which must be SAID ("no games played yet, this is the
+    # opener"): without that line the opener guard rejects a true opener
+    # preview. One key alone proves nothing, so the week fallback applies.
+    if best is None and all(key in extra for key in ("record_home", "record_away")):
         return 0
     return best
 
@@ -355,8 +353,11 @@ def _record_text(rec: Optional[Dict[str, Any]]) -> Optional[str]:
     w, l = rec.get("wins"), rec.get("losses")
     if not isinstance(w, int) or not isinstance(l, int):
         return None
-    d = rec.get("draws")
-    text = f"{w}-{l}-{d}" if isinstance(d, int) and d > 0 else f"{w}-{l}"
+    # The third column is whichever the league has: soccer draws, an NFL tie,
+    # an NHL overtime loss. A league only ever produces one of them.
+    third = next((rec[k] for k in ("draws", "ties", "ot_losses")
+                  if isinstance(rec.get(k), int) and rec[k] > 0), None)
+    text = f"{w}-{l}-{third}" if third is not None else f"{w}-{l}"
     pts = rec.get("points")
     if isinstance(pts, int):
         text += f" ({pts} pt{'s' if pts != 1 else ''})"
@@ -372,8 +373,8 @@ def points_record_lines(g: Dict[str, Any], total_games: Any) -> List[str]:
     total_i = total_games if isinstance(total_games, int) and total_games > 0 else None
     out: List[str] = []
     for team, key in ((g.get("home"), "record_home"), (g.get("away"), "record_away")):
-        if not team:
-            continue
+        if not team or key not in (g.get("extra") or {}):
+            continue  # unknown, not "has not played" (points_based.record_extra)
         rec = (g.get("extra") or {}).get(key)
         text = _record_text(rec)
         played = _games_in_record(rec)
@@ -407,8 +408,8 @@ def win_count_posture_lines(
     total_i = total_games if isinstance(total_games, int) and total_games > 0 else None
     out: List[str] = []
     for team, key in ((g.get("home"), "record_home"), (g.get("away"), "record_away")):
-        if not team:
-            continue
+        if not team or key not in (g.get("extra") or {}):
+            continue  # unknown, not "has not played" (points_based.record_extra)
         rec = (g.get("extra") or {}).get(key)
         text = _record_text(rec)
         wins = rec.get("wins") if isinstance(rec, dict) else None
@@ -1324,13 +1325,16 @@ _OPENER_MARKER = "this is the opener"
 # "kick off their season SERIES" (two teams' first meeting, mid-season) and
 # "unbeaten SINCE the start of the season" are true mid-season sentences, and
 # a player's "season debut" says nothing about the team's calendar.
+# Every alternative names the TEAMS' season starting. DO NOT add "first game
+# of the season" (a captain back from injury plays his) or "start of the
+# season" ("unbeaten since the very start of the season"): both are true
+# mid-season sentences, and a false rejection costs the viewer the preview.
 _OPENER_CLAIMS = re.compile(
-    r"\bkick(?:s|ing)? off (?:their|its|his|her|the|a new) (?:\w+ )?seasons?\b(?! series)"
+    r"\b(?:kick(?:s|ing)? off|launch(?:es|ing)?|open(?:s|ing)?|begin(?:s|ning)?|start(?:s|ing)?)"
+    r" (?:their|its|the|a new) (?:\w+ )?seasons?\b(?![- ]series)"
     r"|\bseason[- ]open(?:er|ing)\b"
-    r"|\bopening (?:game|night|weekend|day) of the (?:\w+ )?season\b(?! series)"
-    r"|\bfirst (?:game|match|outing) of the (?:\w+ )?season\b(?! series)"
-    r"|\bstart(?:s|ing)? from scratch\b"
-    r"|(?<!since the )(?<!from the )\b(?:start|opening) of the (?:\w+ )?season\b(?! series)",
+    r"|\bopening (?:game|night|weekend|day|fixture|match) of the (?:\w+ )?season\b(?![- ]series)"
+    r"|\bstart(?:s|ing)? from scratch\b",
     re.IGNORECASE,
 )
 
@@ -1351,11 +1355,19 @@ def claims_an_opener_it_is_not(prose: str, context: str) -> Optional[str]:
 # 2026-10-16 (#318 live run): an NHL context with records and progress and
 # nothing about last season came back "Colorado has stumbled to an uneven
 # start after last season's push".
+#
+# Presence, not truth: a context with last season's table licenses any
+# last-season sentence, as the other guards license by what was supplied.
+# Calendar wording ("last year", "a year ago") is also licensed by a dated
+# previous meeting, which may sit in last calendar year but this season.
 _LAST_SEASON_CLAIMS = re.compile(
-    r"\blast (?:season|year|campaign|term)\b|\bprevious season\b|\ba year ago\b",
+    r"\blast (?:season|campaign|term)\b|\b(?:previous|prior) (?:season|campaign)\b"
+    r"|\ba season ago\b",
     re.IGNORECASE,
 )
+_LAST_YEAR_CLAIMS = re.compile(r"\blast year\b|\ba year ago\b|\bprior year\b", re.IGNORECASE)
 _LAST_SEASON_FACT_MARKERS = ("Last season's final table:", "(last season)")
+_MEETINGS_MARKER = "Previous meetings between these two"
 
 
 def claims_last_season_without_facts(prose: str, context: str) -> Optional[str]:
@@ -1364,6 +1376,11 @@ def claims_last_season_without_facts(prose: str, context: str) -> Optional[str]:
     if any(marker in context for marker in _LAST_SEASON_FACT_MARKERS):
         return None
     m = _LAST_SEASON_CLAIMS.search(prose)
+    if m:
+        return m.group(0)
+    if _MEETINGS_MARKER in context:
+        return None
+    m = _LAST_YEAR_CLAIMS.search(prose)
     return m.group(0) if m else None
 
 
