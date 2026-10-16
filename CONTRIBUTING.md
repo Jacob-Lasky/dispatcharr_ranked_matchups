@@ -112,10 +112,12 @@ Each label fires for every team whose `round_reached` matches or exceeds
 the corresponding `KNOCKOUT_ROUND_DEPTH`. Source routing in `plugin.py`
 picks `KnockoutSoccerSource` over `SoccerSource` based on `format`.
 
-`boundary_summary` is rendered verbatim in the EPG description as a
-one-line reminder of what each standings position (or bracket round)
-translates to. Use the `→` arrow notation and `·` separator to match
-the existing style.
+`boundary_summary` is a one-line legend of what each standings position
+(or bracket round) translates to, fed to the LLM description prompt. It is NOT shown in the EPG description (#317):
+viewers read the arrow legend as unexplained math. League-format contexts
+get a plain-English sentence there instead (`_boundary_prose` in
+`plugin.py`); other formats get no boundary line. Use the `→` arrow
+notation and `·` separator to match the existing style.
 
 ### Step 3: add the user-facing toggle (`plugin.json`)
 

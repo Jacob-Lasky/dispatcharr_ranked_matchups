@@ -286,7 +286,7 @@ outage) deleted it. Watch the provider's own channel for that game and update.
 | | *Waits for the result and shows the real summary. Runs in a separate process so it cannot stall the web worker, which costs a second or two of startup.* | |
 | `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand; and it also runs by itself when an M3U update lands near a curated game's kickoff (see [When a feed arrives after a refresh](#when-a-feed-arrives-after-a-refresh)). | Both |
 | `show_status` | Print the current curated list with per-game score breakdown, and end with a verdict on the last background run (see [Did the last run work?](#did-the-last-run-work)). No writes. | — |
-| `preview_names` | Render the channel-name template against sample games so you can check the layout before applying. Reports template errors and lists every variable. No writes. | — |
+| `preview_names` | Render the channel-name and description templates against sample games so you can check the layout before applying. Reports template problems on the last line; the variable list is in each template's help text. No writes, no API calls. | — |
 | `reap_now` | Drop games that finished more than `remove_finished_after_minutes` ago and backfill from the bench. Re-fetches nothing. | `cache.json` + DB |
 
 ### Did the last run work?
@@ -509,7 +509,8 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
 - Channel name: rendered from a customizable template (default:
   `{league_short} {favorite_star}★{score} · {away_team}{ (rank_away)} at {home_team}{ (rank_home)}{ · tagline}`).
   Plain text is literal; a `{group}` collapses entirely when its variable is
-  blank. Set your own under "Channel Naming"; preview with `preview_names`.
+  blank. Set your own under "Channel Name & Description"; preview with
+  `preview_names`.
 - Streams: existing Dispatcharr streams are linked through `ChannelStream`.
   An EPG or channel-name match contributes eligible streams from that channel.
   For team games, if one of its streams names either team, named streams that
@@ -521,7 +522,9 @@ channels** in a target ChannelGroup (default `Top Matchups`; tip: prefix with
 - EPG: an inactive `xmltv` `EPGSource` (auto-created with the same name as the
   group) holds one `EPGData` row per virtual channel, with a `ProgramData` entry
   whose `description` shows the full WHY breakdown — TiviMate, Plex, and
-  Jellyfin all surface this natively. It is deliberately not a `dummy` source:
+  Jellyfin all surface this natively. A **Description template** replaces that
+  text with your own layout (`{details}` keeps the built-in text inside it).
+  It is deliberately not a `dummy` source:
   Dispatcharr overlays generated filler programming on every channel attached to
   one of those, which would bury the real descriptions
 - Logo: a real per-game matchup image rather than the provider's channel logo,
