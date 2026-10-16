@@ -24,6 +24,7 @@ import logging
 import re
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ._util import (
@@ -1329,23 +1330,29 @@ _OPENER_MARKER = "this is the opener"
 # of the season" (a captain back from injury plays his) or "start of the
 # season" ("unbeaten since the very start of the season"): both are true
 # mid-season sentences, and a false rejection costs the viewer the preview.
+_SEASON_WORD = r"(?:[\w\u2013-]+ )?seasons?\b(?![- ](?:series|tickets?))"
 _OPENER_CLAIMS = re.compile(
     r"\b(?:kick(?:s|ing)? off|launch(?:es|ing)?|open(?:s|ing)?|begin(?:s|ning)?|start(?:s|ing)?)"
-    r" (?:their|its|the|a new) (?:\w+ )?seasons?\b(?![- ]series)"
-    r"|\bseason[- ]open(?:er|ing)\b"
-    r"|\bopening (?:game|night|weekend|day|fixture|match) of the (?:\w+ )?season\b(?![- ]series)"
-    r"|\bstart(?:s|ing)? from scratch\b",
+    r" (?:their|its|the|a new) " + _SEASON_WORD
+    + r"|\bseason[- ]open(?:er|ing)\b"
+    r"|\bopening (?:game|night|weekend|day|fixture|match) of the " + _SEASON_WORD
+    + r"|\bstart(?:s|ing)? from scratch\b",
     re.IGNORECASE,
 )
+# "Since their season opener, six straight wins" looks BACK at the opener.
+_OPENER_LOOKBACK = re.compile(r"\b(?:since|after|from)\s+(?:\w+\s+){0,2}$", re.IGNORECASE)
 
 
 def claims_an_opener_it_is_not(prose: str, context: str) -> Optional[str]:
     """The first season-opener claim made when the context does not say no
-    games have been played, or None."""
+    games have been played, or None. A mention introduced by "since",
+    "after" or "from" is history, not a claim that this game opens it."""
     if _OPENER_MARKER in context:
         return None
-    m = _OPENER_CLAIMS.search(prose)
-    return m.group(0) if m else None
+    for m in _OPENER_CLAIMS.finditer(prose):
+        if not _OPENER_LOOKBACK.search(prose[:m.start()]):
+            return m.group(0)
+    return None
 
 
 # Claims about LAST season. Only true when the context carried last season's
@@ -1358,8 +1365,8 @@ def claims_an_opener_it_is_not(prose: str, context: str) -> Optional[str]:
 #
 # Presence, not truth: a context with last season's table licenses any
 # last-season sentence, as the other guards license by what was supplied.
-# Calendar wording ("last year", "a year ago") is also licensed by a dated
-# previous meeting, which may sit in last calendar year but this season.
+# Calendar wording ("last year", "a year ago") is also licensed by a previous
+# meeting dated LAST calendar year, which may still be this season.
 _LAST_SEASON_CLAIMS = re.compile(
     r"\blast (?:season|campaign|term)\b|\b(?:previous|prior) (?:season|campaign)\b"
     r"|\ba season ago\b",
@@ -1367,18 +1374,22 @@ _LAST_SEASON_CLAIMS = re.compile(
 )
 _LAST_YEAR_CLAIMS = re.compile(r"\blast year\b|\ba year ago\b|\bprior year\b", re.IGNORECASE)
 _LAST_SEASON_FACT_MARKERS = ("Last season's final table:", "(last season)")
-_MEETINGS_MARKER = "Previous meetings between these two"
+_MEETING_DATE = re.compile(r"^\s+- (\d{4})-\d{2}-\d{2}\b", re.MULTILINE)
 
 
-def claims_last_season_without_facts(prose: str, context: str) -> Optional[str]:
+def claims_last_season_without_facts(
+    prose: str, context: str, today: Optional[datetime] = None,
+) -> Optional[str]:
     """The first claim about last season made with no last-season fact in the
-    context, or None."""
+    context, or None. `today` is injectable for tests; previews are written
+    for games days away, so the calendar year is the writer's."""
     if any(marker in context for marker in _LAST_SEASON_FACT_MARKERS):
         return None
     m = _LAST_SEASON_CLAIMS.search(prose)
     if m:
         return m.group(0)
-    if _MEETINGS_MARKER in context:
+    last_year = (today or datetime.now(timezone.utc)).year - 1
+    if any(int(y) == last_year for y in _MEETING_DATE.findall(context)):
         return None
     m = _LAST_YEAR_CLAIMS.search(prose)
     return m.group(0) if m else None

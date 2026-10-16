@@ -211,6 +211,9 @@ class TestOpenerGuard:
         "The captain plays his first game of the season tonight.",
         "The rookie makes his season debut tonight.",
         "The Broncos host their home opener of the month.",
+        "Since their season opener, they have won six straight.",
+        "After the season-opening loss they have not lost again.",
+        "The club will open their season ticket sales next week.",
     ])
     def test_mid_season_sentences_pass(self, prose):
         ctx = _ctx("NFL", {"wins": 3, "losses": 3, "played": 6}, {"wins": 4, "losses": 2, "played": 6})
@@ -222,6 +225,8 @@ class TestOpenerGuard:
         "Seattle kicks off its 2026 season tonight.",
         "Both clubs launch their seasons tonight.",
         "This is the opening fixture of the season.",
+        "The clubs launch their 2026-27 season tonight.",
+        "Both sides open their 2026\u201327 season under the lights.",
     ])
     def test_opener_claims_fail_mid_season(self, prose):
         ctx = _ctx("NFL", {"wins": 3, "losses": 3, "played": 6}, {"wins": 4, "losses": 2, "played": 6})
@@ -299,10 +304,24 @@ class TestLastSeasonPhrasing:
     def test_other_phrasings_are_caught(self, prose):
         assert llm.claims_last_season_without_facts(prose, self._bare())
 
-    def test_last_year_is_licensed_by_a_dated_meeting(self):
-        ctx = self._bare() + ("\nPrevious meetings between these two, most recent first:"
-                              "\n  - 2025-12-14 (this season): A 3-2 B")
-        assert llm.claims_last_season_without_facts("They met last year in a thriller.", ctx) is None
-        assert llm.claims_last_season_without_facts("They met last year in a thriller.", self._bare())
+    FEB_2026 = datetime(2026, 2, 10, tzinfo=UTC)
+    DEC_2026 = datetime(2026, 12, 10, tzinfo=UTC)
+
+    def _with_meeting(self, date):
+        return self._bare() + ("\nPrevious meetings between these two, most recent first:"
+                               f"\n  - {date} (this season): A 3-2 B (A won)")
+
+    def test_last_year_is_licensed_by_a_meeting_dated_last_year(self):
+        prose = "They met last year in a thriller."
+        ctx = self._with_meeting("2025-12-14")
+        assert llm.claims_last_season_without_facts(prose, ctx, today=self.FEB_2026) is None
+        assert llm.claims_last_season_without_facts(prose, self._bare(), today=self.FEB_2026)
         # Season wording still needs last season's facts, meetings or not.
-        assert llm.claims_last_season_without_facts("They finished last season strong.", ctx)
+        assert llm.claims_last_season_without_facts("They finished last season strong.", ctx,
+                                                    today=self.FEB_2026)
+
+    def test_a_meeting_from_this_year_does_not_license_last_year(self):
+        # December 2026 preview, only a September 2026 meeting: "last year" is false.
+        ctx = self._with_meeting("2026-09-20")
+        assert llm.claims_last_season_without_facts(
+            "They met last year in a thriller.", ctx, today=self.DEC_2026) == "last year"
