@@ -426,6 +426,41 @@ class PointsBasedSportSource(SportSource):
             new_state["_applied"] = state.get("_applied", frozenset()) | {gid}
         return new_state
 
+    def record_extra(self, home: str, away: str) -> Dict[str, Any]:
+        """Each team's season record, for the description writer (#318):
+        `{"record_home": {...} | None, "record_away": {...} | None}` in the
+        shape ncaaf.py already stamps (wins, losses), plus `played`, and
+        `draws` / `points` where the league counts them (soccer draws, NHL
+        and soccer standings points). None for a team with no completed game,
+        which the prompt states as a season opener rather than 0-0.
+
+        Reads only a season list this refresh ALREADY fetched (the refresh's
+        require_season, right after fetch_upcoming, whenever importance is
+        on), so tallying it costs no request. DO NOT let this trigger a
+        fetch: with importance off the season is deliberately never read, and
+        a read that failed with nothing to stand in has no list. Either way
+        this returns {}, so the row says nothing rather than a false 0-0.
+
+        Without this, NFL / NHL / MLB / NBA / NCAA soccer rows reached the LLM
+        with no record and no season progress at all, and a week-7 NFL game
+        was previewed as both teams kicking off their seasons."""
+        if self._initial_state_cache is None and not self._all_games_cache:
+            return {}
+        teams = self.initial_state().get("_teams") or {}
+        return {"record_home": self._record_of(teams.get(home)),
+                "record_away": self._record_of(teams.get(away))}
+
+    def _record_of(self, row: Optional[Dict[str, int]]) -> Optional[Dict[str, int]]:
+        if not row or not row.get("games_played"):
+            return None
+        rec = {"wins": row.get("wins", 0), "losses": row.get("losses", 0),
+               "played": row["games_played"]}
+        if row.get("draws"):
+            rec["draws"] = row["draws"]
+        if self._count_field != "wins":
+            rec["points"] = row.get(self._count_field, 0)
+        return rec
+
     def _record_result_into_state(
         self,
         teams: Dict[str, Dict[str, int]],

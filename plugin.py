@@ -4394,6 +4394,22 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             importance_notes = [knockout_premium_note(comp_code)]
             importance_thresholds_hit = []
 
+        # Season records for the description writer (#318), tallied from the
+        # season list require_season already read (record_extra never fetches
+        # one). A source that stamps its own records (ncaaf.py, from CFBD)
+        # keeps them.
+        _record_extra = getattr(src, "record_extra", None)
+        if callable(_record_extra) and not (
+            "record_home" in g.extra or "record_away" in g.extra
+        ):
+            try:
+                g.extra.update(_record_extra(g.home, g.away))
+            except Exception as e:
+                logger.warning(
+                    "[ranked_matchups] season records failed for %s vs %s: %s",
+                    g.home, g.away, e,
+                )
+
         # Rivalry detection: source-set is_rivalry takes precedence (no adapter
         # currently does this, but the door is open); otherwise we consult the
         # static rivalries.json list. See #8.
