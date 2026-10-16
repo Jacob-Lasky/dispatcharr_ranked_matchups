@@ -1659,6 +1659,17 @@ class TestImportanceBandsAGameIsAbout:
         }, code="PL", playing=("Everton", "Wolves"))
         assert hit == ["relegation", "title"]
 
+    def test_the_playing_teams_own_points_decide_the_lead(self):
+        # Second-opinion case, kept by design: Liverpool (a favorite, not
+        # playing) has 3.0 title points riding on Arsenal v Wolves, but for
+        # the two teams on the field Wolves' relegation swing (1.0) beats
+        # Arsenal's title swing (0.3). Both are named.
+        _raw, _notes, hit = self._bands({
+            ("Arsenal", "title"): 0.06, ("Wolves", "relegation"): 0.20,
+            ("Liverpool", "title"): 0.60,
+        }, code="PL", playing=("Arsenal", "Wolves"))
+        assert hit == ["relegation", "title"]
+
     def test_a_group_game_is_never_tagged_with_a_knockout_round(self):
         # The cascade bands exist so the #53 chain counts in importance; they
         # rendered a group game as "Championship / advance race".
