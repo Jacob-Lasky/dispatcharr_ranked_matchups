@@ -53,6 +53,7 @@ TOKENS: Dict[str, str] = {
     "start_time": "Local start time, e.g. 7:00 PM",
     "kickoff": "Friendly kickoff, e.g. Today 7:00 PM EST",
     "rivalry": "The word 'rivalry' for a known rivalry, else blank",
+    "why": "The plugin's generated EPG explanation, including match status and source",
 }
 KNOWN_TOKENS = set(TOKENS)
 
@@ -95,6 +96,13 @@ def render_name(template: str, ctx: Dict[str, str]) -> str:
         return inner.replace(token, value, 1)
 
     return _GROUP_RE.sub(_sub, template)
+
+
+def render_description(template: str, ctx: Dict[str, str]) -> str:
+    """Render an EPG description; literal ``\\n`` sequences become line breaks."""
+    rendered = render_name(template.replace(r"\n", "\n"), ctx)
+    rendered = re.sub(r"[ \t]{2,}", " ", rendered)
+    return re.sub(r"\n{3,}", "\n\n", rendered).strip()
 
 
 def validate_template(template: str) -> List[str]:
@@ -238,6 +246,7 @@ def build_context(
         "start_time": start_time,
         "kickoff": kickoff,
         "rivalry": "rivalry" if is_rivalry else "",
+        "why": "",
     }
 
 

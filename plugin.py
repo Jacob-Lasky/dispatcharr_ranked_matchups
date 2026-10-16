@@ -7273,7 +7273,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     from django.db import transaction
     from django.db.models import Q
 
-    from .scoring import format_channel_name
+    from .scoring import format_channel_name, strip_team_suffix, tournament_stage_label
 
     cache = _read_cache()
     # Return early ONLY when there is no slate at all (see _cache_has_slate).
@@ -7399,6 +7399,20 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # Downstream still signals "use the default" with None, so preserve that
     # rather than threading the resolved string through every call site.
     name_template = None if _tmpl_is_default else resolved_template
+    # An empty description template preserves the existing EPG prose. A bad
+    # custom template must never prevent an apply or erase useful guide data.
+    description_template = str(settings.get("description_template") or "").strip()
+    desc_tmpl_errors = (
+        naming.validate_template(description_template) if description_template else []
+    )
+    desc_tmpl_problem = ""
+    if desc_tmpl_errors:
+        desc_tmpl_problem = (
+            "description_template invalid (" + "; ".join(desc_tmpl_errors)
+            + "); used the built-in description instead."
+        )
+        logger.warning("[ranked_matchups] %s", desc_tmpl_problem)
+        description_template = ""
     apply_tz = _resolve_tz(settings.get("local_timezone", "UTC"))
 
     # 1. Ensure target ChannelGroup. Also detect any old groups/sources we own
@@ -8283,6 +8297,30 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 llm_used += 1
 
+        if description_template:
+            desc_ctx = naming.build_context(
+                sport_prefix=g["sport_prefix"],
+                sport_label=g.get("sport_label", ""),
+                home=strip_team_suffix(g["home"]),
+                away=strip_team_suffix(g["away"]),
+                rank_home=prep.signals.rank_a,
+                rank_away=prep.signals.rank_b,
+                rank_source=prep.rank_source,
+                score_final=prep.score.final,
+                favorite=bool(prep.signals.favorite_match),
+                recording=autorec.will_record(marker),
+                tagline=tagline,
+                tournament=tournament_stage_label(
+                    getattr(prep.signals, "tournament_stage", None)
+                ),
+                venue=g.get("venue"),
+                is_rivalry=bool(getattr(prep.signals, "is_rivalry", False)),
+                start_dt=prep.start_dt,
+                tz=apply_tz,
+            )
+            desc_ctx["why"] = description
+            description = naming.render_description(description_template, desc_ctx)
+
         resolved_logo_id, logo_outcome = _resolve_matchup_logo_id(g, marker, source)
         if matchup_logos_enabled and not dry_run:
             if logo_outcome == "matchup":
@@ -9007,6 +9045,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # the ones they configured, and that is the most important thing in
         # this message (#126).
         msg = f"WARNING: {tmpl_problem}\n\n{msg}"
+    if desc_tmpl_problem:
+        msg = f"WARNING: {desc_tmpl_problem}\n\n{msg}"
     result = {"status": "ok", "message": msg}
     # The DB now matches this slate, so it can vouch for an empty one built on
     # it (#241, see _vouch_published_slate). Only for a real run that left
