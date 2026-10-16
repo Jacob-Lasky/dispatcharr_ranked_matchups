@@ -5,6 +5,15 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+## [1.36.0] - 2026-10-16
+
+Guide text you can shape and trust. A new Description template lets you write
+your own guide description, Claude's preview included or not. The built-in
+description drops a line of threshold numbers viewers read as math, taglines
+name the stakes a game actually moves instead of the same "playoff" pair on
+every game, and Claude's previews now know each team's record and how far the
+season has gone.
+
 ### Added
 
 - **Description template.** A new **Description template** setting lets you
