@@ -1517,7 +1517,7 @@ def compute_match_importance(
             source, match, queries, n_sims=n_sims, rng=rng,
         )
 
-    return importance_points(leverages, league_ctx)
+    return importance_points(leverages, league_ctx, (match.home, match.away))
 
 
 def compute_league_importance(
@@ -1548,7 +1548,8 @@ def compute_league_importance(
     favs = list(favorites_by_match) if favorites_by_match is not None else [None] * n
     queries = [importance_queries(m, league_ctx, f) for m, f in zip(matches, favs)]
     leverages = monte_carlo_importance_shared(source, matches, queries, n_sims=n_sims, rng=rng)
-    return [importance_points(lv, league_ctx) if lv is not None else None for lv in leverages]
+    return [importance_points(lv, league_ctx, (m.home, m.away)) if lv is not None else None
+            for m, lv in zip(matches, leverages)]
 
 
 def importance_queries(
@@ -1584,29 +1585,33 @@ def importance_queries(
 # La Liga game ~0.3 points, of a CFB game ~2.3). Before this, every band with
 # ANY leverage counted, in query order rather than by size, so in October every
 # NHL game read "playoff bubble / playoff secured race", Detroit's at 0.01 and
-# 0.00 leverage included.
+# 0.00 leverage included. Every band that clears the floor is listed: the floor
+# alone is what makes a band a real stake, and a share-of-the-top cut dropped a
+# 24%-leverage relegation fight from a title-race game's prompt.
 IMPORTANCE_BAND_MIN_LEVERAGE = 0.05
-# A second band is named only when it carries at least this share of the top
-# band's points; "relegation / UCL race" for a game that is 0.86 relegation
-# and 0.05 UCL tells the viewer the wrong thing.
-IMPORTANCE_BAND_SECOND_SHARE = 0.5
 
 
 def importance_points(
     leverages: Dict[Tuple[str, str], float],
     league_ctx: "LeagueContext",
+    playing: Optional[Tuple[str, str]] = None,
 ) -> Tuple[float, List[str], List[str]]:
     """Turn `{(team, label): |tau_c|}` into compute_match_importance's
     `(raw_points, notes, thresholds_hit)`: leverage x consequence weight,
     summed, with one note per nonzero contribution. Shared by both paths.
 
     `thresholds_hit` is NOT every band with leverage: it is the bands this
-    game is about, biggest first. A band qualifies when some queried team's
-    leverage on it reaches IMPORTANCE_BAND_MIN_LEVERAGE; bands rank by their
-    points summed over teams; any band after the first must hold
-    IMPORTANCE_BAND_SECOND_SHARE of the first's points. Empty when nothing
-    clears the floor, so pick_tagline falls through to rank / toss-up /
-    favorite. `raw_points` and `notes` still count every contribution."""
+    game is about, biggest first (pick_tagline names the first two). A band
+    qualifies when one team's leverage on it reaches
+    IMPORTANCE_BAND_MIN_LEVERAGE. Bands the two PLAYING teams carry come
+    first, ranked by their points; bands only a non-playing favorite carries
+    follow, so a favorite's title race cannot headline two other clubs'
+    relegation fight (its stake reaches the prose as an impact narrative).
+    `playing` is (home, away); None treats every queried team as playing.
+    A group stage's knockout-cascade labels never qualify: they are there so
+    importance counts the chain (#53), not to tag a group game "Championship".
+    Empty when nothing clears the floor, so pick_tagline falls through to rank
+    / toss-up / favorite. `raw_points` and `notes` still count everything."""
     # Map label → weight once so the contribution loop is single-pass.
     weight_by_label: Dict[str, float] = {
         label: weight for _, label, weight in league_ctx.thresholds
@@ -1614,8 +1619,6 @@ def importance_points(
 
     raw = 0.0
     notes: List[str] = []
-    band_points: Dict[str, float] = {}   # insertion order breaks ties
-    band_max_leverage: Dict[str, float] = {}
     for (team, label), leverage in leverages.items():
         if leverage <= 0:
             continue
@@ -1631,22 +1634,41 @@ def importance_points(
             f"{strip_team_suffix(team)} {label}: "
             f"{leverage:.2f} leverage × {weight:.1f} = {contrib:.2f}"
         )
-        band_points[label] = band_points.get(label, 0.0) + contrib
-        band_max_leverage[label] = max(band_max_leverage.get(label, 0.0), leverage)
     # Sort notes by descending contribution so the biggest signals lead.
     # Parse the trailing "= X.XX" since the contrib isn't in scope here;
     # cheap enough at 2-32 lines per game (depends on favorite count).
     notes.sort(key=lambda s: -float(s.rsplit("= ", 1)[1]))
-    ranked = sorted(
-        (label for label in band_points
-         if band_max_leverage[label] >= IMPORTANCE_BAND_MIN_LEVERAGE),
-        key=lambda label: -band_points[label],
-    )
-    labels_hit = [
-        label for i, label in enumerate(ranked)
-        if i == 0 or band_points[label] >= IMPORTANCE_BAND_SECOND_SHARE * band_points[ranked[0]]
-    ]
-    return raw, notes, labels_hit
+    return raw, notes, _bands_the_game_is_about(leverages, league_ctx, weight_by_label, playing)
+
+
+def _bands_the_game_is_about(
+    leverages: Dict[Tuple[str, str], float],
+    league_ctx: "LeagueContext",
+    weight_by_label: Dict[str, float],
+    playing: Optional[Tuple[str, str]],
+) -> List[str]:
+    """importance_points' `thresholds_hit`; the rules are in its docstring."""
+    playing_lc = {t.lower() for t in playing} if playing else None
+    own_labels = None
+    if getattr(league_ctx, "format", None) == "group_advance":
+        own_labels = {label for cutoff, label, _ in league_ctx.thresholds
+                      if cutoff == _GROUP_ADVANCE_SENTINEL}
+    # tier 0 = carried by a playing team, tier 1 = only by a favorite.
+    points: Dict[Tuple[int, str], float] = {}
+    for (team, label), leverage in leverages.items():
+        weight = weight_by_label.get(label, 0.0)
+        if leverage < IMPORTANCE_BAND_MIN_LEVERAGE or weight <= 0:
+            continue
+        if own_labels is not None and label not in own_labels:
+            continue
+        tier = 0 if playing_lc is None or team.lower() in playing_lc else 1
+        points[(tier, label)] = points.get((tier, label), 0.0) + leverage * weight
+    ranked = sorted(points, key=lambda key: (key[0], -points[key]))
+    out: List[str] = []
+    for _tier, label in ranked:
+        if label not in out:
+            out.append(label)
+    return out
 
 
 def strip_team_suffix(name: str) -> str:

@@ -152,10 +152,11 @@ Hard rules:
 - Rank adjectives must match the number. "Top-ranked" and "number one" mean
   ranked #1 and nothing else; a #4 team is "fourth-ranked" or "a top-five
   side". Do not inflate a ranking you were given.
-- "Outcome bands in play" lists what is mathematically still reachable, NOT
-  what is urgent. Early in a season everything is reachable and naming a band
-  says nothing: "both teams chasing bowl eligibility" is true of every team in
-  week 1. Let "Season progress" decide how to use them. Late in a season a
+- "Outcome bands in play" lists the season outcomes this result moves for one
+  of the teams, biggest first. It is NOT a measure of urgency: early in a
+  season a single result still shifts the odds of a distant outcome, and
+  naming it says nothing: "both teams chasing bowl eligibility" is true of
+  every team in week 1. Let "Season progress" decide how to use them. Late in a season a
   band is real drama; at the opener it is not a story, so write about the
   matchup, the previous meetings, or last season instead.
 - Match the framing to where the season is. At the opener there is no form

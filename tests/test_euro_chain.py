@@ -407,9 +407,9 @@ class TestEuroGroupGameGetsKnockoutLeverage:
         knockout = self._labels_with_leverage(notes) & set(self.KNOCKOUT_LABELS)
         assert {"round_of_16", "quarterfinal", "semifinal", "final", "winner"} <= knockout, notes
         assert any("quarterfinal:" in n for n in notes), notes
-        # The chain is also what the tagline sees: a knockout band leads or
-        # follows "advance" in the bands this game is about.
-        assert set(hit) & set(self.KNOCKOUT_LABELS), hit
+        # The cascade counts in points, but a group game's tagline names only
+        # its own stake (#319): never "Championship / advance race".
+        assert hit == ["advance"], hit
 
     def test_unpaired_source_scores_advance_only(self, monkeypatch):
         _pts, notes, hit = self._score(monkeypatch, paired=False)
