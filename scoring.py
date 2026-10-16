@@ -1794,6 +1794,44 @@ def pick_tagline(
     return ""
 
 
+def name_context(
+    sport_prefix: str,
+    signals: GameSignals,
+    score: GameScore,
+    home: str,
+    away: str,
+    tagline: str = "",
+    *,
+    rank_source: str = "poll",
+    sport_label: str = "",
+    venue: Optional[str] = None,
+    start_dt: Optional[datetime] = None,
+    tz=None,
+    recording: bool = False,
+) -> Dict[str, str]:
+    """The template token map for one game: format_channel_name renders it as
+    the channel name, and apply extends it for the description template
+    (#317), so both templates see the same values for the same variable."""
+    return naming.build_context(
+        sport_prefix=sport_prefix,
+        sport_label=sport_label,
+        home=strip_team_suffix(home),
+        away=strip_team_suffix(away),
+        rank_home=signals.rank_a,
+        rank_away=signals.rank_b,
+        rank_source=rank_source,
+        score_final=score.final,
+        favorite=bool(signals.favorite_match),
+        recording=bool(recording),
+        tagline=tagline,
+        tournament=tournament_stage_label(getattr(signals, "tournament_stage", None)),
+        venue=venue,
+        is_rivalry=bool(getattr(signals, "is_rivalry", False)),
+        start_dt=start_dt,
+        tz=tz,
+    )
+
+
 def format_channel_name(
     sport_prefix: str,
     signals: GameSignals,
@@ -1827,31 +1865,12 @@ def format_channel_name(
     `rank_source == "poll"`. Team-name corporate suffixes (FC / AFC / ...) are
     stripped here before the names enter the template context.
     """
-    ctx = naming.build_context(
-        sport_prefix=sport_prefix,
-        sport_label=sport_label,
-        home=strip_team_suffix(home),
-        away=strip_team_suffix(away),
-        rank_home=signals.rank_a,
-        rank_away=signals.rank_b,
-        rank_source=rank_source,
-        score_final=score.final,
-        favorite=bool(signals.favorite_match),
-        recording=bool(recording),
-        tagline=tagline,
-        tournament=tournament_stage_label(getattr(signals, "tournament_stage", None)),
-        venue=venue,
-        is_rivalry=bool(getattr(signals, "is_rivalry", False)),
-        start_dt=start_dt,
-        tz=tz,
+    ctx = name_context(
+        sport_prefix, signals, score, home, away, tagline,
+        rank_source=rank_source, sport_label=sport_label, venue=venue,
+        start_dt=start_dt, tz=tz, recording=recording,
     )
-    name = naming.render_name(template or naming.DEFAULT_NAME_TEMPLATE, ctx)
-    # render_name collapses empty {groups}; this mops up any double space a
-    # sparse CUSTOM template leaves between bare-literal separators.
-    name = re.sub(r"\s{2,}", " ", name).strip()
-    if len(name) > 250:
-        name = name[:247] + "..."
-    return name
+    return naming.finish_name(naming.render_name(template or naming.DEFAULT_NAME_TEMPLATE, ctx))
 
 
 def render_favorite_impact(

@@ -90,10 +90,15 @@ first in any IPTV client. The numbers above are the default kickoff-time
 scheme; see [Channel numbering](#channel-numbering) for the compact alternative
 (`400-424` instead of seven digits) and what it costs.
 
-The channel name is fully customizable (see "Channel Naming" in settings). The
-default renders as above: poll ranks appear inline after each team, and any
-empty field (an unranked team, a game with no tagline) collapses cleanly. Use
-the **Test naming convention** action to preview a template before applying it.
+The channel name is fully customizable (see "Channel Name & Description" in
+settings). The default renders as above: poll ranks appear inline after each
+team, and any empty field (an unranked team, a game with no tagline) collapses
+cleanly. The guide description takes a template the same way, with three extra
+variables: `{llm}` (a Claude-written preview, when LLM descriptions are on),
+`{details}` (the built-in description) and `{source_channel}`. For example
+`{away_team} at {home_team}{ · kickoff}{ - llm}`. Leave it blank for the
+built-in description. Use the **Test naming convention** action to preview both
+templates before applying them.
 
 ## Sports supported
 
