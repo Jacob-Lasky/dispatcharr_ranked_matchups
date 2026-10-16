@@ -5,8 +5,36 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+### Added
+
+- **Description template.** A new **Description template** setting lets you
+  choose what the guide shows as each game's description, with the same
+  `{variable}` rules as the channel name template plus `{llm}` (the
+  Claude-written preview), `{details}` (the built-in description) and
+  `{source_channel}`. Blank keeps the built-in description. When LLM
+  descriptions are on and the template has no `{llm}`, no Claude call is made.
+  **Test naming convention** previews the description too. (#317)
+
 ### Fixed
 
+- **"Math" in the guide description.** For NHL, NFL, MLB, NBA, college sports
+  and NCAA soccer, the built-in description ended with a raw threshold legend
+  such as `95+ pts → playoff bubble · 100+ → comfortable · ...`, the same on
+  every game. It is gone; league tables (soccer) keep their plain-English
+  "the top 4 take the Champions League ..." sentence. (#317)
+- **Test naming convention showed blank dates and times.** Its sample games
+  had no kickoff or venue, so `{game_date}`, `{start_time}`, `{kickoff}` and
+  `{venue}` previewed empty, and it skipped the double-space cleanup apply
+  does, so a custom name could look broken in the preview but fine on the
+  channel. The samples now kick off tomorrow at 7 PM with a venue, the cleanup
+  is shared, and the result is short enough to read in full, with any problem
+  on the last line. The variable list moved to the template settings' help
+  text, which now also names `{recording_dot}`. (#317)
+- **Template checks catch two more mistakes.** A `{group}` holding two
+  variables (only the first was ever filled in, the second printed as a plain
+  word) and braces in the wrong order such as `{home_team}}{` used to pass and
+  show up in the channel name. Both are now reported, and the default is used
+  until they are fixed, the same as any other broken template. (#317)
 - **Taglines say what a game is actually about.** The "race" tagline on a
   channel name and in the guide listed the first outcome bands a game touched
   at all, so early in a season nearly every NHL game read "playoff bubble /

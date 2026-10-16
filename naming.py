@@ -1,4 +1,5 @@
-"""Channel-name templating: Sonarr/Radarr-style ``{token}`` substitution.
+"""Channel-name and EPG-description templating: Sonarr/Radarr-style ``{token}``
+substitution.
 
 Bare text in a template is literal. A ``{group}`` holds exactly one known
 token plus optional literal decoration glued around it (brackets, parens,
@@ -18,9 +19,10 @@ stays a pure function set: unit-testable in isolation and safe to call from the
 
 from __future__ import annotations
 
+import functools
 import re
-from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import AbstractSet, Dict, List, Optional, Tuple
 
 
 # The default ships inline poll ranks after each team (issue #99) and drops the
@@ -32,9 +34,9 @@ DEFAULT_NAME_TEMPLATE = (
     "{away_team}{ (rank_away)} at {home_team}{ (rank_home)}{ · tagline}"
 )
 
-# Every token the template understands -> a one-line, user-facing description.
-# The descriptions are surfaced verbatim by the test-naming action, so keep
-# them tight. Insertion order is the order they are listed to the user.
+# Every token the template understands -> a one-line description. The names
+# are listed to the user in plugin.json's name_template help text, and a test
+# fails if one is missing there; the descriptions document each token here.
 TOKENS: Dict[str, str] = {
     "league_short": "Short league code, e.g. CFB",
     "league_full": "Full league name, e.g. NCAA Football",
@@ -54,7 +56,19 @@ TOKENS: Dict[str, str] = {
     "kickoff": "Friendly kickoff, e.g. Today 7:00 PM EST",
     "rivalry": "The word 'rivalry' for a known rivalry, else blank",
 }
-KNOWN_TOKENS = set(TOKENS)
+KNOWN_TOKENS = frozenset(TOKENS)
+
+# The EPG description template (#317) understands every name token plus these.
+# Same shape as TOKENS; plugin.json's description_template help text names
+# each one (test-enforced).
+DESCRIPTION_ONLY_TOKENS: Dict[str, str] = {
+    "llm": ("Claude-written 2-3 sentence preview; needs 'LLM-rewritten EPG "
+            "descriptions' on, blank when it is off or the call fails"),
+    "details": "The plugin's built-in description (why the game ranked, standings, source)",
+    "source_channel": "Name of the channel the stream comes from (blank if unmatched)",
+}
+DESCRIPTION_TOKENS: Dict[str, str] = {**TOKENS, **DESCRIPTION_ONLY_TOKENS}
+KNOWN_DESCRIPTION_TOKENS = frozenset(DESCRIPTION_TOKENS)
 
 _FAVORITE_STAR = "⭐"
 # Same glyph the programme titles carry (recording.DOT); kept as a literal here
@@ -62,20 +76,26 @@ _FAVORITE_STAR = "⭐"
 _RECORDING_DOT = "\U0001F534"
 
 _GROUP_RE = re.compile(r"\{([^{}]*)\}")
-# Longest-first matching so a token never loses to a shorter token that is a
-# prefix of it (e.g. a future bare "rank" must not pre-empt "rank_home").
-_TOKEN_IN_GROUP_RE = re.compile(
-    r"\b(" + "|".join(re.escape(t) for t in sorted(KNOWN_TOKENS, key=len, reverse=True)) + r")\b"
-)
 
 
-def _find_token(inner: str) -> Optional[str]:
+@functools.lru_cache(maxsize=None)
+def _token_re(known: AbstractSet[str]) -> "re.Pattern[str]":
+    # Longest-first matching so a token never loses to a shorter token that is
+    # a prefix of it (e.g. a future bare "rank" must not pre-empt "rank_home").
+    return re.compile(
+        r"\b(" + "|".join(re.escape(t) for t in sorted(known, key=len, reverse=True)) + r")\b"
+    )
+
+
+def _find_token(inner: str, known: AbstractSet[str] = KNOWN_TOKENS) -> Optional[str]:
     """Return the known token inside a group's text, or None if there isn't one."""
-    m = _TOKEN_IN_GROUP_RE.search(inner)
+    m = _token_re(frozenset(known)).search(inner)
     return m.group(1) if m else None
 
 
-def render_name(template: str, ctx: Dict[str, str]) -> str:
+def render_name(
+    template: str, ctx: Dict[str, str], known: AbstractSet[str] = KNOWN_TOKENS,
+) -> str:
     """Render ``template`` against a token -> value map.
 
     A ``{group}`` emits its inner text with the token replaced by its value, or
@@ -86,7 +106,7 @@ def render_name(template: str, ctx: Dict[str, str]) -> str:
     """
     def _sub(m: "re.Match[str]") -> str:
         inner = m.group(1)
-        token = _find_token(inner)
+        token = _find_token(inner, known)
         if token is None:
             return inner
         value = ctx.get(token, "")
@@ -97,16 +117,40 @@ def render_name(template: str, ctx: Dict[str, str]) -> str:
     return _GROUP_RE.sub(_sub, template)
 
 
-def validate_template(template: str) -> List[str]:
+def validate_template(template: str, known: AbstractSet[str] = KNOWN_TOKENS) -> List[str]:
     """Return human-readable problems with a template; empty list means valid."""
     errors: List[str] = []
     if template.count("{") != template.count("}"):
         errors.append("Unbalanced { } braces.")
+    elif not _braces_well_formed(template):
+        # Equal counts are not enough: "{home_team}}{" balances and still
+        # renders a stray "}{" into every channel.
+        errors.append("Braces out of order or nested; each { needs its own } before the next {.")
+    pattern = _token_re(frozenset(known))
     for m in _GROUP_RE.finditer(template):
         inner = m.group(1)
-        if _find_token(inner) is None:
+        found = pattern.findall(inner)
+        if not found:
             errors.append(f"No known variable in group: {{{inner}}}")
+        elif len(found) > 1:
+            # render_name substitutes only the first, so "{source_channel: llm}"
+            # would print the word "llm" and never call Claude.
+            errors.append(f"More than one variable in group: {{{inner}}} (use one group per variable)")
     return errors
+
+
+def _braces_well_formed(template: str) -> bool:
+    depth = 0
+    for ch in template:
+        if ch == "{":
+            depth += 1
+            if depth > 1:
+                return False
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
 
 
 def resolve_template(raw: Optional[str]) -> "tuple[str, List[str], bool]":
@@ -143,13 +187,81 @@ def template_problem_summary(errors: List[str]) -> str:
     sees two different phrasings for the same problem reasonably assumes they
     are two different problems.
     """
+    return _problem_summary("name_template", "the DEFAULT template", errors)
+
+
+def _problem_summary(setting: str, fallback: str, errors: List[str]) -> str:
     if not errors:
         return ""
     return (
-        f"name_template invalid ({'; '.join(errors)}); "
-        f"used the DEFAULT template instead. Fix it under Channel Naming, or "
+        f"{setting} invalid ({'; '.join(errors)}); "
+        f"used {fallback} instead. Fix it under Channel Name & Description, or "
         f"run 'Test naming convention' to preview."
     )
+
+
+# ---------- EPG description template (#317) ----------
+
+def resolve_description_template(raw: Optional[str]) -> Tuple[Optional[str], List[str]]:
+    """The description counterpart of resolve_template: (template, errors).
+
+    None means "use the built-in description", for a blank setting (not an
+    error) and for a broken one (errors listed, and the caller must show them,
+    for the reason resolve_template's docstring gives). Apply, the preview
+    action and show_status all route through here so they cannot disagree.
+    """
+    stripped = (raw or "").strip()
+    if not stripped:
+        return None, []
+    errors = validate_template(stripped, KNOWN_DESCRIPTION_TOKENS)
+    if errors:
+        return None, errors
+    return stripped, []
+
+
+def description_template_problem_summary(errors: List[str]) -> str:
+    """One-line rendering of resolve_description_template's errors."""
+    return _problem_summary("description_template", "the built-in description", errors)
+
+
+def template_uses(template: str, token: str, known: AbstractSet[str] = KNOWN_DESCRIPTION_TOKENS) -> bool:
+    """True when some {group} in `template` resolves to `token`."""
+    return any(_find_token(m.group(1), known) == token for m in _GROUP_RE.finditer(template))
+
+
+def description_needs_llm(template: Optional[str]) -> bool:
+    """Whether a description built from `template` (None = built-in) would
+    show Claude's prose. The built-in layout swaps in the prose whole; a
+    template shows it only through an {llm} group. Apply asks this before
+    paying for a call, and the preview before warning that {llm} will be
+    blank, so the two cannot disagree."""
+    return template is None or template_uses(template, "llm")
+
+
+def render_description(template: str, ctx: Dict[str, str]) -> str:
+    """Render a description template. Unlike a channel name, line breaks are
+    content here, so only runs of spaces are squeezed (and each line trimmed);
+    blank lines left by collapsed groups shrink to one paragraph break.
+
+    A template that renders to nothing (every group collapsed, say {llm} alone
+    on a failed call) yields ctx["details"], the built-in description, rather
+    than an empty guide entry. It lives here, not in apply, so the preview
+    shows the same fallback apply writes."""
+    text = render_name(template, ctx, KNOWN_DESCRIPTION_TOKENS)
+    text = "\n".join(re.sub(r"[ \t]{2,}", " ", line).strip() for line in text.splitlines())
+    return re.sub(r"\n{3,}", "\n\n", text).strip() or ctx.get("details", "")
+
+
+_MAX_NAME_LEN = 250
+
+
+def finish_name(rendered: str) -> str:
+    """The cleanup every rendered channel name gets, in apply AND in the
+    preview, so the preview shows exactly what apply will write: squeeze the
+    double spaces a sparse custom template leaves between bare-literal
+    separators, then cap the length."""
+    name = re.sub(r"\s{2,}", " ", rendered).strip()
+    return name if len(name) <= _MAX_NAME_LEN else name[:_MAX_NAME_LEN - 3] + "..."
 
 
 def format_score(score_final: Optional[float]) -> str:
@@ -244,7 +356,9 @@ def build_context(
 # Representative games for the test-naming action: deterministic, always
 # available (no live cache required), and chosen to exercise every collapse
 # path: both ranked, one ranked, none ranked, favorite present/absent, a
-# tournament-stage tagline, a standings "race" tagline, and a rivalry.
+# tournament-stage tagline, a standings "race" tagline, and a known/unknown
+# venue. Each kicks off tomorrow at 7 PM local (_preview_start), so the date
+# and time variables preview filled in, as they render on a real channel.
 _PREVIEW_SAMPLES = [
     {
         "_label": "Ranked vs unranked, favorite, college",
@@ -252,6 +366,7 @@ _PREVIEW_SAMPLES = [
         "away": "Alabama", "home": "St. John's",
         "rank_away": 15, "rank_home": None, "rank_source": "poll",
         "score_final": 8.5, "favorite": True, "tagline": "top-25 matchup",
+        "venue": "Madison Square Garden",
     },
     {
         "_label": "Both ranked, college football",
@@ -259,6 +374,7 @@ _PREVIEW_SAMPLES = [
         "away": "Ohio State", "home": "Penn State",
         "rank_away": 5, "rank_home": 1, "rank_source": "poll",
         "score_final": 9.2, "favorite": False, "tagline": "top-5 showdown",
+        "venue": "Beaver Stadium",
     },
     {
         "_label": "Standings race, soccer (ranks suppressed)",
@@ -266,6 +382,7 @@ _PREVIEW_SAMPLES = [
         "away": "Brentford", "home": "Manchester United",
         "rank_away": 9, "rank_home": 3, "rank_source": "standings",
         "score_final": 10.0, "favorite": False, "tagline": "title race",
+        "venue": "Old Trafford",
     },
     {
         "_label": "Pro game, no ranks / no tagline / no favorite",
@@ -280,8 +397,22 @@ _PREVIEW_SAMPLES = [
         "away": "LSU", "home": "Tennessee",
         "rank_away": None, "rank_home": None, "rank_source": "poll",
         "score_final": 9.0, "favorite": False, "tagline": "Road to Omaha",
+        "venue": "Charles Schwab Field",
     },
 ]
+
+
+def _preview_start(tz) -> datetime:
+    """Tomorrow, 7:00 PM in `tz` (UTC when None): a kickoff every date and
+    time variable renders for."""
+    zone = tz or timezone.utc
+    tomorrow = datetime.now(zone) + timedelta(days=1)
+    return tomorrow.replace(hour=19, minute=0, second=0, microsecond=0)
+
+
+def _preview_context(sample: Dict, tz) -> Dict[str, str]:
+    kwargs = {k: v for k, v in sample.items() if not k.startswith("_")}
+    return build_context(tz=tz or timezone.utc, start_dt=_preview_start(tz), **kwargs)
 
 
 def preview_lines(template: str, tz=None) -> "tuple[List[str], List[tuple[str, str]]]":
@@ -294,7 +425,32 @@ def preview_lines(template: str, tz=None) -> "tuple[List[str], List[tuple[str, s
     errors = validate_template(template)
     out: List[tuple[str, str]] = []
     for sample in _PREVIEW_SAMPLES:
-        kwargs = {k: v for k, v in sample.items() if not k.startswith("_")}
-        ctx = build_context(tz=tz, **kwargs)
-        out.append((sample["_label"], render_name(template, ctx)))
+        out.append((sample["_label"], finish_name(render_name(template, _preview_context(sample, tz)))))
     return errors, out
+
+
+# Stand-ins for the description-only variables in the preview. Canned, like the
+# samples above, so the preview needs no cache, no network and no API key.
+_PREVIEW_DETAILS = "A top-25 matchup: toss-up.\n\nSource: ESPN+ 12."
+_PREVIEW_LLM = "Alabama brings a top-15 defense into the Garden against a St. John's side unbeaten at home."
+
+
+_PREVIEW_DESCRIPTION_MAX = 200
+
+
+def preview_description(template: str, llm_on: bool, tz=None) -> str:
+    """Render `template` for the first canned sample game, on ONE line (line
+    breaks shown as " / ") and capped, so it fits the action's toast. {llm}
+    renders only when `llm_on`, which is what apply will do."""
+    ctx = _preview_context(_PREVIEW_SAMPLES[0], tz)
+    ctx.update({
+        "llm": _PREVIEW_LLM if llm_on else "",
+        "details": _PREVIEW_DETAILS,
+        "source_channel": "ESPN+ 12",
+    })
+    line = " / ".join(
+        part for part in render_description(template, ctx).splitlines() if part
+    )
+    if len(line) <= _PREVIEW_DESCRIPTION_MAX:
+        return line
+    return line[:_PREVIEW_DESCRIPTION_MAX - 1] + "…"

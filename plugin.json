@@ -571,7 +571,7 @@
       "type": "boolean",
       "label": "LLM-rewritten EPG descriptions",
       "default": false,
-      "help_text": "When on, Claude rewrites each curated game's EPG description as a 2-3 sentence natural-prose preview instead of the deterministic 'Matchday X. Tagline. Source: ...' layout. Uses the Anthropic key + 'Claude model' setting above; falls back to the deterministic description if the key is missing or the API call fails. Cached per game in llm_descriptions_cache.json so a re-apply doesn't re-bill. Cost: ~$0.001 per game (Haiku 4.5), about $2-3/month at default refresh cadence."
+      "help_text": "When on, Claude writes each curated game's EPG description as a 2-3 sentence natural-prose preview instead of the built-in 'Matchday X. Tagline. Source: ...' layout. With a Description template set, the prose goes wherever the template puts {llm} instead, and no call is made if the template has no {llm}. Uses the Anthropic key + 'Claude model' setting above; falls back to the built-in description if the key is missing or the API call fails. Cached per game in llm_descriptions_cache.json so a re-apply doesn't re-bill. Cost: ~$0.001 per game (Haiku 4.5), about $2-3/month at default refresh cadence."
     },
     {
       "id": "_section_scoring",
@@ -612,14 +612,22 @@
     {
       "id": "_section_naming",
       "type": "info",
-      "label": "Channel Naming"
+      "label": "Channel Name & Description"
     },
     {
       "id": "name_template",
       "type": "string",
       "label": "Channel name template",
       "default": "{league_short} {favorite_star}★{score} · {away_team}{ (rank_away)} at {home_team}{ (rank_home)}{ · tagline}",
-      "help_text": "Sonarr/Radarr-style template for the channel name. Plain text is literal; a {group} holds one variable plus any literal characters glued to it, and the whole group disappears when the variable is blank (so an unranked team or a game with no tagline leaves no stray parens or separators). Variables: {league_short} {league_full} {away_team} {home_team} {rank_away} {rank_home} {rank_pair} {score} {favorite_star} {tagline} {tournament} {venue} {game_date} {start_time} {kickoff} {rivalry}. Use the 'Test naming convention' button to preview before applying. Leave blank for the default shown above."
+      "help_text": "Sonarr/Radarr-style template for the channel name. Plain text is literal; a {group} holds one variable plus any literal characters glued to it, and the whole group disappears when the variable is blank (so an unranked team or a game with no tagline leaves no stray parens or separators). Variables: {league_short} {league_full} {away_team} {home_team} {rank_away} {rank_home} {rank_pair} {score} {favorite_star} {recording_dot} {tagline} {tournament} {venue} {game_date} {start_time} {kickoff} {rivalry}. Use the 'Test naming convention' button to preview before applying. Leave blank for the default shown above."
+    },
+    {
+      "id": "description_template",
+      "type": "text",
+      "label": "Description template",
+      "default": "",
+      "placeholder": "{away_team} at {home_team}{ · tagline}{\n\nllm}",
+      "help_text": "Optional. What the guide shows as each game's description, using the same {group} rules as the channel name template above, and line breaks are kept. Leave blank for the built-in description. Every channel-name variable works here, plus {llm} (the Claude-written preview, needs 'LLM-rewritten EPG descriptions' on, blank otherwise), {details} (the built-in description) and {source_channel} (the channel the stream comes from). Example: {away_team} at {home_team}{ · kickoff}{ - llm}. Use 'Test naming convention' to preview."
     },
     {
       "id": "_section_apply",
@@ -882,7 +890,7 @@
     {
       "id": "preview_names",
       "label": "Test naming convention",
-      "description": "Render the channel name template against sample games (no DB writes, no cache needed) so you can check the layout before applying. Reports any template errors and lists every available variable."
+      "description": "Render the channel name and description templates against sample games (no DB writes, no cache needed, no API calls) so you can check the layout before applying. Reports any template problems on the last line."
     },
     {
       "id": "diagnose",
