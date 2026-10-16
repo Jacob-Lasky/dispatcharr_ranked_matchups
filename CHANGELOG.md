@@ -5,6 +5,17 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Taglines say what a game is actually about.** The "race" tagline on a
+  channel name and in the guide listed the first outcome bands a game touched
+  at all, so early in a season nearly every NHL game read "playoff bubble /
+  playoff secured race", including games where the result barely moved
+  anything. It now names the stake this game moves most, plus a second one
+  only when that one is close behind, and leaves the stake out entirely when
+  the game hardly changes anyone's odds (the tagline then falls back to a
+  ranked matchup, toss-up or favorite). (#319)
+
 ## [1.35.0] - 2026-10-15
 
 Three settings a user asked for: weigh some leagues above others, leave out

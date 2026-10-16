@@ -1604,3 +1604,64 @@ class TestTournamentStageNoteIsUserFacing:
         )
         note = next(n for n in res.notes if n.startswith("tournament stage:"))
         assert note.strip() != "tournament stage:"
+
+
+class TestImportanceBandsAGameIsAbout:
+    """#319: thresholds_hit (the tagline's bands) is ranked by points and
+    floored by leverage, not every band with any leverage in query order.
+    Literals throughout, taken from the live 2026-10-15 NHL slate, so a
+    change to the two constants cannot move both sides of an assertion."""
+
+    @staticmethod
+    def _bands(leverages):
+        from dispatcharr_ranked_matchups.scoring import LEAGUE_CONTEXTS, importance_points
+        return importance_points(leverages, LEAGUE_CONTEXTS["NHL"])
+
+    def test_negligible_stakes_name_no_band(self):
+        # Detroit vs Philadelphia: "playoff bubble / playoff secured race" at
+        # 0.01 and 0.004 leverage. Nothing clears the floor, so no tagline.
+        raw, notes, hit = self._bands({
+            ("Detroit Red Wings", "playoff_bubble"): 0.01,
+            ("Detroit Red Wings", "playoff_secured"): 0.004,
+        })
+        assert hit == []
+        assert len(notes) == 2 and raw > 0, "points and notes still count every band"
+
+    def test_bands_rank_by_points_not_query_order(self):
+        # Minnesota vs St. Louis. Query order puts playoff_bubble first; by
+        # points: playoff_secured 0.375+0.275=0.65, division_pace 0.36+0.12=0.48,
+        # playoff_bubble 0.135+0.18=0.315 (under half of 0.65, so not named).
+        _raw, _notes, hit = self._bands({
+            ("Minnesota Wild", "playoff_bubble"): 0.09,
+            ("Minnesota Wild", "playoff_secured"): 0.15,
+            ("Minnesota Wild", "division_pace"): 0.09,
+            ("St. Louis Blues", "playoff_bubble"): 0.12,
+            ("St. Louis Blues", "playoff_secured"): 0.11,
+            ("St. Louis Blues", "division_pace"): 0.03,
+        })
+        assert hit == ["playoff_secured", "division_pace"]
+
+    def test_a_minor_second_band_is_not_named(self):
+        # 0.30 x 4.0 = 1.2 division_pace vs 0.06 x 2.5 = 0.15 playoff_secured.
+        _raw, _notes, hit = self._bands({
+            ("Vegas Golden Knights", "playoff_secured"): 0.06,
+            ("Vegas Golden Knights", "division_pace"): 0.30,
+        })
+        assert hit == ["division_pace"]
+
+    def test_floor_is_per_team_leverage_not_summed(self):
+        # Two teams at 0.03 each: neither result moves anyone's odds by 5
+        # points, so the band is not what the game is about.
+        _raw, _notes, hit = self._bands({
+            ("A", "presidents_trophy"): 0.03,
+            ("B", "presidents_trophy"): 0.03,
+        })
+        assert hit == []
+
+    def test_tagline_follows(self):
+        from dispatcharr_ranked_matchups.scoring import pick_tagline
+        tag = pick_tagline({"importance": 1.0}, [], None, ["playoff_secured", "division_pace"],
+                           None, None, None, rank_source="standings")
+        assert tag == "playoff secured / division pace race"
+        assert pick_tagline({"importance": 1.0}, [], None, [], None, None, None,
+                            rank_source="standings") == ""

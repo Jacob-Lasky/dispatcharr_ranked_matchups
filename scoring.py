@@ -127,10 +127,10 @@ class GameSignals:
     # Lahvička Monte Carlo importance, pre-weight. Sources that don't
     # implement compute_match_importance leave these at 0 / empty; the
     # importance block in score_game then contributes nothing.
-    # `importance_thresholds_hit` is the deduped list of outcome bands
-    # with nonzero leverage on any queried team (the playing teams plus
-    # in-league favorites). pick_tagline uses it for editorial taglines
-    # ("relegation race" / "title race").
+    # `importance_thresholds_hit` is the outcome bands this game is about,
+    # biggest first (see importance_points: a leverage floor, then ranked by
+    # points, over the playing teams plus in-league favorites). pick_tagline
+    # uses it for editorial taglines ("relegation race" / "title race").
     importance_points: float = 0.0
     importance_notes: List[str] = field(default_factory=list)
     importance_thresholds_hit: List[str] = field(default_factory=list)
@@ -1474,9 +1474,9 @@ def compute_match_importance(
       - `raw_points` is the sum of (leverage × weight) over all queries.
       - `notes` lists nonzero contributions sorted by descending magnitude,
         formatted "{team} {label}: 0.42 leverage × 5.0 = 2.10".
-      - `thresholds_hit` is the deduped list of band labels with nonzero
-        leverage on any queried team. Used by pick_tagline to surface
-        "relegation race" / "title race" type editorial taglines.
+      - `thresholds_hit` is the bands this game is about, biggest first
+        (see importance_points for the floor and ranking). Used by
+        pick_tagline to surface "relegation race" / "title race" taglines.
 
     Returns (0.0, [], []) immediately when the source doesn't support
     importance simulation (caller should also gate, but defense in depth).
@@ -1576,13 +1576,37 @@ def importance_queries(
     ]
 
 
+# Which outcome bands a game is "about" (#319): the bands that name its stakes
+# in the tagline ("title race") and in the LLM prompt ("Outcome bands in
+# play"). Leverage is how far this result moves a team's chance of reaching the
+# band, a probability swing, so the floor means the same in every league;
+# contribution sizes do not (measured 2026-10-16: the top band of a curated
+# La Liga game ~0.3 points, of a CFB game ~2.3). Before this, every band with
+# ANY leverage counted, in query order rather than by size, so in October every
+# NHL game read "playoff bubble / playoff secured race", Detroit's at 0.01 and
+# 0.00 leverage included.
+IMPORTANCE_BAND_MIN_LEVERAGE = 0.05
+# A second band is named only when it carries at least this share of the top
+# band's points; "relegation / UCL race" for a game that is 0.86 relegation
+# and 0.05 UCL tells the viewer the wrong thing.
+IMPORTANCE_BAND_SECOND_SHARE = 0.5
+
+
 def importance_points(
     leverages: Dict[Tuple[str, str], float],
     league_ctx: "LeagueContext",
 ) -> Tuple[float, List[str], List[str]]:
     """Turn `{(team, label): |tau_c|}` into compute_match_importance's
     `(raw_points, notes, thresholds_hit)`: leverage x consequence weight,
-    summed, with one note per nonzero contribution. Shared by both paths."""
+    summed, with one note per nonzero contribution. Shared by both paths.
+
+    `thresholds_hit` is NOT every band with leverage: it is the bands this
+    game is about, biggest first. A band qualifies when some queried team's
+    leverage on it reaches IMPORTANCE_BAND_MIN_LEVERAGE; bands rank by their
+    points summed over teams; any band after the first must hold
+    IMPORTANCE_BAND_SECOND_SHARE of the first's points. Empty when nothing
+    clears the floor, so pick_tagline falls through to rank / toss-up /
+    favorite. `raw_points` and `notes` still count every contribution."""
     # Map label → weight once so the contribution loop is single-pass.
     weight_by_label: Dict[str, float] = {
         label: weight for _, label, weight in league_ctx.thresholds
@@ -1590,8 +1614,8 @@ def importance_points(
 
     raw = 0.0
     notes: List[str] = []
-    labels_hit: List[str] = []
-    seen_labels: set = set()
+    band_points: Dict[str, float] = {}   # insertion order breaks ties
+    band_max_leverage: Dict[str, float] = {}
     for (team, label), leverage in leverages.items():
         if leverage <= 0:
             continue
@@ -1607,13 +1631,21 @@ def importance_points(
             f"{strip_team_suffix(team)} {label}: "
             f"{leverage:.2f} leverage × {weight:.1f} = {contrib:.2f}"
         )
-        if label not in seen_labels:
-            seen_labels.add(label)
-            labels_hit.append(label)
+        band_points[label] = band_points.get(label, 0.0) + contrib
+        band_max_leverage[label] = max(band_max_leverage.get(label, 0.0), leverage)
     # Sort notes by descending contribution so the biggest signals lead.
     # Parse the trailing "= X.XX" since the contrib isn't in scope here;
     # cheap enough at 2-32 lines per game (depends on favorite count).
     notes.sort(key=lambda s: -float(s.rsplit("= ", 1)[1]))
+    ranked = sorted(
+        (label for label in band_points
+         if band_max_leverage[label] >= IMPORTANCE_BAND_MIN_LEVERAGE),
+        key=lambda label: -band_points[label],
+    )
+    labels_hit = [
+        label for i, label in enumerate(ranked)
+        if i == 0 or band_points[label] >= IMPORTANCE_BAND_SECOND_SHARE * band_points[ranked[0]]
+    ]
     return raw, notes, labels_hit
 
 
