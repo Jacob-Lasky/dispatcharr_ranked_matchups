@@ -194,6 +194,24 @@ class TestDeepDive:
         assert "unexpected" not in msg
         assert "skipped on purpose" in msg and "swimming" in msg
 
+    def test_skipped_listing_is_reported_as_skipped(self, plugin):
+        # The window listings go through the gate too: a WSL listing is not
+        # "names BOTH teams but wasn't auto-picked".
+        rows = [("BBC Two", "WSL: Chelsea vs Tottenham Hotspur", " [BOTH TEAMS]")]
+        games = [_game("Chelsea FC", "Tottenham Hotspur FC", prefix="EPL")]
+        msg = _run(plugin, games, window_rows=rows, lookup_cands=[])
+        assert "skipped on purpose" in msg and "women's" in msg
+        assert "wasn't auto-picked" not in msg
+
+    def test_a_matchable_listing_outranks_a_skipped_one(self, plugin):
+        # Found by the #324 second opinion: with the skip verdict first, the
+        # matchable BBC One listing went unreported.
+        rows = [("BBC Two", "WSL: Chelsea vs Tottenham Hotspur", " [BOTH TEAMS]"),
+                ("BBC One", "Chelsea vs Tottenham Hotspur", " [BOTH TEAMS]")]
+        games = [_game("Chelsea FC", "Tottenham Hotspur FC", prefix="EPL")]
+        msg = _run(plugin, games, window_rows=rows, lookup_cands=[])
+        assert "wasn't auto-picked" in msg and "BBC One" in msg
+
     def test_lookup_gets_the_users_timezone(self, plugin):
         # Which dated names are stale depends on the zone (min of UTC and
         # local). Diagnose used the UTC default while refresh passed the

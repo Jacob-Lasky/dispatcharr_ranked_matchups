@@ -235,6 +235,17 @@ class ChannelCandidate:
     # to see them or the game only ever reaches the LLM. Empty for Path B / C
     # candidates, which have no programme behind them.
     program_extra: str = ""
+    # The programme sub-title alone (it is also inside program_extra). Short
+    # and curated like a title, so the conflict gate reads it; the description
+    # is free prose that name-drops other sports and is NOT read (#324).
+    program_sub_title: str = ""
+    # The CHANNEL NAME advertises a date before this game (#324). Set by the
+    # lookup on a Path A candidate, whose EPG evidence is current while its
+    # name is last week's event slot ('ESPN+ 138: NC State vs Stanford @ Oct
+    # 16'). Tier 1 and the conflict gate ignore such a name; the programme
+    # tiers still read the EPG. Path B/C candidates with a stale name are not
+    # emitted at all, so this is only ever True on Path A.
+    channel_name_stale: bool = False
 
 
 @dataclass
@@ -589,6 +600,9 @@ def _regex_filter_channel_name(
     do not carry them, so there is no failure of this shape to defend against
     there, and gating an unaffected path only costs recall.
     """
+    # A stale-dated name is last week's event, whatever EPG put the channel
+    # in the pool (#324).
+    candidates = [c for c in candidates if not c.channel_name_stale]
     if team_b is None:
         # Single-sided: see the matching note in _regex_filter.
         a_kws = _strong_team_keywords(team_a)
@@ -897,8 +911,8 @@ def name_is_stale_for_game(name: str, earliest_game_date: "date") -> bool:
     the previous two nights' finished broadcasts (#164).
 
     DO NOT tighten this to "date must equal the game's date". The caller passes
-    the EARLIEST plausible date for the game (its date in UTC and in the user's
-    configured timezone, whichever is earlier), because provider names are
+    the EARLIEST plausible date for the game (its date in UTC, in the user's
+    configured timezone and in US Eastern, whichever is earliest), because provider names are
     stamped in the broadcaster's local zone -- almost always ET -- which can sit
     a day behind or ahead of both. Requiring equality would drop the CORRECT
     feed for any late-evening game whose UTC date has already rolled over, and
@@ -1020,6 +1034,10 @@ _SPORT_PHRASES: Tuple[Tuple[str, str], ...] = (
     ("mma", "mma"),
     ("boxing", "boxing"),
     ("darts", "darts"),
+    # College schedule abbreviations, sport and gender in one token.
+    ("wbb", "basketball"), ("mbb", "basketball"),
+    ("wsoc", "soccer"), ("msoc", "soccer"),
+    ("wvb", "volleyball"), ("mvb", "volleyball"),
 )
 
 # Phrases that name a gender's competition. Women's club competitions are
@@ -1029,7 +1047,9 @@ _GENDER_PHRASES: Tuple[Tuple[str, str], ...] = (
     ("wsl", "w"), ("nwsl", "w"), ("uwcl", "w"), ("wnba", "w"), ("wxv", "w"),
     ("liga f", "w"), ("frauen", "w"), ("femenil", "w"), ("femenino", "w"),
     ("feminino", "w"), ("féminine", "w"), ("feminine", "w"), ("(w)", "w"),
+    ("wbb", "w"), ("wsoc", "w"), ("wvb", "w"),
     ("men's", "m"), ("mens", "m"), ("men", "m"),
+    ("mbb", "m"), ("msoc", "m"), ("mvb", "m"),
 )
 
 
@@ -1088,49 +1108,68 @@ def name_conflicts_with_game(
     return None
 
 
-def _candidate_event_text(
+def _candidate_event_parts(
     c: ChannelCandidate, home_kws: List[str], away_kws: Optional[List[str]],
-) -> str:
-    """The part of a candidate that describes the EVENT it carries.
+) -> List[str]:
+    """The parts of a candidate that each describe the EVENT it carries.
 
-    The programme title always does. The channel/stream name does only when it
-    names the fixture itself (an event slot or a per-match feed, which is every
-    Path B and Path C candidate). A station name that names no team ('Sky Sports
-    Golf', 'NBA TV') is a brand, not a description of tonight's programme, and
-    overflow coverage puts other sports on those stations, so judging the
-    programme by the station's name would drop real broadcasts.
+    The programme title and sub-title always do (the sub-title is where
+    European broadcasters put the fixture, #143). The channel/stream name does
+    only when it names the fixture itself (an event slot or a per-match feed,
+    which is every Path B and Path C candidate) and is not stale-dated. A
+    station name that names no team ('Sky Sports Golf', 'NBA TV') is a brand,
+    not a description of tonight's programme, and overflow coverage puts other
+    sports on those stations, so judging the programme by the station's name
+    would drop real broadcasts. The description is never read: it is prose
+    that mentions other sports and teams in passing.
     """
-    parts = [c.program_title] if c.program_title else []
-    if c.channel_name and c.channel_name != c.program_title:
+    parts = [t for t in (c.program_title, c.program_sub_title) if t]
+    if (c.channel_name and c.channel_name not in parts
+            and not c.channel_name_stale):
         names_fixture = (
             _kw_hit(c.channel_name, home_kws) if away_kws is None
             else both_teams_in_one_segment(c.channel_name, home_kws, away_kws)
         )
         if names_fixture:
             parts.append(c.channel_name)
-    return " ".join(parts)
+    return parts
+
+
+def candidate_conflict(c: ChannelCandidate, game: Any, field: bool) -> Optional[str]:
+    """Why candidate `c` cannot be `game`, or None.
+
+    Each event part is judged ON ITS OWN, so a channel name that says 'CFB'
+    cannot vouch for a programme titled 'College Swimming: NC State vs
+    Stanford' on it: the programme is what is on, and it says it is something
+    else. A game with no or an unmapped prefix is not judged. Diagnose calls
+    this too, so the two can never disagree about a feed.
+    """
+    prefix = getattr(game, "sport_prefix", "") or ""
+    if prefix not in _PREFIX_SPORT:
+        return None
+    home_kws = _team_keywords(game.home)
+    away_kws = None if field else _team_keywords(game.away)
+    teams = (game.home,) if field else (game.home, game.away)
+    for part in _candidate_event_parts(c, home_kws, away_kws):
+        why = name_conflicts_with_game(part, prefix, teams)
+        if why:
+            return why
+    return None
 
 
 def drop_conflicting_candidates(
     candidates: List[ChannelCandidate], game: Any, field: bool,
 ) -> Tuple[List[ChannelCandidate], List[Tuple[ChannelCandidate, str]]]:
     """Split candidates into (kept, [(dropped, reason)]) by the conflict gate."""
-    home_kws = _team_keywords(game.home)
-    away_kws = None if field else _team_keywords(game.away)
-    teams = (game.home,) if field else (game.home, game.away)
-    # getattr: a game with no prefix is unmapped, and unmapped is not judged.
-    prefix = getattr(game, "sport_prefix", "") or ""
-    if prefix not in _PREFIX_SPORT:
-        return list(candidates), []
     kept, dropped = [], []
     for c in candidates:
-        why = name_conflicts_with_game(
-            _candidate_event_text(c, home_kws, away_kws), prefix, teams)
+        why = candidate_conflict(c, game, field)
         if why:
             dropped.append((c, why))
         else:
             kept.append(c)
     return kept, dropped
+
 
 def _partition_attach_targets(
     primary: ChannelCandidate, cands: List[ChannelCandidate]

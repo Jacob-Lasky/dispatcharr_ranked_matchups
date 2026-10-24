@@ -218,3 +218,78 @@ def test_every_emitted_prefix_is_mapped(built_sources):
     missing = sorted(emitted - set(_PREFIX_SPORT))
     assert not missing, f"add these to matcher._PREFIX_SPORT: {missing}"
     assert len(emitted) >= 30, "instrument check: too few sources were built"
+
+
+class TestSecondOpinionFindings:
+    """Six inputs an independent review (gpt-6-sol, 2026-10-24) produced
+    against the first cut of #324. Each failed before its fix."""
+
+    def test_et_stamped_feed_survives_for_a_user_east_of_utc(self, plugin, monkeypatch):
+        # 02:30Z Oct 24 is Oct 23 22:30 ET; a Berlin user's date and UTC's are
+        # both Oct 24, so min(UTC, local) called the correct feed stale.
+        from zoneinfo import ZoneInfo
+        chans = [_Row(id=1, name="ESPN+ 045: NC State at Stanford @ Oct 23 10:30PM ET",
+                      epg_data_id=None)]
+        _install_fake_orm(monkeypatch, chans, programs=[])
+        game = _game("Stanford", "NC State", "CFB",
+                     datetime(2026, 10, 24, 2, 30, tzinfo=timezone.utc))
+        res, stats = _match(plugin, game, chans, local_tz=ZoneInfo("Europe/Berlin"))
+        assert res.channel_ids == [1]
+        assert stats["stale_dated_channels_dropped"] == 0
+
+    def _subtitle_case(self, plugin, monkeypatch, sub_title):
+        win = datetime(2026, 10, 24, 16, 30, tzinfo=timezone.utc)
+        chans = [_Row(id=5, name="BBC One HD", epg_data_id=77)]
+        progs = [_Row(id=1, title="Live Sports", sub_title=sub_title, description="",
+                      start_time=win, end_time=win.replace(hour=18), epg_id=77)]
+        _install_fake_orm(monkeypatch, chans, progs)
+        game = _game("Chelsea FC", "Tottenham Hotspur FC", "EPL", win)
+        return _match(plugin, game, chans)[0]
+
+    def test_womens_fixture_in_the_subtitle_is_rejected(self, plugin, monkeypatch):
+        res = self._subtitle_case(plugin, monkeypatch, "WSL: Chelsea vs Tottenham Hotspur")
+        assert res.channel_ids == []
+
+    def test_mens_fixture_in_the_subtitle_still_matches(self, plugin, monkeypatch):
+        # Recall control for the case above (#143's path).
+        res = self._subtitle_case(
+            plugin, monkeypatch, "Premier League: Chelsea vs Tottenham Hotspur")
+        assert res.channel_ids == [5]
+
+    def test_stale_slot_name_admitted_by_epg_cannot_win_tier1(
+            self, plugin, monkeypatch, eastern):
+        # Path A admits the channel on its current programme naming ONE team;
+        # Tier 1 must not then match on the slot's stale name naming both.
+        win = datetime(2026, 10, 24, 2, 30, tzinfo=timezone.utc)
+        chans = [_Row(id=8, name="ESPN+ 138: NC State vs Stanford @ Oct 16",
+                      epg_data_id=55)]
+        progs = [_Row(id=1, title="Stanford vs Oregon", sub_title="", description="",
+                      start_time=win, end_time=win.replace(hour=5), epg_id=55)]
+        _install_fake_orm(monkeypatch, chans, progs)
+        game = _game("Stanford", "NC State", "CFB", win)
+        res, _ = _match(plugin, game, chans, local_tz=eastern)
+        # Not a Tier 1 (channel-name) match. The one-team programme still
+        # reaches the LLM tier, which declines it with a key; keyless installs
+        # take the first candidate there by design, which is not this test.
+        assert res.method != "regex_strict", res
+
+    def test_a_channel_label_cannot_vouch_for_a_contrary_programme(self):
+        from dispatcharr_ranked_matchups.matcher import ChannelCandidate, candidate_conflict
+        now = datetime(2026, 10, 24, 2, 30, tzinfo=timezone.utc)
+        c = ChannelCandidate(channel_id=1, channel_name="CFB: NC State vs Stanford",
+                             program_title="College Swimming: NC State vs Stanford",
+                             program_start=now, program_end=now)
+        game = _game("Stanford", "NC State", "CFB", now)
+        assert "swimming" in (candidate_conflict(c, game, field=False) or "")
+
+    @pytest.mark.parametrize("text,prefix", [
+        ("ESPN+ 045: Stanford vs NC State WBB", "CBB"),
+        ("ESPN+ 045: Stanford vs NC State MBB", "NCAAW"),
+        ("ACCNX 12: Duke vs UNC WSOC", "NCAAMSOC"),
+        ("ACCNX 13: Duke vs UNC WVB", "NCAAMSOC"),
+    ])
+    def test_college_schedule_abbreviations(self, text, prefix):
+        assert name_conflicts_with_game(text, prefix) is not None
+
+    def test_college_abbreviation_for_the_right_game_is_kept(self):
+        assert name_conflicts_with_game("ESPN+ 045: Stanford vs NC State MBB", "CBB") is None
