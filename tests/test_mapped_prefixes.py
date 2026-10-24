@@ -57,6 +57,7 @@ PREFIX_TABLES = (
     ("gamethumbs", "GAMETHUMBS_LEAGUE_SLUGS"),
     ("gamethumbs", "_TEAM_ALIASES"),
     ("rivalries", "_RIVALRIES_BY_SPORT"),
+    ("matcher", "_PREFIX_SPORT"),
 )
 
 # Tables whose keys overlap the prefix space but are a DIFFERENT key space, so

@@ -4578,11 +4578,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             policy_excluded,
         )
     stale_dropped = epg_lookup.stats.get("stale_dated_streams_dropped", 0)
-    if stale_dropped:
+    stale_chans = epg_lookup.stats.get("stale_dated_channels_dropped", 0)
+    if stale_dropped or stale_chans:
         logger.info(
-            "[ranked_matchups] refresh: skipped %d stream(s) whose name dated "
-            "them before their game (previous nights of the same series)",
-            stale_dropped,
+            "[ranked_matchups] refresh: skipped %d stream(s) and %d channel(s) "
+            "whose name dated them before their game (an earlier event with "
+            "the same teams)",
+            stale_dropped, stale_chans,
         )
 
     # 5. Build cache payload (transparent: every signal + breakdown stored)
@@ -4762,7 +4764,7 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
         _strong_team_keywords,
         _team_keywords,
         both_teams_in_one_segment,
-        stream_is_stale_for_game,
+        name_is_stale_for_game,
     )
     from apps.channels.models import Channel, Stream
     from apps.epg.models import ProgramData
@@ -4770,7 +4772,8 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
 
     # Counters the caller reports after the whole slate is matched. A dict
     # rather than a nonlocal int so the accessor below is a plain attribute.
-    stats = {"stale_dated_streams_dropped": 0, "policy_streams_excluded": 0}
+    stats = {"stale_dated_streams_dropped": 0, "stale_dated_channels_dropped": 0,
+             "policy_streams_excluded": 0}
 
     def lookup(game) -> List[ChannelCandidate]:
         # Per-game match window: soccer needs a tighter window to avoid
@@ -4944,6 +4947,14 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
             if c.id in seen_channel_ids:
                 continue
             seen_channel_ids.add(c.id)
+            # Path B has no time window either (#324): a provider event slot
+            # keeps last week's name until an M3U refresh renames it, and that
+            # name still names both schools. Same predicate and reference date
+            # as Path C below. A channel Path A already found keeps its EPG
+            # evidence, which is why this sits after the seen-check.
+            if name_is_stale_for_game(c.name or "", earliest_game_date):
+                stats["stale_dated_channels_dropped"] += 1
+                continue
             out.append(ChannelCandidate(
                 channel_id=c.id,
                 channel_name=c.name,
@@ -4998,7 +5009,7 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
             # night's dedicated feed names the same two teams and all of them
             # pass. Roughly half the 22 streams attached to one Yankees game
             # were the two previous nights' finished broadcasts.
-            if stream_is_stale_for_game(s.name or "", earliest_game_date):
+            if name_is_stale_for_game(s.name or "", earliest_game_date):
                 stats["stale_dated_streams_dropped"] += 1
                 continue
             out.append(ChannelCandidate(

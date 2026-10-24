@@ -1,5 +1,5 @@
 {
-  "_comment": "Curated team-name aliases for EPG matching. Maps a canonical team name (e.g. 'Manchester United') to a list of common abbreviations broadcasters use in EPG titles ('Man United', 'Man Utd'). Used by matcher._team_keywords to expand the regex pre-filter so 'Man United vs Brentford' EPG entries match the canonical 'Manchester United' from Football-Data.org. Match is case-insensitive. See #4.",
+  "_comment": "Curated team-name aliases for EPG matching. Maps a canonical team name (e.g. 'Manchester United') to a list of common abbreviations broadcasters use in EPG titles ('Man United', 'Man Utd'). Used by matcher._team_keywords to expand the regex pre-filter so 'Man United vs Brentford' EPG entries match the canonical 'Manchester United' from Football-Data.org. Match is case-insensitive. See #4. DO NOT alias a club by a word another club in its own competition also starts with: 'Real' (Real Madrid) matched 'LaLiga: Real Betis vs. Barcelona' for Real Madrid at Barcelona, and 'Paris' (PSG) matches Paris FC and Paris Basketball; the both-teams gate cannot tell them apart when they share an opponent (#324).",
   "Manchester United": [
     "Man United",
     "Man Utd",
@@ -106,7 +106,6 @@
     "Stuttgart"
   ],
   "Real Madrid": [
-    "Real",
     "Real Madrid CF",
     "RMA"
   ],
@@ -137,7 +136,7 @@
   "Paris Saint-Germain": [
     "Paris SG",
     "PSG",
-    "Paris",
+    "Paris SaintGermain",
     "Paris S-G",
     "Paris St-Germain"
   ],

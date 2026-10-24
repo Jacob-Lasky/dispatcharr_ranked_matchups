@@ -183,15 +183,19 @@ def install_orm(chans, progs, streams):
 
 def load_pkg():
     """Load real _util + matcher + plugin by file path (no Django import)."""
+    # The package FIRST: _util does `from ._http import ...`, so loading it
+    # before the parent package exists fails with "No module named
+    # 'dispatcharr_ranked_matchups'". The empty __path__ package lets every
+    # relative import resolve to the files in REPO_ROOT.
+    if PKG not in sys.modules:
+        pkg = types.ModuleType(PKG)
+        pkg.__path__ = [REPO_ROOT]
+        sys.modules[PKG] = pkg
     if f"{PKG}._util" not in sys.modules:
         s = importlib.util.spec_from_file_location(f"{PKG}._util", os.path.join(REPO_ROOT, "_util.py"))
         m = importlib.util.module_from_spec(s)
         sys.modules[f"{PKG}._util"] = m
         s.loader.exec_module(m)
-    if PKG not in sys.modules:
-        pkg = types.ModuleType(PKG)
-        pkg.__path__ = [REPO_ROOT]
-        sys.modules[PKG] = pkg
     out = {}
     for sub in ("matcher", "plugin"):
         full = f"{PKG}.{sub}"
