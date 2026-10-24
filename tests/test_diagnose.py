@@ -174,12 +174,40 @@ class TestDeepDive:
         from datetime import datetime, timezone
         now = datetime(2026, 6, 15, 20, 0, tzinfo=timezone.utc)
         stream_cand = ChannelCandidate(
-            channel_id=-77, channel_name="USA Soccer10: Knicks vs Spurs",
-            program_title="USA Soccer10: Knicks vs Spurs",
+            # No sport word in the name: 'Soccer' would now be skipped by the
+            # #324 conflict gate before this verdict is reached.
+            channel_id=-77, channel_name="USA Sports10: Knicks vs Spurs",
+            program_title="USA Sports10: Knicks vs Spurs",
             program_start=now, program_end=now, stream_id=77)
         games = [_game("New York Knicks", "San Antonio Spurs", prefix="NBA", score=8.0)]
         msg = _run(plugin, games, window_rows=[], lookup_cands=[stream_cand])
         assert "stream name has both teams but it didn't match" in msg
+
+    def test_feed_skipped_for_another_sport_says_so(self, plugin, ChannelCandidate):
+        # #324: the matcher skips this on purpose, so "unexpected; please send
+        # us this" would be a false bug report. Diagnose runs the same gate.
+        name = ("ESPN+ 138: College Swimming League (Indiana, Cal, Stanford, "
+                "NC State) @ Oct 23 8:27PM ET")
+        games = [_game("NC State", "Stanford", prefix="CFB", score=4.0)]
+        msg = _run(plugin, games, window_rows=[],
+                   lookup_cands=[_cand(ChannelCandidate, name)])
+        assert "unexpected" not in msg
+        assert "skipped on purpose" in msg and "swimming" in msg
+
+    def test_lookup_gets_the_users_timezone(self, plugin):
+        # Which dated names are stale depends on the zone (min of UTC and
+        # local). Diagnose used the UTC default while refresh passed the
+        # user's zone, so the two could disagree about the same feed.
+        seen = {}
+
+        def lookup(**kw):
+            seen.update(kw)
+            return lambda shim: []
+        plugin._read_cache = lambda: {"games": [_game("A", "B", prefix="NBA")]}
+        plugin._diagnose_window_sample = lambda *a, **k: []
+        plugin._build_epg_lookup = lookup
+        plugin._action_diagnose({"local_timezone": "America/New_York"})
+        assert str(seen.get("local_tz")) == "America/New_York"
 
     def test_feed_that_arrived_after_the_refresh_says_so(self, plugin, ChannelCandidate):
         # 2026-10-10: the M3U renamed its event slots to the noon game at 12:22,

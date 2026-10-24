@@ -9883,6 +9883,7 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
         _regex_filter_channel_name,
         _strong_team_keywords,
         _team_keywords,
+        drop_conflicting_candidates,
     )
 
     cache = _read_cache()
@@ -9943,6 +9944,7 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     home_kws = away_kws = []
     rows: List[Any] = []
     stream_hits: List[str] = []  # Path C: stream NAMES that name the team(s)
+    conflicts: List[Any] = []    # (candidate, reason) the conflict gate skipped
     verdict = ""
     toast: List[str] = []
     field = False
@@ -9981,10 +9983,16 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
             shim = SimpleNamespace(sport_prefix=target.get("sport_prefix"),
                                    start_time=start_dt, home=home, away=away,
                                    extra=target.get("extra") or {})
+            # Same lookup AND the same pre-tier gate the refresh used, or the
+            # verdicts below explain candidates the matcher never saw: the
+            # user's zone decides which dated names are stale, and a feed the
+            # conflict gate skipped is not "unexpected" (#324).
             try:
                 cands = _build_epg_lookup(
-                    excluded_stream_ids=_streams_in_groups(_group_policy(settings)[1])
+                    local_tz=_resolve_tz(settings.get("local_timezone", "UTC")),
+                    excluded_stream_ids=_streams_in_groups(_group_policy(settings)[1]),
                 )(shim)
+                cands, conflicts = drop_conflicting_candidates(cands, shim, field=field)
             except Exception:
                 cands = []
             # Path C: stream NAMES (not channel names) that name the team(s).
@@ -10018,6 +10026,10 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
                             if field else
                             "A stream name has both teams but it didn't match - ")
                            + "unexpected; please send us this.")
+            elif conflicts:
+                skipped, why = conflicts[0]
+                verdict = (f"A feed names it but {why}, so it was skipped on purpose: "
+                           f"\"{_trunc(skipped.channel_name, 60)}\".")
             elif both:
                 verdict = ("A listing names BOTH teams but wasn't auto-picked - reply "
                            "and we'll fix it.")
@@ -10069,6 +10081,8 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
                 vlog.append(f"    +{len(stream_hits) - 40} more")
         else:
             vlog.append("  streams naming the team(s): none")
+        for skipped, why in conflicts[:20]:
+            vlog.append(f"  skipped ({why}): \"{skipped.channel_name}\"")
     vlog.append(f"  verdict: {verdict}")
     vlog.append(f"all unmatched ({len(unmatched)}):")
     for g in unmatched:
