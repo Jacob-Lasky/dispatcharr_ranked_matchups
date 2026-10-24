@@ -67,8 +67,7 @@
   ],
   "Borussia Dortmund": [
     "Dortmund",
-    "BVB",
-    "Borussia"
+    "BVB"
   ],
   "Bayern Munich": [
     "FC Bayern",
@@ -117,7 +116,10 @@
   "Atletico Madrid": [
     "Atletico",
     "Atletico de Madrid",
-    "Atleti"
+    "Atleti",
+    "Club Atlético de Madrid",
+    "Atlético Madrid",
+    "Atlético de Madrid"
   ],
   "Athletic Bilbao": [
     "Athletic Club",
@@ -156,7 +158,8 @@
   "Inter Milan": [
     "Inter",
     "Internazionale",
-    "Inter Milano"
+    "Inter Milano",
+    "FC Internazionale Milano"
   ],
   "AC Milan": [
     "Milan",
@@ -593,5 +596,17 @@
   ],
   "Argentina": [
     "Argentinien"
+  ],
+  "Espanyol": [
+    "RCD Espanyol de Barcelona",
+    "RCD Espanyol"
+  ],
+  "Feyenoord": [
+    "Feyenoord Rotterdam"
+  ],
+  "Sporting CP": [
+    "Sporting Clube de Portugal",
+    "Sporting Lisbon",
+    "Sporting Lisboa"
   ]
 }

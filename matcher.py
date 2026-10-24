@@ -75,6 +75,37 @@ def _load_team_aliases() -> Dict[str, List[str]]:
 
 _TEAM_ALIASES = _load_team_aliases()
 
+
+def _alias_reverse(aliases: Dict[str, List[str]]) -> Dict[str, str]:
+    """{alias: key} for every alias listed under exactly ONE key.
+
+    An entry is a GROUP of names for one club, and a source may emit any of
+    them as the canonical name. Football-Data.org says 'Club Atlético de
+    Madrid', 'FC Internazionale Milano' and 'Athletic Club', while the entries
+    were keyed 'Atletico Madrid', 'Inter Milan' and 'Athletic Bilbao', so a
+    key-only lookup never applied them and those clubs fell back to bare-city
+    keywords ('Madrid', 'Milano') that name a league rival too (#324). An alias
+    listed under two keys names two clubs and resolves to neither.
+    """
+    seen: Dict[str, Optional[str]] = {}
+    for key, vals in aliases.items():
+        for v in vals:
+            seen[v] = None if v in seen and seen[v] != key else key
+    return {v: k for v, k in seen.items() if k is not None}
+
+
+_TEAM_ALIAS_REVERSE = _alias_reverse(_TEAM_ALIASES)
+
+
+def _alias_group(name: str) -> List[str]:
+    """Every OTHER name in `name`'s alias group, or [] when it has none."""
+    if name in _TEAM_ALIASES:
+        return list(_TEAM_ALIASES[name])
+    key = _TEAM_ALIAS_REVERSE.get(name)
+    if key is None:
+        return []
+    return [key] + [v for v in _TEAM_ALIASES[key] if v != name]
+
 # Last-word tokens we never use as a standalone keyword fallback. 'state' /
 # 'college' / 'university' are college-football generic; the soccer
 # second-words ('united', 'city', etc.) collide across many EPL/EFL clubs.
@@ -110,11 +141,48 @@ _GENERIC_EVENT_LAST_WORDS = frozenset({
     "games", "final", "finals", "challenge", "tournament", "international",
 })
 
+# Club-type nouns that END a club's formal name ('Cagliari Calcio', 'Athletic
+# Club'). They are stripped like a trailing 'FC' rather than kept as the
+# last-word keyword, which they used to be: 'Calcio' was the ONLY short key
+# four Serie A clubs had, so each matched the other three (#324). Matcher-local
+# on purpose, NOT added to _util.TEAM_SUFFIX_TOKENS, which scoring and the
+# sources also read for unrelated name normalisation.
+_CLUB_NOUN_SUFFIXES = frozenset({"calcio", "club", "clube"})
+
+# Places that more than one club in the SAME competition is named for, so a
+# relaxation down to the bare place names a league rival as well (#324):
+# 'Madrid' (Real, Atlético, Rayo), 'Barcelona' (FC Barcelona, RCD Espanyol de
+# Barcelona), 'Milano' (Inter, and AC Milan as a substring), 'Rotterdam'
+# (Feyenoord, Sparta), 'Paris' (PSG, Paris FC), 'Portugal' (Sporting Clube de
+# Portugal, and the national team). Only DERIVED keywords are suppressed; a
+# club whose broadcast name really is the place ('Barcelona' for FC Barcelona)
+# gets it from team_aliases.json, where a human has decided it. The guard is
+# tests/test_wrong_sport_feeds.py::test_no_keyword_names_a_league_rival, which
+# runs over every club in tests/fixtures/fd_team_names.json.
+_SHARED_PLACE_WORDS = frozenset({
+    "madrid", "barcelona", "milano", "milan", "rotterdam", "paris", "portugal",
+})
+
 _GENERIC_LAST_WORDS = frozenset(
     {"state", "college", "university", "york"}
     | set(GENERIC_TEAM_SECOND_WORDS)
     | _GENERIC_EVENT_LAST_WORDS
+    | _SHARED_PLACE_WORDS
 )
+
+# Leading tokens that are a club's legal form, not its identity ('1. FC
+# Köln', 'Sporting Clube de Braga'). A two-word prefix made only of these, or
+# ending in a club noun, is shared by every club of that form: '1. FC' named
+# both Köln and Union Berlin, 'Sporting Clube' both Braga and Sporting CP.
+_CLUB_FORM_TOKENS = frozenset(set(TEAM_SUFFIX_TOKENS) | _CLUB_NOUN_SUFFIXES | {
+    "1.", "ac", "as", "us", "ss", "ssc", "rc", "rcd", "cd", "ud", "sd", "ca",
+    "sv", "vfb", "vfl", "tsg", "fk", "sk",
+})
+
+
+def _is_club_form_prefix(prefix: str) -> bool:
+    toks = prefix.lower().split()
+    return all(t in _CLUB_FORM_TOKENS for t in toks) or toks[-1] in _CLUB_NOUN_SUFFIXES
 
 
 def _is_weak_last_word(token: str) -> bool:
@@ -224,9 +292,21 @@ def _team_keywords_split(team_name: str) -> Tuple[List[str], List[str]]:
     # Strip trailing club tag for soccer-style names so 'Brentford FC' also
     # matches 'Brentford' in a channel/program title.
     stripped: Optional[str] = None
-    if len(parts) >= 2 and parts[-1].lower() in TEAM_SUFFIX_TOKENS:
-        stripped = " ".join(parts[:-1])
-        strong.append(stripped)
+    # Trailing club tags, club nouns and a founding year ('Parma Calcio 1913')
+    # come off together; one tag per name was the old rule (#324).
+    cut = len(parts)
+    while cut >= 2 and (
+        parts[cut - 1].lower() in TEAM_SUFFIX_TOKENS
+        or parts[cut - 1].lower() in _CLUB_NOUN_SUFFIXES
+        or (parts[cut - 1].isdigit() and len(parts[cut - 1]) == 4)
+    ):
+        cut -= 1
+    if cut < len(parts):
+        stripped = " ".join(parts[:cut])
+        # 'Paris FC' -> 'Paris' would name PSG too; the alias lookup below
+        # still uses the stripped form.
+        if stripped.lower() not in _SHARED_PLACE_WORDS:
+            strong.append(stripped)
         # Re-derive parts so subsequent rules see the canonical form.
         parts = stripped.split()
 
@@ -261,18 +341,21 @@ def _team_keywords_split(team_name: str) -> Tuple[List[str], List[str]]:
         # worse than the token it replaced. The full event name stays STRONG and
         # remains the discriminator.
         prefix = " ".join(parts[:2])
-        if not emitted_last_word and stripped is None and not suppressed_as_event_noun:
+        if _is_club_form_prefix(prefix):
+            pass  # '1. FC', 'Sporting Clube': every club of that form (#324)
+        elif not emitted_last_word and stripped is None and not suppressed_as_event_noun:
             strong.append(prefix)
         else:
             weak.append(prefix)
 
     # Broadcaster aliases (#4). Look up both the original name AND the
     # FC-stripped form because the JSON has "Manchester United" but FD.org
-    # returns "Manchester United FC". Aliases are curated per team, so they are
+    # returns "Manchester United FC". The lookup resolves the whole alias
+    # GROUP, so a canonical name listed as an alias also works (#324). Aliases are curated per team, so they are
     # strong by construction.
     for lookup in (name, stripped):
-        if lookup and lookup in _TEAM_ALIASES:
-            strong.extend(_TEAM_ALIASES[lookup])
+        if lookup:
+            strong.extend(_alias_group(lookup))
 
     strong = list(dict.fromkeys(strong))
     weak = [k for k in dict.fromkeys(weak) if k not in strong]

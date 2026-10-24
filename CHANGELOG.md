@@ -5,6 +5,24 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Wrong-sport and last-week feeds on game channels.** NC State at Stanford
+  football carried only `College Swimming League (... Stanford, NC State) @ Oct
+  16`, a week-old swimming meet: channel names had no date check, and nothing
+  checked the sport. A sweep found 5 of 17 game channels with a feed of this
+  kind (swimming, the women's WSL, Real *Betis* for Real Madrid). Channel names
+  now get the same date check as stream names, and a feed naming another sport
+  or the other gender's competition is skipped. (#324)
+- **Clubs matching a league rival's feeds.** Several match keywords named a
+  rival in the same league: `Madrid` (Real, Atlético, Rayo), `Barcelona` for
+  Espanyol, `Calcio` for four Serie A clubs, `Paris` for Paris FC and PSG,
+  `Rotterdam`, `1. FC`, `Borussia`. They are gone, and clubs Football-Data.org
+  names formally (`Club Atlético de Madrid`, `FC Internazionale Milano`,
+  `Athletic Club`, `Cagliari Calcio`) now get their broadcast names, so Inter,
+  Atlético, Espanyol, Feyenoord, Sporting CP and the `Calcio` clubs find feeds
+  they used to miss. (#324)
+
 ## [1.36.0] - 2026-10-16
 
 Guide text you can shape and trust. A new Description template lets you write
