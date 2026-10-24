@@ -100,7 +100,7 @@ class TestPathCRejectsStaleDatedStreams:
         return src[start:src.index("\ndef ", start + 10)]
 
     def test_path_c_consults_the_staleness_filter(self):
-        assert "stream_is_stale_for_game(s.name or \"\", earliest_game_date)" in self._lookup_src()
+        assert "name_is_stale_for_game(s.name or \"\", earliest_game_date)" in self._lookup_src()
 
     def test_the_reference_date_is_the_EARLIER_of_utc_and_local(self):
         # Taking min() is what absorbs the provider's timezone (names are

@@ -2543,6 +2543,11 @@ def _stream_sort_key(
 
 # ---------- timezone helpers ----------
 
+# The zone provider feed names are stamped in ('@ Oct 16 8:27PM ET', '(10.16
+# 7:00 PM ET)'). Part of the stale-name reference date in _build_epg_lookup.
+_PROVIDER_STAMP_TZ = ZoneInfo("America/New_York") if ZoneInfo is not None else timezone.utc
+
+
 def _resolve_tz(name: str):
     """Best-effort load a tz; falls back to UTC. Used for 'is_today' classification
     and for formatting kickoff times in the EPG description."""
@@ -4578,11 +4583,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             policy_excluded,
         )
     stale_dropped = epg_lookup.stats.get("stale_dated_streams_dropped", 0)
-    if stale_dropped:
+    stale_chans = epg_lookup.stats.get("stale_dated_channels_dropped", 0)
+    if stale_dropped or stale_chans:
         logger.info(
-            "[ranked_matchups] refresh: skipped %d stream(s) whose name dated "
-            "them before their game (previous nights of the same series)",
-            stale_dropped,
+            "[ranked_matchups] refresh: skipped %d stream(s) and %d channel(s) "
+            "whose name dated them before their game (an earlier event with "
+            "the same teams)",
+            stale_dropped, stale_chans,
         )
 
     # 5. Build cache payload (transparent: every signal + breakdown stored)
@@ -4762,7 +4769,7 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
         _strong_team_keywords,
         _team_keywords,
         both_teams_in_one_segment,
-        stream_is_stale_for_game,
+        name_is_stale_for_game,
     )
     from apps.channels.models import Channel, Stream
     from apps.epg.models import ProgramData
@@ -4770,7 +4777,8 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
 
     # Counters the caller reports after the whole slate is matched. A dict
     # rather than a nonlocal int so the accessor below is a plain attribute.
-    stats = {"stale_dated_streams_dropped": 0, "policy_streams_excluded": 0}
+    stats = {"stale_dated_streams_dropped": 0, "stale_dated_channels_dropped": 0,
+             "policy_streams_excluded": 0}
 
     def lookup(game) -> List[ChannelCandidate]:
         # Per-game match window: soccer needs a tighter window to avoid
@@ -4790,9 +4798,14 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
         # two rather than picking one and being wrong for half the slate. Erring
         # early costs at most one extra stale feed; erring late drops the LIVE
         # feed for any night game whose UTC date has already rolled over.
+        # Eastern is in the min() itself, not only via the user's zone (#324):
+        # for a user east of UTC both their date and UTC's can be a day AFTER
+        # the ET date the provider stamped, which dropped the CORRECT feed of
+        # every late-evening ET game for them.
         earliest_game_date = min(
             game.start_time.astimezone(timezone.utc).date(),
             game.start_time.astimezone(local_tz).date(),
+            game.start_time.astimezone(_PROVIDER_STAMP_TZ).date(),
         )
 
         # Field events (#127) have no opponent: the away side is the "Field"
@@ -4938,12 +4951,27 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
                             x for x in (getattr(p, "sub_title", "") or "",
                                         getattr(p, "description", "") or "") if x
                         ),
+                        program_sub_title=getattr(p, "sub_title", "") or "",
+                        # The EPG is current, but the NAME may be a slot that
+                        # still carries last week's event, and Tier 1 reads
+                        # the name. Path B below would have dropped this
+                        # channel; here it keeps its programme evidence (#324).
+                        channel_name_stale=name_is_stale_for_game(
+                            c.name or "", earliest_game_date),
                     ))
 
         for c in name_match_chans:
             if c.id in seen_channel_ids:
                 continue
             seen_channel_ids.add(c.id)
+            # Path B has no time window either (#324): a provider event slot
+            # keeps last week's name until an M3U refresh renames it, and that
+            # name still names both schools. Same predicate and reference date
+            # as Path C below. A channel Path A already found keeps its EPG
+            # evidence, which is why this sits after the seen-check.
+            if name_is_stale_for_game(c.name or "", earliest_game_date):
+                stats["stale_dated_channels_dropped"] += 1
+                continue
             out.append(ChannelCandidate(
                 channel_id=c.id,
                 channel_name=c.name,
@@ -4998,7 +5026,7 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
             # night's dedicated feed names the same two teams and all of them
             # pass. Roughly half the 22 streams attached to one Yankees game
             # were the two previous nights' finished broadcasts.
-            if stream_is_stale_for_game(s.name or "", earliest_game_date):
+            if name_is_stale_for_game(s.name or "", earliest_game_date):
                 stats["stale_dated_streams_dropped"] += 1
                 continue
             out.append(ChannelCandidate(
@@ -9869,9 +9897,12 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     # unused parameter.
     from types import SimpleNamespace
     from .matcher import (
+        ChannelCandidate,
         _regex_filter_channel_name,
         _strong_team_keywords,
         _team_keywords,
+        candidate_conflict,
+        drop_conflicting_candidates,
     )
 
     cache = _read_cache()
@@ -9932,6 +9963,7 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
     home_kws = away_kws = []
     rows: List[Any] = []
     stream_hits: List[str] = []  # Path C: stream NAMES that name the team(s)
+    conflicts: List[Any] = []    # (candidate, reason) the conflict gate skipped
     verdict = ""
     toast: List[str] = []
     field = False
@@ -9957,23 +9989,46 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
             verdict = "Can't diagnose this one: bad start time in cache."
             toast = [head, f"=> {verdict}"]
         else:
+            shim = SimpleNamespace(sport_prefix=target.get("sport_prefix"),
+                                   start_time=start_dt, home=home, away=away,
+                                   extra=target.get("extra") or {})
             try:
                 rows = _diagnose_window_sample(
                     start_dt, target.get("sport_prefix"), home, away,
                     home_kws, away_kws, field=field, extra=target.get("extra"))
             except Exception:  # diagnostic must never raise
                 rows = []
+            # The window listings go through the matcher's conflict gate too,
+            # or a skipped 'WSL: Chelsea vs Tottenham Hotspur' listing reads as
+            # "names BOTH teams but wasn't auto-picked" (#324).
+            kept_rows = []
+            for name, title, ann in rows:
+                why = candidate_conflict(
+                    ChannelCandidate(channel_id=0, channel_name=name or "",
+                                     program_title=title or "",
+                                     program_start=start_dt, program_end=start_dt),
+                    shim, field)
+                if why:
+                    conflicts.append((SimpleNamespace(
+                        channel_name=name, program_title=title), why))
+                else:
+                    kept_rows.append((name, title, ann))
+            rows = kept_rows
             # Single most relevant listing that names a team (both > one); an
             # unrelated head-to-head airing at the same time is not evidence.
             both = next((r for r in rows if r[2] == " [BOTH TEAMS]"), None)
             one = next((r for r in rows if r[2] and r[2] != " [BOTH TEAMS]"), None)
-            shim = SimpleNamespace(sport_prefix=target.get("sport_prefix"),
-                                   start_time=start_dt, home=home, away=away,
-                                   extra=target.get("extra") or {})
+            # Same lookup AND the same pre-tier gate the refresh used, or the
+            # verdicts below explain candidates the matcher never saw: the
+            # user's zone decides which dated names are stale, and a feed the
+            # conflict gate skipped is not "unexpected" (#324).
             try:
                 cands = _build_epg_lookup(
-                    excluded_stream_ids=_streams_in_groups(_group_policy(settings)[1])
+                    local_tz=_resolve_tz(settings.get("local_timezone", "UTC")),
+                    excluded_stream_ids=_streams_in_groups(_group_policy(settings)[1]),
                 )(shim)
+                cands, cand_conflicts = drop_conflicting_candidates(cands, shim, field=field)
+                conflicts.extend(cand_conflicts)
             except Exception:
                 cands = []
             # Path C: stream NAMES (not channel names) that name the team(s).
@@ -10010,6 +10065,12 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
             elif both:
                 verdict = ("A listing names BOTH teams but wasn't auto-picked - reply "
                            "and we'll fix it.")
+            elif conflicts:
+                # After `both`: a matchable listing is the actionable finding,
+                # and a skipped one only explains why it was not this feed.
+                skipped, why = conflicts[0]
+                verdict = (f"A feed names it but {why}, so it was skipped on purpose: "
+                           f"\"{_trunc(skipped.program_title or skipped.channel_name, 60)}\".")
             elif one:
                 verdict = ("Likely a name/spelling gap: if 'Saw' above is this game, "
                            "reply with that exact title.")
@@ -10058,6 +10119,9 @@ def _action_diagnose(settings: Dict[str, Any]) -> Dict[str, Any]:
                 vlog.append(f"    +{len(stream_hits) - 40} more")
         else:
             vlog.append("  streams naming the team(s): none")
+        for skipped, why in conflicts[:20]:
+            vlog.append(f"  skipped ({why}): {skipped.channel_name}: "
+                        f"\"{skipped.program_title}\"")
     vlog.append(f"  verdict: {verdict}")
     vlog.append(f"all unmatched ({len(unmatched)}):")
     for g in unmatched:

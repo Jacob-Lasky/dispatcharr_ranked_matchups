@@ -438,7 +438,7 @@ and Spanish as well as English, so `Frankreich` and `Francia` both find
 `France`. A **description** must name *both* sides to count, since match reports
 name other teams in passing; a title or sub-title only needs one.
 
-Three rules keep this from over-matching, all worth knowing if a channel you
+Four rules keep this from over-matching, all worth knowing if a channel you
 expected does not appear:
 
 - **Both teams must appear in one segment of the name.** Names are split on `:`
@@ -452,11 +452,21 @@ expected does not appear:
   token. As loose substrings they behave like wildcards: `NE` is inside
   Sportsnet and Tennessee, `PIT` is inside Jupiter, `CLE` is inside Clearwater.
   Longer names still match as substrings.
-- **A stream whose name is dated before the game is skipped.** Providers spin up
-  a dedicated feed per night, and a three-game series has every night's feed
-  naming the same two teams, so without this the channel stacks finished games
-  behind the live one. Feeds with no date in the name are unaffected, and a
-  feed dated later than the game is kept.
+- **A channel or stream whose name is dated before the game is skipped.**
+  Providers spin up a dedicated feed per night, and a three-game series has
+  every night's feed naming the same two teams, so without this the channel
+  stacks finished games behind the live one. Event-slot channels keep their
+  last event's name until the next playlist refresh renames them, so the same
+  applies to channel names. Feeds with no date in the name are unaffected, and
+  a feed dated later than the game is kept.
+- **A feed that names a different sport or the other gender's competition is
+  skipped.** Schools meet in many sports in one week, and women's fixtures
+  mirror men's: `ESPN+ 138: College Swimming League (Indiana, Cal, Stanford, NC
+  State)` names both teams of a Stanford football game, and `Chelsea v
+  Tottenham Hotspur WSL` both clubs of a Premier League one. A name that names
+  no sport is never skipped, and one naming this game's own sport as well is
+  kept. **Diagnose matching** shows the reason when every candidate was
+  skipped this way.
 
 When several feeds carry the same event, a plain feed is preferred over one that
 labels itself as the pre-show, the prelims, a press conference or a multiview.

@@ -15,7 +15,7 @@ from dispatcharr_ranked_matchups.matcher import (
     _regex_filter_channel_name,
     _strip_preview_titles,
     parse_stream_date,
-    stream_is_stale_for_game,
+    name_is_stale_for_game,
     _strong_team_keywords,
     _team_keywords,
     both_teams_in_one_segment,
@@ -289,7 +289,7 @@ class TestShortKeywordWordBoundaries:
     """#129 mode 1: short aliases are substring-matched into unrelated words.
 
     team_aliases.json carries 2-4 character abbreviations ('NE', 'OM', 'GB',
-    'BOS', 'PIT', 'Real'), and _is_weak_last_word only screens the LAST-WORD
+    'BOS', 'PIT', 'RMA'), and _is_weak_last_word only screens the LAST-WORD
     fallback, so aliases reach _kw_hit unfiltered. As bare substrings they are
     close to wildcards: 'NE' is inside 'Sportsnet', 'Tennessee', and 'Network'.
     On Path A's single-keyword title pre-filter that hands Tier 3 an arbitrary
@@ -304,7 +304,7 @@ class TestShortKeywordWordBoundaries:
         ("Boston Celtics", "WC 12: Bosnia vs Morocco", "BOS"),
         ("Green Bay Packers", "GBN News HD", "GB"),
         ("Pittsburgh Steelers", "Capital Sports 4", "PIT"),
-        ("Real Madrid", "CF Montreal vs Toronto", "Real"),
+        ("Real Madrid", "Karma Sports 2", "RMA"),
     ])
     def test_short_alias_does_not_match_inside_a_word(self, team, text, alias):
         assert alias in [k for k in _strong_team_keywords(team)], (
@@ -1127,31 +1127,31 @@ class TestStreamStaleness:
     ])
     def test_previous_nights_of_the_series_are_dropped(self, name):
         # Verbatim from the stack the issue recorded on a live instance.
-        assert stream_is_stale_for_game(name, self.GAME) is True
+        assert name_is_stale_for_game(name, self.GAME) is True
 
     @pytest.mark.parametrize("name", [
         "MLB 21 | New York Yankees at Chicago White Sox AWAY 29 Jul 07:40 PM ET",
         "MLB 12: White Sox vs. Yankees (7.29 7:40 PM ET)",
     ])
     def test_tonights_feeds_survive(self, name):
-        assert stream_is_stale_for_game(name, self.GAME) is False
+        assert name_is_stale_for_game(name, self.GAME) is False
 
     def test_undated_feeds_always_survive(self):
         # THE non-regression that matters: dedicated feeds with no date at all
         # must keep matching, which is why the rule is "reject a date that IS
         # present and earlier", not "require a matching date".
-        assert stream_is_stale_for_game("YES Network HD", self.GAME) is False
-        assert stream_is_stale_for_game("MLB Network FHD", self.GAME) is False
+        assert name_is_stale_for_game("YES Network HD", self.GAME) is False
+        assert name_is_stale_for_game("MLB Network FHD", self.GAME) is False
 
     def test_future_dated_feeds_survive(self):
         # A provider publishing tomorrow's feed early is not evidence against
         # this game, and pre-published feeds are how a viewer gets a stream at
         # all when the guide runs ahead.
-        assert stream_is_stale_for_game(
+        assert name_is_stale_for_game(
             "MLB 30 | Yankees at White Sox 31 Jul 07:40 PM ET", self.GAME) is False
 
     def test_same_day_survives_at_the_boundary(self):
-        assert stream_is_stale_for_game(
+        assert name_is_stale_for_game(
             "MLB 21 | Yankees at White Sox 29 Jul 07:40 PM ET", self.GAME) is False
 
 

@@ -75,6 +75,37 @@ def _load_team_aliases() -> Dict[str, List[str]]:
 
 _TEAM_ALIASES = _load_team_aliases()
 
+
+def _alias_reverse(aliases: Dict[str, List[str]]) -> Dict[str, str]:
+    """{alias: key} for every alias listed under exactly ONE key.
+
+    An entry is a GROUP of names for one club, and a source may emit any of
+    them as the canonical name. Football-Data.org says 'Club Atlético de
+    Madrid', 'FC Internazionale Milano' and 'Athletic Club', while the entries
+    were keyed 'Atletico Madrid', 'Inter Milan' and 'Athletic Bilbao', so a
+    key-only lookup never applied them and those clubs fell back to bare-city
+    keywords ('Madrid', 'Milano') that name a league rival too (#324). An alias
+    listed under two keys names two clubs and resolves to neither.
+    """
+    seen: Dict[str, Optional[str]] = {}
+    for key, vals in aliases.items():
+        for v in vals:
+            seen[v] = None if v in seen and seen[v] != key else key
+    return {v: k for v, k in seen.items() if k is not None}
+
+
+_TEAM_ALIAS_REVERSE = _alias_reverse(_TEAM_ALIASES)
+
+
+def _alias_group(name: str) -> List[str]:
+    """Every OTHER name in `name`'s alias group, or [] when it has none."""
+    if name in _TEAM_ALIASES:
+        return list(_TEAM_ALIASES[name])
+    key = _TEAM_ALIAS_REVERSE.get(name)
+    if key is None:
+        return []
+    return [key] + [v for v in _TEAM_ALIASES[key] if v != name]
+
 # Last-word tokens we never use as a standalone keyword fallback. 'state' /
 # 'college' / 'university' are college-football generic; the soccer
 # second-words ('united', 'city', etc.) collide across many EPL/EFL clubs.
@@ -110,11 +141,48 @@ _GENERIC_EVENT_LAST_WORDS = frozenset({
     "games", "final", "finals", "challenge", "tournament", "international",
 })
 
+# Club-type nouns that END a club's formal name ('Cagliari Calcio', 'Athletic
+# Club'). They are stripped like a trailing 'FC' rather than kept as the
+# last-word keyword, which they used to be: 'Calcio' was the ONLY short key
+# four Serie A clubs had, so each matched the other three (#324). Matcher-local
+# on purpose, NOT added to _util.TEAM_SUFFIX_TOKENS, which scoring and the
+# sources also read for unrelated name normalisation.
+_CLUB_NOUN_SUFFIXES = frozenset({"calcio", "club", "clube"})
+
+# Places that more than one club in the SAME competition is named for, so a
+# relaxation down to the bare place names a league rival as well (#324):
+# 'Madrid' (Real, Atlético, Rayo), 'Barcelona' (FC Barcelona, RCD Espanyol de
+# Barcelona), 'Milano' (Inter, and AC Milan as a substring), 'Rotterdam'
+# (Feyenoord, Sparta), 'Paris' (PSG, Paris FC), 'Portugal' (Sporting Clube de
+# Portugal, and the national team). Only DERIVED keywords are suppressed; a
+# club whose broadcast name really is the place ('Barcelona' for FC Barcelona)
+# gets it from team_aliases.json, where a human has decided it. The guard is
+# tests/test_wrong_sport_feeds.py::test_no_keyword_names_a_league_rival, which
+# runs over every club in tests/fixtures/fd_team_names.json.
+_SHARED_PLACE_WORDS = frozenset({
+    "madrid", "barcelona", "milano", "milan", "rotterdam", "paris", "portugal",
+})
+
 _GENERIC_LAST_WORDS = frozenset(
     {"state", "college", "university", "york"}
     | set(GENERIC_TEAM_SECOND_WORDS)
     | _GENERIC_EVENT_LAST_WORDS
+    | _SHARED_PLACE_WORDS
 )
+
+# Leading tokens that are a club's legal form, not its identity ('1. FC
+# Köln', 'Sporting Clube de Braga'). A two-word prefix made only of these, or
+# ending in a club noun, is shared by every club of that form: '1. FC' named
+# both Köln and Union Berlin, 'Sporting Clube' both Braga and Sporting CP.
+_CLUB_FORM_TOKENS = frozenset(set(TEAM_SUFFIX_TOKENS) | _CLUB_NOUN_SUFFIXES | {
+    "1.", "ac", "as", "us", "ss", "ssc", "rc", "rcd", "cd", "ud", "sd", "ca",
+    "sv", "vfb", "vfl", "tsg", "fk", "sk",
+})
+
+
+def _is_club_form_prefix(prefix: str) -> bool:
+    toks = prefix.lower().split()
+    return all(t in _CLUB_FORM_TOKENS for t in toks) or toks[-1] in _CLUB_NOUN_SUFFIXES
 
 
 def _is_weak_last_word(token: str) -> bool:
@@ -167,6 +235,17 @@ class ChannelCandidate:
     # to see them or the game only ever reaches the LLM. Empty for Path B / C
     # candidates, which have no programme behind them.
     program_extra: str = ""
+    # The programme sub-title alone (it is also inside program_extra). Short
+    # and curated like a title, so the conflict gate reads it; the description
+    # is free prose that name-drops other sports and is NOT read (#324).
+    program_sub_title: str = ""
+    # The CHANNEL NAME advertises a date before this game (#324). Set by the
+    # lookup on a Path A candidate, whose EPG evidence is current while its
+    # name is last week's event slot ('ESPN+ 138: NC State vs Stanford @ Oct
+    # 16'). Tier 1 and the conflict gate ignore such a name; the programme
+    # tiers still read the EPG. Path B/C candidates with a stale name are not
+    # emitted at all, so this is only ever True on Path A.
+    channel_name_stale: bool = False
 
 
 @dataclass
@@ -224,9 +303,21 @@ def _team_keywords_split(team_name: str) -> Tuple[List[str], List[str]]:
     # Strip trailing club tag for soccer-style names so 'Brentford FC' also
     # matches 'Brentford' in a channel/program title.
     stripped: Optional[str] = None
-    if len(parts) >= 2 and parts[-1].lower() in TEAM_SUFFIX_TOKENS:
-        stripped = " ".join(parts[:-1])
-        strong.append(stripped)
+    # Trailing club tags, club nouns and a founding year ('Parma Calcio 1913')
+    # come off together; one tag per name was the old rule (#324).
+    cut = len(parts)
+    while cut >= 2 and (
+        parts[cut - 1].lower() in TEAM_SUFFIX_TOKENS
+        or parts[cut - 1].lower() in _CLUB_NOUN_SUFFIXES
+        or (parts[cut - 1].isdigit() and len(parts[cut - 1]) == 4)
+    ):
+        cut -= 1
+    if cut < len(parts):
+        stripped = " ".join(parts[:cut])
+        # 'Paris FC' -> 'Paris' would name PSG too; the alias lookup below
+        # still uses the stripped form.
+        if stripped.lower() not in _SHARED_PLACE_WORDS:
+            strong.append(stripped)
         # Re-derive parts so subsequent rules see the canonical form.
         parts = stripped.split()
 
@@ -261,18 +352,21 @@ def _team_keywords_split(team_name: str) -> Tuple[List[str], List[str]]:
         # worse than the token it replaced. The full event name stays STRONG and
         # remains the discriminator.
         prefix = " ".join(parts[:2])
-        if not emitted_last_word and stripped is None and not suppressed_as_event_noun:
+        if _is_club_form_prefix(prefix):
+            pass  # '1. FC', 'Sporting Clube': every club of that form (#324)
+        elif not emitted_last_word and stripped is None and not suppressed_as_event_noun:
             strong.append(prefix)
         else:
             weak.append(prefix)
 
     # Broadcaster aliases (#4). Look up both the original name AND the
     # FC-stripped form because the JSON has "Manchester United" but FD.org
-    # returns "Manchester United FC". Aliases are curated per team, so they are
+    # returns "Manchester United FC". The lookup resolves the whole alias
+    # GROUP, so a canonical name listed as an alias also works (#324). Aliases are curated per team, so they are
     # strong by construction.
     for lookup in (name, stripped):
-        if lookup and lookup in _TEAM_ALIASES:
-            strong.extend(_TEAM_ALIASES[lookup])
+        if lookup:
+            strong.extend(_alias_group(lookup))
 
     strong = list(dict.fromkeys(strong))
     weak = [k for k in dict.fromkeys(weak) if k not in strong]
@@ -309,9 +403,10 @@ def _team_keywords(team_name: str) -> List[str]:
 
 # Keywords at or below this many alphanumeric characters must match as a whole
 # token, not as a bare substring. Team aliases are abbreviations ('NE', 'OM',
-# 'GB', 'BOS', 'PIT', 'Real'), and as substrings they are close to wildcards:
+# 'GB', 'BOS', 'PIT', 'RMA'), and as substrings they are close to wildcards:
 # 'NE' is inside Sportsnet / Tennessee / Network, 'BOS' is inside Bosnia, 'PIT'
-# is inside Capital, 'Real' is inside Montreal (#129). Longer keywords are
+# is inside Capital, and 'Real' was inside Montreal (#129; that alias was
+# removed in #324 as a same-league wildcard). Longer keywords are
 # discriminating on their own and keep substring semantics deliberately, so a
 # possessive or run-on form ("Yankees' bullpen", "Manchester Uniteds") still
 # hits. DO NOT raise this bound to cover all keywords without re-running the
@@ -505,6 +600,9 @@ def _regex_filter_channel_name(
     do not carry them, so there is no failure of this shape to defend against
     there, and gating an unaffected path only costs recall.
     """
+    # A stale-dated name is last week's event, whatever EPG put the channel
+    # in the pool (#324).
+    candidates = [c for c in candidates if not c.channel_name_stale]
     if team_b is None:
         # Single-sided: see the matching note in _regex_filter.
         a_kws = _strong_team_keywords(team_a)
@@ -796,8 +894,15 @@ def parse_stream_date(name: str, reference: "date") -> "Optional[date]":
     return None
 
 
-def stream_is_stale_for_game(name: str, earliest_game_date: "date") -> bool:
-    """Whether a stream NAME advertises a date BEFORE this game's.
+def name_is_stale_for_game(name: str, earliest_game_date: "date") -> bool:
+    """Whether a stream or channel NAME advertises a date BEFORE this game's.
+
+    Applied to BOTH name-only candidate paths: Path C stream names (#164) and
+    Path B channel names (#324). Neither has a schedule to window on, and a
+    provider event slot that has not been renamed since last week still names
+    the same two schools: 'ESPN+ 138: College Swimming League (Indiana, Cal,
+    Stanford, NC State) @ Oct 16 8:27PM ET' was the only feed on NC State at
+    Stanford football on Oct 23.
 
     Deliberately one-sided. Baseball plays the same opponent three nights
     running, so every night's dedicated feed names the same two teams and the
@@ -806,8 +911,8 @@ def stream_is_stale_for_game(name: str, earliest_game_date: "date") -> bool:
     the previous two nights' finished broadcasts (#164).
 
     DO NOT tighten this to "date must equal the game's date". The caller passes
-    the EARLIEST plausible date for the game (its date in UTC and in the user's
-    configured timezone, whichever is earlier), because provider names are
+    the EARLIEST plausible date for the game (its date in UTC, in the user's
+    configured timezone and in US Eastern, whichever is earliest), because provider names are
     stamped in the broadcaster's local zone -- almost always ET -- which can sit
     a day behind or ahead of both. Requiring equality would drop the CORRECT
     feed for any late-evening game whose UTC date has already rolled over, and
@@ -821,6 +926,249 @@ def stream_is_stale_for_game(name: str, earliest_game_date: "date") -> bool:
     if parsed is None:
         return False
     return parsed < earliest_game_date
+
+
+
+# ---------- sport / competition conflict gate (#324) ----------
+#
+# The both-teams gate is blind to the SPORT. College schools meet in a dozen
+# sports in the same week and a provider's event slot keeps its last event's
+# name until the next M3U refresh renames it, so 'ESPN+ 138: College Swimming
+# League (Indiana, Cal, Stanford, NC State)' passed Tier 1 for NC State at
+# Stanford FOOTBALL. Women's club fixtures mirror the men's ('Chelsea v
+# Tottenham Hotspur  WSL 2026/27' matched the Premier League game). A name that
+# SAYS which sport or which gender's competition it carries is evidence the
+# matcher was throwing away.
+
+# Sport and gender of every source's games, keyed on sport_prefix. Gender is
+# None where the gate should not judge it (combat sports and motorsport carry
+# mixed cards, golf's women's tour is not a source). tests/test_mapped_prefixes.py
+# fails on a key no source emits, and tests/test_wrong_sport_feeds.py fails on
+# an emitted prefix missing here: an unmapped prefix silently skips the gate.
+_PREFIX_SPORT: Dict[str, Tuple[str, Optional[str]]] = {
+    **{p: ("soccer", "m") for p in (
+        "EPL", "EFL", "UCL", "BL1", "LaLiga", "SerieA", "Ligue1", "Eredivisie",
+        "PrimeiraLiga", "BSA", "WC", "EURO", "MLS", "LigaMX", "EFLCUP", "FACUP",
+        "FRIENDLY", "CLUBFRIENDLY", "NCAAMSOC")},
+    **{p: ("soccer", "w") for p in ("NWSL", "FRIENDLYW", "NCAAWSOC")},
+    "NFL": ("american_football", "m"),
+    "CFB": ("american_football", "m"),
+    "NBA": ("basketball", "m"),
+    "CBB": ("basketball", "m"),
+    "WNBA": ("basketball", "w"),
+    "NCAAW": ("basketball", "w"),
+    "MLB": ("baseball", "m"),
+    "NCAABSB": ("baseball", "m"),
+    "NCAASBL": ("softball", "w"),
+    "NHL": ("ice_hockey", "m"),
+    "ATP": ("tennis", "m"),
+    "WTA": ("tennis", "w"),
+    "PGA": ("golf", None),
+    "F1": ("motorsport", None),
+    "NASCAR": ("motorsport", None),
+    "UFC": ("mma", None),
+    "BOX": ("boxing", None),
+}
+
+# Phrases a channel, stream or programme name uses to say which sport it
+# carries, matched as whole words. Multi-word phrases are consumed BEFORE the
+# single words inside them, so 'field hockey' never also reads as 'hockey'.
+#
+# DO NOT add bare 'football': it is soccer in a UK/AU feed name ('Sky Sports
+# Football') and gridiron in a US one, so it is evidence of neither. DO NOT add
+# 'bowling' (Bowling Green) or 'athletics' (the MLB club) for the same reason
+# in the other direction: a team name would read as a sport. Team names are
+# also screened per game (_sport_words_in), but that only covers the two teams
+# in THIS game, not an opponent named elsewhere in the feed.
+_SPORT_PHRASES: Tuple[Tuple[str, str], ...] = (
+    ("college football", "american_football"),
+    ("american football", "american_football"),
+    ("field hockey", "field_hockey"),
+    ("ice hockey", "ice_hockey"),
+    ("water polo", "water_polo"),
+    ("swim & dive", "swimming"),
+    ("swim and dive", "swimming"),
+    ("swimming & diving", "swimming"),
+    ("track & field", "track"),
+    ("track and field", "track"),
+    ("cross country", "track"),
+    ("beach volleyball", "volleyball"),
+    ("formula 1", "motorsport"),
+    ("formula one", "motorsport"),
+    ("g league", "basketball"),
+    ("nfl", "american_football"),
+    ("ncaaf", "american_football"),
+    ("cfb", "american_football"),
+    ("soccer", "soccer"),
+    ("futbol", "soccer"),
+    ("fútbol", "soccer"),
+    ("futebol", "soccer"),
+    ("futsal", "futsal"),
+    ("basketball", "basketball"),
+    ("nba", "basketball"),
+    ("wnba", "basketball"),
+    ("ncaab", "basketball"),
+    ("baseball", "baseball"),
+    ("mlb", "baseball"),
+    ("softball", "softball"),
+    ("hockey", "ice_hockey"),
+    ("nhl", "ice_hockey"),
+    ("volleyball", "volleyball"),
+    ("swimming", "swimming"),
+    ("swim", "swimming"),
+    ("diving", "swimming"),
+    ("wrestling", "wrestling"),
+    ("gymnastics", "gymnastics"),
+    ("lacrosse", "lacrosse"),
+    ("rowing", "rowing"),
+    ("fencing", "fencing"),
+    ("rugby", "rugby"),
+    ("cricket", "cricket"),
+    ("handball", "handball"),
+    ("tennis", "tennis"),
+    ("golf", "golf"),
+    ("nascar", "motorsport"),
+    ("indycar", "motorsport"),
+    ("motogp", "motorsport"),
+    ("ufc", "mma"),
+    ("mma", "mma"),
+    ("boxing", "boxing"),
+    ("darts", "darts"),
+    # College schedule abbreviations, sport and gender in one token.
+    ("wbb", "basketball"), ("mbb", "basketball"),
+    ("wsoc", "soccer"), ("msoc", "soccer"),
+    ("wvb", "volleyball"), ("mvb", "volleyball"),
+)
+
+# Phrases that name a gender's competition. Women's club competitions are
+# usually named by acronym (WSL, NWSL, UWCL), not by the word.
+_GENDER_PHRASES: Tuple[Tuple[str, str], ...] = (
+    ("women's", "w"), ("womens", "w"), ("women", "w"), ("ladies", "w"),
+    ("wsl", "w"), ("nwsl", "w"), ("uwcl", "w"), ("wnba", "w"), ("wxv", "w"),
+    ("liga f", "w"), ("frauen", "w"), ("femenil", "w"), ("femenino", "w"),
+    ("feminino", "w"), ("féminine", "w"), ("feminine", "w"), ("(w)", "w"),
+    ("wbb", "w"), ("wsoc", "w"), ("wvb", "w"),
+    ("men's", "m"), ("mens", "m"), ("men", "m"),
+    ("mbb", "m"), ("msoc", "m"), ("mvb", "m"),
+)
+
+
+def _phrase_rx(phrase: str) -> re.Pattern:
+    # Lookarounds, not \b: '(w)' and "women's" begin or end in punctuation,
+    # where \b means the opposite of what is wanted (see _keyword_pattern).
+    return re.compile(r"(?<![a-z0-9])" + re.escape(phrase) + r"(?![a-z0-9])")
+
+
+_SPORT_RX = tuple((_phrase_rx(p), v) for p, v in _SPORT_PHRASES)
+_GENDER_RX = tuple((_phrase_rx(p), v) for p, v in _GENDER_PHRASES)
+
+
+def _phrases_in(text: str, table) -> set:
+    """Values of every phrase in `table` that `text` names, longest-first
+    consumption so a multi-word phrase hides the words inside it."""
+    t = (text or "").lower().replace("\u2019", "'")
+    found = set()
+    for rx, value in table:
+        if rx.search(t):
+            found.add(value)
+            t = rx.sub(" ", t)
+    return found
+
+
+def name_conflicts_with_game(
+    text: str, sport_prefix: str, team_names: Tuple[str, ...] = (),
+) -> Optional[str]:
+    """Why `text` (a feed or programme name) cannot be this game, or None.
+
+    A conflict needs POSITIVE evidence: the text names some other sport (or
+    the other gender's competition) AND does not also name this game's own.
+    A name that names no sport at all is never rejected, which is most of
+    them ('ESPN+ 045: NC State at Stanford', 'Sky Sports Main Event'). This is
+    the same asymmetry select_streams_for_game rests on, for the same reason:
+    naming something else is evidence against, naming nothing is not.
+
+    Words that occur in the game's own team names are ignored, so a team
+    called 'England Women' or a school with a sport word in it cannot veto its
+    own feed.
+
+    An unmapped prefix is never judged (returns None).
+    """
+    own = _PREFIX_SPORT.get(sport_prefix)
+    if own is None or not text:
+        return None
+    sport, gender = own
+    in_teams = " ".join(team_names)
+    sports = _phrases_in(text, _SPORT_RX) - _phrases_in(in_teams, _SPORT_RX)
+    if sports and sport not in sports:
+        return "names " + "/".join(sorted(sports)).replace("_", " ")
+    if gender is not None:
+        genders = _phrases_in(text, _GENDER_RX) - _phrases_in(in_teams, _GENDER_RX)
+        if genders and gender not in genders:
+            return "names a " + ("women's" if "w" in genders else "men's") + " competition"
+    return None
+
+
+def _candidate_event_parts(
+    c: ChannelCandidate, home_kws: List[str], away_kws: Optional[List[str]],
+) -> List[str]:
+    """The parts of a candidate that each describe the EVENT it carries.
+
+    The programme title and sub-title always do (the sub-title is where
+    European broadcasters put the fixture, #143). The channel/stream name does
+    only when it names the fixture itself (an event slot or a per-match feed,
+    which is every Path B and Path C candidate) and is not stale-dated. A
+    station name that names no team ('Sky Sports Golf', 'NBA TV') is a brand,
+    not a description of tonight's programme, and overflow coverage puts other
+    sports on those stations, so judging the programme by the station's name
+    would drop real broadcasts. The description is never read: it is prose
+    that mentions other sports and teams in passing.
+    """
+    parts = [t for t in (c.program_title, c.program_sub_title) if t]
+    if (c.channel_name and c.channel_name not in parts
+            and not c.channel_name_stale):
+        names_fixture = (
+            _kw_hit(c.channel_name, home_kws) if away_kws is None
+            else both_teams_in_one_segment(c.channel_name, home_kws, away_kws)
+        )
+        if names_fixture:
+            parts.append(c.channel_name)
+    return parts
+
+
+def candidate_conflict(c: ChannelCandidate, game: Any, field: bool) -> Optional[str]:
+    """Why candidate `c` cannot be `game`, or None.
+
+    Each event part is judged ON ITS OWN, so a channel name that says 'CFB'
+    cannot vouch for a programme titled 'College Swimming: NC State vs
+    Stanford' on it: the programme is what is on, and it says it is something
+    else. A game with no or an unmapped prefix is not judged. Diagnose calls
+    this too, so the two can never disagree about a feed.
+    """
+    prefix = getattr(game, "sport_prefix", "") or ""
+    if prefix not in _PREFIX_SPORT:
+        return None
+    home_kws = _team_keywords(game.home)
+    away_kws = None if field else _team_keywords(game.away)
+    teams = (game.home,) if field else (game.home, game.away)
+    for part in _candidate_event_parts(c, home_kws, away_kws):
+        why = name_conflicts_with_game(part, prefix, teams)
+        if why:
+            return why
+    return None
+
+
+def drop_conflicting_candidates(
+    candidates: List[ChannelCandidate], game: Any, field: bool,
+) -> Tuple[List[ChannelCandidate], List[Tuple[ChannelCandidate, str]]]:
+    """Split candidates into (kept, [(dropped, reason)]) by the conflict gate."""
+    kept, dropped = [], []
+    for c in candidates:
+        why = candidate_conflict(c, game, field)
+        if why:
+            dropped.append((c, why))
+        else:
+            kept.append(c)
+    return kept, dropped
 
 
 def _partition_attach_targets(
@@ -897,6 +1245,21 @@ def match_games_to_channels(
         # alone, exactly as field_event.py's design contract assumes. Two-team
         # games keep `match_away = game.away` and the full both-teams gate.
         match_away = None if is_field_event(game.away, getattr(game, "extra", None)) else game.away
+
+        # Before ANY tier, so neither the regex tiers nor the LLM can pick a
+        # feed whose name says it is another sport or the other gender's
+        # competition (#324).
+        candidates, conflicts = drop_conflicting_candidates(
+            candidates, game, field=match_away is None)
+        for c, why in conflicts:
+            logger.info(
+                "[ranked_matchups] match: %s %s vs %s: skipped %r (%s)",
+                game.sport_prefix, game.home, match_away, c.channel_name, why)
+        if not candidates:
+            results[i].note = (
+                f"{len(conflicts)} candidate(s) named another sport or "
+                "competition (" + conflicts[0][1] + ")")
+            continue
 
         # Tier 1 (strongest signal): channels whose NAME contains both teams
         # (or, for field events, the event name). These are dedicated match
