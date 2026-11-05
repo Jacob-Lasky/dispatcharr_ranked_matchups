@@ -7,6 +7,9 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ### Fixed
 
+- **Botafogo games finding no feed.** Football-Data.org names the club
+  `Botafogo FR`, while providers list it as `Botafogo` (`Botafogo vs Atlético
+  Mineiro`). `team_aliases.json` now maps the two.
 - **Every refresh timing out once college basketball started, freezing
   channel matching.** NCAA men's basketball simulates only games involving an
   AP Top 25 team, but the whole Division I slate was sent to importance
