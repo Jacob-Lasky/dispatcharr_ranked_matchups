@@ -56,10 +56,16 @@ _ESPN_POLL_SOURCES = [
     ("ncaa_baseball", "NcaaBaseballRegularSource", {}, "college-baseball", 3),
     ("ncaa_softball", "NcaaSoftballRegularSource", {}, "college-softball", 3),
     ("ncaaw_basketball", "NcaawBasketballRegularSource", {}, "womens-college-basketball", 1),
+    # The tournament source ranks its games from the same AP poll (W171): it
+    # is the only source that emits a tournament game.
+    ("ncaaw_basketball", "NcaawBasketballPlayoffSource", {}, "womens-college-basketball", 1),
     ("ncaa_soccer", "NcaaSoccerSource", {"gender": "m"}, "usa.ncaa.m.1", 3),
     ("ncaa_soccer", "NcaaSoccerSource", {"gender": "w"}, "usa.ncaa.w.1", 3),
 ]
 _IDS = [f"{cls}{kw}" for _m, cls, kw, _u, _r in _ESPN_POLL_SOURCES]
+# The event shape a source's own filter keeps, where it is not the default
+# regular-season game.
+_SHAPE = {"NcaawBasketballPlayoffSource": {"season_type": 3, "slug": "post-season"}}
 
 
 def _espn_source(monkeypatch, module, cls, kwargs, poll, games=True):
@@ -77,7 +83,8 @@ def _espn_source(monkeypatch, module, cls, kwargs, poll, games=True):
         if "/seasons/" in url:
             return None   # no season calendar: NCAA soccer's fixed cutoff
         if games and f"dates={TOMORROW_BUCKET}" in url:
-            return {"events": [_event("g1", "Alpha", "Beta", TOMORROW, "pre")]}
+            return {"events": [_event("g1", "Alpha", "Beta", TOMORROW, "pre",
+                                      **_SHAPE.get(cls, {}))]}
         return {"events": []}
 
     monkeypatch.setattr(mod, "_http_get", http_get)

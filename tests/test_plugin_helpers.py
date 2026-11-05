@@ -4085,11 +4085,12 @@ class TestManifestFieldsSurviveTheSerializer:
         "boolean", "info", "number", "select", "string", "text",
     })
 
-    @staticmethod
     @pytest.fixture(scope="class")
+    @staticmethod
     def fields():
         # staticmethod: a class-scoped fixture declared as an instance method is
-        # deprecated in pytest 8 and warns on every run.
+        # deprecated in pytest 8 and warns on every run. The fixture decorator
+        # goes OUTSIDE it: pytest 9 warns on the reverse order.
         import json
         with open(os.path.join(REPO_ROOT, "plugin.json"), encoding="utf-8") as fh:
             return json.load(fh)["fields"]

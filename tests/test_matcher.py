@@ -1371,3 +1371,35 @@ class TestTournamentGenericLastWord:
         for kw in _strong_team_keywords(team):
             assert kw
         assert team in _strong_team_keywords(team)
+
+
+class TestEspnUnlimitedSoccerFeeds:
+    """W171: NCAAMSOC 'NC State at Virginia Tech' (2026-11-04) went out as a
+    stream-less placeholder although the provider carried it on three
+    channels. Replaying the matcher showed it was NOT a name mismatch (the
+    feeds read 'Soccer:' and 'vs.' where the game reads 'at'): the matcher
+    links all three. The cause was the stale match verdict (see
+    tests/test_shared_importance.py::TestOutOfPopulationGamesAreNotSimulated).
+    This pins the real feed names so a future matcher change cannot turn it
+    into a name mismatch."""
+
+    FEEDS = {
+        390612: "ESPN UNLTD 081: Soccer: NC State vs. Virginia Tech (11.04 06:00 PM ET)",
+        390340: "SEC+ ACCNX 004: ACCNX: NC State vs. Virginia Tech (11.04 06:00 PM ET)",
+        389854: "SEC+ / ACC extra 06: NC State vs. Virginia Tech (First Round) (ACCNX) @ 4 Nov 06:00 PM ET",
+    }
+
+    def _cand(self, channel_id: int, channel_name: str) -> ChannelCandidate:
+        return ChannelCandidate(
+            channel_id=channel_id,
+            channel_name=channel_name,
+            program_title="any",
+            program_start=datetime(2026, 11, 4, 23, tzinfo=timezone.utc),
+            program_end=datetime(2026, 11, 5, 1, tzinfo=timezone.utc),
+        )
+
+    def test_all_three_real_feeds_match_the_game(self):
+        cands = [self._cand(cid, name) for cid, name in self.FEEDS.items()]
+        cands.append(self._cand(1, "ESPN UNLTD 082: Soccer: Duke vs. Clemson (11.04 07:00 PM ET)"))
+        out = _regex_filter_channel_name(cands, "Virginia Tech", "NC State")
+        assert {c.channel_id for c in out} == set(self.FEEDS)

@@ -7,6 +7,22 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ### Fixed
 
+- **Every refresh timing out once college basketball started, freezing
+  channel matching.** NCAA men's basketball simulates only games involving an
+  AP Top 25 team, but the whole Division I slate was sent to importance
+  scoring. About 300 games a refresh fell to the per-game simulator, at ~4.4s
+  each and always scoring 0, so every refresh and re-match passed the
+  25-minute ceiling from Oct 31. Matching only runs inside that pipeline, so
+  game channels kept a four-day-old "no feed yet" verdict: NC State at
+  Virginia Tech went out with no stream although three provider channels
+  carried it. A game that provably cannot move any team into a win band now
+  scores 0 without simulating, and the log says how many.
+- **NCAA women's tournament games scored as regular-season games.** The
+  regular-season source also emitted tournament games, and its row won over
+  the tournament source's, so a tournament game was scored against
+  regular-season win bands instead of the bracket. It now emits regular-season
+  games only, as the NBA, WNBA and NFL sources do, and the tournament source
+  attaches the AP poll ranks those rows used to carry.
 - **Wrong-sport and last-week feeds on game channels.** NC State at Stanford
   football carried only `College Swimming League (... Stanford, NC State) @ Oct
   16`, a week-old swimming meet: channel names had no date check, and nothing
