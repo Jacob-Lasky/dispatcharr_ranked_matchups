@@ -271,6 +271,220 @@ class TestRefreshHelper:
         assert ids["importance_seasons"]["default"] == 2000
 
 
+class _Resp:
+    """A CBBD HTTP answer for the NcaamSource season walk."""
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._data
+
+
+class TestOutOfPopulationGamesAreNotSimulated:
+    """W171: NcaamSource simulates only games involving an AP-ranked team,
+    but emits the whole Division I slate. Every game outside that population
+    fell to the per-game simulator: ~4.4s each, always 0.0000 (measured on
+    the live CBBD API, 116 of 126 slate games). ~313 of them a refresh pushed
+    every pipeline past its 25-minute ceiling from 2026-10-31, and since
+    matching only runs inside the pipeline, a stale "no feed yet" verdict
+    left a live game's channel without a stream for four days."""
+
+    def _game(self, home, away, code="CBB"):
+        return GameRow(sport_prefix="CBB", sport_label="NCAA Men's Basketball", home=home,
+                       away=away, rank_home=None, rank_away=None,
+                       start_time=datetime(2026, 11, 5, tzinfo=timezone.utc),
+                       extra={"fd_competition_code": code})
+
+    class _Subset:
+        """A source that simulates a subset, like NcaamSource."""
+        supports_importance = True
+        shared_season_importance = True
+        sport_label = "NCAA Men's Basketball"
+        population = {"Michigan State", "Florida"}
+
+        def importance_covers(self, game):
+            return game.home in self.population or game.away in self.population
+
+    def test_shared_path_simulates_only_covered_games(self, plugin, monkeypatch, caplog):
+        seen = []
+
+        def fake_league(src, matches, ctx, n_sims, favorites_by_match):
+            seen.extend((m.home, m.away) for m in matches)
+            return [(2.0, [], []) for _ in matches]
+        monkeypatch.setattr(scoring, "compute_league_importance", fake_league)
+        src = self._Subset()
+        games = [self._game("Michigan State", "Toledo"), self._game("Dartmouth", "Framingham State"),
+                 self._game("Butler", "Fairleigh Dickinson"), self._game("Florida", "Jacksonville")]
+        caplog.set_level("INFO")
+        out = plugin._shared_league_importance(games, [src] * 4, [], 50)
+        assert seen == [("Michigan State", "Toledo"), ("Florida", "Jacksonville")]
+        assert set(out) == {0, 3}
+        assert any("2 games that cannot move a band scored 0 without simulating"
+                   in r.getMessage() for r in caplog.records)
+
+    def test_per_game_path_skips_uncovered_games(self, plugin):
+        """The per-game fallback reads the same predicate with the game: an
+        uncovered game never reaches compute_match_importance."""
+        ctx = scoring.LEAGUE_CONTEXTS["CBB"]
+        src = self._Subset()
+        assert plugin._importance_applies(src, ctx, self._game("Florida", "Jacksonville"))
+        assert not plugin._importance_applies(src, ctx, self._game("Dartmouth", "Framingham State"))
+        refresh = inspect.getsource(plugin._action_refresh)
+        assert "_importance_applies(src, league_ctx, g)" in refresh
+
+    def test_a_source_without_the_predicate_covers_everything(self, plugin):
+        class Plain:
+            supports_importance = True
+        assert plugin._importance_applies(Plain(), scoring.LEAGUE_CONTEXTS["CBB"],
+                                          self._game("Dartmouth", "Framingham State"))
+
+    def test_a_failing_predicate_simulates_rather_than_failing_the_refresh(self, plugin, caplog):
+        class Broken(self._Subset):
+            def importance_covers(self, game):
+                raise RuntimeError("poll gone")
+        caplog.set_level("WARNING")
+        assert plugin._importance_applies(Broken(), scoring.LEAGUE_CONTEXTS["CBB"],
+                                          self._game("Dartmouth", "Framingham State"))
+        assert any("importance_covers failed" in r.getMessage() for r in caplog.records)
+
+    def test_ncaam_covers_exactly_the_games_it_simulates(self, monkeypatch):
+        """The real source, real team names from the 2026-11-04 measurement.
+        Early in a season no outside team can reach a band, so
+        `importance_covers` and the season walk's population filter must
+        agree game for game, or the scorer skips a game the simulation could
+        answer (or the slow fallback comes back)."""
+        from dispatcharr_ranked_matchups.sources import ncaam
+        poll = {"Michigan State": 12, "Florida": 3, "Vanderbilt": 20}
+        src = ncaam.NcaamSource(api_key="k")
+        monkeypatch.setattr(src, "_fetch_rankings", lambda season: poll)
+        pairs = [("Michigan State", "Toledo"), ("Florida", "Jacksonville"),
+                 ("Vanderbilt", "Wake Forest"), ("Dartmouth", "Framingham State"),
+                 ("App State", "Christendom"), ("Butler", "Fairleigh Dickinson")]
+
+        rows = [{"id": i, "homeTeam": h, "awayTeam": a, "startDate": "2026-11-05T00:00:00Z"}
+                for i, (h, a) in enumerate(pairs)]
+        answers = [rows, [], []]
+        monkeypatch.setattr(ncaam, "get_within_deadline", lambda *a, **k: _Resp(answers.pop(0)))
+        simulated = {(g["home"], g["away"]) for g in src._fetch_games_cached()}
+        covered = {p for p in pairs if src.importance_covers(self._game(*p))}
+        assert covered == simulated == set(pairs[:3])
+
+    def test_skipping_changes_no_score(self, monkeypatch):
+        """The skip is free only if the simulator would have said 0 anyway.
+        Oracle: the real per-game simulator on the real source. An
+        out-of-population team plays only its population games (here two),
+        so it can never reach the 15-win band and its column is constant;
+        an in-population game with a live race scores above zero, so the
+        zero is not just a dead simulator."""
+        from dispatcharr_ranked_matchups.sources import ncaam
+        src = ncaam.NcaamSource(api_key="k")
+        monkeypatch.setattr(src, "_fetch_rankings", lambda season: {"Duke": 1})
+        rows, gid = [], 0
+        for i in range(12):  # Duke 12-0 against a rotating field, all played
+            gid += 1
+            rows.append({"id": gid, "homeTeam": "Duke", "awayTeam": f"Opp{i}",
+                         "homePoints": 80, "awayPoints": 60, "homeWinner": True,
+                         "awayWinner": False, "startDate": "2025-12-01T00:00:00Z"})
+        for i in range(6):  # six left: 15 wins is live
+            gid += 1
+            rows.append({"id": gid, "homeTeam": "Duke", "awayTeam": f"Late{i}",
+                         "startDate": "2026-02-20T00:00:00Z"})
+        rows.append({"id": gid + 1, "homeTeam": "Duke", "awayTeam": "Dartmouth",
+                     "startDate": "2026-02-21T00:00:00Z"})
+        rows.append({"id": gid + 2, "homeTeam": "Duke", "awayTeam": "Framingham State",
+                     "startDate": "2026-02-22T00:00:00Z"})
+
+        answers = [rows, [], []]  # the season walk's three date chunks
+        monkeypatch.setattr(ncaam, "get_within_deadline",
+                            lambda *a, **k: _Resp(answers.pop(0)))
+        ctx = scoring.LEAGUE_CONTEXTS["CBB"]
+        outside = self._game("Dartmouth", "Framingham State")
+        inside = self._game("Duke", "Late0")
+        assert not src.importance_covers(outside) and src.importance_covers(inside)
+        pts_out, _, _ = scoring.compute_match_importance(src, outside, ctx, n_sims=200,
+                                                         rng=random.Random(7))
+        pts_in, _, _ = scoring.compute_match_importance(src, inside, ctx, n_sims=200,
+                                                        rng=random.Random(7))
+        assert pts_out == 0.0
+        assert pts_in > 0.0
+
+    def _outside_team_with(self, monkeypatch, finished, left):
+        """A real NcaamSource whose season has unranked Gonzaga beating poll
+        teams `finished` times, with `left` such games still to play."""
+        from dispatcharr_ranked_matchups.sources import ncaam
+        src = ncaam.NcaamSource(api_key="k")
+        monkeypatch.setattr(src, "_fetch_rankings", lambda season: {"Duke": 1, "Kansas": 2})
+        rows = []
+        for i in range(finished):
+            rows.append({"id": i + 1, "homeTeam": "Gonzaga", "awayTeam": ("Duke", "Kansas")[i % 2],
+                         "homePoints": 80, "awayPoints": 60, "homeWinner": True,
+                         "awayWinner": False, "startDate": "2025-12-01T00:00:00Z"})
+        for i in range(left):
+            rows.append({"id": 100 + i, "homeTeam": "Gonzaga", "awayTeam": "Duke",
+                         "startDate": "2026-02-20T00:00:00Z"})
+        answers = [rows, [], []]
+        monkeypatch.setattr(ncaam, "get_within_deadline", lambda *a, **k: _Resp(answers.pop(0)))
+        return src
+
+    @pytest.mark.parametrize("finished,left", [(14, 0), (13, 1)])
+    def test_an_outside_team_that_can_still_reach_a_band_is_simulated(
+            self, monkeypatch, finished, left):
+        """Second-opinion counterexample (2026-11-04): an unranked team with
+        14 wins over poll teams, playing another unranked team, reaches the
+        15-win band only by winning THIS game, so the game has real stakes
+        (the simulator, the oracle here, scores it above zero). Population
+        membership alone would have zeroed it."""
+        src = self._outside_team_with(monkeypatch, finished, left)
+        game = self._game("Gonzaga", "Dartmouth")
+        assert src.importance_covers(game)
+        pts, _, _ = scoring.compute_match_importance(src, game, scoring.LEAGUE_CONTEXTS["CBB"],
+                                                     n_sims=200, rng=random.Random(7))
+        assert pts > 0.0
+
+    def test_an_outside_team_one_win_short_is_skipped_and_scores_zero(self, monkeypatch):
+        """The other side of the boundary: 13 wins and nothing left, so even
+        winning this game leaves it at 14. Skipped, and the simulator agrees."""
+        src = self._outside_team_with(monkeypatch, 13, 0)
+        game = self._game("Gonzaga", "Dartmouth")
+        assert not src.importance_covers(game)
+        pts, _, _ = scoring.compute_match_importance(src, game, scoring.LEAGUE_CONTEXTS["CBB"],
+                                                     n_sims=200, rng=random.Random(7))
+        assert pts == 0.0
+
+    def test_ncaam_failed_season_read_simulates(self, monkeypatch):
+        """A season read that raises answers True (the simulation then
+        reports it) rather than zeroing the slate."""
+        from dispatcharr_ranked_matchups.sources import ncaam
+        src = ncaam.NcaamSource(api_key="k")
+        monkeypatch.setattr(src, "_fetch_rankings", lambda season: {"Duke": 1})
+
+        def boom():
+            raise RuntimeError("season gone")
+        monkeypatch.setattr(src, "_win_ceiling", boom)
+        assert src.importance_covers(self._game("Dartmouth", "Framingham State"))
+
+    def test_ncaam_failed_poll_is_not_read_as_out_of_population(self, monkeypatch):
+        """A failed poll answers True, so the importance call raises and logs
+        the outage (#283) instead of every game silently scoring zero."""
+        from dispatcharr_ranked_matchups.sources import ncaam
+        from dispatcharr_ranked_matchups.sources.base import RankingsUnavailable
+        src = ncaam.NcaamSource(api_key="k")
+
+        def refused(season):
+            raise RankingsUnavailable("refused")
+        monkeypatch.setattr(src, "_fetch_rankings", refused)
+        assert src.importance_covers(self._game("Dartmouth", "Framingham State"))
+
+    def test_ncaam_no_poll_yet_covers_nothing(self, monkeypatch):
+        from dispatcharr_ranked_matchups.sources import ncaam
+        src = ncaam.NcaamSource(api_key="k")
+        monkeypatch.setattr(src, "_fetch_rankings", lambda season: None)
+        assert not src.importance_covers(self._game("Florida", "Jacksonville"))
+
+
 class TestCostScalesWithSeasonsNotGames:
     """The defect #230 fixes, witnessed directly: the old per-game simulator
     sampled targets x seasons x season-length results; the shared one samples

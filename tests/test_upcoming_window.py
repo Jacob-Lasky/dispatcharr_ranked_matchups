@@ -312,6 +312,26 @@ class TestEveningGameIsFound:
         league = _LEAGUE_PATH[module_name]
         assert urls and all(f"/apis/site/v2/sports/{league}/scoreboard?" in u for u in urls)
 
+    @pytest.mark.parametrize("module_name,regular,playoff", [
+        ("nba", "NbaRegularSource", "NbaPlayoffSource"),
+        ("nfl", "NflRegularSource", "NflPlayoffSource"),
+        ("wnba", "WnbaRegularSource", "WnbaPlayoffSource"),
+        ("ncaaw_basketball", "NcaawBasketballRegularSource", "NcaawBasketballPlayoffSource"),
+    ])
+    def test_a_postseason_game_comes_only_from_the_playoff_source(
+            self, monkeypatch, module_name, regular, playoff):
+        """A season.type 3 game belongs to the playoff source alone. The
+        NCAAW regular source used to emit it as well, and its row won the
+        dedupe, so a tournament game was scored by the per-game fallback
+        against regular-season win bands instead of the bracket (W171
+        second opinion, 2026-11-04)."""
+        _pin_clock(monkeypatch)
+        mod, reg = _src(module_name, regular)
+        _serve_buckets(monkeypatch, mod, _evening(season_type=3, slug="post-season"))
+        assert reg.fetch_upcoming(days_ahead=1) == []
+        _mod, po = _src(module_name, playoff)
+        assert _homes(po.fetch_upcoming(days_ahead=1)) == ["Home Live"]
+
     def test_mls_conference_sweep_finds_it(self, monkeypatch):
         mod, src = _src("mls_standings", "MlsEastSource")
         _pin_clock(monkeypatch)

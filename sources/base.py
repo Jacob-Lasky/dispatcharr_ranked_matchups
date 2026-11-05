@@ -298,6 +298,30 @@ class SportSource(ABC):
     # enforces that statically for every opted-in class.
     shared_season_importance: bool = False
 
+    def importance_covers(self, game: GameRow) -> bool:
+        """Whether simulating `game` can give it a nonzero importance. False
+        tells the scorer to give it zero without simulating, so answer False
+        ONLY when the simulator provably returns 0 for the game. Default
+        True.
+
+        A game outside the season a source simulates still goes to the
+        per-game simulator, which plays it on top of that season. That is
+        correct and often nonzero: an MLS cross-conference game is outside
+        both conference seasons (intra-conference by design, see
+        mls_standings) and still moves the home team's standing, so MLS
+        keeps the default. DO NOT answer False merely because a game is
+        outside the population.
+
+        Override when a source emits many games whose result provably
+        cannot move any team into or out of a band. NCAA men's basketball
+        simulates only games involving a poll team and emits the whole
+        Division I slate; ~300 outside games per refresh at seconds each,
+        every one 0.0000, pushed every refresh past the 25-minute pipeline
+        ceiling from 2026-10-31 to 2026-11-04 (W171), freezing channel
+        matching. NcaamSource.importance_covers is the worked example of
+        the proof."""
+        return True
+
     # ---------- Monte Carlo importance interface ----------
     # All 7 default to NotImplementedError. Sources that flip
     # `supports_importance = True` MUST override all of them; the simulator

@@ -201,6 +201,18 @@ def _extract_game_record(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 # =====================================================================
 
 
+def _fetch_ap_poll() -> Dict[str, int]:
+    """{team_location: rank} from ESPN's AP poll, else the first poll listed
+    (the page also carries the Coaches Poll). Raises `RankingsUnavailable`
+    when it did not answer (#283; see `_espn.fetch_espn_poll`). One function
+    because the regular and the tournament source both rank their rows from
+    it, as their `_fetch_rankings`."""
+    return fetch_espn_poll(
+        _http_get, f"{ESPN_BASE}/rankings", _team_canonical_name,
+        prefer=lambda poll: "ap" in (poll.get("shortName") or "").lower(),
+    )
+
+
 class NcaawBasketballRegularSource(PointsBasedSportSource):
     """D1 Women's Basketball regular season via ESPN.
 
@@ -214,6 +226,7 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
     # measured 2026-10-11 from ESPN's women's college basketball
     # `/teams?groups=50` (D1). See SportSource.rank_field_size.
     rank_field_size = 362
+    _fetch_rankings = staticmethod(_fetch_ap_poll)
     _DEFAULT_POINTS_FOR = _DEFAULT_POINTS_FOR
     _DEFAULT_POINTS_AGAINST = _DEFAULT_POINTS_AGAINST
 
@@ -237,13 +250,14 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
         (`base.attach_poll_ranks`); a failed one raises (#283)."""
         def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
             rec = _extract_game_record(event)
-            if rec is None:
+            # Regular season only (season.type == 2), as for NBA, WNBA and
+            # NFL. DO NOT surface tournament games (type 3) here too: the
+            # playoff source already emits them, and the regular-season row
+            # won the dedupe, so a tournament game was scored against
+            # regular-season win bands by the per-game fallback (this
+            # source's season holds type 2 only) instead of the bracket.
+            if rec is None or rec.get("season_type") != 2:
                 return None
-            # Both regular-season AND tournament games surface here.
-            # Filtering by season.type isn't strictly necessary: we
-            # surface postseason games in fetch_upcoming so the user's
-            # guide picks them up; the playoff source covers the
-            # importance-cascade side separately.
             start = rec.get("start_time")
             if start is None:
                 return None
@@ -266,16 +280,6 @@ class NcaawBasketballRegularSource(PointsBasedSportSource):
         return attach_poll_ranks(
             sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row),
             self._fetch_rankings,
-        )
-
-    def _fetch_rankings(self) -> Dict[str, int]:
-        """{team_location: rank} from ESPN's AP poll, else the first poll
-        listed (the page also carries the Coaches Poll). Raises
-        `RankingsUnavailable` when it did not answer (#283; see
-        `_espn.fetch_espn_poll`)."""
-        return fetch_espn_poll(
-            _http_get, f"{ESPN_BASE}/rankings", _team_canonical_name,
-            prefer=lambda poll: "ap" in (poll.get("shortName") or "").lower(),
         )
 
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
@@ -331,6 +335,10 @@ class NcaawBasketballPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSour
     KO_STAGES = ("R64", "R32", "S16", "E8", "F4", "NCG")
     SERIES_LENGTH = 1   # uniform single-game elim
     supports_importance = True
+    # Its rows carry the same AP poll's ranks (`fetch_upcoming`), so they are
+    # read against the same Division I field. See SportSource.rank_field_size.
+    rank_field_size = NcaawBasketballRegularSource.rank_field_size
+    _fetch_rankings = staticmethod(_fetch_ap_poll)
 
     def __init__(self, season_end_year: Optional[int] = None) -> None:
         self.season_end_year = season_end_year or _default_season_end_year()
@@ -356,10 +364,16 @@ class NcaawBasketballPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSour
         return None
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Upcoming NCAA tournament games (season.type == 3)
-        through `_espn.sweep_upcoming_events`, which owns the window
-        (including the US-Eastern lookback day, #256), the FINISHED and stale
-        drops and the dedupe.
+        """Upcoming NCAA tournament games (season.type == 3) with the AP Top
+        25 attached as ranks, through `_espn.sweep_upcoming_events`, which
+        owns the window (including the US-Eastern lookback day, #256), the
+        FINISHED and stale drops and the dedupe.
+
+        DO NOT drop the poll here: this source is the only one that emits a
+        tournament game, so without it a ranked team's tournament game scores
+        no rank at all (it carried one while the regular source also emitted
+        type 3 games, W171). The poll is read as for the regular source
+        (`base.attach_poll_ranks`); a failed one raises (#283).
         """
         def to_row(event: Dict[str, Any]) -> Optional[GameRow]:
             rec = _extract_game_record(event)
@@ -383,7 +397,10 @@ class NcaawBasketballPlayoffSource(ForcedWinnerPoissonSampler, BestOfNSeriesSour
                     "fd_competition_code": self._league_context_code(),
                 },
             )
-        return sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row)
+        return attach_poll_ranks(
+            sweep_upcoming_events(_http_get, f"{ESPN_BASE}/scoreboard", days_ahead, to_row),
+            self._fetch_rankings,
+        )
 
     def estimate_strengths(self) -> Dict[str, Dict[str, float]]:
         if self._team_strengths_from_regular is not None:

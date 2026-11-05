@@ -41,6 +41,16 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaam")
 CBB_BASE = "https://api.collegebasketballdata.com"
 
 
+def _in_population(home: Optional[str], away: Optional[str], ranked: Dict[str, int]) -> bool:
+    """Whether a game between `home` and `away` belongs to the simulated
+    population: one of the two is in the poll. The ONE predicate for both
+    `_fetch_full_season_games` (which games are simulated) and the first
+    test in `NcaamSource.importance_covers` (which games are worth
+    simulating): if they drift, a game the scorer skips would be one the simulation could
+    answer, or the per-game fallback comes back for games it cannot."""
+    return home in ranked or away in ranked
+
+
 def _completed(game: Dict[str, Any]) -> bool:
     """Whether a CBBD /games row is a finished game. CBBD encodes completion
     via the homeWinner/awayWinner booleans being non-null AND the *Points
@@ -80,6 +90,8 @@ class NcaamSource(PointsBasedSportSource):
         # (season, poll or None) once read, or (season, RankingsUnavailable).
         # See _poll.
         self._poll_memo: Optional[tuple] = None
+        # {team: most wins reachable in the simulated season}. See _win_ceiling.
+        self._win_ceiling_memo: Optional[Dict[str, int]] = None
 
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
         if not self.api_key:
@@ -323,6 +335,63 @@ class NcaamSource(PointsBasedSportSource):
 
     # ---------- Monte Carlo importance ----------
 
+    def importance_covers(self, game: GameRow) -> bool:
+        """Whether simulating `game` can produce a nonzero importance.
+        Only games involving a poll team are in the simulated season
+        (`_fetch_full_season_games`). For any other game the simulator
+        applies the sampled result, plays out the population's remaining
+        games and buckets each team by `wins >= band`: a team that cannot
+        reach the lowest CBB band even by winning this game and every
+        population game it has left lands in no band under either result,
+        so Kendall tau-c is exactly 0 (simulation.monte_carlo_importance).
+        Skipping such a game changes no score; it only saves the ~4.4s
+        simulation. Measured 2026-11-04 on the live CBBD API: 116 of 126
+        slate games were outside the population and every one scored 0.0000
+        in the per-game fallback, which pushed every refresh past its
+        timeout. See SportSource.importance_covers.
+
+        DO NOT reduce this to `_in_population` alone: an unranked team with
+        enough wins over poll teams can still reach a band from a game
+        against another unranked team, and that game's importance is real
+        (second-opinion counterexample, 2026-11-04: 14 population wins
+        scored 1.356).
+
+        A failed poll or season fetch answers True: the importance call
+        then raises and logs the outage as before (#283), rather than every
+        game silently scoring zero here."""
+        from ..scoring import LEAGUE_CONTEXTS
+        try:
+            ranked = self._poll(self._season())
+        except RankingsUnavailable:
+            return True
+        if _in_population(game.home, game.away, ranked or {}):
+            return True
+        try:
+            ceiling = self._win_ceiling()
+        except Exception:  # noqa: BLE001 - the simulation raises and reports it
+            return True
+        bands = [t[0] for t in LEAGUE_CONTEXTS[self.league_context_code].thresholds]
+        if not bands:
+            return False
+        # +1: this game itself, which is not in the population.
+        return any(ceiling.get(team, 0) + 1 >= min(bands)
+                   for team in (game.home, game.away))
+
+    def _win_ceiling(self) -> Dict[str, int]:
+        """Most wins each team can finish the simulated season with: its
+        FINISHED population wins plus every population game it has left.
+        Read from the same initial_state/remaining_matches the simulator
+        drains, and cached per refresh alongside them."""
+        if self._win_ceiling_memo is None:
+            state = self.initial_state()
+            ceiling = {team: int(row.get(self._count_field, 0))
+                       for team, row in (state.get("_teams") or {}).items()}
+            for m in self.remaining_matches(state):
+                for team in (m.home, m.away):
+                    ceiling[team] = ceiling.get(team, 0) + 1
+            self._win_ceiling_memo = ceiling
+        return self._win_ceiling_memo
+
     def _fetch_full_season_games(self) -> List[Dict[str, Any]]:
         """Return the current regular-season game list filtered to games
         involving an AP-ranked team. The full D1 schedule is ~7500 games
@@ -349,7 +418,6 @@ class NcaamSource(PointsBasedSportSource):
             # No AP poll yet (preseason). Importance signal returns 0
             # via terminal_outcomes' empty dict: graceful no-op.
             return []
-        ap_teams = set(ranked.keys())
 
         # Season window: Nov 1 of (season-1) through Apr 30 of season.
         # Three date-range chunks to stay under CBBD's 3000-row cap per call.
@@ -394,7 +462,7 @@ class NcaamSource(PointsBasedSportSource):
             away = g.get("awayTeam")
             if not home or not away:
                 continue
-            if home not in ap_teams and away not in ap_teams:
+            if not _in_population(home, away, ranked):
                 continue
             hp = g.get("homePoints")
             ap_pts = g.get("awayPoints")

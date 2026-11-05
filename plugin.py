@@ -4016,14 +4016,41 @@ def _favorites_with_standings(extra: Dict[str, Any], favorites: List[str]) -> Li
     return out
 
 
-def _importance_applies(src: Any, league_ctx: Any) -> bool:
-    """Whether a game from `src` in this league gets an importance score at
-    all. One predicate for the shared and per-game paths."""
+def _importance_modelled(src: Any, league_ctx: Any) -> bool:
+    """Whether this source and league have an importance model at all: the
+    source simulates and the league has outcome bands to score against."""
     return bool(
         getattr(src, "supports_importance", False)
         and league_ctx is not None
         and league_ctx.thresholds
     )
+
+
+def _importance_applies(src: Any, league_ctx: Any, game: Any) -> bool:
+    """Whether `game` from `src` in this league gets an importance score at
+    all. One predicate for the shared and per-game paths.
+
+    False for a game the source proves cannot score above zero
+    (`SportSource.importance_covers`): it scores zero without simulating.
+    DO NOT drop that clause: the per-game fallback costs seconds per game,
+    and ~300 such college basketball games a refresh pushed every pipeline
+    past its 25-minute ceiling (W171)."""
+    if not _importance_modelled(src, league_ctx):
+        return False
+    covers = getattr(src, "importance_covers", None)
+    if not callable(covers):
+        return True
+    try:
+        return bool(covers(game))
+    except Exception as e:
+        # Unsure means simulate, as before this predicate existed: the
+        # importance call's own catch then logs whatever is wrong. A raise
+        # here would be outside that catch and fail the whole refresh.
+        logger.warning(
+            "[ranked_matchups] importance_covers failed for %s; simulating: %s",
+            getattr(src, "sport_label", "?"), e,
+        )
+        return True
 
 
 def _shared_league_importance(
@@ -4041,12 +4068,23 @@ def _shared_league_importance(
     from .scoring import LEAGUE_CONTEXTS, compute_league_importance
 
     groups: Dict[Tuple[int, str], List[int]] = {}
+    skipped: Dict[str, int] = {}
     for i, (g, src) in enumerate(zip(games, sources)):
         code = (g.extra or {}).get("fd_competition_code")
         ctx = LEAGUE_CONTEXTS.get(code) if code else None
-        if not (_importance_applies(src, ctx) and getattr(src, "shared_season_importance", False)):
+        if not _importance_applies(src, ctx, g):
+            if _importance_modelled(src, ctx):
+                label = getattr(src, "sport_label", code)
+                skipped[label] = skipped.get(label, 0) + 1
+            continue
+        if not getattr(src, "shared_season_importance", False):
             continue
         groups.setdefault((id(src), code), []).append(i)
+    for label, n in skipped.items():
+        logger.info(
+            "[ranked_matchups] importance: %s, %d games that cannot move a "
+            "band scored 0 without simulating", label, n,
+        )
 
     out: Dict[int, Tuple[float, List[str], List[str]]] = {}
     for (_src_id, code), idxs in groups.items():
@@ -4369,7 +4407,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         importance_thresholds_hit: List[str] = []
         if done_n in shared_importance:
             importance_pts, importance_notes, importance_thresholds_hit = shared_importance[done_n]
-        elif weights.importance > 0 and _importance_applies(src, league_ctx):
+        elif weights.importance > 0 and _importance_applies(src, league_ctx, g):
             try:
                 importance_pts, importance_notes, importance_thresholds_hit = (
                     compute_match_importance(

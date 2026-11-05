@@ -442,7 +442,9 @@ class TestPollSourcesDeclareTheirField:
     def _poll_sources():
         from dispatcharr_ranked_matchups.sources.ncaaf import NcaafSource
         from dispatcharr_ranked_matchups.sources.ncaam import NcaamSource
-        from dispatcharr_ranked_matchups.sources.ncaaw_basketball import NcaawBasketballRegularSource
+        from dispatcharr_ranked_matchups.sources.ncaaw_basketball import (
+            NcaawBasketballPlayoffSource, NcaawBasketballRegularSource,
+        )
         from dispatcharr_ranked_matchups.sources.ncaa_baseball import NcaaBaseballRegularSource
         from dispatcharr_ranked_matchups.sources.ncaa_softball import NcaaSoftballRegularSource
         from dispatcharr_ranked_matchups.sources.ncaa_soccer import NcaaSoccerSource
@@ -450,6 +452,7 @@ class TestPollSourcesDeclareTheirField:
             "NcaafSource": NcaafSource(api_key="x"),
             "NcaamSource": NcaamSource(api_key="x"),
             "NcaawBasketballRegularSource": NcaawBasketballRegularSource(),
+            "NcaawBasketballPlayoffSource": NcaawBasketballPlayoffSource(),
             "NcaaBaseballRegularSource": NcaaBaseballRegularSource(),
             "NcaaSoftballRegularSource": NcaaSoftballRegularSource(),
             "NcaaSoccerSource(m)": NcaaSoccerSource(gender="m"),
@@ -520,6 +523,7 @@ class TestPollSourcesDeclareTheirField:
             "NcaafSource": 138,
             "NcaamSource": 365,
             "NcaawBasketballRegularSource": 362,
+            "NcaawBasketballPlayoffSource": 362,
             "NcaaBaseballRegularSource": 304,
             "NcaaSoftballRegularSource": 309,
             "NcaaSoccerSource(m)": 215,
