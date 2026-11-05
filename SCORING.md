@@ -102,7 +102,7 @@ standings table for a league source, or 25 for a poll source. `field` is
 |---|---|---|
 | NCAA Football | AP Top 25 | 138 (FBS, 2026) |
 | NCAA Men's Basketball | AP Top 25 | 365 |
-| NCAA Women's Basketball (regular season and tournament) | AP Top 25 | 362 |
+| NCAA Women's Basketball | AP Top 25 | 362 (regular season and tournament) |
 | NCAA Baseball | D1Baseball Top 25 | 304 |
 | NCAA Softball | Top 25 | 309 |
 | NCAA Men's / Women's Soccer | United Soccer Coaches Top 25 | 215 / 351 |
