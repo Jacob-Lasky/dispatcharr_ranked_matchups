@@ -904,6 +904,13 @@
       "button_label": "Reap",
       "button_variant": "outline",
       "button_color": "orange"
+    },
+    {
+      "id": "rematch",
+      "label": "Match cached games + apply",
+      "description": "Pick up new feeds without fetching schedules or scoring.",
+      "button_label": "Match + apply",
+      "button_variant": "outline"
     }
   ]
 }

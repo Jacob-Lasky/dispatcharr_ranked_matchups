@@ -8015,6 +8015,26 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         foreign_streams_dropped += _foreign_n
         policy_dropped_stream_ids |= _policy_ids
 
+        # A stale empty verdict is not evidence that a manually repaired feed
+        # disappeared (#327). Do this BEFORE placeholder/skip and recording
+        # eligibility: retaining links only in the write loop lets a low-score
+        # future game get skipped and reaped instead. Exclusion still applies.
+        existing_ch = existing_virtuals.get(_build_marker_key(g))
+        if not source_streams and existing_ch is not None:
+            snapshot = parse_iso_utc(g.get("matched_at")) or _match_snapshot_time(cache)
+            latest = _latest_m3u_refresh()
+            if latest is not None and (snapshot is None or snapshot < latest):
+                source_streams = list(
+                    ChannelStream.objects.filter(channel=existing_ch)
+                    .exclude(stream_id__in=excluded_ids).order_by("order")
+                    .values_list("stream_id", flat=True)
+                )
+                if source_streams:
+                    logger.warning(
+                        "[ranked_matchups] keeping %d stream(s) on channel %s: empty match predates M3U refresh",
+                        len(source_streams), existing_ch.id,
+                    )
+
         placeholder = False
         # A stream-only match (no whole-channel source, but attachable streams)
         # is a real match, NOT a placeholder. Keyed on `source_streams`, the
@@ -9168,6 +9188,55 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------- auto pipeline ----------
+
+def _action_rematch(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-match the scored slate without fetching or scoring, then apply (#327).
+
+    The parent holds the run lock. An optional rematch_channel_id restricts
+    matching to one owned channel; apply still sees the complete slate so it
+    cannot reap other channels. Partial matching never advances the global
+    snapshot timestamp, which would hide other games' stale matches.
+    """
+    from .matcher import match_games_to_channels
+    cache = _read_cache()
+    if not _cache_has_slate(cache):
+        return {"status": "error", "message": "No scored slate available for matching recovery."}
+    rows = list(cache.get("games") or []) + list(cache.get("bench") or [])
+    channel_id = settings.get("rematch_channel_id")
+    if channel_id is not None:
+        from apps.channels.models import Channel
+        marker = Channel.objects.filter(pk=channel_id, tvg_id__startswith=TVG_ID_PREFIX).values_list("tvg_id", flat=True).first()
+        rows = [r for r in rows if marker and _build_marker_key(r) == marker]
+        if not rows:
+            return {"status": "error", "message": "That channel has no cached matchup."}
+    matched_at = datetime.now(timezone.utc).isoformat()
+    lookup = _build_epg_lookup(
+        local_tz=_resolve_tz(settings.get("local_timezone", "UTC")),
+        excluded_stream_ids=_streams_in_groups(_group_policy(settings)[1]),
+    )
+    matches = match_games_to_channels(
+        [(_gamerow_from_row(r), None, None) for r in rows], lookup,
+        _resolve_key(settings, "anthropic_api_key", ANTHROPIC_KEY_PATH),
+        settings.get("model", "claude-haiku-4-5"),
+        widen=bool(settings.get(_WIDEN_STREAM_POOL_SETTING, False)),
+    )
+    for row, match in zip(rows, matches):
+        row.update(_match_fields(match))
+        row["matched_at"] = matched_at
+    if channel_id is None:
+        cache["matched_at"] = matched_at
+    # Keep refreshed_at and all score/hold/bench fields: only matching changed.
+    _write_cache(cache)
+    tasks._update_inflight_phase("apply (matching recovery)")
+    result = _action_apply(settings)
+    logger.info("[ranked_matchups] rematch: %d cached games, apply status=%s", len(rows), result.get("status"))
+    return {**result, "message": f"Re-matched {len(rows)} cached games. {result.get('message', '')}"}
+
+
+def _action_rematch_async(settings: Dict[str, Any]) -> Dict[str, Any]:
+    task_id = tasks.run_rematch_background(settings)
+    return {"status": "queued", "task_id": task_id, "message": f"Match cached games + apply queued (task {task_id})."}
+
 
 def _action_auto_pipeline_sync(settings: Dict[str, Any]) -> Dict[str, Any]:
     """Synchronous auto_pipeline body (refresh then apply).
@@ -11568,6 +11637,7 @@ _ACTION_HANDLERS = {
     # Locked wrapper, NOT the bare _action_apply: see _action_apply_locked.
     "apply": _action_apply_locked,
     "auto_pipeline": _action_auto_pipeline_async,
+    "rematch": _action_rematch_async,
     "show_status": _action_show_status,
     "preview_names": _action_preview_names,
     "diagnose": _action_diagnose,

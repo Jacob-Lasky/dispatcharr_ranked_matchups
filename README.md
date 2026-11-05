@@ -285,6 +285,7 @@ outage) deleted it. Watch the provider's own channel for that game and update.
 | `apply` | Create / update virtual channels in the target group, link matched streams, write `ProgramData` descriptions, schedule or cancel recordings for your [recorded teams](#recording-your-teams), delete stale ones. | DB (honors `dry_run`) |
 | | *Waits for the result and shows the real summary. Runs in a separate process so it cannot stall the web worker, which costs a second or two of startup.* | |
 | `auto_pipeline` | `refresh` + `apply`. The scheduler runs this; the button triggers it on demand; and it also runs by itself when an M3U update lands near a curated game's kickoff (see [When a feed arrives after a refresh](#when-a-feed-arrives-after-a-refresh)). | Both |
+| `rematch` | Re-match the last scored list (games and bench) against your current channels and streams, then `apply`. Fetches no schedules and runs no scoring; runs in the background. Also runs once on its own after a failed or timed-out `auto_pipeline` (see [Matching recovery](#matching-recovery)). | `cache.json` (match fields only) + DB |
 | `show_status` | Print the current curated list with per-game score breakdown, and end with a verdict on the last background run (see [Did the last run work?](#did-the-last-run-work)). No writes. | — |
 | `preview_names` | Render the channel-name and description templates against sample games so you can check the layout before applying. Reports template problems on the last line; the variable list is in each template's help text. No writes, no API calls. | — |
 | `reap_now` | Drop games that finished more than `remove_finished_after_minutes` ago and backfill from the bench. Re-fetches nothing. | `cache.json` + DB |
@@ -330,7 +331,8 @@ Its last line is always the verdict:
 The run is named by why it happened — `Refresh + apply` (the button),
 `Scheduled refresh + apply` (a time from **Scheduled times**), `Refresh + apply
 after an M3U update` (see [When a feed arrives after a
-refresh](#when-a-feed-arrives-after-a-refresh)), or `Refresh`.
+refresh](#when-a-feed-arrives-after-a-refresh)), `Match cached games + apply`
+(see [Matching recovery](#matching-recovery)), or `Refresh`.
 
 Above the verdict come warnings about the data itself, the failures a run
 can otherwise complete "ok" through: **sources that failed to fetch** (named,
@@ -509,6 +511,20 @@ update`. Three things to know:
 **Diagnose matching** knows about this too: if the channel or stream naming a
 game only appeared after the last match, it tells you when the feed showed up
 and to click **Refresh + apply now**, rather than reporting a matching bug.
+
+### Matching recovery
+
+A failed or timed-out Refresh + apply run retries matching and apply once in a
+fresh process using the last scored slate. It does not fetch schedules or rerun
+scoring. The original scoring failure remains visible in Show current state.
+An empty match older than the latest successful M3U refresh cannot erase streams
+already attached to a channel.
+
+Use **Match cached games + apply** to pick up feeds without waiting for scoring.
+For a single owned channel, invoke the plugin action `rematch` with
+`params: {"rematch_channel_id": <channel id>}` through Dispatcharr's authenticated
+plugin Run API. Other cached games remain on the slate; only that channel is
+re-matched.
 
 ## How channels are created
 
