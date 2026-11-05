@@ -146,6 +146,7 @@ _SUBPROCESS_TIMEOUT_SECONDS = 25 * 60
 ACTION_REFRESH = "refresh"
 ACTION_APPLY = "apply"
 ACTION_AUTO_PIPELINE = "auto_pipeline"
+ACTION_REMATCH = "rematch"
 # Reaping deletes Channels and their EPG rows, so it is destructive bulk DB
 # work and belongs OUT OF PROCESS for the same reason apply does (#142): those
 # writes wedged a gevent worker even after the transaction was shrunk.
@@ -384,6 +385,7 @@ RUN_KIND_LABELS = {
     "refresh": "Refresh",
     "apply": "Apply",
     "reap": "Reap finished games",
+    "rematch": "Match cached games + apply",
 }
 
 
@@ -497,7 +499,9 @@ def pipeline_child_seconds_left() -> Optional[float]:
 
 
 def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, Any]:
-    """`_run_pipeline_child`, plus ONE apply in a fresh child when an
+    """Run a child, recovering failed pipelines with match + apply (#327).
+
+    Also runs ONE apply in a fresh child when an
     auto_pipeline's apply stopped for lack of time (APPLY_STOPPED_FOR_TIME).
     Only one: the fresh child starts with its whole life, so its apply cannot
     run short, and a follow-up of a follow-up would hide a real fault. The
@@ -512,6 +516,18 @@ def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, 
     browser's timeout for a second child. A reap whose apply stopped is
     finished by reap's own pending path on its next run."""
     result = _run_pipeline_child(action, settings)
+    if (action == ACTION_AUTO_PIPELINE and result.get("status") != "ok"
+            and not result.get(APPLY_STOPPED_FOR_TIME)):
+        # Scoring must never freeze matching (#327). The failed child is
+        # already dead, and the parent still owns the run lock. Use the last
+        # scored slate in ONE fresh child, with no fetch or simulation.
+        logger.warning("[ranked_matchups] scoring/pipeline failed; rematching the cached slate in a fresh child")
+        _update_inflight_phase("rematch (recovery)")
+        recovery = _run_pipeline_child(ACTION_REMATCH, settings)
+        return {**result, "matching_recovery": recovery, "message": (
+            f"{result.get('message', '')} | matching recovery: "
+            f"{recovery.get('status')}: {recovery.get('message', '')}"
+        )}
     follow_up = ACTION_APPLY
     if action != ACTION_AUTO_PIPELINE or not result.get(APPLY_STOPPED_FOR_TIME):
         return result
@@ -531,6 +547,17 @@ def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, 
         f"| first run: {result.get('message', '')}"
     )
     return out
+
+
+def run_rematch_background(settings: Dict[str, Any]) -> str:
+    """On-demand matching, supervised under the same lock as every writer."""
+    task_id = _new_task_id()
+    threading.Thread(
+        target=_run_under_lock,
+        args=("rematch", task_id, partial(run_pipeline_subprocess, ACTION_REMATCH), settings),
+        name=f"ranked_matchups-rematch-{task_id[:8]}", daemon=True,
+    ).start()
+    return task_id
 
 
 def _run_pipeline_child(action: str, settings: Dict[str, Any]) -> Dict[str, Any]:

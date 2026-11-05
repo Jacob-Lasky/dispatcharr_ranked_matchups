@@ -7,3 +7,4 @@ class M3UAccount(models.Model):
     name = models.CharField(max_length=255, unique=True)
     max_streams = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(null=True)

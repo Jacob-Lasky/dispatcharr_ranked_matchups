@@ -820,3 +820,17 @@ exactly which signal to nudge.
 ## License
 
 MIT — see LICENSE.
+
+### Matching recovery
+
+A failed or timed-out Refresh + apply run retries matching and apply once in a
+fresh process using the last scored slate. It does not fetch schedules or rerun
+scoring. The original scoring failure remains visible in Show current state.
+An empty match older than the latest successful M3U refresh cannot erase streams
+already attached to a channel.
+
+Use **Match cached games + apply** to pick up feeds without waiting for scoring.
+For a single owned channel, invoke the plugin action `rematch` with
+`params: {"rematch_channel_id": <channel id>}` through Dispatcharr's authenticated
+plugin Run API. Other cached games remain on the slate; only that channel is
+re-matched.

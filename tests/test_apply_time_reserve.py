@@ -394,10 +394,10 @@ class TestFreshChildFollowUp:
         assert calls == ["auto_pipeline", "apply"]
         assert out["status"] == "error"
 
-    def test_any_other_result_runs_once(self, tasks_mod, monkeypatch):
-        calls = self._script(tasks_mod, monkeypatch, [{"status": "error", "message": "band full"}])
-        assert tasks_mod.run_pipeline_subprocess("auto_pipeline", {})["message"] == "band full"
-        assert calls == ["auto_pipeline"]
+    def test_other_error_gets_matching_recovery(self, tasks_mod, monkeypatch):
+        calls = self._script(tasks_mod, monkeypatch, [{"status": "error", "message": "band full"}, {"status": "error", "message": "band full"}])
+        assert "band full" in tasks_mod.run_pipeline_subprocess("auto_pipeline", {})["message"]
+        assert calls == ["auto_pipeline", "rematch"]
 
     @pytest.mark.parametrize("action", ["apply", "reap"])
     def test_a_standalone_apply_or_reap_is_not_rerun(self, tasks_mod, monkeypatch, action):

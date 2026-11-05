@@ -80,6 +80,7 @@ def main() -> int:
         tasks.ACTION_REFRESH: plugin._action_refresh,
         tasks.ACTION_APPLY: plugin._action_apply,
         tasks.ACTION_AUTO_PIPELINE: plugin._action_auto_pipeline_sync,
+        tasks.ACTION_REMATCH: plugin._action_rematch,
         # Bare _action_reap, never a locked wrapper: the parent holds the
         # scheduler lock across this call and the token is a parent-process
         # global, so re-acquiring here would fail and silently skip the work.
