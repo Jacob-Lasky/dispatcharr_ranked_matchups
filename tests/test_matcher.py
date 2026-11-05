@@ -25,6 +25,15 @@ from dispatcharr_ranked_matchups.matcher import (
 
 
 class TestTeamKeywords:
+    def test_botafogo_fd_name_matches_fanatiz_fixture(self):
+        home = _team_keywords("Botafogo FR")
+        away = _team_keywords("CA Mineiro")
+        assert both_teams_in_one_segment(
+            "(Fanatiz 002) | Botafogo vs Atlético Mineiro (2026-11-04 19:30:00)",
+            home, away,
+        )
+        assert not both_teams_in_one_segment("Botafogo vs Palmeiras", home, away)
+
     def test_single_word(self):
         kws = _team_keywords("Wrexham")
         assert "Wrexham" in kws
