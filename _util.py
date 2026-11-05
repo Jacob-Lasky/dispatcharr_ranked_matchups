@@ -586,13 +586,20 @@ def group_advance_text(group_stage: Optional[Dict[str, Any]]) -> str:
 #
 # Both key fields are input_type=password in plugin.json, which masks the form
 # input and does nothing for logs, and Dispatcharr logs go to container stdout.
+# Health messages also pass through here: a relative Kuma push path and an
+# Authorization Bearer/Basic header can appear without an absolute URL (W177).
 #
 # DO NOT log a raw URL or a raw `requests` exception from a call that carries a
 # key. Wrap it in redact_secrets(). See #156.
 _SECRET_QUERY_PARAM_RE = re.compile(
-    r"((?:api_?key|apikey|token|secret)=)([^&\s\"']+)", re.IGNORECASE
+    r'''(["']?(?:api[_-]?key|token|secret|password)["']?\s*[=:]\s*)'''
+    r'''(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s"'<>]+)''', re.IGNORECASE
 )
-_SECRET_PATH_SEGMENT_RE = re.compile(r"(/api/v\d+/json/)([^/\s]+)")
+_SECRET_PATH_SEGMENT_RE = re.compile(r"(/(?:api/v\d+/json|api/push)/)([^/\s?\"']+)", re.IGNORECASE)
+_SECRET_AUTH_RE = re.compile(
+    r"([\"']?authorization[\"']?\s*[:=]\s*[\"']?(?:(?:Bearer|Basic)\s+)?)([^,\s\"'}]+)",
+    re.IGNORECASE,
+)
 
 
 def redact_secrets(value: Any) -> str:
@@ -606,6 +613,7 @@ def redact_secrets(value: Any) -> str:
     text = str(value)
     text = _SECRET_QUERY_PARAM_RE.sub(r"\1***", text)
     text = _SECRET_PATH_SEGMENT_RE.sub(r"\1***", text)
+    text = _SECRET_AUTH_RE.sub(r"\1***", text)
     return text
 
 

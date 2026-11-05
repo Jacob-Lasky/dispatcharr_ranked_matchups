@@ -380,6 +380,28 @@
       "help_text": "D1 regular season + College Cup tournament bracket. ESPN unofficial API + United Soccer Coaches Top 25 poll. Regular-season standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. Postseason is single-game elimination: the men's 48-team field gives the top 16 seeds byes (R1 → R2 → Sweet 16 → Elite 8 → College Cup semis → final), the women's is a full 64-team field over 6 rounds. No API key required."
     },
     {
+      "id": "_section_health",
+      "type": "info",
+      "label": "Health monitoring (optional)",
+      "description": "Push run health and feed refresh health to your own heartbeat monitors. Leave blank to disable."
+    },
+    {
+      "id": "health_push_url",
+      "type": "string",
+      "input_type": "password",
+      "label": "Health push URL (optional)",
+      "default": "",
+      "help_text": "Kuma-compatible push URL for pipeline health. Sends UP only after a healthy Refresh + apply run; errors, timeouts, stale matches and live channels with no streams send DOWN. Warns after 17m30s. Set the monitor interval longer than your largest scheduled gap plus 50 minutes, so a missed run expires in the monitor."
+    },
+    {
+      "id": "refresh_health_push_url",
+      "type": "string",
+      "input_type": "password",
+      "label": "M3U/EPG refresh health push URL (optional)",
+      "default": "",
+      "help_text": "Separate Kuma-compatible push monitor for Dispatcharr feed refreshes. Checks active providers every five minutes for failed refreshes or scheduled feeds overdue by 25 minutes. Use at least a one-hour monitor interval to cover a pipeline and its recovery. Built-in custom M3U and dummy EPG sources are excluded."
+    },
+    {
       "id": "_section_keys",
       "type": "info",
       "label": "API Keys",

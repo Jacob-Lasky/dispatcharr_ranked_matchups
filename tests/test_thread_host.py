@@ -606,7 +606,7 @@ class TestStalenessIsShownAndLogged:
         # Including the ticks that do not reap: the check must sit above the
         # reap_delay gate, or it runs only on the rare tick that also reaps.
         settings = {"auto_refresh_enabled": True}
-        checked, reaped = [], []
+        checked, reaped, refresh_checked = [], [], []
         wakes = iter([False, True])  # one wake, then the stop event
         monkeypatch.setattr(plugin, "_scheduler_sleep", lambda ev, t: next(wakes))
         monkeypatch.setattr(plugin, "_reap_settings", lambda s: reap_minutes)
@@ -616,9 +616,11 @@ class TestStalenessIsShownAndLogged:
         monkeypatch.setattr(plugin, "_maybe_rematch_after_m3u", lambda s: None)
         monkeypatch.setattr(plugin, "_action_reap_locked", lambda *a, **k: reaped.append(1) or {})
         monkeypatch.setattr(plugin, "_warn_if_scheduler_stale", checked.append)
+        monkeypatch.setattr(plugin.tasks.health, "report_refresh", refresh_checked.append)
         ref = MagicMock(get_current_settings=lambda: settings)
         plugin._reaper_loop(ref, threading.Event())
         assert checked == [settings]
+        assert refresh_checked == [settings]
         assert reaped == []
 
     def test_a_malformed_stop_entry_does_not_stop_the_reaper(self, plugin, monkeypatch, tmp_path):
