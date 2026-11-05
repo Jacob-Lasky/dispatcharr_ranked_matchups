@@ -102,7 +102,7 @@ standings table for a league source, or 25 for a poll source. `field` is
 |---|---|---|
 | NCAA Football | AP Top 25 | 138 (FBS, 2026) |
 | NCAA Men's Basketball | AP Top 25 | 365 |
-| NCAA Women's Basketball | AP Top 25 | 362 |
+| NCAA Women's Basketball (regular season and tournament) | AP Top 25 | 362 |
 | NCAA Baseball | D1Baseball Top 25 | 304 |
 | NCAA Softball | Top 25 | 309 |
 | NCAA Men's / Women's Soccer | United Soccer Coaches Top 25 | 215 / 351 |
@@ -739,8 +739,11 @@ doesn't capture:
   what gets them onto the guide at all. F1 and NASCAR have no major
   tier: every race is `EVENT`.
 - **NCAA Women's Basketball / March Madness:** ESPN scoreboard for
-  the regular season, dedicated `NcaawSource` knows the 6-round
-  single-game elimination shape (R64 → R32 → S16 → E8 → F4 → NCG).
+  the regular season, dedicated `NcaawBasketballPlayoffSource` knows the
+  6-round single-game elimination shape (R64 → R32 → S16 → E8 → F4 → NCG)
+  and is the only source that emits a tournament game (with the AP poll
+  ranks attached), so tournament games are scored against the bracket,
+  not the regular-season win bands.
   Uses the same `KNOCKOUT_ROUND_DEPTH` cascade the FIFA / UEFA
   knockouts use.
 
