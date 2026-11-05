@@ -11,6 +11,7 @@ class EPGSource(models.Model):
     file_path = models.CharField(max_length=1024, blank=True, null=True)
     refresh_interval = models.IntegerField(default=0)
     status = models.CharField(max_length=20, default="idle")
+    updated_at = models.DateTimeField(null=True)
 
 
 class EPGData(models.Model):

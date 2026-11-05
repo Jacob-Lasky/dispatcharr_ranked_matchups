@@ -520,6 +520,18 @@ class TestRedactSecrets:
         clean = "https://site.api.espn.com/apis/site/v2/sports/soccer/club.friendly/scoreboard?dates=20260725"
         assert _util.redact_secrets(clean) == clean
 
+    def test_health_messages_mask_relative_push_paths_and_auth_headers(self):
+        for message in (
+            "Authorization: Bearer SECRET123", "authorization: Basic SECRET123",
+            "{'Authorization': 'Bearer SECRET123'}", '"Authorization": "Basic SECRET123"',
+            "GET /api/push/SECRET123?status=down", "/API/PUSH/SECRET123",
+            "/API/V1/JSON/SECRET123/lookup", "password=SECRET123", "apiKey: SECRET123",
+            'password="SECRET123"', "token='SECRET123'", "api-key=SECRET123",
+        ):
+            assert "SECRET123" not in _util.redact_secrets(message), message
+        assert _util.redact_secrets('"password": "PRIVATE WITH_SPACE"') == '"password": ***'
+        assert _util.redact_secrets('password="PRIVATE\\\"WITH_SPACE"') == 'password=***'
+
 
 class TestNoRawSecretLogging:
     """Contract guard. The redactor only helps if the leak sites actually call

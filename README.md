@@ -526,6 +526,46 @@ For a single owned channel, invoke the plugin action `rematch` with
 plugin Run API. Other cached games remain on the slate; only that channel is
 re-matched.
 
+### Health monitoring (optional)
+
+Create a Push monitor in your own Uptime Kuma and paste its push URL into
+**Health push URL** in plugin Settings. Leave it blank to disable monitoring.
+The URL is masked because it contains a secret token; keep it out of logs and
+support screenshots. The plugin uses a Kuma-compatible HTTP(S) GET with `status`
+and `msg` query parameters, so another compatible heartbeat service works too.
+
+After every **Refresh + apply** run (manual, scheduled or triggered by an M3U
+update), the plugin sends UP only when the run succeeded, matching covers that
+run and the latest M3U refresh, and no live owned channel has zero actual stream
+links. Errors and timeouts send DOWN with the cause, even when matching recovery
+rescued the channels. Source fetch failures and incomplete schedules also send
+DOWN. Future placeholders do not count as broken live channels; the published
+guide is checked too, so a channel missing from the cache is still covered.
+
+At 70% of the 1500-second child ceiling (17m30s), an early DOWN warns that the run
+is still going. The final healthy run sends UP. Use **zero retries** on the Push
+monitor for immediate DOWN alerts, and attach your usual notification.
+
+Set its interval longer than your largest scheduled gap plus 50 minutes (one
+25-minute child and one possible recovery child). For example, a schedule of
+0400/1000/1300/1600/1900 has a nine-hour overnight gap; a ten-hour interval covers
+it. Only completed pipeline runs send the heartbeat: a dead scheduler or a run
+that never gets the lock goes DOWN when Kuma's own interval expires. Change the
+monitor interval if you change the schedule. With scheduled runs disabled,
+manual runs must provide the heartbeat or the monitor will expire.
+
+For Dispatcharr's own feed refreshes, create a **second** Push monitor and paste
+its URL into **M3U/EPG refresh health push URL**. The existing reaper checks active
+M3U/EPG providers every five minutes and reports failed refresh statuses or a
+scheduled source overdue by its refresh interval plus 25 minutes. It ignores the
+locked built-in custom M3U, inactive sources and dummy EPG. Manual feeds have no
+age deadline. Use a one-hour interval and zero retries; this allows the reaper
+time to finish a pipeline and its recovery. Its heartbeat stays separate from
+the pipeline monitor so it cannot conceal a dead scoring scheduler.
+
+A failed push is logged by exception type without its URL and cannot stop the
+pipeline or strand its lock. Kuma detects a silent sender by its own expiry.
+
 ## How channels are created
 
 The plugin keeps your source channels untouched. Instead it creates **virtual

@@ -10600,7 +10600,7 @@ def _scheduled_retry_deadline(slot: datetime, times: List[Tuple[int, int]], tz) 
 
 
 # Run kinds that do a scheduled slot's whole job (refresh + apply).
-_PIPELINE_RUN_KINDS = frozenset({"auto_pipeline", tasks.SCHEDULED_RUN_KIND, "m3u_rematch"})
+_PIPELINE_RUN_KINDS = tasks.PIPELINE_RUN_KINDS
 
 
 def _slot_already_covered(slot: datetime) -> bool:
@@ -11102,6 +11102,10 @@ def _reaper_loop(plugin_ref, stop_event):
                 # Never raises. Catches a scheduler thread that died while
                 # this one lives; one log line per missed slot (#252).
                 _warn_if_scheduler_stale(settings)
+                try:
+                    tasks.health.report_refresh(settings)
+                except Exception as exc:
+                    logger.warning("[ranked_matchups.health] refresh check failed (%s)", type(exc).__name__)
                 # Its own try: a failure here must not cost this tick's reap.
                 try:
                     _maybe_rematch_after_m3u(settings)

@@ -70,6 +70,7 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Optional
 
 from ._util import write_json_atomic
+from . import health
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.tasks")
 
@@ -263,7 +264,13 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
         return False
     started = datetime.now(timezone.utc)
     result: Dict[str, Any] = {"status": "error", "message": "crashed before returning a result"}
+    health_watch = None
     try:
+        if kind in PIPELINE_RUN_KINDS and settings.get(health.HEALTH_PUSH_URL_SETTING):
+            try:
+                health_watch = health.PipelineHealth(settings, started, _SUBPROCESS_TIMEOUT_SECONDS)
+            except Exception as exc:
+                logger.warning("[ranked_matchups.health] timer start failed (%s)", type(exc).__name__)
         _set_inflight(kind, task_id, "refresh")
         result = target(settings)
         # LOG THE MESSAGE, not just the status (#170). Every caller of this
@@ -284,6 +291,12 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
         )
         result = {"status": "error", "message": f"crashed: {e}"}
     finally:
+        if health_watch is not None:
+            try:
+                health_watch.finish(result)
+            except Exception as exc:
+                # Monitoring cannot strand the run lock or suppress its outcome.
+                logger.warning("[ranked_matchups.health] final check failed (%s)", type(exc).__name__)
         _record_last_run(kind, task_id, started, result)
         _clear_inflight()
         _release_scheduler_lock(lock_token)
@@ -377,6 +390,7 @@ def record_skipped_run(kind: str, reason: Optional[str] = None) -> None:
 # by name (plugin._scheduler_staleness treats a lock held by one as a busy
 # scheduler), so it is one constant, not a literal at each end.
 SCHEDULED_RUN_KIND = "scheduled_auto_pipeline"
+PIPELINE_RUN_KINDS = frozenset({ACTION_AUTO_PIPELINE, SCHEDULED_RUN_KIND, "m3u_rematch"})
 
 RUN_KIND_LABELS = {
     "auto_pipeline": "Refresh + apply",
