@@ -7,6 +7,12 @@ follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 
 ### Fixed
 
+- **A betting analysis show attached as a game's feed.** SportsGrid's
+  "In-Game Live" show lists both teams in its title (`BYU vs. Utah College
+  Football In-Game Live Gameday`) but shows betting commentary, not the game.
+  A feed whose programme, sub-title or channel/stream name says "In-Game Live"
+  is now skipped, as a primary or a backup; ordinary "Live" broadcasts are
+  unaffected.
 - **Botafogo games finding no feed.** Football-Data.org names the club
   `Botafogo FR`, while providers list it as `Botafogo` (`Botafogo vs Atlético
   Mineiro`). `team_aliases.json` now maps the two.
