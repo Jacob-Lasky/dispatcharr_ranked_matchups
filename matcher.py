@@ -644,6 +644,20 @@ def _strip_preview_titles(
     return [c for c in candidates if not _is_preview_title(c.program_title)]
 
 
+# SportsGrid's branded betting show names the teams being discussed, but does
+# not carry the game. Check both provider-slot names and EPG titles, before
+# ANY tier: a strict name match must not re-admit it as a primary or backup.
+# DO NOT reject generic "in game" or "live" labels on actual game broadcasts.
+_ANALYSIS_SHOW_RE = re.compile(r"\bin[\s-]+game\s+live\b", re.IGNORECASE)
+
+
+def _is_analysis_show(candidate: ChannelCandidate) -> bool:
+    texts = [candidate.program_title, candidate.program_sub_title]
+    if not candidate.channel_name_stale:
+        texts.append(candidate.channel_name)
+    return any(_ANALYSIS_SHOW_RE.search(text or "") for text in texts)
+
+
 def _post_claude(
     api_key: str,
     model: str,
@@ -1141,9 +1155,12 @@ def candidate_conflict(c: ChannelCandidate, game: Any, field: bool) -> Optional[
     Each event part is judged ON ITS OWN, so a channel name that says 'CFB'
     cannot vouch for a programme titled 'College Swimming: NC State vs
     Stanford' on it: the programme is what is on, and it says it is something
-    else. A game with no or an unmapped prefix is not judged. Diagnose calls
-    this too, so the two can never disagree about a feed.
+    else. Sport conflicts are not judged for an unmapped prefix. Analysis
+    shows are rejected for every game. Diagnose calls this too, so the two
+    can never disagree about a feed.
     """
+    if _is_analysis_show(c):
+        return "names the In-Game Live analysis show, not a game broadcast"
     prefix = getattr(game, "sport_prefix", "") or ""
     if prefix not in _PREFIX_SPORT:
         return None
@@ -1247,8 +1264,8 @@ def match_games_to_channels(
         match_away = None if is_field_event(game.away, getattr(game, "extra", None)) else game.away
 
         # Before ANY tier, so neither the regex tiers nor the LLM can pick a
-        # feed whose name says it is another sport or the other gender's
-        # competition (#324).
+        # feed whose name says it is another sport, the other gender's
+        # competition (#324), or an analysis show rather than the game.
         candidates, conflicts = drop_conflicting_candidates(
             candidates, game, field=match_away is None)
         for c, why in conflicts:
@@ -1258,7 +1275,7 @@ def match_games_to_channels(
         if not candidates:
             results[i].note = (
                 f"{len(conflicts)} candidate(s) named another sport or "
-                "competition (" + conflicts[0][1] + ")")
+                "competition, or an analysis show (" + conflicts[0][1] + ")")
             continue
 
         # Tier 1 (strongest signal): channels whose NAME contains both teams
