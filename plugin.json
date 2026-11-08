@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.36.1",
+  "version": "1.36.2",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -761,14 +761,14 @@
       "options": [
         {
           "value": "quality",
-          "label": "Quality (highest resolution/bitrate first)"
+          "label": "Quality (native frame rate, resolution, bitrate)"
         },
         {
           "value": "us_preferred",
           "label": "Prefer US broadcasts (quality first, US breaks ties)"
         }
       ],
-      "help_text": "How a virtual channel's stacked fallback streams are ordered. 'Quality' sorts by ffprobe resolution then bitrate, falling back to HD/FHD/UHD hints in the stream name when a stream was never probed (the historical behavior). 'Prefer US broadcasts' keeps that quality ordering but, among streams of EQUAL quality, puts the US English feed (ESPN/FOX/NBC/ABC/CBS/etc.) ahead of Canadian (TSN/Sportsnet) and overseas feeds. It never promotes a lower-quality US feed over a higher-quality non-US one. US is detected from the stream name; Spanish-language US feeds (ESPN Deportes, Telemundo) are not treated as the preferred US feed. In both modes, known languages absent from Preferred languages stay behind eligible feeds, regardless of quality or channel curation. Within eligible feeds, quality still leads in Prefer US broadcasts mode."
+      "help_text": "How a virtual channel's stacked fallback streams are ordered. 'Quality' prefers measured 59.94/60 fps streams for domestic North American leagues, then ffprobe resolution and bitrate. Unknown frame rates retain the previous quality order. It falls back to HD/FHD/UHD hints in the stream name when a stream was never probed. 'Prefer US broadcasts' keeps that quality ordering but, among streams of EQUAL quality, puts the US English feed (ESPN/FOX/NBC/ABC/CBS/etc.) ahead of Canadian (TSN/Sportsnet) and overseas feeds. It never promotes a lower-quality US feed over a higher-quality non-US one. US is detected from the stream name; Spanish-language US feeds (ESPN Deportes, Telemundo) are not treated as the preferred US feed. In both modes, known languages absent from Preferred languages stay behind eligible feeds, regardless of quality or channel curation. Within eligible feeds, quality still leads in Prefer US broadcasts mode."
     },
     {
       "id": "language_preferences",

@@ -147,7 +147,12 @@ to sort to the top of group lists):
   unknown audio stays eligible) → provenance (a stream the user attached to a
   channel of their own beats one only the Path C sweep found) → language
   (`language_preferences`, an ordered code list, default `en`) → quality
-  (ffprobe resolution/bitrate, then name hints). Under `us_preferred`, quality
+  (ffprobe resolution/bitrate, then name hints; for a game whose prefix is in
+  `_FULL_RATE_60_PREFIXES`, the domestic North American leagues, a measured
+  59-61 fps `source_fps` leads resolution first (#335). Unknown fps keeps the
+  resolution order, and names never imply an fps. International competitions
+  are left out because 50 fps is native there; the set is covered by
+  `tests/test_mapped_prefixes.py`). Under `us_preferred`, quality
   leads within the eligibility/provenance tier, the US-broadcast rank breaks
   quality ties, and language rank is the last tiebreak.
   `_detect_stream_language` checks explicit audio labels (`German Commentary`,

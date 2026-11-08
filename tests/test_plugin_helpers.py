@@ -4634,3 +4634,49 @@ class TestLaLigaEnglishOrdering:
         english = plugin._stream_sort_key(stats, "TSN 3", lang_prefs=["en"],
                                           prefer_us=prefer_us, curated=False)
         assert english < spanish
+
+
+class TestNativeBroadcastCadence:
+    def test_real_raiders_pool_prefers_native_full_rate(self, plugin):
+        """W258: the real 21-stream list selected 1080p/50 over 720p/59.94."""
+        with open(os.path.join(REPO_ROOT, "tests/fixtures/raiders_49ers_streams.json")) as fh:
+            fixture = json.load(fh)
+        streams = [types.SimpleNamespace(channel_group_id=None, **{
+            k: row[k] for k in ("id", "name", "stream_stats")
+        }) for row in fixture["streams"]]
+        ids, _, _ = plugin._build_stream_pool(
+            [], [s.id for s in streams], fixture["game"],
+            field_event=False, home_kws=[], away_kws=[],
+            select_streams_for_game=lambda names, *_: [True] * len(names),
+            stream_model=_FakeStreamModel(streams), lang_prefs=["en"], prefer_us=True,
+            curated_ids={s["id"] for s in fixture["streams"] if s["curated"]},
+            fallback_only_ids={s["id"] for s in fixture["streams"] if s["fallback_only"]},
+            excluded_ids=set(),
+        )
+        assert ids[0] == 412319, f"Native 59.94 fps game feed lost to {ids[0]}"
+        assert set(ids) == {s.id for s in streams}
+
+
+    @pytest.mark.parametrize("sport", ["NFL", "CFB", "NBA", "CBB", "WNBA", "NCAAW", "MLB", "NCAABSB", "NCAASBL", "NHL", "NCAAMSOC", "NCAAWSOC", "MLS", "NWSL", "NASCAR"])
+    @pytest.mark.parametrize("prefer_us", [False, True])
+    def test_domestic_full_rate_beats_resolution(self, plugin, sport, prefer_us):
+        native = {"resolution": "1280x720", "source_fps": "59.94"}
+        converted = {"resolution": "1920x1080", "source_fps": 50}
+        assert plugin._stream_sort_key(native, "Game", sport_prefix=sport, prefer_us=prefer_us) < plugin._stream_sort_key(converted, "AU: ESPN FHD", sport_prefix=sport, prefer_us=prefer_us)
+
+    @pytest.mark.parametrize("fps", [None, "", "unknown", "nan", "inf", 0])
+    def test_unknown_fps_keeps_resolution_order(self, plugin, fps):
+        assert plugin._stream_sort_key({"resolution": "1920x1080", "source_fps": fps}, "Game", sport_prefix="NFL") < plugin._stream_sort_key({"resolution": "1280x720"}, "Game", sport_prefix="NFL")
+
+    def test_international_50_fps_and_user_policy_are_preserved(self, plugin):
+        native = {"resolution": "1280x720", "source_fps": 59.94}
+        pal = {"resolution": "1920x1080", "source_fps": 50}
+        assert plugin._stream_sort_key(pal, "Feed", sport_prefix="EPL") < plugin._stream_sort_key(native, "Feed", sport_prefix="EPL")
+        assert plugin._stream_sort_key(pal, "Feed", curated=True, sport_prefix="NFL") < plugin._stream_sort_key(native, "Feed", sport_prefix="NFL")
+        assert plugin._stream_sort_key(pal, "Feed", sport_prefix="NFL") < plugin._stream_sort_key(native, "Feed", sport_prefix="NFL", fallback_only=True)
+        assert plugin._stream_sort_key(pal, "ESPN", sport_prefix="NFL", lang_prefs=["en"], prefer_us=True) < plugin._stream_sort_key(native, "ESPN Deportes", sport_prefix="NFL", lang_prefs=["en"], prefer_us=True)
+
+    def test_failed_probe_cannot_win_on_fps(self, plugin):
+        failed = {"resolution": "0x0", "source_fps": 60}
+        valid = {"resolution": "1280x720", "source_fps": 50}
+        assert plugin._stream_sort_key(valid, "Feed", sport_prefix="NFL") < plugin._stream_sort_key(failed, "Feed", sport_prefix="NFL")

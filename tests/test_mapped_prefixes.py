@@ -51,6 +51,7 @@ PREFIX_TABLES = (
     ("logos", "SPORTSDB_LEAGUE_IDS"),
     ("logos", "SPORTSDB_TOURNAMENT_LEAGUE_IDS"),
     ("plugin", "_SOCCER_PREFIXES"),
+    ("plugin", "_FULL_RATE_60_PREFIXES"),
     ("plugin", "_SOCCER_EVERY_GAME_LONG_WINDOW"),
     ("plugin", "_MATCH_WINDOW_OVERRIDE_PRE_MIN"),
     ("plugin", "_MATCH_WINDOW_OVERRIDE_POST_HOURS"),

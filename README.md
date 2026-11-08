@@ -424,6 +424,12 @@ lineup you curated leads by default and raw M3U inventory backs it up.
 Your own matchup channels do not count as
 curation.
 
+Within the quality tier, domestic North American leagues prefer a measured
+59.94/60 fps feed before resolution and bitrate. For example, a 720p/59.94 NFL
+feed leads a 1080p/50 rebroadcast. Unknown frame rates retain the previous
+quality order, and international competitions keep their existing ordering.
+Group policy, language eligibility and curated provenance still take precedence.
+
 **Language is read from the stream name, so it is best-effort.** A `DE:` or
 `MX |` tag, a broadcaster like ZDF or Telemundo, an `English Feed` label, or
 accented spelling all resolve. Explicit `En Español` / `(ESP)` labels and
