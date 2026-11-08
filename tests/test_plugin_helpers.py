@@ -5,6 +5,7 @@ __init__.py (which imports Plugin → starts the scheduler thread → imports
 Django models). The conftest registers the package without exec-ing
 __init__.py."""
 
+import json
 import os
 import re
 import types
@@ -3054,7 +3055,6 @@ class TestDetectStreamLanguage:
         # Each of these was a MEASURED false positive of a looser predicate.
         "TSN+ 08: NO EVENT",                                    # not Norwegian
         "EFL36ⓧ| No Scheduled Event",                            # not Norwegian (title case)
-        "ESPN UNLTD 209: ESPN+: SE Missouri vs. North Alabama",  # not Swedish
         "SEC+ / ACC extra 16: SE Louisiana vs. Ole Miss",        # not Swedish
         "NCAAF 027: MOREHOUSE VS UAPB (IN LITTLE ROCK, AR)",     # not Arabic
         "US: Canal 47",                                          # "US" is deliberately not a tag
@@ -3238,7 +3238,7 @@ class TestUsBroadcastPreference:
     def test_acceptance_4k_fox_usa_v_aus_is_top(self, plugin):
         # Real config: widen_stream_pool ON (lang_prefs=["en"]) AND us_preferred,
         # with realistic live feed names (no team names): "FOX 4K" is a US token
-        # but NOT an English token; "TSN 1" IS an English token. Under us_preferred
+        # and now an English token; "TSN 1" is English too. Under us_preferred
         # quality leads, so the probed-4K Fox tops the 1080p TSN. The bug this
         # guards: language-first alone sank FOX below TSN (TSN-first symptom).
         kw = dict(lang_prefs=["en"], prefer_us=True, home="United States", away="Australia")
@@ -3254,19 +3254,20 @@ class TestUsBroadcastPreference:
             key=lambda t: t[1])
         assert ranked[0][0] == "fox_4k", f"expected fox_4k first, got {[r[0] for r in ranked]}"
 
-    def test_us_preferred_overrides_language_ordering(self, plugin):
-        # Regression for the live bug: with a language preference set, a 4K feed whose name
-        # is NOT an English token must still beat a 1080p English-token feed under
-        # us_preferred (quality leads; language is only a final tiebreak). Without
-        # prefer_us, the language key sinks the 4K feed below the 1080p one.
-        fox_4k, tsn_1080 = {"width": 3840, "height": 2160}, {"width": 1920, "height": 1080}
-        hw = dict(home="United States", away="Australia")
-        # us_preferred: 4K FOX wins (quality leads)
-        assert plugin._stream_sort_key(fox_4k, "FOX 4K", lang_prefs=["en"], prefer_us=True, **hw) < \
-               plugin._stream_sort_key(tsn_1080, "TSN 1", lang_prefs=["en"], prefer_us=True, **hw)
-        # language only (the #111 behavior that produced TSN-first): TSN wins
-        assert plugin._stream_sort_key(tsn_1080, "TSN 1", lang_prefs=["en"], **hw) < \
-               plugin._stream_sort_key(fox_4k, "FOX 4K", lang_prefs=["en"], **hw)
+    def test_english_4k_keeps_quality_priority_in_both_modes(self, plugin):
+        fox_4k = {"width": 3840, "height": 2160}
+        tsn_1080 = {"width": 1920, "height": 1080}
+        for prefer_us in (False, True):
+            assert plugin._stream_sort_key(fox_4k, "FOX 4K", lang_prefs=["en"], prefer_us=prefer_us) < \
+                   plugin._stream_sort_key(tsn_1080, "TSN 1", lang_prefs=["en"], prefer_us=prefer_us)
+
+    def test_us_preferred_preserves_unlabelled_quality_priority(self, plugin):
+        # Unknown audio is eligible, not a known unwanted language.
+        assert plugin._stream_sort_key({"width": 3840, "height": 2160}, "Unlabelled 4K",
+                                      lang_prefs=["en"], prefer_us=True) < \
+               plugin._stream_sort_key({"width": 1920, "height": 1080}, "TSN 1",
+                                      lang_prefs=["en"], prefer_us=True)
+
 
     def test_manifest_stream_priority_matches_code(self, plugin):
         # plugin.json's stream_priority option values + default MUST match the
@@ -4561,3 +4562,75 @@ class TestMatchdayReadsAsTimeRemaining:
                            {"name": "A FC", "position": 1, "points": 80, "played": 37}]}}
         assert "Catch-up matchday 35 of 38." in plugin._build_description(
             g, tagline="", placeholder=False)
+
+
+class TestLaLigaEnglishOrdering:
+    """W255 / #333: actual AliceXC Atlético–Barcelona stream stack, 2026-11-08."""
+
+    def _rank(self, plugin, prefer_us):
+        with open(os.path.join(REPO_ROOT, "tests", "fixtures", "laliga_w255_streams.json")) as fh:
+            rows = json.load(fh)
+        assert len(rows) == 28 and {r["account"] for r in rows} == {"AliceXC"}
+        streams = [_stream_stub(r["id"], r["name"], group_id=r["channel_group_id"],
+                                stats=r["stream_stats"]) for r in rows]
+        ids, foreign, dropped = plugin._build_stream_pool(
+            [], [s.id for s in streams],
+            {"home": "Club Atlético de Madrid", "away": "FC Barcelona"},
+            field_event=False, home_kws=["atletico"], away_kws=["barcelona"],
+            select_streams_for_game=None, stream_model=_FakeStreamModel(streams),
+            lang_prefs=["en"], prefer_us=prefer_us,
+            curated_ids={r["id"] for r in rows if r["curated"]},
+            fallback_only_ids={r["id"] for r in rows if r["group"] == "Sports | ESPN Unlimited"},
+            excluded_ids=set())
+        assert len(ids) == 28 and set(ids) == {s.id for s in streams}
+        assert foreign == 0 and not dropped
+        return ids
+
+    @pytest.mark.parametrize("prefer_us", [False, True])
+    def test_actual_stack_plays_english_and_keeps_spanish_backups(self, plugin, prefer_us):
+        ids = self._rank(plugin, prefer_us)
+        assert ids[0] == 172839, "healthy English TSN 3 must lead, not M+ LaLiga"
+        english = [172839, 172647, 174036, 413998, 372613]
+        spanish = [180753, 173868, 413999, 413177, 413174, 303731]
+        assert max(ids.index(s) for s in english) < min(ids.index(s) for s in spanish)
+        # Quality still orders English feeds: TSN 1080p/5763.7, Premier
+        # 1080p/5308.7, Premier 1080p/no bitrate, then unprobed ESPN+.
+        assert [s for s in ids if s in [172839, 172647, 174036, 413998]] == [
+            172839, 172647, 174036, 413998]
+
+    @pytest.mark.parametrize("name,expected", [
+        ("ESPN UNLTD 209: ESPN+: SE Missouri vs. North Alabama", "en"),
+        ("M+ LaLiga TV FHD", "es"),
+        ("ESPN+ 111: En Español-Atlético de Madrid vs. FC Barcelona (Fecha #12)", "es"),
+        ("ESPN UNLTD 200: Soccer: Atlético Madrid vs. Barcelona (ESP)", "es"),
+        ("ESPN+ 110: Atletico de Madrid vs. FC Barcelona (Matchday #12)", "en"),
+        ("Premier Sports 1", "en"),
+    ])
+    def test_actual_audio_markers(self, plugin, name, expected):
+        assert plugin._detect_stream_language(name) == expected
+
+    @pytest.mark.parametrize("name,expected", [
+        ("ESPN+ | Carlos Alcaraz (ESP) vs Taylor Fritz (USA) English Feed", "en"),
+        ("German Commentary (EN)", "de"),
+    ])
+    def test_full_audio_label_beats_parenthesized_nationality(self, plugin, name, expected):
+        assert plugin._detect_stream_language(name) == expected
+
+    @pytest.mark.parametrize("prefer_us", [False, True])
+    def test_english_4k_with_athlete_nationality_keeps_quality(self, plugin, prefer_us):
+        uhd = plugin._stream_sort_key(
+            {"width": 3840, "height": 2160},
+            "ESPN+ | Carlos Alcaraz (ESP) vs Taylor Fritz (USA) English Feed",
+            lang_prefs=["en"], prefer_us=prefer_us)
+        hd = plugin._stream_sort_key({"width": 1920, "height": 1080}, "TSN 3",
+                                      lang_prefs=["en"], prefer_us=prefer_us)
+        assert uhd < hd
+
+    @pytest.mark.parametrize("prefer_us", [False, True])
+    def test_curated_spanish_cannot_override_english_preference(self, plugin, prefer_us):
+        stats = {"width": 1920, "height": 1080}
+        spanish = plugin._stream_sort_key(stats, "ESPN Deportes", lang_prefs=["en"],
+                                          prefer_us=prefer_us, curated=True)
+        english = plugin._stream_sort_key(stats, "TSN 3", lang_prefs=["en"],
+                                          prefer_us=prefer_us, curated=False)
+        assert english < spanish

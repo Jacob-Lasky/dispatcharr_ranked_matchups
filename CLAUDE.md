@@ -141,10 +141,19 @@ to sort to the top of group lists):
 - `streams` = cloned via `ChannelStream` from the matched source channel, plus
   the Path C stream-name matches. `_stream_sort_key` orders the stack
   outside-in: group policy (`fallback_only_groups` demotes a group below
-  everything else) → provenance (a stream the user attached to a channel of
-  their own beats one only the Path C sweep found) → language
+  everything else) → language eligibility (#333: a positively detected
+  language absent from `language_preferences` sorts behind eligible and
+  unknown-language feeds in BOTH `stream_priority` modes, even when curated;
+  unknown audio stays eligible) → provenance (a stream the user attached to a
+  channel of their own beats one only the Path C sweep found) → language
   (`language_preferences`, an ordered code list, default `en`) → quality
-  (ffprobe resolution/bitrate, then name hints). `excluded_groups` removes
+  (ffprobe resolution/bitrate, then name hints). Under `us_preferred`, quality
+  leads within the eligibility/provenance tier, the US-broadcast rank breaks
+  quality ties, and language rank is the last tiebreak.
+  `_detect_stream_language` checks explicit audio labels (`German Commentary`,
+  `En Español`, `(ESP)`) BEFORE country tags and broadcasters, so a label
+  overrides a mixed-language broadcaster (ESPN+ / ESPN UNLTD carry both).
+  `excluded_groups` removes
   streams outright; see the gotcha below for where that filter has to run
 - `epg_data` = a per-channel `EPGData` row in our dummy `EPGSource` with same
   name as the group; `ProgramData` description carries the WHY breakdown

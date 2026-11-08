@@ -115,7 +115,7 @@ _LANGUAGE_PREFS_DEFAULT = "en"
 
 # Provenance tiers (#206). A stream the user attached to a channel of their own
 # outranks one reachable only through the global Path C stream-name sweep. See
-# _stream_sort_key for why this is the outermost sort key and
+# _stream_sort_key for why this leads within the eligible-language tier and
 # _curated_stream_ids for the plugin-owned-channel trap it has to dodge.
 _PROVENANCE_CURATED = 0
 _PROVENANCE_UNCURATED = 1
@@ -1974,11 +1974,12 @@ _LANG_RANK_UNWANTED = 1     # + len(prefs)
 _FOREIGN_ACCENT_CHARS = frozenset("áéíóúñüàèìòùâêîôûäëïöãõçÁÉÍÓÚÑÜÀÈÌÒÙÂÊÎÔÛÄËÏÖÃÕÇ")
 
 # Whitespace-padded tokens that reliably mark an ENGLISH feed. DO NOT add
-# "Peacock" or bare "ESPN": Peacock carries both English and Telemundo Spanish,
-# and "ESPN Deportes" is Spanish, so both would mislabel non-English feeds.
+# "Peacock": it carries both English and Telemundo Spanish. ESPN is checked
+# only after explicit audio labels and Spanish broadcasters such as Deportes.
 _ENGLISH_PROVIDER_TOKENS = (
     " BBC ", " ITV ", " TNT ", " TSN ", " SPORTSNET ", " SKY SPORTS ",
     "(UK)", " UK ", " USA ", " ENGLISH ", " ENG ", " EN ",
+    " ESPN ", " ESPN+ ", " ESPN UNLTD ", " FOX ", " PREMIER SPORTS ",
 )
 
 # US-broadcast preference (stream_priority="us_preferred"): rank US English feeds
@@ -2005,7 +2006,7 @@ _US_RANK_NON_US = 1
 _LANG_PROVIDER_TOKENS = (
     (" TELEMUNDO ", "es"), (" UNIVERSO ", "es"), (" TUDN ", "es"),
     (" DEPORTES ", "es"), (" MOVISTAR ", "es"), ("ESPN DEPORTES", "es"),
-    (" DAZN ES ", "es"),
+    (" DAZN ES ", "es"), (" M+ ", "es"),
     (" ZDF ", "de"), (" ARD ", "de"), (" DAZN DE ", "de"),
     (" CANAL+ ", "fr"),
     (" SPORTTV ", "pt"), (" SPORT TV ", "pt"), (" GLOBO ", "pt"),
@@ -2041,6 +2042,12 @@ _FEED_LANGUAGE_CODES = {
     "SWEDISH": "sv", "NORWEGIAN": "no", "CROATIAN": "hr", "SERBIAN": "sr",
     "CHINESE": "zh",
 }
+# Explicit commentary labels beat broadcaster and market hints. In particular,
+# ESPN+ and ESPN Unlimited carry both English and Spanish broadcasts (#333).
+_AUDIO_LANGUAGE_LABELS = (
+    (re.compile(r"\bEN\s+ESPA[ÑN]OL\b|\((?:ESP|SPA)\)", re.I), "es"),
+    (re.compile(r"\((?:ENG|EN)\)", re.I), "en"),
+)
 _FOREIGN_FEED_NOUNS = ("FEED", "COMMENTARY", "AUDIO", "COMMS")
 # Compiled with a trailing word boundary: a bare substring test read "German
 # Feedback Channel" as German, because "GERMAN FEED" is a prefix of "GERMAN
@@ -2150,8 +2157,8 @@ def _detect_stream_language(
 
     Checked strongest-evidence-first, and the ORDER MATTERS:
 
-    1. An explicit language/country tag ("DE:", "PT DAZN"). Most specific.
-    2. A language-named audio label ("German Commentary"). Also explicit.
+    1. An explicit audio label ("German Commentary", "En Español", "(ESP)").
+    2. An explicit language/country tag ("DE:", "PT DAZN").
     3. A language-specific broadcaster (ZDF, Telemundo, RAI).
     4. A Spanish country spelling ("Estados Unidos").
     5. An accented letter -> _LANG_NOT_EN. Reliable that it is not English,
@@ -2181,7 +2188,8 @@ def _detect_stream_language(
     #    there is, and it beats a market tag: "AU | Spanish Feed" is Spanish
     #    audio on an Australian feed, and "MX | English Feed" is English audio
     #    on a Mexican one. Checking the tag first got both backwards.
-    for marker, code in _FEED_LANGUAGE_MARKERS:
+    # Full audio phrases beat abbreviations that can also be athlete nationality.
+    for marker, code in _FEED_LANGUAGE_MARKERS + _AUDIO_LANGUAGE_LABELS:
         if marker.search(upper):
             return code
     # 2. An explicit language/country tag ("DE:", "PT DAZN").
@@ -2503,41 +2511,40 @@ def _stream_sort_key(
       1. GROUP POLICY (#206). A stream from a `fallback_only_groups` group is
          demoted below everything else. This is an explicit user instruction,
          so it outranks the inferred signal below it.
-      2. PROVENANCE (#206). A stream the user attached to a real channel of
-         their own outranks one found only by the global stream-name sweep
-         (Path C). Outermost but for group policy, in BOTH modes including
-         "us_preferred", because it is not an attribute of the stream: it is
-         the user having already said which inventory they curate. The report
-         behind #206 said it outright ("I haven't added them as channels").
-      3. LANGUAGE, when `lang_prefs` is non-empty: position in the user's
-         ordered `language_preferences` list. See _rank_for_language.
-      4. QUALITY: ffprobe resolution then bitrate, falling back to name hints.
+      2. LANGUAGE ELIGIBILITY (#333). A positively identified language that
+         is absent from the preference list stays behind eligible or unknown
+         feeds, even under us_preferred and even if curated. Unknown audio is
+         still eligible: a high-quality unlabelled English feed must not sink
+         below a lower-quality recognised English network.
+      3. PROVENANCE (#206). User-curated inventory leads the global Path C
+         sweep within a language-eligibility tier.
+      4. LANGUAGE preference order, then QUALITY (resolution, bitrate).
 
-    When prefer_us is True (stream_priority="us_preferred"), QUALITY decides
-    ahead of language and a US-broadcast rank breaks quality ties (a 1080p TSN
-    feed still beats a 720p ESPN feed). That DELIBERATELY overrides the
-    language-first ordering: a high-quality feed whose name is not an English
-    token (e.g. "FOX 4K") would otherwise sink below a 1080p "TSN" (TSN IS an
-    English token, FOX is not), which is the opposite of the quality-first
-    intent. Language survives as a final sub-tiebreak below quality and US.
+    When prefer_us is True (stream_priority="us_preferred"), QUALITY leads
+    within the eligibility/provenance tier and US English breaks quality ties.
+    Language rank is a final sub-tiebreak. A 4K FOX or unlabelled feed still
+    beats a 1080p TSN, but a known Spanish 4K feed cannot override "en".
 
-    `lang_prefs` empty (the default) means no language preference and restores
+    `lang_prefs` empty (the helper default) means no language preference and restores
     the pre-#206 quality-only ordering within a provenance tier. home/away are
     the game's English team names, needed by the detector's both-teams check.
     """
     prefs = lang_prefs or []
+    language_rank = _rank_for_language(name, prefs, home, away) if prefs else 0
+    unwanted_language = bool(prefs) and language_rank == len(prefs) + _LANG_RANK_UNWANTED
     provenance = (
         1 if fallback_only else 0,
+        int(unwanted_language),
         _PROVENANCE_CURATED if curated else _PROVENANCE_UNCURATED,
     )
     quality = _stream_quality_sort_key(stream_stats, name)
     if prefer_us:
         key = provenance + quality + (_us_broadcast_rank(name),)
         if prefs:
-            key = key + (_rank_for_language(name, prefs, home, away),)
+            key = key + (language_rank,)
         return key
     if prefs:
-        return provenance + (_rank_for_language(name, prefs, home, away),) + quality
+        return provenance + (language_rank,) + quality
     return provenance + quality
 
 
@@ -11738,7 +11745,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.36.0"
+    version = "1.36.1"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

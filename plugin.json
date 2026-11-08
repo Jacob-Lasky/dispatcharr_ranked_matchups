@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.36.0",
+  "version": "1.36.1",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -768,7 +768,7 @@
           "label": "Prefer US broadcasts (quality first, US breaks ties)"
         }
       ],
-      "help_text": "How a virtual channel's stacked fallback streams are ordered. 'Quality' sorts by ffprobe resolution then bitrate, falling back to HD/FHD/UHD hints in the stream name when a stream was never probed (the historical behavior). 'Prefer US broadcasts' keeps that quality ordering but, among streams of EQUAL quality, puts the US English feed (ESPN/FOX/NBC/ABC/CBS/etc.) ahead of Canadian (TSN/Sportsnet) and overseas feeds. It never promotes a lower-quality US feed over a higher-quality non-US one. US is detected from the stream name; Spanish-language US feeds (ESPN Deportes, Telemundo) are not treated as the preferred US feed."
+      "help_text": "How a virtual channel's stacked fallback streams are ordered. 'Quality' sorts by ffprobe resolution then bitrate, falling back to HD/FHD/UHD hints in the stream name when a stream was never probed (the historical behavior). 'Prefer US broadcasts' keeps that quality ordering but, among streams of EQUAL quality, puts the US English feed (ESPN/FOX/NBC/ABC/CBS/etc.) ahead of Canadian (TSN/Sportsnet) and overseas feeds. It never promotes a lower-quality US feed over a higher-quality non-US one. US is detected from the stream name; Spanish-language US feeds (ESPN Deportes, Telemundo) are not treated as the preferred US feed. In both modes, known languages absent from Preferred languages stay behind eligible feeds, regardless of quality or channel curation. Within eligible feeds, quality still leads in Prefer US broadcasts mode."
     },
     {
       "id": "language_preferences",
@@ -776,7 +776,7 @@
       "label": "Preferred languages",
       "default": "en",
       "placeholder": "en, de, es",
-      "help_text": "Ordered, comma-separated language codes deciding which stream a matchup channel plays FIRST when several carry the same game. 'en' prefers English commentary; 'de, en' prefers German and falls back to English. Earlier in the list wins. Streams whose language cannot be told from their name sort after your listed languages but ahead of languages you did not list, and NOTHING is ever removed for its language, so a backup feed stays reachable as a fallback. Leave blank to ignore language and order by quality alone. Language is read from the stream name (a 'DE:' or 'MX |' tag, a broadcaster like ZDF or Telemundo, an 'English Feed' label, or accented spelling), so it is best-effort: a German Bundesliga feed named 'Bayern Munich vs Dortmund' is indistinguishable from an English one, because the English club names ARE the German ones. Use 'Demote stream groups' below for those."
+      "help_text": "Ordered, comma-separated language codes deciding which stream a matchup channel plays FIRST when several carry the same game. 'en' prefers English commentary; 'de, en' prefers German and falls back to English. Earlier in the list wins. Streams whose language cannot be told from their name sort after your listed languages but ahead of languages you did not list, and NOTHING is ever removed for its language, so a backup feed stays reachable as a fallback. Leave blank to ignore language and order by quality alone. Language is read from the stream name (a 'DE:' or 'MX |' tag, a broadcaster like ZDF or Telemundo, an 'English Feed' label, or accented spelling), so it is best-effort: a German Bundesliga feed named 'Bayern Munich vs Dortmund' is indistinguishable from an English one, because the English club names ARE the German ones. Use 'Demote stream groups' below for those. Explicit En Español/(ESP) audio labels and M+/Movistar identify Spanish; TSN, Premier Sports, ESPN+ and FOX identify English unless an explicit audio label says otherwise. With Prefer US broadcasts, quality leads among eligible feeds; known unwanted languages remain backups."
     },
     {
       "id": "fallback_only_groups",
