@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.36.1
+
+- Keep known unwanted commentary languages behind eligible feeds in both stream
+  ordering modes, preserving quality priority among English broadcasts. Recognise
+  M+/Movistar, En Español and (ESP), plus English ESPN+, Premier Sports and FOX.
+  Foreign feeds remain available as backups (#333).
+
 All notable changes to this plugin are documented here. Format roughly
 follows [Keep a Changelog](https://keepachangelog.com/) with semver.
 

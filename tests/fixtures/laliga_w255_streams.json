@@ -1,0 +1,462 @@
+[
+  {
+    "id": 180753,
+    "name": "M+ LaLiga TV FHD",
+    "account": "AliceXC",
+    "group": "Sports | La Liga",
+    "channel_group_id": 513,
+    "curated": true,
+    "stream_stats": {
+      "width": 1920,
+      "height": 1080,
+      "resolution": "1920x1080",
+      "source_fps": 25.0,
+      "audio_codec": "aac",
+      "sample_rate": 48000,
+      "stream_type": "mpegts",
+      "video_codec": "h264",
+      "pixel_format": "yuv420p",
+      "audio_bitrate": 127.0,
+      "audio_channels": "stereo",
+      "ffmpeg_output_bitrate": 6343.9
+    },
+    "metadata": {
+      "tvg-id": "M+LaLigaTV.es",
+      "group-title": "Sports | La Liga"
+    }
+  },
+  {
+    "id": 172839,
+    "name": "TSN 3",
+    "account": "AliceXC",
+    "group": "CA | Sports",
+    "channel_group_id": 45,
+    "curated": true,
+    "stream_stats": {
+      "width": 1920,
+      "height": 1080,
+      "resolution": "1920x1080",
+      "source_fps": 59.94,
+      "audio_codec": "aac",
+      "sample_rate": 48000,
+      "stream_type": "mpegts",
+      "video_codec": "h264",
+      "pixel_format": "yuv420p",
+      "audio_bitrate": 99.0,
+      "audio_channels": "stereo",
+      "ffmpeg_output_bitrate": 5763.7
+    },
+    "metadata": {
+      "tvg-id": "TSN3.ca",
+      "group-title": "CA | Sports"
+    }
+  },
+  {
+    "id": 172647,
+    "name": "Premier Sports 1",
+    "account": "AliceXC",
+    "group": "UK | Sports",
+    "channel_group_id": 14,
+    "curated": true,
+    "stream_stats": {
+      "width": 1920,
+      "height": 1080,
+      "resolution": "1920x1080",
+      "source_fps": 50.0,
+      "audio_codec": "aac",
+      "sample_rate": 48000,
+      "stream_type": "mpegts",
+      "video_codec": "h264",
+      "pixel_format": "yuv420p",
+      "audio_bitrate": 129.0,
+      "audio_channels": "stereo",
+      "ffmpeg_output_bitrate": 5308.7
+    },
+    "metadata": {
+      "tvg-id": "PremierSports1.uk",
+      "group-title": "UK | Sports"
+    }
+  },
+  {
+    "id": 181991,
+    "name": "NowHK Sports 2 HD",
+    "account": "AliceXC",
+    "group": "Sports | NowHK",
+    "channel_group_id": 543,
+    "curated": true,
+    "stream_stats": {
+      "width": 1920,
+      "height": 1080,
+      "resolution": "1920x1080",
+      "source_fps": 50.0,
+      "audio_codec": "aac",
+      "sample_rate": 48000,
+      "stream_type": "mpegts",
+      "video_codec": "h264",
+      "pixel_format": "yuv420p",
+      "audio_bitrate": 96.0,
+      "audio_channels": "stereo",
+      "ffmpeg_output_bitrate": 4937.7
+    },
+    "metadata": {
+      "tvg-id": "NowSports2.hk",
+      "group-title": "Sports | NowHK"
+    }
+  },
+  {
+    "id": 174036,
+    "name": "Premier Sports 1",
+    "account": "AliceXC",
+    "group": "IE | Sports",
+    "channel_group_id": 473,
+    "curated": true,
+    "stream_stats": {
+      "width": 1920,
+      "height": 1080,
+      "resolution": "1920x1080",
+      "source_fps": 25.0,
+      "audio_codec": "aac",
+      "sample_rate": 48000,
+      "video_codec": "h264",
+      "pixel_format": "yuv420p",
+      "audio_bitrate": 192.124,
+      "audio_channels": "stereo"
+    },
+    "metadata": {
+      "tvg-id": "PremierSports1.ie",
+      "group-title": "IE | Sports"
+    }
+  },
+  {
+    "id": 176723,
+    "name": "beIN Sports 2",
+    "account": "AliceXC",
+    "group": "Sports | Kayo",
+    "channel_group_id": 117,
+    "curated": true,
+    "stream_stats": {
+      "width": 1920,
+      "height": 1080,
+      "resolution": "1920x1080",
+      "source_fps": 50.0,
+      "audio_codec": "aac",
+      "sample_rate": 48000,
+      "video_codec": "h264",
+      "pixel_format": "yuv420p",
+      "audio_bitrate": 40.144,
+      "audio_channels": "stereo"
+    },
+    "metadata": {
+      "tvg-id": "beINSPORTS2.au",
+      "group-title": "Sports | Kayo"
+    }
+  },
+  {
+    "id": 173868,
+    "name": "ESPN Deportes",
+    "account": "AliceXC",
+    "group": "US | Sports",
+    "channel_group_id": 30,
+    "curated": true,
+    "stream_stats": {
+      "width": 1280,
+      "height": 720,
+      "resolution": "1280x720",
+      "source_fps": 30.0,
+      "audio_codec": "aac",
+      "sample_rate": 48000,
+      "video_codec": "h264",
+      "pixel_format": "yuv420p",
+      "audio_bitrate": 128.011,
+      "audio_channels": "stereo"
+    },
+    "metadata": {
+      "tvg-id": "ESPNDeportes.us",
+      "group-title": "US | Sports"
+    }
+  },
+  {
+    "id": 304551,
+    "name": "NL: Ziggo Sport UHD",
+    "account": "AliceXC",
+    "group": "Netherlands | Sports",
+    "channel_group_id": 497,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "ZiggoSport.nl",
+      "group-title": "Netherlands | Sports"
+    }
+  },
+  {
+    "id": 413998,
+    "name": "ESPN+ 110: Atletico de Madrid vs. FC Barcelona (Matchday #12) @ Nov 08 2:30PM ET",
+    "account": "AliceXC",
+    "group": "Sports | ESPN+",
+    "channel_group_id": 546,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "BossSports.ESPN+.110",
+      "group-title": "Sports | ESPN+"
+    }
+  },
+  {
+    "id": 413999,
+    "name": "ESPN+ 111: En Español-Atlético de Madrid vs. FC Barcelona (Fecha #12) @ Nov 08 2:30PM ET",
+    "account": "AliceXC",
+    "group": "Sports | ESPN+",
+    "channel_group_id": 546,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "BossSports.ESPN+.111",
+      "group-title": "Sports | ESPN+"
+    }
+  },
+  {
+    "id": 413358,
+    "name": "La Liga 05: Atletico de Madrid vs. FC Barcelona @ 8 Nov 08:00 PM London",
+    "account": "AliceXC",
+    "group": "Sports | La Liga",
+    "channel_group_id": 513,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "",
+      "group-title": "Sports | La Liga"
+    }
+  },
+  {
+    "id": 372613,
+    "name": "TSN 3 (Alternate)",
+    "account": "AliceXC",
+    "group": "CA | Sports",
+    "channel_group_id": 45,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "TSN3.ca",
+      "group-title": "CA | Sports"
+    }
+  },
+  {
+    "id": 311341,
+    "name": "AU: beIN Sports 2",
+    "account": "AliceXC",
+    "group": "AU | Sports",
+    "channel_group_id": 61,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "beINSPORTS2.au",
+      "group-title": "AU | Sports"
+    }
+  },
+  {
+    "id": 341342,
+    "name": "LaLiga TV",
+    "account": "AliceXC",
+    "group": "UK | Sports",
+    "channel_group_id": 14,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "LaLigaTV.uk",
+      "group-title": "UK | Sports"
+    }
+  },
+  {
+    "id": 377648,
+    "name": "4K: LaLiga TV",
+    "account": "AliceXC",
+    "group": "4K / UHD",
+    "channel_group_id": 2,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "LaLigaTV.uk",
+      "group-title": "4K / UHD"
+    }
+  },
+  {
+    "id": 279957,
+    "name": "beIN Sports 2",
+    "account": "AliceXC",
+    "group": "Sports | AstroSports",
+    "channel_group_id": 522,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "beINSports2.my",
+      "group-title": "Sports | AstroSports"
+    }
+  },
+  {
+    "id": 311291,
+    "name": "beIN Sports 2",
+    "account": "AliceXC",
+    "group": "Sports | Kayo (2)",
+    "channel_group_id": 855,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "beINSPORTS2.au",
+      "group-title": "Sports | Kayo (2)"
+    }
+  },
+  {
+    "id": 308645,
+    "name": "NL: Ziggo Sport 1",
+    "account": "AliceXC",
+    "group": "Netherlands | Sports",
+    "channel_group_id": 497,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "ZiggoSport.nl",
+      "group-title": "Netherlands | Sports"
+    }
+  },
+  {
+    "id": 303653,
+    "name": "TR: S Sport 2",
+    "account": "AliceXC",
+    "group": "Turkey | Sports",
+    "channel_group_id": 849,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "SSpor.tr",
+      "group-title": "Turkey | Sports"
+    }
+  },
+  {
+    "id": 303651,
+    "name": "TR: S Sport 1",
+    "account": "AliceXC",
+    "group": "Turkey | Sports",
+    "channel_group_id": 849,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "SSpor.tr",
+      "group-title": "Turkey | Sports"
+    }
+  },
+  {
+    "id": 303650,
+    "name": "TR: S Sport 1",
+    "account": "AliceXC",
+    "group": "Turkey | Sports",
+    "channel_group_id": 849,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "SSpor.tr",
+      "group-title": "Turkey | Sports"
+    }
+  },
+  {
+    "id": 303656,
+    "name": "TR: S Sport",
+    "account": "AliceXC",
+    "group": "Turkey | Sports",
+    "channel_group_id": 849,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "SSpor.tr",
+      "group-title": "Turkey | Sports"
+    }
+  },
+  {
+    "id": 303657,
+    "name": "TR: S Sport",
+    "account": "AliceXC",
+    "group": "Turkey | Sports",
+    "channel_group_id": 849,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "SSpor.tr",
+      "group-title": "Turkey | Sports"
+    }
+  },
+  {
+    "id": 303731,
+    "name": "ES: M+ LaLiga TV",
+    "account": "AliceXC",
+    "group": "Spain | Sports",
+    "channel_group_id": 501,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "M+LaLigaTV.es",
+      "group-title": "Spain | Sports"
+    }
+  },
+  {
+    "id": 184830,
+    "name": "Premier Sports 1",
+    "account": "AliceXC",
+    "group": "IE | Sky",
+    "channel_group_id": 608,
+    "curated": true,
+    "stream_stats": {
+      "width": 0,
+      "height": 0,
+      "resolution": "0x0",
+      "source_fps": 50.0,
+      "audio_codec": "aac",
+      "sample_rate": 48000,
+      "video_codec": "h264",
+      "pixel_format": "yuv420p",
+      "audio_bitrate": 128.054,
+      "audio_channels": "stereo"
+    },
+    "metadata": {
+      "tvg-id": "PremierSports1.ie",
+      "group-title": "IE | Sky"
+    }
+  },
+  {
+    "id": 413173,
+    "name": "ESPN UNLTD 199: Soccer: Atlético Madrid vs. Barcelona (11.08 02:30 PM ET)",
+    "account": "AliceXC",
+    "group": "Sports | ESPN Unlimited",
+    "channel_group_id": 839,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "BossSports.ESPN Unlimited.199",
+      "group-title": "Sports | ESPN Unlimited"
+    }
+  },
+  {
+    "id": 413177,
+    "name": "ESPN UNLTD 203: Spanish LALIGA: Atlético Madrid vs. Barcelona (ESP) (11.08 02:55 PM ET)",
+    "account": "AliceXC",
+    "group": "Sports | ESPN Unlimited",
+    "channel_group_id": 839,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "BossSports.ESPN Unlimited.203",
+      "group-title": "Sports | ESPN Unlimited"
+    }
+  },
+  {
+    "id": 413174,
+    "name": "ESPN UNLTD 200: Soccer: Atlético Madrid vs. Barcelona (Atlético Madrid vs. Barcelona (ESP)) (11.08 02:30 PM ET)",
+    "account": "AliceXC",
+    "group": "Sports | ESPN Unlimited",
+    "channel_group_id": 839,
+    "curated": true,
+    "stream_stats": null,
+    "metadata": {
+      "tvg-id": "BossSports.ESPN Unlimited.200",
+      "group-title": "Sports | ESPN Unlimited"
+    }
+  }
+]

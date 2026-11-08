@@ -418,15 +418,24 @@ you say so:
 | **Demote stream groups** | Streams from these channel groups sort behind everything else. They stay playable as a last resort. |
 | **Exclude stream groups** | Streams from these groups are never attached at all, not even as a fallback. |
 
-Streams you have attached to a channel of your own always sort ahead of ones
-found only by the Path C sweep, so the lineup you curated leads by default and
-raw M3U inventory backs it up. Your own matchup channels do not count as
+Within the same language-eligibility tier, streams you have attached to a
+channel of your own sort ahead of ones found only by the Path C sweep, so the
+lineup you curated leads by default and raw M3U inventory backs it up.
+Your own matchup channels do not count as
 curation.
 
 **Language is read from the stream name, so it is best-effort.** A `DE:` or
 `MX |` tag, a broadcaster like ZDF or Telemundo, an `English Feed` label, or
-accented spelling all resolve; a name with no such marker does not. The honest
-limit: a German Bundesliga feed named `Bayern Munich vs Dortmund` is
+accented spelling all resolve. Explicit `En Español` / `(ESP)` labels and
+M+/Movistar identify Spanish, while TSN, Premier Sports, ESPN+ and FOX identify
+English unless an explicit audio label overrides the broadcaster.
+Known languages absent from **Preferred languages** stay behind eligible or
+unknown feeds in both stream-ordering modes, even when curated. **Prefer US
+broadcasts** still orders eligible feeds by quality, then uses US English to
+break ties: a 4K FOX feed stays ahead of a 1080p TSN. Demoted groups remain last
+regardless of language. No language preference removes a feed. A name without
+a reliable marker remains unknown. The honest limit: a German Bundesliga feed
+named `Bayern Munich vs Dortmund` is
 character-for-character what an English one would be called, because the
 canonical English club names *are* the German ones. Measured against one real
 provider's German sports group, 8 of 10 per-match Bundesliga feeds carried no
