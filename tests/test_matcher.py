@@ -14,6 +14,7 @@ from dispatcharr_ranked_matchups.matcher import (
     _regex_filter,
     _regex_filter_channel_name,
     _strip_preview_titles,
+    candidate_conflict,
     parse_stream_date,
     name_is_stale_for_game,
     _strong_team_keywords,
@@ -895,6 +896,57 @@ class TestTier1Merge:
         results = match_games_to_channels(games, lambda g: cands, api_key="", model="m")
         assert results[0].channel_ids == [10, 11]
         assert results[0].stream_ids == []
+
+
+class TestInGameLiveAnalysis:
+    @pytest.mark.parametrize("label", ["In-Game Live", "In Game Live"])
+    @pytest.mark.parametrize("dedicated", [False, True])
+    @pytest.mark.parametrize("source", ["epg", "subtitle", "channel", "stream"])
+    def test_analysis_show_never_becomes_a_game_or_backup(self, label, dedicated, source):
+        # W236, the actual SportsGrid EPG title named both teams, but video
+        # showed betting commentary, not the ABC game. Test the matcher result,
+        # including Tier 1's merge of programme-title matches into its backups.
+        title = f"BYU vs. Utah College Football {label} Gameday  ᴸᶦᵛᵉ"
+        bad = (_scand(174245, title) if source == "stream" else
+               _cand(227523, title if source == "channel" else "SportsGrid",
+                     "Cougars at Utes" if source == "channel" else title))
+        if source == "subtitle":
+            bad.program_title = "College Football"
+            bad.program_sub_title = bad.program_extra = title
+        cands = [bad]
+        if dedicated:
+            cands.append(_cand(396728, "NCAAF 01: BYU vs. Utah", "Cougars at Utes"))
+        game = _Game("Utah", "BYU")
+        game.sport_prefix = "CFB"
+        assert "analysis show" in candidate_conflict(bad, game, field=False)
+        result = match_games_to_channels(
+            [(game, None, None)], lambda g: cands,
+            api_key="", model="m", widen=True,
+        )[0]
+        assert result.channel_ids == ([396728] if dedicated else [])
+        assert result.stream_ids == []
+
+    def test_old_slot_branding_does_not_veto_current_game_epg(self):
+        candidate = _cand(10, "In-Game Live: BYU vs Utah (10.31 12:00 PM ET)",
+                          "BYU vs Utah College Football Live")
+        candidate.channel_name_stale = True
+        result = match_games_to_channels(
+            [(_Game("Utah", "BYU"), None, None)], lambda g: [candidate],
+            api_key="", model="m",
+        )[0]
+        assert result.channel_ids == [10]
+
+    @pytest.mark.parametrize("title", [
+        "BYU vs. Utah College Football Live",
+        "BYU vs. Utah in game coverage",
+    ])
+    def test_regular_live_broadcast_is_kept(self, title):
+        result = match_games_to_channels(
+            [(_Game("Utah", "BYU"), None, None)],
+            lambda g: [_cand(10, "ABC", title)],
+            api_key="", model="m",
+        )[0]
+        assert result.channel_ids == [10]
 
 
 class TestStreamGranularRouting:
