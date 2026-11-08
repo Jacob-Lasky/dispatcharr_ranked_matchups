@@ -2311,12 +2311,23 @@ def _us_broadcast_rank(name: str) -> int:
     return _US_RANK_NON_US
 
 
-def _stream_quality_sort_key(stream_stats, name):
+# Domestic North American broadcasts use the 59.94/60 Hz family. Do not apply
+# this to international tours/competitions: native 50 fps is correct there.
+_FULL_RATE_60_PREFIXES = frozenset({
+    "NFL", "CFB", "NBA", "CBB", "WNBA", "NCAAW", "MLB", "NCAABSB",
+    "NCAASBL", "NHL", "NCAAMSOC", "NCAAWSOC", "MLS", "NWSL", "NASCAR",
+})
+
+
+def _stream_quality_sort_key(stream_stats, name, sport_prefix=""):
     """Composite quality sort key for a stream. Lower tuple = sorted earlier.
 
     Tiers (most authoritative first):
       0. Valid ffprobe data: real height ≥ 240 and width ≥ 320.
-         Sub-sort by -height (1080p before 720p) then -bitrate.
+         For domestic North American leagues, a measured 59.94/60 fps feed
+         leads other measured/unknown cadences before resolution and bitrate.
+         Otherwise sub-sort by -height (1080p before 720p), then -bitrate.
+         Unknown fps keeps the old ordering; names/region never invent fps.
       1. No probe data at all (Dispatcharr never crawled this stream).
          Sub-sort by name-keyword bucket (UHD > FHD > HD > unknown > SD).
       2. Probe ran and got 0x0: typically a dead/broken stream. Sort last
@@ -2342,10 +2353,17 @@ def _stream_quality_sort_key(stream_stats, name):
                 pass
         if height >= 240 and width >= 320:
             bitrate = float(stats.get("ffmpeg_output_bitrate") or 0)
-            return (_PROBE_TIER_VALID, -height, -bitrate)
+            cadence = 0
+            if sport_prefix in _FULL_RATE_60_PREFIXES:
+                try:
+                    fps = float(stats.get("source_fps") or 0)
+                except (TypeError, ValueError):
+                    fps = 0
+                cadence = 0 if 59 <= fps <= 61 else 1
+            return (_PROBE_TIER_VALID, cadence, -height, -bitrate)
         if height == 0 or width == 0 or resolution == "0x0":
-            return (_PROBE_TIER_FAILED, 0, 0)
-    return (_PROBE_TIER_NO_PROBE, _stream_quality_rank(name), 0)
+            return (_PROBE_TIER_FAILED, 0, 0, 0)
+    return (_PROBE_TIER_NO_PROBE, 0, _stream_quality_rank(name), 0)
 
 
 def _build_stream_pool(
@@ -2410,6 +2428,7 @@ def _build_stream_pool(
                 st, st.name or src.name or "",
                 lang_prefs=lang_prefs, prefer_us=prefer_us,
                 home=game["home"], away=game["away"],
+                sport_prefix=game.get("sport_prefix", ""),
                 curated_ids=curated_ids,
                 fallback_only_ids=fallback_only_ids,
                 excluded_ids=excluded_ids,
@@ -2443,6 +2462,7 @@ def _build_stream_pool(
                 st, st.name or "",
                 lang_prefs=lang_prefs, prefer_us=prefer_us,
                 home=game["home"], away=game["away"],
+                sport_prefix=game.get("sport_prefix", ""),
                 curated_ids=curated_ids,
                 fallback_only_ids=fallback_only_ids,
                 excluded_ids=excluded_ids,
@@ -2467,6 +2487,7 @@ def _pool_entry_key(
     curated_ids,
     fallback_only_ids,
     excluded_ids,
+    sport_prefix="",
 ):
     """Sort key for one candidate stream, or None when group policy EXCLUDES it.
 
@@ -2491,6 +2512,7 @@ def _pool_entry_key(
         away=away,
         curated=stream.id in curated_ids,
         fallback_only=stream.id in fallback_only_ids,
+        sport_prefix=sport_prefix,
     )
 
 
@@ -2503,6 +2525,7 @@ def _stream_sort_key(
     away="",
     curated=False,
     fallback_only=False,
+    sport_prefix="",
 ):
     """Ordering key for one stream in a matchup channel's fallback stack.
 
@@ -2518,7 +2541,8 @@ def _stream_sort_key(
          below a lower-quality recognised English network.
       3. PROVENANCE (#206). User-curated inventory leads the global Path C
          sweep within a language-eligibility tier.
-      4. LANGUAGE preference order, then QUALITY (resolution, bitrate).
+      4. LANGUAGE preference order, then QUALITY (native full-rate cadence
+         for domestic North American leagues, resolution, bitrate).
 
     When prefer_us is True (stream_priority="us_preferred"), QUALITY leads
     within the eligibility/provenance tier and US English breaks quality ties.
@@ -2537,7 +2561,7 @@ def _stream_sort_key(
         int(unwanted_language),
         _PROVENANCE_CURATED if curated else _PROVENANCE_UNCURATED,
     )
-    quality = _stream_quality_sort_key(stream_stats, name)
+    quality = _stream_quality_sort_key(stream_stats, name, sport_prefix)
     if prefer_us:
         key = provenance + quality + (_us_broadcast_rank(name),)
         if prefs:
@@ -11745,7 +11769,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.36.1"
+    version = "1.36.2"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

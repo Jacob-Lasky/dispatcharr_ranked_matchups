@@ -1,0 +1,234 @@
+{
+  "channel_id": 400402,
+  "game": {
+    "sport_prefix": "NFL",
+    "home": "San Francisco 49ers",
+    "away": "Las Vegas Raiders"
+  },
+  "streams": [
+    {
+      "id": 412319,
+      "name": "NFL 11: Raiders vs. 49ers (11.8 4:25 PM ET)",
+      "stream_stats": {
+        "resolution": "1280x720",
+        "source_fps": 59.94,
+        "audio_codec": "aac",
+        "sample_rate": 48000,
+        "stream_type": "mpegts",
+        "video_codec": "h264",
+        "pixel_format": "yuv420p",
+        "audio_bitrate": 95.0,
+        "audio_channels": "stereo",
+        "ffmpeg_output_bitrate": 5369.2
+      },
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 311343,
+      "name": "AU: ESPN FHD",
+      "stream_stats": {
+        "resolution": "1920x1080",
+        "source_fps": 50.0,
+        "audio_codec": "aac",
+        "sample_rate": 48000,
+        "stream_type": "mpegts",
+        "video_codec": "hevc",
+        "pixel_format": "yuv420p",
+        "audio_bitrate": 129.0,
+        "audio_channels": "stereo",
+        "ffmpeg_output_bitrate": 5030.0
+      },
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 181993,
+      "name": "NowHK Sports 3 HD",
+      "stream_stats": {
+        "width": 1920,
+        "height": 1080,
+        "resolution": "1920x1080",
+        "source_fps": 50.0,
+        "audio_codec": "aac",
+        "sample_rate": 48000,
+        "video_codec": "h264",
+        "pixel_format": "yuv420p",
+        "audio_bitrate": 95.982,
+        "audio_channels": "stereo"
+      },
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 181449,
+      "name": "San Francisco 49ers",
+      "stream_stats": {
+        "width": 1280,
+        "height": 720,
+        "resolution": "1280x720",
+        "source_fps": 25.0,
+        "audio_codec": "aac",
+        "sample_rate": 48000,
+        "video_codec": "h264",
+        "pixel_format": "yuv420p",
+        "audio_bitrate": 122.698,
+        "audio_channels": "stereo"
+      },
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 181417,
+      "name": "Las Vegas Raiders",
+      "stream_stats": {
+        "width": 1280,
+        "height": 720,
+        "resolution": "1280x720",
+        "source_fps": 25.0,
+        "audio_codec": "aac",
+        "sample_rate": 48000,
+        "video_codec": "h264",
+        "pixel_format": "yuv420p",
+        "audio_bitrate": 130.97,
+        "audio_channels": "stereo"
+      },
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 173557,
+      "name": "Sky Sports + SD",
+      "stream_stats": {
+        "width": 1024,
+        "height": 576,
+        "resolution": "1024x576",
+        "source_fps": 50.0,
+        "audio_codec": "aac",
+        "sample_rate": 48000,
+        "video_codec": "h264",
+        "pixel_format": "yuv420p",
+        "audio_bitrate": 128.056,
+        "audio_channels": "stereo"
+      },
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 385158,
+      "name": "ESPN FHD",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 385215,
+      "name": "ESPN FHD",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 413885,
+      "name": "FOX ONE 15: Raiders at 49ers (FOX KHON) @ 8 Nov 04:25 PM ET",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 413838,
+      "name": "DAZN CA 60: RedZone, GB @ NE, ARI @ SEA, LV @ SF @ 8 Nov 04:05 PM ET",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 413835,
+      "name": "DAZN CA 57: HOU @ LAC, GB @ NE, ARI @ SEA, LV @ SF @ 8 Nov 04:05 PM ET",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 413841,
+      "name": "DAZN CA 63: Raiders @ 49ers @ 8 Nov 04:25 PM ET",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 414165,
+      "name": "NFL GP 09 | Raiders @ 49ers (2026-11-08 21:25:00)",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 414156,
+      "name": "NFL Multi Screen / HDR 20: RedZone, GB @ NE, ARI @ SEA, LV @ SF @ 8 Nov 04:05 PM ET",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 412931,
+      "name": "Sky Sports + 43: NFL Las Vegas Raiders @ San Francisco 49ers @ 8 Nov 09:20 PM London",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 278979,
+      "name": "Sky Sports+",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 357011,
+      "name": "Sky Sports+ HEVC LB (1080p)",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 357010,
+      "name": "Sky Sports+ HEVC HB (1080p)",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 412287,
+      "name": "NFL SD 11: Raiders vs. 49ers (11.8 4:25 PM ET)",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 184817,
+      "name": "Sky Sports Plus",
+      "stream_stats": {
+        "width": 0,
+        "height": 0,
+        "resolution": "0x0",
+        "source_fps": 50.0,
+        "audio_codec": "aac",
+        "sample_rate": 48000,
+        "video_codec": "h264",
+        "pixel_format": "yuv420p",
+        "audio_bitrate": 128.076,
+        "audio_channels": "stereo"
+      },
+      "curated": true,
+      "fallback_only": false
+    },
+    {
+      "id": 311330,
+      "name": "BR: ESPN 2",
+      "stream_stats": null,
+      "curated": true,
+      "fallback_only": false
+    }
+  ]
+}

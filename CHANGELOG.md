@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.36.2
+
+- Prefer measured 59.94/60 fps streams for domestic North American matchups before resolution/bitrate, keeping group, language and curation policy intact. Fixes 1080p/50 AU rebroadcasts outranking 720p/59.94 game feeds (#335).
+
 ## 1.36.1
 
 - Keep known unwanted commentary languages behind eligible feeds in both stream
