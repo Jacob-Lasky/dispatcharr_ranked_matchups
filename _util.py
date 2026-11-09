@@ -70,6 +70,13 @@ def parse_iso_utc(s: Optional[str]) -> Optional[datetime]:
     return dt
 
 
+def key_id(api_key: str) -> str:
+    """A non-reversible tag for an API key, so a quota backoff belongs to the key that ran out:
+    a user who pastes a new key is not kept waiting. Never the key itself: the backoff files
+    (`odds_cache.json`, `college_cache/quota.json`) are plain JSON in the plugin folder."""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+
+
 def stable_hash_int(s: str) -> int:
     """Process-stable hash of a string. Python's builtin hash() is salted by
     PYTHONHASHSEED: same input gives different output across restarts. This

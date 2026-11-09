@@ -16,6 +16,7 @@ game off it. These tests pin:
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 import random
 import textwrap
@@ -272,6 +273,7 @@ class TestRefreshHelper:
 
 
 class _Resp:
+    headers = {}
     """A CBBD HTTP answer for the NcaamSource season walk."""
     def __init__(self, data):
         self._data = data
@@ -367,7 +369,7 @@ class TestOutOfPopulationGamesAreNotSimulated:
         rows = [{"id": i, "homeTeam": h, "awayTeam": a, "startDate": "2026-11-05T00:00:00Z"}
                 for i, (h, a) in enumerate(pairs)]
         answers = [rows, [], []]
-        monkeypatch.setattr(ncaam, "get_within_deadline", lambda *a, **k: _Resp(answers.pop(0)))
+        monkeypatch.setattr(importlib.import_module(f"{ncaam.__package__}._college_data"), "get_within_deadline", lambda *a, **k: _Resp(answers.pop(0)))
         simulated = {(g["home"], g["away"]) for g in src._fetch_games_cached()}
         covered = {p for p in pairs if src.importance_covers(self._game(*p))}
         assert covered == simulated == set(pairs[:3])
@@ -398,7 +400,7 @@ class TestOutOfPopulationGamesAreNotSimulated:
                      "startDate": "2026-02-22T00:00:00Z"})
 
         answers = [rows, [], []]  # the season walk's three date chunks
-        monkeypatch.setattr(ncaam, "get_within_deadline",
+        monkeypatch.setattr(importlib.import_module(f"{ncaam.__package__}._college_data"), "get_within_deadline",
                             lambda *a, **k: _Resp(answers.pop(0)))
         ctx = scoring.LEAGUE_CONTEXTS["CBB"]
         outside = self._game("Dartmouth", "Framingham State")
@@ -426,7 +428,7 @@ class TestOutOfPopulationGamesAreNotSimulated:
             rows.append({"id": 100 + i, "homeTeam": "Gonzaga", "awayTeam": "Duke",
                          "startDate": "2026-02-20T00:00:00Z"})
         answers = [rows, [], []]
-        monkeypatch.setattr(ncaam, "get_within_deadline", lambda *a, **k: _Resp(answers.pop(0)))
+        monkeypatch.setattr(importlib.import_module(f"{ncaam.__package__}._college_data"), "get_within_deadline", lambda *a, **k: _Resp(answers.pop(0)))
         return src
 
     @pytest.mark.parametrize("finished,left", [(14, 0), (13, 1)])

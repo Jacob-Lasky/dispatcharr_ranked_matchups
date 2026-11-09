@@ -173,7 +173,13 @@ def test_nhl_schedule_walk_reports_a_failed_day(monkeypatch, cls_name):
     assert lost == {lost_day}
 
 
-_HTTP_CALLS = ("_http_get", "http_get", "get_json", "http_get_json", "_fd_get")
+_HTTP_CALLS = ("_http_get", "http_get", "get_json", "http_get_json", "_fd_get", "get_within_deadline")
+# Loops that make requests but do not walk days of games, so a failure loses no day.
+# DO NOT add a loop here that decides which games exist.
+_NOT_DAY_LOOPS = {
+    # One request, retried: the caller of `_fd_get` sees its failure and reports.
+    ("soccer.py", "_fd_get"),
+}
 # Either reports: per day, or the days of one ranged request.
 _REPORTERS = {"report_lost_days", "report_lost_day_range"}
 
@@ -221,6 +227,8 @@ def test_every_upcoming_day_loop_reports_its_lost_days():
     for path in sorted(SOURCES.glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for name, loop in _upcoming_day_loops(tree):
+            if (path.name, name) in _NOT_DAY_LOOPS:
+                continue
             called = {_call_name(c) for c in ast.walk(loop) if isinstance(c, ast.Call)}
             if not called & _REPORTERS:
                 offenders.append(f"{path.name}:{name}:{loop.lineno}")
@@ -246,7 +254,8 @@ def test_the_guard_sees_the_football_data_chunk_loop():
     """Same check for the ranged walk: Football-Data's 10-day chunks, reached
     from `SoccerSource.fetch_upcoming` through `_fetch_fixtures`."""
     tree = ast.parse((SOURCES / "soccer.py").read_text(encoding="utf-8"))
-    assert [name for name, _loop in _upcoming_day_loops(tree)] == ["_fetch_tier_fixtures"]
+    assert [name for name, _loop in _upcoming_day_loops(tree)
+            if ("soccer.py", name) not in _NOT_DAY_LOOPS] == ["_fetch_tier_fixtures"]
 
 
 # ---------------------------------------------------------------------------

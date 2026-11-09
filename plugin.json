@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.36.2",
+  "version": "1.36.3",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -413,7 +413,7 @@
       "input_type": "password",
       "label": "CollegeFootballData.com API key",
       "default": "",
-      "help_text": "Register: https://collegefootballdata.com/key (free, 1k req/day). The same key works for collegebasketballdata.com — one key powers both NCAAF and NCAAM, including the Monte Carlo importance signal."
+      "help_text": "Register: https://collegefootballdata.com/key (free tier: 1,000 calls a month, one pool for both APIs; the plugin keeps answers for 12 hours to fit it). The same key works for collegebasketballdata.com — one key powers both NCAAF and NCAAM, including the Monte Carlo importance signal."
     },
     {
       "id": "football_data_api_key",

@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.36.3
+
+- NCAA Football and Men's Basketball rankings no longer fail every refresh once the
+  month's CollegeFootballData calls run out (#337). The free tier is 1,000 calls a
+  month shared by both APIs, not 1,000 a day: each refresh asked about ten questions
+  (NCAAF's betting lines once per week of the lookahead) 9 to 28 times a day, so the
+  month was gone within days. Now nine questions whatever the lookahead, each kept on
+  disk for 12 hours (about 560 calls in a 31-day month); the exact `Monthly call quota
+  exceeded.` 429 stops that key's college requests until the 1st of the next month;
+  last week's poll ranks new games while the pool is empty; and a malformed answer is
+  never kept. The log reports the calls left.
+
 ## 1.36.2
 
 - Prefer measured 59.94/60 fps streams for domestic North American matchups before resolution/bitrate, keeping group, language and curation policy intact. Fixes 1080p/50 AU rebroadcasts outranking 720p/59.94 game feeds (#335).
