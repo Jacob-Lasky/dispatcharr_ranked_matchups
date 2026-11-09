@@ -32,7 +32,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._college_data import POLL_STANDS_IN, get_answer, get_json, require_rows
+from ._college_data import POLL_STANDS_IN, get_answer, get_json, line_objects, require_rows
 from .base import GameRow, RankingsUnavailable, SeasonUnavailable
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
@@ -443,8 +443,7 @@ class NcaafSource(PointsBasedSportSource):
             gid = entry.get("id")
             if gid not in wanted:
                 continue
-            # A game with no lines yet can carry `"lines": null`: no spread, not a failure.
-            line_list = [l for l in (entry.get("lines") or []) if isinstance(l, dict)]
+            line_list = line_objects(entry)
             consensus = next((l for l in line_list if l.get("provider") == "consensus"), None)
             line = consensus or (line_list[0] if line_list else None)
             if line is None:

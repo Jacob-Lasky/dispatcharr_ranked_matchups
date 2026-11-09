@@ -92,6 +92,14 @@ def require_rows(body: Any) -> None:
         raise ValueError("a row is not an object")
 
 
+def line_objects(entry: Dict[str, Any]) -> list:
+    """A /lines row's bookmaker lines that are objects. A game with no lines yet can carry
+    `"lines": null`, and anything that is not a list is read as none: no spread, not a failure
+    replayed from the cache for twelve hours."""
+    lines = entry.get("lines")
+    return [line for line in lines if isinstance(line, dict)] if isinstance(lines, list) else []
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 

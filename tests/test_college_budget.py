@@ -272,9 +272,18 @@ def test_an_ncaam_season_chunk_of_null_rows_takes_the_season_failure_path(colleg
 def test_a_game_with_null_lines_has_no_spread(college, http):
     _calls, queue = http
     ncaaf = importlib.import_module("dispatcharr_ranked_matchups.sources.ncaaf")
-    queue.append(FakeResp(200, [{"id": 1, "lines": None},
+    queue.append(FakeResp(200, [{"id": 1, "lines": None}, {"id": 3, "lines": 1},
                                 {"id": 2, "lines": [None, {"provider": "consensus", "spread": -3.5}]}]))
-    assert ncaaf.NcaafSource(api_key=KEY)._fetch_spreads(2026, [{"id": 1}, {"id": 2}]) == {2: 3.5}
+    assert ncaaf.NcaafSource(api_key=KEY)._fetch_spreads(2026, [{"id": 1}, {"id": 2}, {"id": 3}]) == {2: 3.5}
+
+
+def test_an_ncaam_game_with_non_list_lines_has_no_spread(college, http):
+    from datetime import date
+    _calls, queue = http
+    ncaam = importlib.import_module("dispatcharr_ranked_matchups.sources.ncaam")
+    queue.append(FakeResp(200, [{"gameId": 1, "lines": 1}, {"gameId": 2, "lines": None},
+                                {"gameId": 3, "lines": [{"spread": -2.0}]}]))
+    assert ncaam.NcaamSource(api_key=KEY)._fetch_spreads(date(2026, 11, 9), date(2026, 11, 12)) == {3: 2.0}
 
 
 def test_a_wrong_shape_is_a_failure_and_is_not_kept(college, http):

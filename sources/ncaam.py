@@ -30,7 +30,7 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from ._college_data import POLL_STANDS_IN, get_answer, get_json, require_rows
+from ._college_data import POLL_STANDS_IN, get_answer, get_json, line_objects, require_rows
 from .base import GameRow, RankingsUnavailable, SeasonUnavailable, report_lost_day_range
 from .points_based import PointsBasedSportSource
 from ._espn import upcoming_window
@@ -308,7 +308,7 @@ class NcaamSource(PointsBasedSportSource):
             gid = entry.get("gameId")
             if gid is None:
                 continue
-            line_list = [l for l in (entry.get("lines") or []) if isinstance(l, dict)]
+            line_list = line_objects(entry)
             # CBB returns per-bookmaker lines without a "consensus" entry:
             # take the first non-null spread we see (mirrors what the user
             # would see at the top of any sportsbook).
