@@ -1349,18 +1349,24 @@ top-level files had gone in. So, with nobody streaming and no recording due:
 
 ```bash
 P=/mnt/user/appdata/dispatcharr/data/plugins/dispatcharr_ranked_matchups  # host path
-# 1. Every path must belong to the folder's owner (1000:1000), or the copy can fail partway.
-docker run --rm -v $P:/p:ro alpine sh -c 'find /p -not -user 1000 | head -1' # must print nothing
+# 1. Every path must belong to the folder's owner (1000:1000) and be writable by it, or the
+#    copy can fail partway (a 0555 directory owned by 1000 fails too).
+docker run --rm -v $P:/p:ro alpine sh -c \
+  'find /p \( -not -user 1000 -o -not -perm -u+w -o -type d -not -perm -u+x \) | head -1'  # must print nothing
 # 2. Back up, outside /data/plugins (a dir there is discovered as a plugin): /mnt/user/backups.
 # 3. Unzip the published release asset into a staging dir OUTSIDE /data/plugins, then copy
 #    it in as the owner in ONE container run that stops on the first error:
 docker run --rm --user 1000:1000 -v <staging>/dispatcharr_ranked_matchups:/src:ro -v $P:/dst \
   alpine sh -c 'set -e; cp -R /src/. /dst/'
-# 4. Verify byte-for-byte (every file in the release must `cmp` equal), and only then
-# 5. `docker restart Dispatcharr` (or POST /api/plugins/plugins/reload/ with auth).
+# 4. Remove what the release no longer ships: every file in the folder that is neither in the
+#    release nor runtime state (the "Plugin runtime state" and secret entries of .gitignore).
+#    From a checkout: `git check-ignore --no-index -q <relative path>` exits 0 for state.
+# 5. Verify both ways: every release file `cmp`s equal, and the folder holds nothing else
+#    but runtime state. Only then
+# 6. `docker restart Dispatcharr` (or POST /api/plugins/plugins/reload/ with auth).
 ```
 
-If step 1 or 4 fails, fix ownership (as root, after the backup) and copy again
+If step 1 or 5 fails, fix ownership (as root, after the backup) and copy again
 before restarting; never restart onto a mixed tree.
 
 Smoke-test refresh (the `-e` keeps this exec from starting a scheduler and
