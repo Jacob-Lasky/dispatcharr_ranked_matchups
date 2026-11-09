@@ -112,6 +112,46 @@ jobs:
             --allowedTools "Read,Glob,Grep,Edit(**/*.md),Write(**/*.md)"
             --disallowedTools "Bash"
 
+      # claude-code-action treats the PR head's config as untrusted: before the model runs it
+      # replaces these paths with the BASE branch's copies ("Restoring ... from origin/main") and
+      # leaves them that way. The validate step then saw every CLAUDE.md line the PR added as
+      # removed, and keep-pr-docs.sh refused the push (PR #338; without that guard this job would
+      # have reverted the PR's CLAUDE.md). The model has finished, so the PR's own copies are safe
+      # to put back here: CLAUDE.md files get a three-way merge (base copy, the model's edit of it,
+      # the PR's copy) so the model's docs edits survive, and on a conflict the PR's copy wins.
+      # Every other path goes back to the PR head exactly. DO NOT drop this step or move it
+      # before the Claude step: the restore exists to keep PR config away from the model.
+      - name: Put back the PR's copies of the paths the action restored from base
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          for path in CLAUDE.md CLAUDE.local.md; do
+            in_head=0; git cat-file -e "HEAD:$path" 2>/dev/null && in_head=1
+            if [ "$in_head" = 1 ] && [ -f "$path" ] && git cat-file -e "origin/$BASE_REF:$path" 2>/dev/null; then
+              git show "origin/$BASE_REF:$path" > "$RUNNER_TEMP/base.md"
+              git show "HEAD:$path" > "$RUNNER_TEMP/head.md"
+              if git merge-file -q "$path" "$RUNNER_TEMP/base.md" "$RUNNER_TEMP/head.md"; then
+                echo "$path: the PR's copy restored with the docs pass's edits merged"
+              else
+                git checkout HEAD -- "$path"
+                echo "::warning::$path: the docs pass's edits conflict with the PR's own changes; kept the PR's copy"
+              fi
+            elif [ "$in_head" = 1 ]; then
+              git checkout HEAD -- "$path"
+            else
+              rm -f "$path"
+            fi
+          done
+          for path in .claude .mcp.json .claude.json .gitmodules .ripgreprc .husky; do
+            rm -rf "$path"
+            if git cat-file -e "HEAD:$path" 2>/dev/null; then
+              git checkout HEAD -- "$path"
+            fi
+          done
+          # The action's copy of the PR's sensitive paths, for its review agents; never committed.
+          rm -rf .claude-pr
+
       - name: Validate markdown-only changes, then commit and push
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
