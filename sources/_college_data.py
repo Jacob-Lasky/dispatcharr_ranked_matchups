@@ -3,21 +3,25 @@
 The free tier is 1,000 calls a MONTH, in ONE pool both APIs draw from through the one key.
 CFBD's /info said so on 2026-11-09: `"tierName":"Free","monthlyLimit":1000,"sharedPool":true,
 "products":["cfb","cbb"],"resetAt":"2026-12-01T00:00:00.000Z"`. The sources used to say
-"1k req/day". A refresh asks about ten questions (NCAAF: /rankings, the season's /games, /lines
-per week in the window; NCAAM: /rankings, the window's /games and /lines, three season /games
-chunks), and refreshes run 9 to 12 times a day (four scheduled plus M3U rematches; 28 a day in
+"1k req/day", asked about ten questions a refresh (NCAAF's /lines once per week in the
+window), and refreshes run 9 to 12 times a day (four scheduled plus M3U rematches; 28 a day in
 late October). So the month's pool was gone within days and every /rankings call answered 429
 `Monthly call quota exceeded.` until the reset: on 2026-11-09 the November pool had been empty
 since November 1.
 
+The budget now. Nine questions, whatever the lookahead: NCAAF /rankings, the season's /games
+and the season's /lines (ONE question, not one per week: a 90-day lookahead once asked eleven);
+NCAAM /rankings, the window's /games and /lines, and three season /games chunks. Each answer is
+kept for FRESH_FOR, so a question is asked at most twice a day, three times on the day the NCAAM
+window moves: about 20 calls a day, ~620 in a 31-day month, under the pool with headroom.
+
 So, per question (API, path and parameters):
 
-- The answer is kept on disk for FRESH_FOR and served from there without a request. At most
-  two requests a day per question is about 20 a day, ~620 in a 31-day month, under the pool
-  with room for the questions that change daily (the NCAAM window's dates).
+- The answer is kept on disk for FRESH_FOR and served from there without a request.
 - On the exact `Monthly call quota exceeded.` 429, no request is made with that key until the
-  pool resets (the 1st of the next month, 00:00 UTC), logged plainly once. A new key is not
-  held by the old one's wait.
+  pool resets (the 1st of the next month, 00:00 UTC), logged plainly once. Each key has its own
+  wait: a new key is not held by the old one's, and the old one's is not cleared by the new
+  one's answers.
 - A failed or refused request raises `CollegeDataUnavailable`, and the caller's existing failure
   path runs unchanged: the season store stands in for a season read (`SeasonUnavailable`), a lost
   window is held, a missing line drops a spread. Only /rankings, which has no fallback of its own,
@@ -25,11 +29,13 @@ So, per question (API, path and parameters):
   failing would hold the label with no new game added (#283, #240). DO NOT give a question a
   `stale_for` where the caller already falls back: two stand-ins for one read is two answers to
   "how old may this be", and the season store's is measured.
-- Only an answer the caller's `valid` check accepts is kept, so an error object served with a
-  200 is never replayed for twelve hours.
+- An answer is kept only after the caller's `check` (its real parser) accepts it, so a
+  malformed answer served with a 200 never replaces a good one for twelve hours.
+- `get_answer` returns when the answer was fetched, so a caller that keeps a derived copy (the
+  season store) dates it by the data, not by the refresh that read it from here.
 
-DO NOT shorten FRESH_FOR, add a question per refresh, or drop the quota wait without redoing
-the budget above: each one multiplies the month's calls.
+DO NOT shorten FRESH_FOR, add a question per refresh (or per week, day or team), or drop the
+quota wait without redoing the budget above: each one multiplies the month's calls.
 """
 from __future__ import annotations
 
@@ -40,7 +46,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import requests
 
@@ -61,6 +67,8 @@ FRESH_FOR = timedelta(hours=12)
 POLL_STANDS_IN = timedelta(days=8)
 # Files older than the longest stand-in can never be served: pruned.
 MAX_STALE = POLL_STANDS_IN
+# A wait longer than this is a corrupt value or a clock that went backwards, never a real month.
+_LONGEST_WAIT = timedelta(days=32)
 QUOTA_MESSAGE = "Monthly call quota exceeded."
 _VERSION = 1
 
@@ -68,6 +76,17 @@ _VERSION = 1
 class CollegeDataUnavailable(RuntimeError):
     """No answer: the request failed or was refused, or the month's pool is used up, and no
     kept answer is recent enough to stand in. The message never carries the key."""
+
+
+class Answer(NamedTuple):
+    body: Any
+    fetched_at: datetime
+
+
+def require_list(body: Any) -> None:
+    """The `check` for an answer that must be a JSON list (`[]` included)."""
+    if not isinstance(body, list):
+        raise ValueError("not a list")
 
 
 def _now() -> datetime:
@@ -104,16 +123,16 @@ def _write(path: str, data: Dict[str, Any], compressed: bool) -> None:
         logger.warning("[college_data] could not write %s: %s", path, e)
 
 
-def _kept(question: str, now: datetime) -> Optional[Dict[str, Any]]:
-    """The kept answer for `question` with its age, or None. Not from the future either: a
-    clock that went backwards must not make an old answer look fresh."""
+def _kept(question: str, now: datetime) -> Optional[Answer]:
+    """The kept answer for `question`, or None. Not from the future either: a clock that went
+    backwards must not make an old answer look fresh."""
     data = _read(_path(question), compressed=True)
     if not (data and data.get("v") == _VERSION and data.get("question") == question and "body" in data):
         return None
     at = parse_iso_utc(data.get("fetched_at")) if isinstance(data.get("fetched_at"), str) else None
     if at is None or at > now + timedelta(minutes=5):
         return None
-    return {"age": now - at, "body": data["body"]}
+    return Answer(data["body"], at)
 
 
 def _next_reset(now: datetime) -> datetime:
@@ -121,16 +140,31 @@ def _next_reset(now: datetime) -> datetime:
     return (now.replace(day=1, hour=0, minute=0, second=0, microsecond=0) + timedelta(days=32)).replace(day=1)
 
 
-def _waiting_until(api_key: str, now: datetime) -> Optional[datetime]:
-    """When this key's used-up month resets, while that is still ahead. Bounded by one month
-    so a corrupt far-future value (or a clock that went backwards) cannot stop requests
-    for longer than a real wait."""
+def _waits(now: datetime) -> Dict[str, str]:
+    """{key tag: wait-until} still ahead and plausible, from quota.json."""
     data = _read(_quota_path(), compressed=False) or {}
-    until = parse_iso_utc(data.get("exhausted_until")) if isinstance(data.get("exhausted_until"), str) else None
-    if (until is not None and now < until <= now + timedelta(days=32)
-            and data.get("exhausted_key") == key_id(api_key)):
-        return until
-    return None
+    waits = data.get("waits") if isinstance(data.get("waits"), dict) else {}
+    out = {}
+    for kid, until in waits.items():
+        at = parse_iso_utc(until) if isinstance(until, str) else None
+        if at is not None and now < at <= now + _LONGEST_WAIT:
+            out[kid] = until
+    return out
+
+
+def _record_quota(now: datetime, kid: str, *, wait_until: Optional[datetime] = None,
+                  remaining: Optional[str] = None) -> None:
+    """Set (`wait_until`) or clear (an answer) this key's wait, keeping every other key's."""
+    data = _read(_quota_path(), compressed=False) or {}
+    waits = _waits(now)
+    if wait_until is not None:
+        waits[kid] = wait_until.isoformat()
+        data["refused_at"] = now.isoformat()
+    else:
+        waits.pop(kid, None)
+        data.update(calls_remaining=remaining, checked_at=now.isoformat())
+    data["waits"] = waits
+    _write(_quota_path(), data, compressed=False)
 
 
 def _prune() -> None:
@@ -160,34 +194,36 @@ def _quota_refusal(r: Any) -> bool:
     return isinstance(body, dict) and body.get("message") == QUOTA_MESSAGE
 
 
-def get_json(
+def get_answer(
     base: str, path: str, params: Dict[str, Any], api_key: str, *, timeout: float,
-    log_tag: str, valid: Callable[[Any], bool], expect: str,
-    stale_for: timedelta = timedelta(0), now: Optional[datetime] = None,
-) -> Any:
-    """The answer to one question: kept while younger than FRESH_FOR, else asked.
+    log_tag: str, check: Callable[[Any], Any], stale_for: timedelta = timedelta(0),
+    now: Optional[datetime] = None,
+) -> Answer:
+    """The answer to one question and when it was fetched: kept while younger than FRESH_FOR,
+    else asked.
 
-    A failed or refused request, or a used-up month, serves the kept answer if it is younger
-    than `stale_for` (default none, at most MAX_STALE) and logs that it did; otherwise RAISES
-    `CollegeDataUnavailable`. An answer `valid` rejects is a failure and is not kept; `expect`
-    names the shape it wanted, for that message."""
+    `check` is the caller's parser: an answer it raises on is a failure and is not kept. A
+    failed or refused request, or a used-up month, serves the kept answer if it is younger than
+    `stale_for` (default none, at most MAX_STALE) and logs that it did; otherwise RAISES
+    `CollegeDataUnavailable`."""
     now = now or _now()
     stale_for = min(stale_for, MAX_STALE)
     question = _question(base, path, params)
     kept = _kept(question, now)
-    if kept is not None and kept["age"] < FRESH_FOR:
-        return kept["body"]
+    if kept is not None and now - kept.fetched_at < FRESH_FOR:
+        return kept
 
-    def stand_in(why: str) -> Any:
-        if kept is not None and kept["age"] < stale_for:
+    def stand_in(why: str) -> Answer:
+        if kept is not None and now - kept.fetched_at < stale_for:
             logger.warning("[%s] %s %s; using the answer kept %.1f h ago", log_tag, path, why,
-                           kept["age"].total_seconds() / 3600)
-            return kept["body"]
+                           (now - kept.fetched_at).total_seconds() / 3600)
+            return kept
         raise CollegeDataUnavailable(f"{path} {why}")
 
-    until = _waiting_until(api_key, now)
+    kid = key_id(api_key)
+    until = _waits(now).get(kid)
     if until is not None:
-        return stand_in(f"not asked: the month's free-tier calls are used up until {until.isoformat()}")
+        return stand_in(f"not asked: the month's free-tier calls are used up until {until}")
 
     try:
         r = get_within_deadline(requests, f"{base}{path}", headers={"Authorization": f"Bearer {api_key}"},
@@ -200,33 +236,34 @@ def get_json(
     except requests.HTTPError:
         if not _quota_refusal(r):
             return stand_in(f"answered HTTP {r.status_code}")
-        until = _next_reset(now)
-        quota = _read(_quota_path(), compressed=False) or {}
-        quota.update(exhausted_until=until.isoformat(), exhausted_key=key_id(api_key), refused_at=now.isoformat())
-        _write(_quota_path(), quota, compressed=False)
+        reset = _next_reset(now)
+        _record_quota(now, kid, wait_until=reset)
         logger.warning(
             "[college_data] CollegeFootballData's free tier is 1,000 calls a month shared with "
-            "CollegeBasketballData, and this month's are used up: no college data requests until "
-            "%s. Kept answers stand in meanwhile; the key itself is fine.", until.isoformat(),
+            "CollegeBasketballData, and this month's are used up: no college data requests with "
+            "this key until %s. Kept answers stand in meanwhile; the key itself is fine.",
+            reset.isoformat(),
         )
-        return stand_in(f"refused: the month's free-tier calls are used up until {until.isoformat()}")
+        return stand_in(f"refused: the month's free-tier calls are used up until {reset.isoformat()}")
     try:
         body = r.json()
     except ValueError:
         return stand_in("answered something that is not JSON")
-    if not valid(body):
-        return stand_in(f"answered {str(body)[:80]!r}, not {expect}")
+    try:
+        check(body)
+    except Exception as e:  # the caller's parser: any raise is an unusable answer
+        return stand_in(f"answered {str(body)[:80]!r}: {e}")
 
     _write(_path(question), {"v": _VERSION, "question": question, "fetched_at": now.isoformat(),
                              "body": body}, compressed=True)
-    # An answer proves the month is not used up, whatever an older wait said.
     remaining = r.headers.get("X-CallLimit-Remaining")
-    quota = _read(_quota_path(), compressed=False) or {}
-    quota.pop("exhausted_until", None)
-    quota.pop("exhausted_key", None)
-    quota.update(calls_remaining=remaining, checked_at=now.isoformat())
-    _write(_quota_path(), quota, compressed=False)
+    _record_quota(now, kid, remaining=remaining)   # an answer: this key's month is not used up
     _prune()
     logger.info("[%s] %s fetched (%s calls left this month)", log_tag, path,
                 remaining if remaining is not None else "?")
-    return body
+    return Answer(body, now)
+
+
+def get_json(*args: Any, **kwargs: Any) -> Any:
+    """`get_answer(...)`'s body, for a caller that keeps no copy of its own."""
+    return get_answer(*args, **kwargs).body

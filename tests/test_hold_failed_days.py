@@ -179,8 +179,6 @@ _HTTP_CALLS = ("_http_get", "http_get", "get_json", "http_get_json", "_fd_get", 
 _NOT_DAY_LOOPS = {
     # One request, retried: the caller of `_fd_get` sees its failure and reports.
     ("soccer.py", "_fd_get"),
-    # Betting lines per week of the window: a lost week drops spreads, never a game.
-    ("ncaaf.py", "_fetch_spreads"),
 }
 # Either reports: per day, or the days of one ranged request.
 _REPORTERS = {"report_lost_days", "report_lost_day_range"}

@@ -205,8 +205,16 @@ class PointsBasedSportSource(SportSource):
             return self._all_games_cache
         self._all_games_cache = out or []
         if key:
-            _season_store.remember(key, self._all_games_cache)
+            _season_store.remember(key, self._all_games_cache, now=self._season_read_at())
         return self._all_games_cache
+
+    def _season_read_at(self) -> Optional[datetime]:
+        """When the answers this season read used were fetched, or None for
+        now. A source whose answers are kept between refreshes
+        (`_college_data`, #337) overrides it, so the season store's MAX_AGE
+        runs from the data and a cached answer re-read every refresh cannot
+        keep a days-old season standing in."""
+        return None
 
     def season_store_key(self) -> Optional[str]:
         """The key this source's complete season reads are kept under

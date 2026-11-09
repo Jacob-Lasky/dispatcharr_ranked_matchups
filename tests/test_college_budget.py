@@ -6,6 +6,7 @@ MONTH in one pool for both APIs, all used. The sources assumed 1k a day and
 asked about ten questions on each of 9 to 28 refreshes a day.
 """
 
+import collections
 import importlib
 import json
 import os
@@ -63,7 +64,7 @@ def http(college, monkeypatch):
 def _ask(college, now=NOW, key=KEY, path="/rankings", params=None, stale_for=None):
     kw = {} if stale_for is None else {"stale_for": stale_for}
     return college.get_json(BASE, path, params or {"year": 2026}, key, timeout=15, log_tag="t",
-                            valid=lambda d: isinstance(d, list), expect="a list", now=now, **kw)
+                            check=college.require_list, now=now, **kw)
 
 
 def test_an_answer_is_kept_for_twelve_hours(college, http):
@@ -124,7 +125,7 @@ def test_a_far_future_wait_is_ignored(college, http):
     calls, _ = http
     os.makedirs(college.CACHE_DIR, exist_ok=True)
     key_id = importlib.import_module("dispatcharr_ranked_matchups._util").key_id
-    json.dump({"exhausted_until": "2099-01-01T00:00:00+00:00", "exhausted_key": key_id(KEY)},
+    json.dump({"waits": {key_id(KEY): "2099-01-01T00:00:00+00:00"}},
               open(os.path.join(college.CACHE_DIR, "quota.json"), "w"))
     _ask(college)
     assert len(calls) == 1
@@ -137,7 +138,31 @@ def test_an_answer_clears_the_wait_and_records_the_calls_left(college, http):
         _ask(college)
     _ask(college, key="a-new-key", now=NOW + timedelta(minutes=1))
     quota = json.load(open(os.path.join(college.CACHE_DIR, "quota.json")))
-    assert "exhausted_until" not in quota and quota["calls_remaining"] == "900"
+    key_id = importlib.import_module("dispatcharr_ranked_matchups._util").key_id
+    assert quota["waits"] == {key_id(KEY): "2026-12-01T00:00:00+00:00"}   # only the new key's answer
+    assert quota["calls_remaining"] == "900"
+
+
+def test_another_keys_answer_does_not_clear_this_keys_wait(college, http):
+    """A, then B, then A: B's answer is not A's month coming back (round-1 review)."""
+    calls, queue = http
+    queue.append(QUOTA)
+    with pytest.raises(college.CollegeDataUnavailable):
+        _ask(college)
+    _ask(college, key="a-new-key", now=NOW + timedelta(minutes=1))
+    with pytest.raises(college.CollegeDataUnavailable, match="not asked"):
+        _ask(college, path="/games", now=NOW + timedelta(minutes=2))
+    assert len(calls) == 2
+
+
+def test_a_successful_answer_clears_only_its_own_keys_wait(college, http):
+    calls, queue = http
+    queue.append(QUOTA)
+    with pytest.raises(college.CollegeDataUnavailable):
+        _ask(college)
+    _ask(college, now=datetime(2026, 12, 1, 0, 5, tzinfo=UTC))   # the new month
+    quota = json.load(open(os.path.join(college.CACHE_DIR, "quota.json")))
+    assert quota["waits"] == {}
 
 
 def test_a_kept_poll_stands_in_for_a_week_and_no_longer(college, http):
@@ -165,6 +190,63 @@ def test_control_without_a_stand_in_a_failure_raises_however_recent_the_answer(c
         _ask(college, path="/games", now=NOW + timedelta(hours=13))
 
 
+def test_a_malformed_poll_never_replaces_a_good_one(college, http, monkeypatch):
+    """WITNESS (round-1 review): `{"poll": "AP Top 25", "ranks": null}` passed the
+    shape check, was kept, and replayed for twelve hours. The parser is the check."""
+    calls, queue = http
+    ncaaf = importlib.import_module("dispatcharr_ranked_matchups.sources.ncaaf")
+    clock = {"now": NOW}
+    monkeypatch.setattr(college, "_now", lambda: clock["now"])
+    assert ncaaf.NcaafSource(api_key=KEY)._fetch_rankings(2026) == {"Georgia": 1}
+    clock["now"] = NOW + timedelta(hours=13)
+    queue.append(FakeResp(200, [{"week": 12, "polls": [{"poll": "AP Top 25", "ranks": None}]}]))
+    assert ncaaf.NcaafSource(api_key=KEY)._fetch_rankings(2026) == {"Georgia": 1}   # the kept poll
+    clock["now"] = NOW + timedelta(hours=13, minutes=5)
+    fixed = [{"week": 12, "polls": [{"poll": "AP Top 25", "ranks": [{"school": "Ohio State", "rank": 1}]}]}]
+    queue.append(FakeResp(200, fixed))
+    assert ncaaf.NcaafSource(api_key=KEY)._fetch_rankings(2026) == {"Ohio State": 1}
+    assert len(calls) == 3
+
+
+def test_an_ncaam_poll_with_no_readable_rank_is_not_kept(college, http, monkeypatch):
+    calls, queue = http
+    ncaam = importlib.import_module("dispatcharr_ranked_matchups.sources.ncaam")
+    queue.append(FakeResp(200, [{"pollType": "AP Top 25", "week": 3, "team": "Duke", "ranking": "NR"}]))
+    with pytest.raises(Exception, match="no readable rank"):
+        ncaam.NcaamSource(api_key=KEY)._fetch_rankings(2027)
+    queue.append(FakeResp(200, [{"pollType": "AP Top 25", "week": 3, "team": "Duke", "ranking": 4}]))
+    assert ncaam.NcaamSource(api_key=KEY)._fetch_rankings(2027) == {"Duke": 4}
+    assert len(calls) == 2
+
+
+def test_a_cached_season_does_not_restart_the_season_stores_clock(college, http, monkeypatch):
+    """WITNESS (round-1 review): a season fetched at hour 0 and read from the
+    cache at hour 11 was remembered as an hour-11 read, so an outage at hour
+    46 still simulated it. The store dates it by the answer."""
+    import requests
+    calls, queue = http
+    store = importlib.import_module("dispatcharr_ranked_matchups.sources._season_store")
+    ncaaf = importlib.import_module("dispatcharr_ranked_matchups.sources.ncaaf")
+    clock = {"now": NOW}
+    monkeypatch.setattr(college, "_now", lambda: clock["now"])
+    monkeypatch.setattr(store, "_now", lambda: clock["now"])
+    monkeypatch.setattr(ncaaf.NcaafSource, "_current_season_year", staticmethod(lambda: 2026))
+    season = [{"id": 1, "homeTeam": "Georgia", "awayTeam": "Samford", "homeClassification": "fbs",
+               "awayClassification": "fcs", "homePoints": 45, "awayPoints": 3, "completed": True,
+               "startDate": "2026-09-06T23:00:00.000Z"}]
+    queue.append(FakeResp(200, season))
+    ncaaf.NcaafSource(api_key=KEY, divisions="fbs")._fetch_games_cached()
+    clock["now"] = NOW + timedelta(hours=11)
+    ncaaf.NcaafSource(api_key=KEY, divisions="fbs")._fetch_games_cached()   # from the cache
+    assert len(calls) == 1
+    key = ncaaf.NcaafSource(api_key=KEY, divisions="fbs").season_store_key()
+    assert store.recall(key).read_at == NOW
+    clock["now"] = NOW + timedelta(hours=46)
+    queue.append(requests.ConnectionError("refused"))
+    later = ncaaf.NcaafSource(api_key=KEY, divisions="fbs")
+    assert later._fetch_games_cached() == [] and later.season_fallback() is None
+
+
 def test_a_wrong_shape_is_a_failure_and_is_not_kept(college, http):
     calls, queue = http
     queue.append(FakeResp(200, {"message": "Unauthorized"}))
@@ -183,23 +265,57 @@ def test_the_reset_is_the_first_of_the_next_month(college, now, reset):
     assert college._next_reset(now) == reset
 
 
-def test_a_refresh_day_fits_the_month(college, http, monkeypatch):
-    """The budget the module docstring promises, measured through the real
-    sources: twelve refreshes in a day ask each question at most twice."""
-    calls, _ = http
+def test_a_month_of_refreshes_fits_the_pool(college, monkeypatch):
+    """The budget the module docstring promises, measured through both real
+    sources' fetch_upcoming and season walks: 31 days of a refresh every two
+    hours, the longest lookahead the plugin allows (90 days, so NCAAF's window
+    spans many weeks), and the NCAAM window moving every day."""
+    calls = []
+
+    def get(url, params=None, headers=None, timeout=None):
+        calls.append(url)
+        if url.endswith("/rankings") and "basketball" in url:
+            return FakeResp(200, [{"pollType": "AP Top 25", "week": 3, "team": "Duke", "ranking": 1}])
+        if url.endswith("/rankings"):
+            return FakeResp(200, POLL)
+        if url.endswith("/games") and "basketball" in url:
+            # a game at the end of the asked window, so NCAAM goes on to ask /lines too
+            return FakeResp(200, [{"id": 1, "homeTeam": "Duke", "awayTeam": "UNC",
+                                   "startDate": params["endDateRange"] + "T23:00:00Z"}])
+        if url.endswith("/games") and "football" in url:
+            return FakeResp(200, [{"id": w, "week": w, "homeTeam": "Georgia", "awayTeam": f"Opp{w}",
+                                   "homeClassification": "fbs", "awayClassification": "fbs",
+                                   "startDate": (NOW + timedelta(days=7 * w)).isoformat()}
+                                  for w in range(1, 13)])
+        return FakeResp(200, [])
+
+    stub_requests_get(monkeypatch, get)
     ncaaf = importlib.import_module("dispatcharr_ranked_matchups.sources.ncaaf")
+    ncaam = importlib.import_module("dispatcharr_ranked_matchups.sources.ncaam")
+    espn = importlib.import_module("dispatcharr_ranked_matchups.sources._espn")
     clock = {"now": NOW}
     monkeypatch.setattr(college, "_now", lambda: clock["now"])
     monkeypatch.setattr(ncaaf.NcaafSource, "_current_season_year", staticmethod(lambda: 2026))
-    for hour in range(0, 24, 2):
-        clock["now"] = NOW + timedelta(hours=hour)
-        ncaaf.NcaafSource(api_key=KEY)._fetch_rankings(2026)
-        ncaaf.NcaafSource(api_key=KEY)._fetch_raw_season(2026)
-    per_question = {}
-    for url, params, _h in calls:
-        per_question[(url, tuple(sorted(params.items())))] = per_question.get(
-            (url, tuple(sorted(params.items()))), 0) + 1
-    assert len(per_question) == 2 and max(per_question.values()) == 2
+    monkeypatch.setattr(ncaam.NcaamSource, "_current_season_year", staticmethod(lambda: 2027))
+
+    class _Clock(datetime):   # the windows (NCAAM's via _espn, NCAAF's own) move with the clock
+        @classmethod
+        def now(cls, tz=None):
+            return clock["now"] if tz is not None else clock["now"].replace(tzinfo=None)
+
+    monkeypatch.setattr(espn, "datetime", _Clock)
+    monkeypatch.setattr(ncaaf, "datetime", _Clock)
+    for step in range(31 * 12):
+        clock["now"] = NOW + timedelta(hours=2 * step)
+        for src in (ncaaf.NcaafSource(api_key=KEY), ncaam.NcaamSource(api_key=KEY)):
+            try:
+                src.fetch_upcoming(days_ahead=90)
+            except Exception:
+                pass
+            src._fetch_games_cached()
+    by_path = collections.Counter(u.split(".com")[0][-8:] + u.split(".com")[1] for u in calls)
+    print("calls in 31 days:", len(calls), dict(by_path))
+    assert 450 <= len(calls) <= 700, (len(calls), by_path)   # all nine questions, ~560 measured
 
 
 def test_no_other_module_calls_the_college_apis_directly():

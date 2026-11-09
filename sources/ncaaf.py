@@ -1,11 +1,12 @@
 """NCAA Football source via CollegeFootballData.com.
 
 Free tier: 1,000 calls a MONTH, shared with CollegeBasketballData through the
-one key; every request goes through `_college_data.get_json`, which keeps
-answers on disk and owns that budget (#337). Three questions per refresh:
+one key; every request goes through `_college_data`, which keeps answers on
+disk and owns that budget (#337). Three questions per refresh, whatever the
+lookahead:
   1) /rankings: current AP Top-25 (nested polls→ranks shape)
   2) /games  : the whole regular season (param: ?year=)
-  3) /lines  : betting lines per week in the window
+  3) /lines  : the whole regular season's betting lines (no ?week=)
 
 Offseason (Feb-Aug) /games returns no upcoming results; fetch_upcoming
 returns []. CFBD identifies a season by its START year (?year=2024 means
@@ -31,7 +32,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._college_data import POLL_STANDS_IN, get_json
+from ._college_data import POLL_STANDS_IN, get_answer, get_json, require_list
 from .base import GameRow, RankingsUnavailable, SeasonUnavailable
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
@@ -110,6 +111,8 @@ class NcaafSource(PointsBasedSportSource):
             )
         self.divisions = divisions if divisions in DIVISION_SETS else DEFAULT_DIVISIONS
         self._raw_season_cache: Dict[int, List[Dict[str, Any]]] = {}
+        # When each cached season answer was fetched (`_season_read_at`).
+        self._raw_season_at: Dict[int, datetime] = {}
 
     @property
     def _allowed_classifications(self) -> frozenset:
@@ -238,14 +241,11 @@ class NcaafSource(PointsBasedSportSource):
         when the request failed or did not answer with a list of weekly
         snapshots (#283)."""
         try:
-            # /rankings is a list of weekly snapshots, each with a `polls`
-            # list, `[]` before the first poll; anything else (an error
-            # object, null) is a failure, not a preseason.
+            # The parser is the check: an answer it cannot read is a failure
+            # and is never kept in place of a good poll (#337).
             data = get_json(
                 CFBD_BASE, "/rankings", {"year": year}, self.api_key, timeout=15,
-                log_tag="ncaaf", stale_for=POLL_STANDS_IN, expect="a list of snapshots",
-                valid=lambda d: isinstance(d, list) and (not d or (
-                    isinstance(d[-1], dict) and isinstance(d[-1].get("polls"), list))),
+                log_tag="ncaaf", stale_for=POLL_STANDS_IN, check=self._poll_from,
             )
         except Exception as e:
             logger.error(
@@ -253,11 +253,24 @@ class NcaafSource(PointsBasedSportSource):
                 "are held this refresh", e,
             )
             raise RankingsUnavailable(f"/rankings failed: {e}") from e
+        return self._poll_from(data, year=year)
+
+    def _poll_from(self, data: Any, year: Optional[int] = None) -> Optional[Dict[str, int]]:
+        """{team: rank} from a /rankings answer, or None for no poll yet. RAISES
+        `RankingsUnavailable` for an answer it cannot read. Logs the None cases
+        only when `year` is given (the read, not the cache's check)."""
+        # /rankings is a list of weekly snapshots, each with a `polls` list,
+        # `[]` before the first poll; anything else (an error object, null) is
+        # a failure, not a preseason.
+        if not isinstance(data, list) or (data and not (
+                isinstance(data[-1], dict) and isinstance(data[-1].get("polls"), list))):
+            raise RankingsUnavailable(f"/rankings answered {str(data)[:80]!r}, not a list of snapshots")
         if not data:
-            logger.info(
-                "[ncaaf] no %s snapshot published for %d yet (preseason); "
-                "skipping", self.poll_name, year,
-            )
+            if year is not None:
+                logger.info(
+                    "[ncaaf] no %s snapshot published for %d yet (preseason); "
+                    "skipping", self.poll_name, year,
+                )
             return None
         latest = data[-1]
         if not all(isinstance(p, dict) for p in latest["polls"]):
@@ -279,11 +292,12 @@ class NcaafSource(PointsBasedSportSource):
                     # empty poll.
                     raise RankingsUnavailable(f"/rankings: {self.poll_name} has no readable rank")
                 return out
-        logger.info(
-            "[ncaaf] poll %r absent from the latest snapshot (polls present: "
-            "%s); skipping", self.poll_name,
-            ", ".join(str(p.get("poll")) for p in latest["polls"]) or "none",
-        )
+        if year is not None:
+            logger.info(
+                "[ncaaf] poll %r absent from the latest snapshot (polls present: "
+                "%s); skipping", self.poll_name,
+                ", ".join(str(p.get("poll")) for p in latest["polls"]) or "none",
+            )
         return None
 
     def _season_store_id(self) -> Optional[str]:
@@ -309,10 +323,9 @@ class NcaafSource(PointsBasedSportSource):
         try:
             # /games answers with a list of games, `[]` included; an error
             # object or null is a failure, not an empty season.
-            data = get_json(
+            answer = get_answer(
                 CFBD_BASE, "/games", {"year": year, "seasonType": "regular"}, self.api_key,
-                timeout=60, log_tag="ncaaf", expect="a list",
-                valid=lambda d: isinstance(d, list),
+                timeout=60, log_tag="ncaaf", check=require_list,
             )
         except Exception as e:
             logger.error("[ncaaf] /games failed: %s", e)
@@ -324,8 +337,14 @@ class NcaafSource(PointsBasedSportSource):
             # an outage the refresh holds the label for (#240) and a season
             # failure the refresh reports.
             raise SeasonUnavailable(f"/games failed: {e}") from e
-        self._raw_season_cache[year] = data
+        self._raw_season_cache[year] = data = answer.body
+        self._raw_season_at[year] = answer.fetched_at
         return data
+
+    def _season_read_at(self) -> Optional[datetime]:
+        """The season answer is kept up to twelve hours (#337): the season
+        store dates this read by it, not by now (`points_based`)."""
+        return self._raw_season_at.get(self._season())
 
     def _team_records(self, year: int) -> Dict[str, Tuple[int, int]]:
         """{team: (wins, losses)} from completed games in the season payload.
@@ -407,32 +426,35 @@ class NcaafSource(PointsBasedSportSource):
     def _fetch_spreads(self, year: int, games: List[Dict]) -> Dict[int, float]:
         if not games:
             return {}
-        weeks = {g.get("week") for g in games if g.get("week") is not None}
+        # ONE question for the whole regular season (#337): without `week`,
+        # /lines answers every game, so a long lookahead costs no extra calls
+        # against the monthly pool. DO NOT go back to one request per week.
+        try:
+            lines = get_json(
+                CFBD_BASE, "/lines", {"year": year, "seasonType": "regular"},
+                self.api_key, timeout=30, log_tag="ncaaf", check=require_list,
+            )
+        except Exception as e:
+            logger.warning("[ncaaf] /lines failed: %s", e)
+            return {}
+        wanted = {g.get("id") for g in games}
         out: Dict[int, float] = {}
-        for week in weeks:
-            try:
-                lines = get_json(
-                    CFBD_BASE, "/lines", {"year": year, "week": week, "seasonType": "regular"},
-                    self.api_key, timeout=15, log_tag="ncaaf", expect="a list",
-                    valid=lambda d: isinstance(d, list),
-                )
-            except Exception as e:
-                logger.warning("[ncaaf] /lines week %s failed: %s", week, e)
+        for entry in lines:
+            gid = entry.get("id") if isinstance(entry, dict) else None
+            if gid not in wanted:
                 continue
-            for entry in lines:
-                gid = entry.get("id")
-                line_list = entry.get("lines", [])
-                consensus = next((l for l in line_list if l.get("provider") == "consensus"), None)
-                line = consensus or (line_list[0] if line_list else None)
-                if line is None:
-                    continue
-                spread = line.get("spread")
-                if spread is None:
-                    continue
-                try:
-                    out[gid] = abs(float(spread))
-                except (TypeError, ValueError):
-                    continue
+            line_list = entry.get("lines", [])
+            consensus = next((l for l in line_list if l.get("provider") == "consensus"), None)
+            line = consensus or (line_list[0] if line_list else None)
+            if line is None:
+                continue
+            spread = line.get("spread")
+            if spread is None:
+                continue
+            try:
+                out[gid] = abs(float(spread))
+            except (TypeError, ValueError):
+                continue
         return out
 
     # ---------- Monte Carlo importance ----------
