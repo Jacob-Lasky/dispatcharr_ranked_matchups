@@ -1339,12 +1339,29 @@ says which.
 
 ## Development loop
 
-Inside the Dispatcharr container:
+Deploying a release to Tower (the installed folder is NOT a git checkout: it
+holds the release zip's files plus runtime state such as `cache.json`,
+`*_cache.json`, `season_cache/`, `college_cache/` and the key files). The
+pipeline subprocess imports the plugin from disk on every run, so a copy that
+stops halfway leaves a refresh running old and new modules together: on
+2026-11-09 a root-owned `sources/` made the v1.36.3 copy fail after the
+top-level files had gone in. So, with nobody streaming and no recording due:
 
 ```bash
-docker exec dispatcharr git -C /data/plugins/dispatcharr_ranked_matchups pull
-# or rsync from your dev box → /data/plugins/ in the container
+P=/mnt/user/appdata/dispatcharr/data/plugins/dispatcharr_ranked_matchups  # host path
+# 1. Every path must belong to the folder's owner (1000:1000), or the copy can fail partway.
+docker run --rm -v $P:/p:ro alpine sh -c 'find /p -not -user 1000 | head -1' # must print nothing
+# 2. Back up, outside /data/plugins (a dir there is discovered as a plugin): /mnt/user/backups.
+# 3. Unzip the published release asset into a staging dir OUTSIDE /data/plugins, then copy
+#    it in as the owner in ONE container run that stops on the first error:
+docker run --rm --user 1000:1000 -v <staging>/dispatcharr_ranked_matchups:/src:ro -v $P:/dst \
+  alpine sh -c 'set -e; cp -R /src/. /dst/'
+# 4. Verify byte-for-byte (every file in the release must `cmp` equal), and only then
+# 5. `docker restart Dispatcharr` (or POST /api/plugins/plugins/reload/ with auth).
 ```
+
+If step 1 or 4 fails, fix ownership (as root, after the backup) and copy again
+before restarting; never restart onto a mixed tree.
 
 Smoke-test refresh (the `-e` keeps this exec from starting a scheduler and
 reaper of its own: `python -c` is a process `_thread_host` cannot place, so it
