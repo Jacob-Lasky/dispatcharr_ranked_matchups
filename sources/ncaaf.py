@@ -32,7 +32,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._college_data import POLL_STANDS_IN, get_answer, get_json, require_list
+from ._college_data import POLL_STANDS_IN, get_answer, get_json, require_rows
 from .base import GameRow, RankingsUnavailable, SeasonUnavailable
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
@@ -325,7 +325,7 @@ class NcaafSource(PointsBasedSportSource):
             # object or null is a failure, not an empty season.
             answer = get_answer(
                 CFBD_BASE, "/games", {"year": year, "seasonType": "regular"}, self.api_key,
-                timeout=60, log_tag="ncaaf", check=require_list,
+                timeout=60, log_tag="ncaaf", check=require_rows,
             )
         except Exception as e:
             logger.error("[ncaaf] /games failed: %s", e)
@@ -432,7 +432,7 @@ class NcaafSource(PointsBasedSportSource):
         try:
             lines = get_json(
                 CFBD_BASE, "/lines", {"year": year, "seasonType": "regular"},
-                self.api_key, timeout=30, log_tag="ncaaf", check=require_list,
+                self.api_key, timeout=30, log_tag="ncaaf", check=require_rows,
             )
         except Exception as e:
             logger.warning("[ncaaf] /lines failed: %s", e)
@@ -440,10 +440,11 @@ class NcaafSource(PointsBasedSportSource):
         wanted = {g.get("id") for g in games}
         out: Dict[int, float] = {}
         for entry in lines:
-            gid = entry.get("id") if isinstance(entry, dict) else None
+            gid = entry.get("id")
             if gid not in wanted:
                 continue
-            line_list = entry.get("lines", [])
+            # A game with no lines yet can carry `"lines": null`: no spread, not a failure.
+            line_list = [l for l in (entry.get("lines") or []) if isinstance(l, dict)]
             consensus = next((l for l in line_list if l.get("provider") == "consensus"), None)
             line = consensus or (line_list[0] if line_list else None)
             if line is None:

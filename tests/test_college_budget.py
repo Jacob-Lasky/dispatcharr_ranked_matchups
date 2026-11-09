@@ -64,7 +64,7 @@ def http(college, monkeypatch):
 def _ask(college, now=NOW, key=KEY, path="/rankings", params=None, stale_for=None):
     kw = {} if stale_for is None else {"stale_for": stale_for}
     return college.get_json(BASE, path, params or {"year": 2026}, key, timeout=15, log_tag="t",
-                            check=college.require_list, now=now, **kw)
+                            check=college.require_rows, now=now, **kw)
 
 
 def test_an_answer_is_kept_for_twelve_hours(college, http):
@@ -245,6 +245,36 @@ def test_a_cached_season_does_not_restart_the_season_stores_clock(college, http,
     queue.append(requests.ConnectionError("refused"))
     later = ncaaf.NcaafSource(api_key=KEY, divisions="fbs")
     assert later._fetch_games_cached() == [] and later.season_fallback() is None
+
+
+def test_a_null_row_is_a_failure_and_is_not_kept(college, http):
+    """WITNESS (round-2 review): `[null]` passed a list-only check, was kept, and
+    crashed the source's loop (AttributeError) on every refresh for twelve hours."""
+    calls, queue = http
+    queue.append(FakeResp(200, [None]))
+    with pytest.raises(college.CollegeDataUnavailable, match="a row is not an object"):
+        _ask(college, path="/games")
+    assert _ask(college, path="/games", now=NOW + timedelta(minutes=1)) == POLL   # asked again
+    assert len(calls) == 2
+
+
+def test_an_ncaam_season_chunk_of_null_rows_takes_the_season_failure_path(college, http):
+    from dispatcharr_ranked_matchups.sources.base import SeasonUnavailable
+    _calls, queue = http
+    ncaam = importlib.import_module("dispatcharr_ranked_matchups.sources.ncaam")
+    src = ncaam.NcaamSource(api_key=KEY)
+    src._poll_memo = (src._season(), {"Duke": 1})
+    queue.append(FakeResp(200, [None]))
+    with pytest.raises(SeasonUnavailable):
+        src._fetch_full_season_games()
+
+
+def test_a_game_with_null_lines_has_no_spread(college, http):
+    _calls, queue = http
+    ncaaf = importlib.import_module("dispatcharr_ranked_matchups.sources.ncaaf")
+    queue.append(FakeResp(200, [{"id": 1, "lines": None},
+                                {"id": 2, "lines": [None, {"provider": "consensus", "spread": -3.5}]}]))
+    assert ncaaf.NcaafSource(api_key=KEY)._fetch_spreads(2026, [{"id": 1}, {"id": 2}]) == {2: 3.5}
 
 
 def test_a_wrong_shape_is_a_failure_and_is_not_kept(college, http):

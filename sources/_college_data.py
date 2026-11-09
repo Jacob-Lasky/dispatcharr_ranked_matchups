@@ -83,10 +83,13 @@ class Answer(NamedTuple):
     fetched_at: datetime
 
 
-def require_list(body: Any) -> None:
-    """The `check` for an answer that must be a JSON list (`[]` included)."""
+def require_rows(body: Any) -> None:
+    """The `check` for an answer that must be a JSON list of objects (`[]` included): a `null`
+    row would be kept and then crash the caller's loop on every refresh for twelve hours."""
     if not isinstance(body, list):
         raise ValueError("not a list")
+    if not all(isinstance(row, dict) for row in body):
+        raise ValueError("a row is not an object")
 
 
 def _now() -> datetime:

@@ -30,7 +30,7 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from ._college_data import POLL_STANDS_IN, get_answer, get_json, require_list
+from ._college_data import POLL_STANDS_IN, get_answer, get_json, require_rows
 from .base import GameRow, RankingsUnavailable, SeasonUnavailable, report_lost_day_range
 from .points_based import PointsBasedSportSource
 from ._espn import upcoming_window
@@ -287,7 +287,7 @@ class NcaamSource(PointsBasedSportSource):
             # (an error object, null) is not an answer.
             return get_json(
                 CBB_BASE, "/games", _date_range(start, end), self.api_key, timeout=30,
-                log_tag="ncaam", check=require_list,
+                log_tag="ncaam", check=require_rows,
             )
         except Exception as e:
             logger.error("[ncaam] /games failed: %s", e)
@@ -299,7 +299,7 @@ class NcaamSource(PointsBasedSportSource):
         try:
             data = get_json(
                 CBB_BASE, "/lines", _date_range(start, end), self.api_key, timeout=30,
-                log_tag="ncaam", check=require_list,
+                log_tag="ncaam", check=require_rows,
             )
         except Exception as e:
             logger.warning("[ncaam] /lines failed: %s", e)
@@ -308,7 +308,7 @@ class NcaamSource(PointsBasedSportSource):
             gid = entry.get("gameId")
             if gid is None:
                 continue
-            line_list = entry.get("lines") or []
+            line_list = [l for l in (entry.get("lines") or []) if isinstance(l, dict)]
             # CBB returns per-bookmaker lines without a "consensus" entry:
             # take the first non-null spread we see (mirrors what the user
             # would see at the top of any sportsbook).
@@ -430,7 +430,7 @@ class NcaamSource(PointsBasedSportSource):
             try:
                 answer = get_answer(
                     CBB_BASE, "/games", _date_range(start, end), self.api_key, timeout=30,
-                    log_tag="ncaam", check=require_list,
+                    log_tag="ncaam", check=require_rows,
                 )
             except Exception as e:
                 logger.warning("[ncaam] full-season chunk %s..%s failed: %s",
