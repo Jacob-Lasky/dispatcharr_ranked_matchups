@@ -139,6 +139,16 @@ def _isolated_season_store(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_college_cache(tmp_path, monkeypatch):
+    """Point sources/_college_data.CACHE_DIR at a per-test temp directory (#337):
+    every answer a test stubs is kept there for twelve hours, and a later test
+    would otherwise be served it in place of its own stub."""
+    import importlib
+    college = importlib.import_module(f"{PKG_NAME}.sources._college_data")
+    monkeypatch.setattr(college, "CACHE_DIR", str(tmp_path / "college_cache"))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_odds_cache(tmp_path, monkeypatch):
     """Point sources/_odds.CACHE_PATH at a per-test temp file (#200), for the
     same reason as _isolated_last_run: left live, a test would write

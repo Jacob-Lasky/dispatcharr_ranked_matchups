@@ -197,7 +197,7 @@ def test_far_future_backoff_is_ignored(odds, http):
     import json
     calls, _ = http
     json.dump({"entries": {}, "exhausted_until": "2099-01-01T00:00:00+00:00",
-               "exhausted_key": odds._key_id(KEY)}, open(odds.CACHE_PATH, "w"))
+               "exhausted_key": importlib.import_module("dispatcharr_ranked_matchups._util").key_id(KEY)}, open(odds.CACHE_PATH, "w"))
     _fetch(odds)
     assert len(calls) == 1
 

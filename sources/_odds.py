@@ -29,7 +29,6 @@ them would move every score on one side. This module returns raw events.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -39,7 +38,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from .._http import get_within_deadline
-from .._util import redact_secrets, write_json_atomic
+from .._util import key_id, redact_secrets, write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +58,6 @@ _OUT_OF_CREDITS = "OUT_OF_USAGE_CREDITS"
 # returned, so a stale fallback cannot lend a past fixture's line to the next
 # meeting of the same two teams (callers match on the team pair alone).
 _MAX_AGE_AFTER_KICKOFF = timedelta(hours=6)
-
-
-def _key_id(api_key: str) -> str:
-    """A non-reversible tag for the key, so the backoff belongs to the key that
-    ran out: a user who pastes a new key is not kept waiting a day. Never the
-    key itself: this file is plain JSON in the plugin folder."""
-    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
 
 
 def _current(events: Any, now: datetime) -> Optional[List[Dict[str, Any]]]:
@@ -138,7 +130,7 @@ def fetch_odds_events(
     # Bounded by EXHAUSTED_BACKOFF so a corrupt far-future value (or a clock
     # that went backwards) cannot suppress requests indefinitely.
     if (exhausted_until is not None and now < exhausted_until <= now + EXHAUSTED_BACKOFF
-            and data.get("exhausted_key") == _key_id(api_key)):
+            and data.get("exhausted_key") == key_id(api_key)):
         return cached
 
     try:
@@ -162,7 +154,7 @@ def fetch_odds_events(
             code = None
         if code == _OUT_OF_CREDITS:
             data["exhausted_until"] = (now + EXHAUSTED_BACKOFF).isoformat()
-            data["exhausted_key"] = _key_id(api_key)
+            data["exhausted_key"] = key_id(api_key)
             _save(data)
             logger.warning(
                 "[odds] The Odds API monthly credits are used up; no odds requests "

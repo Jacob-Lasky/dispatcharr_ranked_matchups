@@ -17,6 +17,7 @@ numbering_state.json
 sportsdb_thumb_cache.json
 gamethumbs_cache.json
 season_cache/
+college_cache/
 *.tmp
 
 # Python

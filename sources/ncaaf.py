@@ -1,9 +1,11 @@
 """NCAA Football source via CollegeFootballData.com.
 
-Free tier: 1k req/day. We make 3 calls per refresh:
+Free tier: 1,000 calls a MONTH, shared with CollegeBasketballData through the
+one key; every request goes through `_college_data.get_json`, which keeps
+answers on disk and owns that budget (#337). Three questions per refresh:
   1) /rankings: current AP Top-25 (nested polls→ranks shape)
-  2) /games  : schedule for the upcoming window (param: ?year=)
-  3) /lines  : betting lines per week
+  2) /games  : the whole regular season (param: ?year=)
+  3) /lines  : betting lines per week in the window
 
 Offseason (Feb-Aug) /games returns no upcoming results; fetch_upcoming
 returns []. CFBD identifies a season by its START year (?year=2024 means
@@ -29,11 +31,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
-
+from ._college_data import POLL_STANDS_IN, get_json
 from .base import GameRow, RankingsUnavailable, SeasonUnavailable
 from .points_based import PointsBasedSportSource
-from .._http import get_within_deadline
 from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaaf")
@@ -110,7 +110,6 @@ class NcaafSource(PointsBasedSportSource):
             )
         self.divisions = divisions if divisions in DIVISION_SETS else DEFAULT_DIVISIONS
         self._raw_season_cache: Dict[int, List[Dict[str, Any]]] = {}
-        self._headers = {"Authorization": f"Bearer {api_key}"}
 
     @property
     def _allowed_classifications(self) -> frozenset:
@@ -239,20 +238,15 @@ class NcaafSource(PointsBasedSportSource):
         when the request failed or did not answer with a list of weekly
         snapshots (#283)."""
         try:
-            r = get_within_deadline(
-                requests, f"{CFBD_BASE}/rankings",
-                headers=self._headers,
-                params={"year": year},
-                timeout=15,
+            # /rankings is a list of weekly snapshots, each with a `polls`
+            # list, `[]` before the first poll; anything else (an error
+            # object, null) is a failure, not a preseason.
+            data = get_json(
+                CFBD_BASE, "/rankings", {"year": year}, self.api_key, timeout=15,
+                log_tag="ncaaf", stale_for=POLL_STANDS_IN, expect="a list of snapshots",
+                valid=lambda d: isinstance(d, list) and (not d or (
+                    isinstance(d[-1], dict) and isinstance(d[-1].get("polls"), list))),
             )
-            r.raise_for_status()
-            data = r.json()
-            if not isinstance(data, list) or (data and not (
-                    isinstance(data[-1], dict) and isinstance(data[-1].get("polls"), list))):
-                # /rankings is a list of weekly snapshots, each with a `polls`
-                # list, `[]` before the first poll; anything else (an error
-                # object, null) is a failure, not a preseason.
-                raise ValueError(f"/rankings answered {str(data)[:80]!r}, not a list of snapshots")
         except Exception as e:
             logger.error(
                 "[ncaaf] /rankings request failed (%s); NCAAF's previous games "
@@ -307,24 +301,19 @@ class NcaafSource(PointsBasedSportSource):
         promise two call sites have to keep. Two separate requests could
         disagree (a classification edited between them, a year boundary
         crossed mid-refresh), and the disagreement would be invisible.
-        It also halves the request cost against a 1k/day free tier.
+        It also halves the request cost against the monthly free tier.
         """
         cached = self._raw_season_cache.get(year)
         if cached is not None:
             return cached
         try:
-            r = get_within_deadline(
-                requests, f"{CFBD_BASE}/games",
-                headers=self._headers,
-                params={"year": year, "seasonType": "regular"},
-                timeout=60,
+            # /games answers with a list of games, `[]` included; an error
+            # object or null is a failure, not an empty season.
+            data = get_json(
+                CFBD_BASE, "/games", {"year": year, "seasonType": "regular"}, self.api_key,
+                timeout=60, log_tag="ncaaf", expect="a list",
+                valid=lambda d: isinstance(d, list),
             )
-            r.raise_for_status()
-            data = r.json()
-            if not isinstance(data, list):
-                # /games answers with a list of games, `[]` included; an
-                # error object or null is a failure, not an empty season.
-                raise ValueError(f"/games answered {str(data)[:80]!r}, not a list")
         except Exception as e:
             logger.error("[ncaaf] /games failed: %s", e)
             # DO NOT cache a failure: a transient error must not freeze an
@@ -422,14 +411,11 @@ class NcaafSource(PointsBasedSportSource):
         out: Dict[int, float] = {}
         for week in weeks:
             try:
-                r = get_within_deadline(
-                    requests, f"{CFBD_BASE}/lines",
-                    headers=self._headers,
-                    params={"year": year, "week": week, "seasonType": "regular"},
-                    timeout=15,
+                lines = get_json(
+                    CFBD_BASE, "/lines", {"year": year, "week": week, "seasonType": "regular"},
+                    self.api_key, timeout=15, log_tag="ncaaf", expect="a list",
+                    valid=lambda d: isinstance(d, list),
                 )
-                r.raise_for_status()
-                lines = r.json()
             except Exception as e:
                 logger.warning("[ncaaf] /lines week %s failed: %s", week, e)
                 continue

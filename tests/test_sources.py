@@ -143,6 +143,8 @@ class TestNcaafFetchGamesAppliesFilter:
         payload = self._payload()
 
         class FakeResp:
+            headers = {}
+
             @staticmethod
             def raise_for_status():
                 return None
@@ -178,6 +180,8 @@ class TestNcaafFetchGamesAppliesFilter:
         }]
 
         class FakeResp:
+            headers = {}
+
             @staticmethod
             def raise_for_status():
                 return None
@@ -216,6 +220,8 @@ class TestNcaafSimulatedUniverseMatchesEmitted:
         from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
 
         class FakeResp:
+            headers = {}
+
             @staticmethod
             def raise_for_status():
                 return None
@@ -307,6 +313,8 @@ class TestNcaafEmittedTeamsAreSimulated:
         payload = self._payload(when)
 
         class FakeResp:
+            headers = {}
+
             @staticmethod
             def raise_for_status():
                 return None
@@ -361,6 +369,8 @@ class TestNcaafOutcomeEligibility:
         from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
 
         class FakeResp:
+            headers = {}
+
             @staticmethod
             def raise_for_status():
                 return None
@@ -433,6 +443,8 @@ class TestNcaafSeasonFetchIsSharedAndCached:
         payload = self._payload()
 
         class FakeResp:
+            headers = {}
+
             @staticmethod
             def raise_for_status():
                 return None
@@ -462,6 +474,8 @@ class TestNcaafSeasonFetchIsSharedAndCached:
         state = {"fail": True}
 
         class FakeResp:
+            headers = {}
+
             @staticmethod
             def raise_for_status():
                 return None
@@ -619,6 +633,7 @@ class TestNcaamRankingsShape:
     def test_latest_week_wins(self, monkeypatch):
 
         class FakeResp:
+            headers = {}
             status_code = 200
             def __init__(self, payload):
                 self._p = payload
@@ -645,6 +660,7 @@ class TestNcaamRankingsShape:
     def test_empty_response_returns_none(self, monkeypatch):
 
         class FakeResp:
+            headers = {}
             def raise_for_status(self): pass
             def json(self): return []
 
@@ -654,6 +670,7 @@ class TestNcaamRankingsShape:
     def test_unknown_poll_type_returns_none(self, monkeypatch):
 
         class FakeResp:
+            headers = {}
             def raise_for_status(self): pass
             def json(self):
                 return [{"week": 1, "pollType": "Coaches Poll", "team": "X", "ranking": 1}]
@@ -671,6 +688,7 @@ class TestNcaamGamesShape:
         captured = {}
 
         class FakeResp:
+            headers = {}
             def raise_for_status(self): pass
             def json(self): return []
 
@@ -711,6 +729,7 @@ class TestNcaamSpreadsShape:
         ]
 
         class FakeResp:
+            headers = {}
             def raise_for_status(self): pass
             def json(self): return payload
 
@@ -2102,6 +2121,7 @@ class TestNcaafFullSeasonFilter:
         from dispatcharr_ranked_matchups.sources import ncaaf as ncaaf_mod
 
         class FakeResp:
+            headers = {}
             def __init__(self, payload):
                 self._p = payload
 
@@ -2168,6 +2188,7 @@ class TestNcaamFullSeasonFilter:
         from dispatcharr_ranked_matchups.sources import ncaam as ncaam_mod
 
         class FakeResp:
+            headers = {}
             def __init__(self, payload):
                 self._p = payload
 
@@ -2218,6 +2239,7 @@ class TestNcaamFullSeasonFilter:
         captured = []
 
         class FakeResp:
+            headers = {}
             def __init__(self, p): self._p = p
             def raise_for_status(self): pass
             def json(self): return self._p

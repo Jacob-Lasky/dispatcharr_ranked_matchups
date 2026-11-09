@@ -104,7 +104,7 @@ templates before applying them.
 
 | Sport | Source | Free tier? |
 |---|---|---|
-| NCAA Football (D1 FBS; FCS optional) | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (1k req/day) |
+| NCAA Football (D1 FBS; FCS optional) | [CollegeFootballData.com](https://collegefootballdata.com/) | Yes (free tier: 1,000 calls a month, shared with NCAAM) |
 | NCAA Men's Basketball | [CollegeBasketballData.com](https://collegebasketballdata.com/) (same key as CFBD) | Yes |
 | EPL / EFL Championship / UCL / Bundesliga / La Liga / Serie A / Ligue 1 / Eredivisie / Primeira Liga / Brazilian Série A / FIFA World Cup / UEFA EURO | [Football-Data.org](https://www.football-data.org/) | Yes (10 req/min, and those 12 competitions ARE the free tier — every domestic cup is paid-only) |
 | NHL (regular + Stanley Cup Playoffs) | [api-web.nhle.com](https://api-web.nhle.com/) (official, undocumented) | Yes (no key required) |

@@ -16,7 +16,9 @@ live API on 2026-04-27):
 These shape differences make sharing code with NcaafSource brittle: each
 source implements SportSource directly.
 
-Free tier: same as CFBD (1k req/day, free key from collegebasketballdata.com).
+Free tier: ONE monthly pool of 1,000 calls shared with CFBD through the one key
+(free key from collegebasketballdata.com). Every request goes through
+`_college_data.get_json`, which keeps answers on disk and owns that budget (#337).
 Season runs roughly November → early April (regular season ends, then
 March Madness). Calls in May-October return [] cleanly.
 """
@@ -28,12 +30,10 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import requests
-
+from ._college_data import POLL_STANDS_IN, get_json
 from .base import GameRow, RankingsUnavailable, SeasonUnavailable, report_lost_day_range
 from .points_based import PointsBasedSportSource
 from ._espn import upcoming_window
-from .._http import get_within_deadline
 from .._util import parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.ncaam")
@@ -49,6 +49,12 @@ def _in_population(home: Optional[str], away: Optional[str], ranked: Dict[str, i
     simulating): if they drift, a game the scorer skips would be one the simulation could
     answer, or the per-game fallback comes back for games it cannot."""
     return home in ranked or away in ranked
+
+
+def _date_range(start: Any, end: Any) -> Dict[str, str]:
+    """The regular-season date-range parameters /games and /lines share."""
+    return {"startDateRange": start.strftime("%Y-%m-%d"),
+            "endDateRange": end.strftime("%Y-%m-%d"), "seasonType": "regular"}
 
 
 def _completed(game: Dict[str, Any]) -> bool:
@@ -86,7 +92,6 @@ class NcaamSource(PointsBasedSportSource):
         super().__init__()
         self.api_key = api_key
         self.poll_name = poll_name
-        self._headers = {"Authorization": f"Bearer {api_key}"}
         # (season, poll or None) once read, or (season, RankingsUnavailable).
         # See _poll.
         self._poll_memo: Optional[tuple] = None
@@ -225,20 +230,15 @@ class NcaamSource(PointsBasedSportSource):
         failed request or an answer that is not a list of poll rows, which is
         not a preseason (#283). Read through `_poll`."""
         try:
-            r = get_within_deadline(
-                requests, f"{CBB_BASE}/rankings",
-                headers=self._headers,
-                params={"season": season},
-                timeout=15,
+            # /rankings is a flat JSON list of poll rows, [] before the first
+            # poll; anything else (an error object, null, rows without a
+            # pollType) is a failure, not a preseason.
+            data = get_json(
+                CBB_BASE, "/rankings", {"season": season}, self.api_key, timeout=15,
+                log_tag="ncaam", stale_for=POLL_STANDS_IN, expect="a list of poll rows",
+                valid=lambda d: isinstance(d, list) and all(
+                    isinstance(e, dict) and "pollType" in e for e in d),
             )
-            r.raise_for_status()
-            data = r.json()
-            if not isinstance(data, list) or not all(
-                    isinstance(e, dict) and "pollType" in e for e in data):
-                # /rankings is a flat JSON list of poll rows, [] before the
-                # first poll; anything else (an error object, null, rows
-                # without a pollType) is a failure, not a preseason.
-                raise ValueError(f"/rankings answered {str(data)[:80]!r}, not a list of poll rows")
         except Exception as e:
             logger.error("[ncaam] /rankings failed: %s", e)
             raise RankingsUnavailable(f"/rankings failed: {e}") from e
@@ -274,23 +274,13 @@ class NcaamSource(PointsBasedSportSource):
         games): the caller reports the window's days as lost on None.
         """
         try:
-            r = get_within_deadline(
-                requests, f"{CBB_BASE}/games",
-                headers=self._headers,
-                params={
-                    "startDateRange": start.strftime("%Y-%m-%d"),
-                    "endDateRange": end.strftime("%Y-%m-%d"),
-                    "seasonType": "regular",
-                },
-                timeout=30,
+            # /games answers with a JSON list, empty included; anything else
+            # (an error object, null) is not an answer.
+            return get_json(
+                CBB_BASE, "/games", _date_range(start, end), self.api_key, timeout=30,
+                log_tag="ncaam", expect="a list",
+                valid=lambda d: isinstance(d, list),
             )
-            r.raise_for_status()
-            data = r.json()
-            if not isinstance(data, list):
-                # /games answers with a JSON list, empty included; anything
-                # else (an error object, null) is not an answer.
-                raise ValueError(f"/games answered {type(data).__name__}, not a list")
-            return data
         except Exception as e:
             logger.error("[ncaam] /games failed: %s", e)
             return None
@@ -299,18 +289,11 @@ class NcaamSource(PointsBasedSportSource):
         """Same date-range as /games. Returns {gameId: abs(spread)}."""
         out: Dict[int, float] = {}
         try:
-            r = get_within_deadline(
-                requests, f"{CBB_BASE}/lines",
-                headers=self._headers,
-                params={
-                    "startDateRange": start.strftime("%Y-%m-%d"),
-                    "endDateRange": end.strftime("%Y-%m-%d"),
-                    "seasonType": "regular",
-                },
-                timeout=30,
+            data = get_json(
+                CBB_BASE, "/lines", _date_range(start, end), self.api_key, timeout=30,
+                log_tag="ncaam", expect="a list",
+                valid=lambda d: isinstance(d, list),
             )
-            r.raise_for_status()
-            data = r.json()
         except Exception as e:
             logger.warning("[ncaam] /lines failed: %s", e)
             return {}
@@ -432,20 +415,11 @@ class NcaamSource(PointsBasedSportSource):
         all_games: List[Dict[str, Any]] = []
         for start, end in chunks:
             try:
-                r = get_within_deadline(
-                    requests, f"{CBB_BASE}/games",
-                    headers=self._headers,
-                    params={
-                        "startDateRange": start.strftime("%Y-%m-%d"),
-                        "endDateRange": end.strftime("%Y-%m-%d"),
-                        "seasonType": "regular",
-                    },
-                    timeout=30,
+                data = get_json(
+                    CBB_BASE, "/games", _date_range(start, end), self.api_key, timeout=30,
+                    log_tag="ncaam", expect="a list",
+                valid=lambda d: isinstance(d, list),
                 )
-                r.raise_for_status()
-                data = r.json()
-                if not isinstance(data, list):
-                    raise ValueError(f"/games answered {type(data).__name__}, not a list")
             except Exception as e:
                 logger.warning("[ncaam] full-season chunk %s..%s failed: %s",
                                start.date(), end.date(), e)

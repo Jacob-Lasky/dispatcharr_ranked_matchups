@@ -34,11 +34,19 @@ _ONE = [{"id": 1, "home": "A", "away": "B", "home_points": 2, "away_points": 1,
          "status": "FINISHED", "start_time": datetime(2026, 10, 1, 23, 0, tzinfo=UTC)}]
 
 
+# A college refresh this much later asks CFBD/CBBD again (their answers are kept for
+# twelve hours, #337) and is still inside the season store's MAX_AGE.
+LATER_THAN_COLLEGE_CACHE = timedelta(hours=13)
+
+
 @pytest.fixture
 def store(monkeypatch):
     mod = importlib.import_module(f"{PKG}._season_store")
     clock = {"now": T0}
     monkeypatch.setattr(mod, "_now", lambda: clock["now"])
+    # The college sources keep their answers for twelve hours (#337) on this clock too.
+    college = importlib.import_module(f"{PKG}._college_data")
+    monkeypatch.setattr(college, "_now", lambda: clock["now"])
     mod.clock = clock
     return mod
 
@@ -194,11 +202,12 @@ def test_ncaam_a_read_under_another_poll_does_not_stand_in(monkeypatch, store):
     monkeypatch.setattr(ncaam.NcaamSource, "_current_season_year", staticmethod(lambda: 2026))
     ncaam.NcaamSource(api_key="k")._fetch_games_cached()
     state.update(poll=["Duke", "Kansas"], games_ok=False)
-    store.clock["now"] = T0 + timedelta(hours=6)
+    store.clock["now"] = T0 + LATER_THAN_COLLEGE_CACHE
     later = ncaam.NcaamSource(api_key="k")
     assert later._fetch_games_cached() == []
     assert later.season_fallback() is None
     state["poll"] = ["Duke"]
+    store.clock["now"] += LATER_THAN_COLLEGE_CACHE   # a refresh that asks for the poll again
     same_poll = ncaam.NcaamSource(api_key="k")
     same_poll._fetch_games_cached()
     assert same_poll.season_fallback() == T0
@@ -270,7 +279,7 @@ def test_ncaaf_eligibility_survives_the_fallback(monkeypatch, store):
     first._fetch_games_cached()   # the complete read, kept
     assert first.outcome_eligible_teams() == frozenset({"Georgia"})
     answers["ok"] = False
-    store.clock["now"] = T0 + timedelta(hours=6)
+    store.clock["now"] = T0 + LATER_THAN_COLLEGE_CACHE
     later = ncaaf.NcaafSource(api_key="k", divisions="fbs")
     assert [g["home"] for g in later._fetch_games_cached()] == ["Georgia"]   # the kept read
     assert later.season_fallback() is not None
