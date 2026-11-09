@@ -124,3 +124,49 @@ def test_a_pr_added_claude_md_the_pass_rewrote_keeps_the_prs_copy_with_a_warning
     r = run(repo)
     assert r.returncode == 0 and "::warning::CLAUDE.local.md" in r.stdout
     assert (repo / "CLAUDE.local.md").read_text() == "local notes from the PR\n"
+
+
+def test_a_pr_only_file_with_an_unusual_name_comes_back(repo):
+    """Round-2 review: newline output quotes such names, so the file stayed deleted."""
+    write(repo, ".claude/skills/café/SKILL.md", "unicode skill from the PR\n")
+    git(repo, "add", ".claude/skills/café"); git(repo, "commit", "-q", "-m", "pr adds unicode")
+    git(repo, "rm", "-q", "-r", "--cached", ".claude/skills/café")
+    shutil.rmtree(repo / ".claude/skills/café")
+    assert run(repo).returncode == 0
+    assert (repo / ".claude/skills/café/SKILL.md").read_text() == "unicode skill from the PR\n"
+    assert changed(repo) == []
+
+
+def test_an_untouched_symlink_is_not_a_change(tmp_path):
+    """Round-2 review: hashing the link's target, not its text, failed the job."""
+    r = tmp_path / "links"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    git(r, "config", "user.email", "t@t"); git(r, "config", "user.name", "t")
+    write(r, ".mcp.json", '{"base": true}\n')
+    write(r, ".claude/settings.json", '{"s": 1}\n')
+    os.symlink("settings.json", r / ".claude/link.json")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "base")
+    git(r, "update-ref", "refs/remotes/origin/main", "HEAD")
+    git(r, "checkout", "-q", "-b", "pr")
+    write(r, "code.py", "x = 2\n")
+    git(r, "add", "code.py"); git(r, "commit", "-q", "-m", "pr")
+    out = run(r)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert (r / ".claude/link.json").is_symlink() and changed(r) == []
+
+
+def test_a_staged_change_nobody_made_fails_the_job(repo):
+    """Round-2 review: a staged change with the worktree back at base was reset away unseen."""
+    (repo / ".mcp.json").write_text('{"staged": true}\n')
+    git(repo, "add", ".mcp.json")
+    git(repo, "show", "origin/main:.mcp.json")
+    (repo / ".mcp.json").write_text('{"base": true}\n')
+    r = run(repo)
+    assert r.returncode == 1 and "staged change" in r.stdout
+
+
+def test_a_missing_base_ref_fails_instead_of_passing(repo):
+    """Round-2 review: enumeration errors were swallowed by process substitution."""
+    r = subprocess.run(["bash", str(SCRIPT), "no-such-branch"], cwd=repo, capture_output=True, text=True)
+    assert r.returncode == 1 and "no base ref" in r.stdout

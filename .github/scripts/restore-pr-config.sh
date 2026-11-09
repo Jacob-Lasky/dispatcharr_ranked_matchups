@@ -9,48 +9,71 @@
 # keep-pr-docs.sh refused the push (PR #338); without that guard the job would have reverted the
 # PR's CLAUDE.md. The model has finished here, so the PR's copies are safe to put back.
 #
-# Per file under the paths, comparing the base copy (what the model was given), the worktree
-# (what the model left) and the PR head:
-#   - untouched by the model          -> the PR's copy (or no file, if the PR has none);
-#   - a non-markdown file it changed   -> error: the job must not push (this keeps validation's
+# Per entry under the paths (files and symlinks, compared as git does: type and blob), comparing
+# the base copy (what the model was given), the worktree (what it left) and the PR head:
+#   - untouched by the model          -> the PR's copy (or no entry, if the PR has none);
+#   - a non-markdown entry it changed  -> error: the job must not push (this keeps validation's
 #                                         "markdown only" rule for these paths too);
 #   - markdown it changed              -> three-way merge of its edit onto the PR's copy; on a
 #                                         conflict, or when it could not have seen the PR's copy
-#                                         (the PR adds or deletes the file), the PR's version wins
-#                                         and a warning says the pass's edit was dropped;
+#                                         (the PR adds or deletes the file, or either is a link),
+#                                         the PR's version wins and a warning says so;
 #   - a new markdown file in neither   -> kept.
+# A staged change the action did not make (the index differing from both the base and the PR
+# copy) is an error too: the model has no git, so nothing it did can look like that.
+# Paths are NUL-delimited throughout (git quotes unusual names in newline output).
 # DO NOT run this before the Claude step: the restore exists to keep PR config away from the model.
 set -euo pipefail
 base="origin/$1"
+git rev-parse -q --verify "$base^{commit}" >/dev/null || { echo "::error::no base ref $base"; exit 1; }
 paths=(.claude .mcp.json .claude.json .gitmodules .ripgreprc CLAUDE.md CLAUDE.local.md .husky)
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 fail=0
 
-files() {
-  for p in "${paths[@]}"; do
-    git ls-tree -r --name-only "$base" -- "$p"
-    git ls-tree -r --name-only HEAD -- "$p"
-    if [ -d "$p" ]; then find "$p" -type f; elif [ -f "$p" ]; then printf '%s\n' "$p"; fi
-  done | sort -u
+# The list is built first, so a git failure stops the script (set -e) instead of hiding in a pipe.
+: > "$tmp/list"
+for p in "${paths[@]}"; do
+  git ls-tree -r -z --name-only "$base" -- "$p" >> "$tmp/list"
+  git ls-tree -r -z --name-only HEAD -- "$p" >> "$tmp/list"
+  if [ -d "$p" ] && [ ! -L "$p" ]; then
+    find "$p" \( -type f -o -type l \) -print0 >> "$tmp/list"
+  elif [ -e "$p" ] || [ -L "$p" ]; then
+    printf '%s\0' "$p" >> "$tmp/list"
+  fi
+done
+sort -zu "$tmp/list" > "$tmp/files"
+
+tree_id() {   # "<l|f>:<blob>" of $2 in tree $1, or empty
+  local line
+  line=$(git ls-tree -z "$1" -- "$2" | tr -d '\0')
+  [ -n "$line" ] || return 0
+  case "$line" in 120000*) printf 'l:%s' "$(cut -d' ' -f3 <<<"$line" | cut -f1)" ;;
+                  *) printf 'f:%s' "$(cut -d' ' -f3 <<<"$line" | cut -f1)" ;; esac
 }
-blob() { git rev-parse -q --verify "$1:$2" 2>/dev/null || true; }
-take_head() {   # the PR's copy, mode included, in the worktree and the index; or no file at all
+work_id() {   # the same for the worktree entry
+  if [ -L "$1" ]; then printf 'l:%s' "$(readlink -n -- "$1" | git hash-object --stdin)"
+  elif [ -f "$1" ]; then printf 'f:%s' "$(git hash-object -- "$1")"; fi
+}
+take_head() {   # the PR's copy (type and mode included) in the worktree and the index, or none
   if [ -n "$2" ]; then git checkout -q HEAD -- "$1"; else git rm -q -f --ignore-unmatch -- "$1"; rm -f -- "$1"; fi
 }
 
-while IFS= read -r f; do
-  b=$(blob "$base" "$f"); h=$(blob HEAD "$f"); w=""
-  [ -f "$f" ] && w=$(git hash-object -- "$f")
+while IFS= read -r -d '' f; do
+  b=$(tree_id "$base" "$f"); h=$(tree_id HEAD "$f"); w=$(work_id "$f")
+  i=$(git ls-files -s -z -- "$f" | tr -d '\0' | cut -d' ' -f2)
+  if [ -n "$i" ] && [ "f:$i" != "$b" ] && [ "l:$i" != "$b" ] && [ "f:$i" != "$h" ] && [ "l:$i" != "$h" ]; then
+    echo "::error::$f has a staged change neither the base nor the PR has"; fail=1; continue
+  fi
   if [ "$w" = "$b" ]; then take_head "$f" "$h"; continue; fi
   case "$f" in
     *.md) ;;
     *) echo "::error::The docs pass changed protected non-markdown file $f"; fail=1; continue ;;
   esac
   if [ -z "$b" ] && [ -z "$h" ]; then continue; fi          # a new markdown file: keep it
-  if [ -z "$b" ] || [ -z "$h" ] || [ -z "$w" ]; then
+  if [ "${b%%:*}" != f ] || [ "${h%%:*}" != f ] || [ "${w%%:*}" != f ]; then
     if [ "$w" != "$h" ]; then
-      echo "::warning::$f: the PR adds or deletes it (or the pass deleted it), so the pass worked without the PR's copy; kept the PR's version, dropped the pass's edit"
+      echo "::warning::$f: the PR adds or deletes it, or it is a link (or the pass deleted it), so the pass worked without the PR's copy; kept the PR's version, dropped the pass's edit"
     fi
     take_head "$f" "$h"; continue
   fi
@@ -61,7 +84,7 @@ while IFS= read -r f; do
     take_head "$f" "$h"
     echo "::warning::$f: the docs pass's edits conflict with the PR's changes; kept the PR's version"
   fi
-done < <(files)
+done < "$tmp/files"
 
 # The action's copy of the PR's sensitive paths, for its review agents: never committed.
 rm -rf .claude-pr

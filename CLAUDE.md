@@ -1359,8 +1359,11 @@ docker run --rm -v $P:/p:ro alpine sh -c \
 docker run --rm --user 1000:1000 -v <staging>/dispatcharr_ranked_matchups:/src:ro -v $P:/dst \
   alpine sh -c 'set -e; cp -R /src/. /dst/'
 # 4. Remove what the release no longer ships: every file in the folder that is neither in the
-#    release nor runtime state (the "Plugin runtime state" and secret entries of .gitignore).
-#    From a checkout: `git check-ignore --no-index -q <relative path>` exits 0 for state.
+#    release nor runtime state. Runtime state is exactly the names under "# Plugin runtime
+#    state" and "# Secrets" in .gitignore (cache.json, *_cache.json, recordings_state.json,
+#    recording_stops.json, last_run.json, numbering_state.json, season_cache/, college_cache/,
+#    the *_api_key files). Anything else goes, __pycache__/ included; do not use
+#    `git check-ignore`, which also matches *.pyc and editor files.
 # 5. Verify both ways: every release file `cmp`s equal, and the folder holds nothing else
 #    but runtime state. Only then
 # 6. `docker restart Dispatcharr` (or POST /api/plugins/plugins/reload/ with auth).
