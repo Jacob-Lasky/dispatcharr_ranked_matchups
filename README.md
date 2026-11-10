@@ -743,6 +743,14 @@ Only channels the plugin owns (tvg_id marker `ranked_matchups:`) are touched,
 including ones created by earlier versions, so an existing install fixes itself
 on the first apply after upgrading.
 
+The recordings archive channel (the streamless channel in the **Recordings
+group name** group that holds recordings of games whose channel has gone) is
+left out of this sync. Its profile
+memberships also decide who can see its recordings, so the plugin neither
+enables it everywhere (which would list an unplayable channel as Live TV) nor
+disables it everywhere (which would hide the recordings). Set its profiles by
+hand in the profile editor; apply leaves them as you set them.
+
 ## Recording your teams
 
 List teams under **Recorded teams** and every game involving one of them is

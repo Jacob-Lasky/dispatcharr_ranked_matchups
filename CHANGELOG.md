@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.36.4
+
+- The recordings archive channel is no longer published as Live TV. Apply's
+  Channel Profiles sync used to enable it in every selected profile like a game
+  channel, so a streamless, unplayable channel showed up in clients such as
+  Jellyfin. The sync now leaves the archive's profile memberships as you set
+  them, since they also decide who can see its recordings.
+
 ## 1.36.3
 
 - NCAA Football and Men's Basketball rankings no longer fail every refresh once the
