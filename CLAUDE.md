@@ -1362,7 +1362,8 @@ docker run --rm --user 1000:1000 -v <staging>/dispatcharr_ranked_matchups:/src:r
 #    release nor runtime state. Runtime state is exactly the names under "# Plugin runtime
 #    state" and "# Secrets" in .gitignore (cache.json, *_cache.json, recordings_state.json,
 #    recording_stops.json, last_run.json, numbering_state.json, season_cache/, college_cache/,
-#    the *_api_key files). Anything else goes, __pycache__/ included; do not use
+#    *.tmp, and the secrets: *_api_key and *.api_key). Anything else goes, __pycache__/
+#    included; do not use
 #    `git check-ignore`, which also matches *.pyc and editor files.
 # 5. Verify both ways: every release file `cmp`s equal, and the folder holds nothing else
 #    but runtime state. Only then

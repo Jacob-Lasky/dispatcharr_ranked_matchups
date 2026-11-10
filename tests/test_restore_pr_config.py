@@ -170,3 +170,23 @@ def test_a_missing_base_ref_fails_instead_of_passing(repo):
     """Round-2 review: enumeration errors were swallowed by process substitution."""
     r = subprocess.run(["bash", str(SCRIPT), "no-such-branch"], cwd=repo, capture_output=True, text=True)
     assert r.returncode == 1 and "no base ref" in r.stdout
+
+
+def test_names_with_newlines_and_glob_characters_are_files_not_patterns(tmp_path):
+    """Round-3 review: a newline split git's fields, and `x*.md` matched another file's index entry."""
+    r = tmp_path / "odd"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    git(r, "config", "user.email", "t@t"); git(r, "config", "user.name", "t")
+    write(r, ".claude/settings\nnext.json", "{}\n")
+    write(r, ".claude/x*.md", "star\n")
+    write(r, ".claude/x!.md", "bang\n")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "base")
+    git(r, "update-ref", "refs/remotes/origin/main", "HEAD")
+    git(r, "checkout", "-q", "-b", "pr")
+    write(r, ".claude/x!.md", "bang from the PR\n")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "pr")
+    git(r, "checkout", "-q", "origin/main", "--", ".claude")          # the action's restore
+    out = run(r)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert (r / ".claude/x!.md").read_text() == "bang from the PR\n" and changed(r) == []

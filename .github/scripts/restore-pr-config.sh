@@ -24,6 +24,8 @@
 # Paths are NUL-delimited throughout (git quotes unusual names in newline output).
 # DO NOT run this before the Claude step: the restore exists to keep PR config away from the model.
 set -euo pipefail
+# Every name below is a file name, never a pattern: `.claude/x*.md` must not match `.claude/x!.md`.
+export GIT_LITERAL_PATHSPECS=1
 base="origin/$1"
 git rev-parse -q --verify "$base^{commit}" >/dev/null || { echo "::error::no base ref $base"; exit 1; }
 paths=(.claude .mcp.json .claude.json .gitmodules .ripgreprc CLAUDE.md CLAUDE.local.md .husky)
@@ -44,12 +46,19 @@ for p in "${paths[@]}"; do
 done
 sort -zu "$tmp/list" > "$tmp/files"
 
-tree_id() {   # "<l|f>:<blob>" of $2 in tree $1, or empty
-  local line
-  line=$(git ls-tree -z "$1" -- "$2" | tr -d '\0')
-  [ -n "$line" ] || return 0
-  case "$line" in 120000*) printf 'l:%s' "$(cut -d' ' -f3 <<<"$line" | cut -f1)" ;;
-                  *) printf 'f:%s' "$(cut -d' ' -f3 <<<"$line" | cut -f1)" ;; esac
+tree_id() {   # "<l|f>:<blob>" of $2 in tree $1, or empty. Fields end at the first tab, so a
+              # newline in the name cannot shift them (NUL-terminated record, read whole).
+  local rec mode rest
+  IFS= read -r -d '' rec < <(git ls-tree -z "$1" -- "$2") || true
+  [ -n "${rec:-}" ] || return 0
+  mode=${rec%% *}; rest=${rec#* * }
+  if [ "$mode" = 120000 ]; then printf 'l:%s' "${rest%%$'\t'*}"; else printf 'f:%s' "${rest%%$'\t'*}"; fi
+}
+index_blob() {   # the index's blob for $1, or empty ("<mode> <blob> <stage>\t<name>")
+  local rec rest
+  IFS= read -r -d '' rec < <(git ls-files -s -z -- "$1") || true
+  [ -n "${rec:-}" ] || return 0
+  rest=${rec#* }; printf '%s' "${rest%% *}"
 }
 work_id() {   # the same for the worktree entry
   if [ -L "$1" ]; then printf 'l:%s' "$(readlink -n -- "$1" | git hash-object --stdin)"
@@ -61,7 +70,7 @@ take_head() {   # the PR's copy (type and mode included) in the worktree and the
 
 while IFS= read -r -d '' f; do
   b=$(tree_id "$base" "$f"); h=$(tree_id HEAD "$f"); w=$(work_id "$f")
-  i=$(git ls-files -s -z -- "$f" | tr -d '\0' | cut -d' ' -f2)
+  i=$(index_blob "$f")
   if [ -n "$i" ] && [ "f:$i" != "$b" ] && [ "l:$i" != "$b" ] && [ "f:$i" != "$h" ] && [ "l:$i" != "$h" ]; then
     echo "::error::$f has a staged change neither the base nor the PR has"; fail=1; continue
   fi
