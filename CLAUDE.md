@@ -1628,3 +1628,5 @@ the Dispatcharr Discord plugins channel
 Dispatcharr is shipping an in-app plugin browser. Once that lands,
 users will install/update without leaving the app — the listing page
 and CONTRIBUTING.md are the source of truth.
+
+<!-- W295 docs-bot probe: this PR-added line must survive the docs job. Not for merge. -->
