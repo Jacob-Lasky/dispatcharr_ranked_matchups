@@ -1339,12 +1339,39 @@ says which.
 
 ## Development loop
 
-Inside the Dispatcharr container:
+Deploying a release to Tower (the installed folder is NOT a git checkout: it
+holds the release zip's files plus runtime state such as `cache.json`,
+`*_cache.json`, `season_cache/`, `college_cache/` and the key files). The
+pipeline subprocess imports the plugin from disk on every run, so a copy that
+stops halfway leaves a refresh running old and new modules together: on
+2026-11-09 a root-owned `sources/` made the v1.36.3 copy fail after the
+top-level files had gone in. So, with nobody streaming and no recording due:
 
 ```bash
-docker exec dispatcharr git -C /data/plugins/dispatcharr_ranked_matchups pull
-# or rsync from your dev box → /data/plugins/ in the container
+P=/mnt/user/appdata/dispatcharr/data/plugins/dispatcharr_ranked_matchups  # host path
+# 1. Every path must belong to the folder's owner (1000:1000) and be writable by it, or the
+#    copy can fail partway (a 0555 directory owned by 1000 fails too).
+docker run --rm -v $P:/p:ro alpine sh -c \
+  'find /p \( -not -user 1000 -o -not -perm -u+w -o -type d -not -perm -u+x \) | head -1'  # must print nothing
+# 2. Back up, outside /data/plugins (a dir there is discovered as a plugin): /mnt/user/backups.
+# 3. Unzip the published release asset into a staging dir OUTSIDE /data/plugins, then copy
+#    it in as the owner in ONE container run that stops on the first error:
+docker run --rm --user 1000:1000 -v <staging>/dispatcharr_ranked_matchups:/src:ro -v $P:/dst \
+  alpine sh -c 'set -e; cp -R /src/. /dst/'
+# 4. Remove what the release no longer ships: every file in the folder that is neither in the
+#    release nor runtime state. Runtime state is exactly the names under "# Plugin runtime
+#    state" and "# Secrets" in .gitignore (cache.json, *_cache.json, recordings_state.json,
+#    recording_stops.json, last_run.json, numbering_state.json, season_cache/, college_cache/,
+#    *.tmp, and the secrets: *_api_key and *.api_key). Anything else goes, __pycache__/
+#    included; do not use
+#    `git check-ignore`, which also matches *.pyc and editor files.
+# 5. Verify both ways: every release file `cmp`s equal, and the folder holds nothing else
+#    but runtime state. Only then
+# 6. `docker restart Dispatcharr` (or POST /api/plugins/plugins/reload/ with auth).
 ```
+
+If step 1 or 5 fails, fix ownership (as root, after the backup) and copy again
+before restarting; never restart onto a mixed tree.
 
 Smoke-test refresh (the `-e` keeps this exec from starting a scheduler and
 reaper of its own: `python -c` is a process `_thread_host` cannot place, so it

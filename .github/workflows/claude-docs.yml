@@ -112,6 +112,16 @@ jobs:
             --allowedTools "Read,Glob,Grep,Edit(**/*.md),Write(**/*.md)"
             --disallowedTools "Bash"
 
+      # claude-code-action restores CLAUDE.md and other config from the BASE branch before the
+      # model runs and leaves them that way (PR #338: keep-pr-docs.sh then refused every PR that
+      # adds CLAUDE.md lines). The script puts the PR's copies back, merges the model's markdown
+      # edits onto them, and fails on a model change to protected non-markdown. Its header has the
+      # rules. DO NOT move this step before the Claude step.
+      - name: Put back the PR's copies of the paths the action restored from base
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: bash .github/scripts/restore-pr-config.sh "$BASE_REF"
+
       - name: Validate markdown-only changes, then commit and push
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
