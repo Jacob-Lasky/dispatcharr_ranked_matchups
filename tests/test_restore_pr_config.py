@@ -183,6 +183,19 @@ def test_a_broken_index_fails_instead_of_passing(tmp_path):
     assert out.returncode != 0, out.stdout + out.stderr
 
 
+def test_a_merge_file_error_fails_instead_of_passing_as_a_conflict(repo):
+    """Cycle-3 review: an unwritable CLAUDE.md made merge-file exit 255; the script read that as a
+    conflict, dropped the docs edit and exited 0."""
+    if os.geteuid() == 0:
+        pytest.skip("root writes a 0444 file")
+    text = (repo / "CLAUDE.md").read_text().replace("intro\n", "intro, updated by the docs pass\n")
+    (repo / "CLAUDE.md").write_text(text)
+    (repo / "CLAUDE.md").chmod(0o444)
+    r = run(repo)
+    assert r.returncode != 0, r.stdout + r.stderr
+    assert "merge-file failed" in r.stdout
+
+
 def test_a_missing_base_ref_fails_instead_of_passing(repo):
     """Round-2 review: enumeration errors were swallowed by process substitution."""
     r = subprocess.run(["bash", str(SCRIPT), "no-such-branch"], cwd=repo, capture_output=True, text=True)

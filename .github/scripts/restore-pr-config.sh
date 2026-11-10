@@ -93,11 +93,16 @@ while IFS= read -r -d '' f; do
     take_head "$f" "$h"; continue
   fi
   git show "$base:$f" > "$tmp/base"; git show "HEAD:$f" > "$tmp/head"
-  if git merge-file -q "$f" "$tmp/base" "$tmp/head"; then
+  # merge-file exits with the conflict count (1-127) or, on an error such as an unwritable file,
+  # a negative status (255): an error must fail the job, not pass as a conflict (W290 review).
+  rc=0; git merge-file -q "$f" "$tmp/base" "$tmp/head" || rc=$?
+  if [ "$rc" -eq 0 ]; then
     echo "$f: the PR's copy with the docs pass's edits merged in"
-  else
+  elif [ "$rc" -le 127 ]; then
     take_head "$f" "$h"
     echo "::warning::$f: the docs pass's edits conflict with the PR's changes; kept the PR's version"
+  else
+    echo "::error::$f: git merge-file failed (status $rc)"; fail=1
   fi
 done < "$tmp/files"
 
