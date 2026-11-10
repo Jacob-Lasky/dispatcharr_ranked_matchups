@@ -166,6 +166,23 @@ def test_a_staged_change_nobody_made_fails_the_job(repo):
     assert r.returncode == 1 and "staged change" in r.stdout
 
 
+def test_a_broken_index_fails_instead_of_passing(tmp_path):
+    """Cycle-2 review: `git ls-files` failed inside a process substitution, read as "no entry", and
+    the job reported success without checking staged changes. The only protected entry is a new
+    markdown file, so no top-level git command reads the index first."""
+    r = tmp_path / "r"
+    r.mkdir()
+    git(r, "init", "-q", "-b", "main")
+    git(r, "config", "user.email", "t@t"); git(r, "config", "user.name", "t")
+    write(r, "code.py", "x = 1\n")
+    git(r, "add", "-A"); git(r, "commit", "-q", "-m", "base")
+    git(r, "update-ref", "refs/remotes/origin/main", "HEAD")
+    write(r, ".claude/new.md", "new\n")
+    (r / ".git" / "index").write_text("broken index")
+    out = run(r)
+    assert out.returncode != 0, out.stdout + out.stderr
+
+
 def test_a_missing_base_ref_fails_instead_of_passing(repo):
     """Round-2 review: enumeration errors were swallowed by process substitution."""
     r = subprocess.run(["bash", str(SCRIPT), "no-such-branch"], cwd=repo, capture_output=True, text=True)

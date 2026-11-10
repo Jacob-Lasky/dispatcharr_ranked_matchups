@@ -46,23 +46,29 @@ for p in "${paths[@]}"; do
 done
 sort -zu "$tmp/list" > "$tmp/files"
 
+# DO NOT read git output through `< <(git ...)` or use `$(git ...)` as an argument: set -e never
+# sees a failure there, and a broken index read as "no entry" let the job pass (W290 review). Each
+# helper runs in `x=$(helper ...)`, so its `|| exit 1` fails that assignment and set -e stops the job.
 tree_id() {   # "<l|f>:<blob>" of $2 in tree $1, or empty. Fields end at the first tab, so a
               # newline in the name cannot shift them (NUL-terminated record, read whole).
   local rec mode rest
-  IFS= read -r -d '' rec < <(git ls-tree -z "$1" -- "$2") || true
+  git ls-tree -z "$1" -- "$2" > "$tmp/rec" || exit 1
+  IFS= read -r -d '' rec < "$tmp/rec" || true
   [ -n "${rec:-}" ] || return 0
   mode=${rec%% *}; rest=${rec#* * }
   if [ "$mode" = 120000 ]; then printf 'l:%s' "${rest%%$'\t'*}"; else printf 'f:%s' "${rest%%$'\t'*}"; fi
 }
 index_blob() {   # the index's blob for $1, or empty ("<mode> <blob> <stage>\t<name>")
   local rec rest
-  IFS= read -r -d '' rec < <(git ls-files -s -z -- "$1") || true
+  git ls-files -s -z -- "$1" > "$tmp/rec" || exit 1
+  IFS= read -r -d '' rec < "$tmp/rec" || true
   [ -n "${rec:-}" ] || return 0
   rest=${rec#* }; printf '%s' "${rest%% *}"
 }
 work_id() {   # the same for the worktree entry
-  if [ -L "$1" ]; then printf 'l:%s' "$(readlink -n -- "$1" | git hash-object --stdin)"
-  elif [ -f "$1" ]; then printf 'f:%s' "$(git hash-object -- "$1")"; fi
+  local id
+  if [ -L "$1" ]; then id=$(readlink -n -- "$1" | git hash-object --stdin) || exit 1; printf 'l:%s' "$id"
+  elif [ -f "$1" ]; then id=$(git hash-object -- "$1") || exit 1; printf 'f:%s' "$id"; fi
 }
 take_head() {   # the PR's copy (type and mode included) in the worktree and the index, or none
   if [ -n "$2" ]; then git checkout -q HEAD -- "$1"; else git rm -q -f --ignore-unmatch -- "$1"; rm -f -- "$1"; fi
