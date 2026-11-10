@@ -2,11 +2,11 @@
 
 ## 1.36.4
 
-- The recordings archive channel is no longer published as Live TV. Apply's
-  Channel Profiles sync used to enable it in every selected profile like a game
-  channel, so a streamless, unplayable channel showed up in clients such as
-  Jellyfin. The sync now leaves the archive's profile memberships as you set
-  them, since they also decide who can see its recordings.
+- Channel Profiles sync no longer automatically publishes the recordings
+  archive as Live TV. It used to enable the archive in every selected profile
+  like a game channel, listing a streamless, unplayable channel in clients such
+  as Jellyfin. Remove the archive from the relevant output profile once; apply
+  now preserves that choice and the other memberships that control DVR access.
 
 ## 1.36.3
 
