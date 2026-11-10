@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.36.5
+
+- Retry an empty automatic recording once at kickoff when an event-only feed
+  failed during pre-roll. The normal stream budget still applies; user stops,
+  edits, deletions, captures with data and failures at or after kickoff remain
+  untouched. A later Apply keeps the retry out of the failed pregame window.
+
 ## 1.36.4
 
 - Channel Profiles sync no longer automatically publishes the recordings

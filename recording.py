@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from ._util import write_json_atomic
+from ._util import parse_iso_utc, write_json_atomic
 
 # Key the plugin stamps into Recording.custom_properties on every recording it
 # creates. It is the ONLY provenance test for "ours": every update, cancel and
@@ -46,10 +46,11 @@ REASON_RANKED = "ranked"
 
 # Recording.custom_properties["status"] values Dispatcharr writes
 # (apps/channels/tasks.py run_recording and api_views.stop). A recording in a
-# terminal state is finished business: never re-created, never moved, and it
-# holds no stream.
+# terminal state holds no stream and is normally never recreated or moved.
+# retry_empty_pregame is the narrow exception for a proven empty pregame outage.
 STATUS_RECORDING = "recording"
 TERMINAL_STATUSES = frozenset({"completed", "stopped", "interrupted", "failed"})
+PREGAME_RETRY_KEY = "ranked_matchups_pregame_retry"
 
 # How long a created-by-us entry is kept once its game has left the slate.
 # Long enough to outlive any game's window plus the lookahead the plugin plans
@@ -521,6 +522,41 @@ def was_edited(rec: Any, entry: Optional[Dict[str, Any]]) -> bool:
     s, e = _span(rec)
     return (s.isoformat() != entry.get("start") or e.isoformat() != entry.get("end")
             or getattr(rec, "channel_id", entry.get("channel")) != entry.get("channel"))
+
+
+def retry_empty_pregame(rec: Any, kickoff: datetime, now: datetime,
+                        entry: Optional[Dict[str, Any]]) -> bool:
+    """One kickoff retry when the provider had no pregame feed (W322).
+
+    DO NOT restart a user stop, an edited row, or a capture with any data.
+    Require the DVR's explicit no-data failure, entirely before kickoff;
+    missing telemetry is not evidence that restarting is safe. The normal
+    planner must still give this game a slot. Never retry a second failure.
+    """
+    cp = getattr(rec, "custom_properties", None) or {}
+    if (not rec_marker(rec) or rec_status(rec) != "interrupted"
+            or cp.get(PREGAME_RETRY_KEY) or was_edited(rec, entry)
+            or cp.get("bytes_written") not in (0, "0")
+            or cp.get("remux_success") is not False
+            or not str(cp.get("interrupted_reason", "")).startswith("no_stream_data:")):
+        return False
+    started = parse_iso_utc(cp.get("started_at"))
+    ended = parse_iso_utc(cp.get("ended_at"))
+    start, end = _span(rec)
+    kickoff, now = _aware(kickoff), _aware(now)
+    return (started is not None and ended is not None and start is not None and end is not None
+            and start <= started <= ended < kickoff
+            and ended <= now < end and now <= kickoff + timedelta(minutes=15))
+
+
+def pregame_retry_properties(props: Dict[str, Any]) -> Dict[str, Any]:
+    """Reset empty DVR runtime state; preserve ownership, programme and artwork."""
+    cp = dict(props)
+    for key in ("started_at", "ended_at", "interrupted_reason", "error", "remux_success",
+                "bytes_written", "file_url", "output_file_url", "file_name", "file_path", "_hls_dir"):
+        cp.pop(key, None)
+    cp.update(status="scheduled", **{PREGAME_RETRY_KEY: True})
+    return cp
 
 
 def decide(
