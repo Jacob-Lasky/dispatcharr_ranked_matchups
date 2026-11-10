@@ -38,7 +38,7 @@ import threading
 import time
 import types
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -1005,6 +1005,7 @@ class _AutoRecord:
         self.cancelled_ids: set = set()
         self.failed: List[str] = []
         self.names: Dict[str, str] = {}
+        self.pregame_retries: set = set()
         self.slate: Optional[set] = None        # every marker in the cache (#224)
         self.reason_holds = None                # rec -> still wanted? (#224)
         self.meta: Dict[str, Tuple[Any, List[str], str, List[str]]] = {}  # marker -> (candidate, teams, league, [home, away])
@@ -1161,6 +1162,21 @@ def _autorecord_prepare(games: List[Dict[str, Any]], settings: Dict[str, Any],
 
     ar.ours, skip = recording_policy.classify_existing(
         ours_rows, ar.state, list(dict.fromkeys([c.marker for c in candidates] + watched)))
+    for i, c in enumerate(candidates):
+        existing = ar.ours.get(c.marker)
+        if existing is None:
+            continue
+        cp = existing.custom_properties or {}
+        if cp.get(recording_policy.PREGAME_RETRY_KEY):
+            # A later apply must not move the scheduled kickoff retry back
+            # into the same empty pregame window that already failed.
+            candidates[i] = replace(c, start=max(c.kickoff, now))
+        elif (skip.get(c.marker) == "interrupted"
+              and recording_policy.retry_empty_pregame(
+                  existing, c.kickoff, now, ar.state["created"].get(c.marker))):
+            skip.pop(c.marker)
+            ar.pregame_retries.add(c.marker)
+            candidates[i] = replace(c, start=max(c.kickoff, now))
     ar.new_tombstones = [m for m, why in skip.items()
                          if why == "deleted by you" and m not in ar.state["tombstones"]]
     live_rows = list(Recording.objects.filter(end_time__gt=now))
@@ -1317,9 +1333,18 @@ def _autorecord_for_game(ar: "_AutoRecord", marker: str, channel, title: str,
         existing = Recording.objects.select_for_update().filter(pk=existing.pk).first()
         if existing is None:
             ar.ours.pop(marker, None)
+            # The user deleted it while apply was preparing. Keep the created
+            # entry so the next plan records its tombstone; never recreate it.
+            return
         else:
             ar.ours[marker] = existing
     action = recording_policy.decide(planned, existing, channel.id)
+    retry = (planned is not None and existing is not None and marker in ar.pregame_retries
+             and recording_policy.retry_empty_pregame(
+                 existing, ar.meta[marker][0].kickoff, datetime.now(timezone.utc),
+                 ar.state["created"].get(marker)))
+    if retry:
+        action = recording_policy.UPDATE
     if dry_run:
         if action == recording_policy.CREATE:
             ar.created += 1
@@ -1357,6 +1382,11 @@ def _autorecord_for_game(ar: "_AutoRecord", marker: str, channel, title: str,
         elif action == recording_policy.UPDATE:
             existing.start_time, existing.end_time = start, end
             existing.channel = channel
+            if retry:
+                existing.custom_properties = recording_policy.pregame_retry_properties(
+                    existing.custom_properties or {})
+                logger.info("[ranked_matchups] retrying empty pregame recording %s at %s",
+                            existing.id, start.isoformat())
             existing.custom_properties = {**(existing.custom_properties or {}), **_reason_props(ar, marker)}
             existing.save()  # FULL save: pre_save revokes, post_save reschedules
             ar.state["created"][marker] = recording_policy.written_record(
@@ -2633,8 +2663,9 @@ _PAST_SLOT_DEFAULT_DURATION = timedelta(hours=12)
 def _live_window(g: Dict[str, Any], start_dt: datetime) -> Tuple[datetime, datetime]:
     """The game's "Live" EPG block: kickoff minus EPG_PRE_MIN through the game's
     estimated end. ONE definition shared by the EPG writer and the auto-record
-    window (#216), so the recording can never cover a different span than the
-    block the guide calls live (recording the Upcoming block instead is #145).
+    window (#216). A retry after an empty pregame outage starts at kickoff,
+    inside this block; it must not return to the failed pregame span. Recording
+    the Upcoming block instead is #145.
     """
     prog_start = start_dt - timedelta(minutes=EPG_PRE_MIN)
     # DO NOT compute this as start_dt + EPG_POST_HOURS. That is a flat
@@ -11774,7 +11805,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.36.4"
+    version = "1.36.5"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than

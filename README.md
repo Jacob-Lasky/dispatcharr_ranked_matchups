@@ -815,6 +815,10 @@ does not have to be a Favorite, and listing it does not change its score.
   stop is not restarted. A game with no stream yet still gets its channel and
   its recording, so a feed the provider adds shortly before kickoff is
   recorded once the next refresh attaches it.
+- An automatic recording that failed with no stream data entirely before
+  kickoff gets one retry at kickoff on the next Apply. It must still win a
+  recording slot. User stops, edits and deletions are respected; recordings
+  with captured data and failures after kickoff are never restarted this way.
 - **Motorsport, golf, tennis, UFC.** The plugin sees the event, not the
   people in it, so enter an event name (`Monaco`, `Masters`) rather than a
   driver or player.
