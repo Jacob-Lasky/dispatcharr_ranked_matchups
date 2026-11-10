@@ -246,7 +246,7 @@ def orm(request):
 
     models = types.ModuleType("apps.channels.models")
     models.Channel = MagicMock(name="Channel")
-    models.Channel.objects.filter.return_value.values_list.return_value = channel_ids
+    models.Channel.objects.filter.return_value.exclude.return_value.values_list.return_value = channel_ids
     models.ChannelProfile = MagicMock(name="ChannelProfile")
     models.ChannelProfile.objects.all.return_value = profile_objs
 
