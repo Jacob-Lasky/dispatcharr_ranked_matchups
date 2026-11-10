@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.36.4
+
+- Channel Profiles sync no longer automatically publishes the recordings
+  archive as Live TV. It used to enable the archive in every selected profile
+  like a game channel, listing a streamless, unplayable channel in clients such
+  as Jellyfin. Remove the archive from the relevant output profile once; apply
+  now preserves that choice and the other memberships that control DVR access.
+
 ## 1.36.3
 
 - NCAA Football and Men's Basketball rankings no longer fail every refresh once the

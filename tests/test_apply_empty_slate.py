@@ -596,6 +596,68 @@ def scenario_empty_slate_keeps_a_channel_that_is_recording(env):
     assert not m.Channel.objects.filter(pk=finished_ch.pk).exists()
 
 
+def scenario_new_recordings_archive_is_not_a_live_channel(env):
+    """Re-homing a completed recording must not advertise its streamless container."""
+    m = env.m
+    profile = m.ChannelProfile.objects.create(name="Jellyfin")
+    user_ch, _ = _seed_source_channel(env)
+    start = _now() - timedelta(hours=6)
+    owned = _publish(env, [_row(401, start, user_ch.id)])
+    recording = m.Recording.objects.create(
+        channel=owned["ranked_matchups:CFB:401"], start_time=start,
+        end_time=start + timedelta(hours=3), custom_properties={"status": "completed"},
+    )
+    _write_cache(env, [])
+    result = env.plugin._action_apply(_settings())
+    assert result["status"] == "ok", result
+    recording.refresh_from_db()
+    archive = recording.channel
+    assert archive.tvg_id == "ranked_matchups:recordings_archive"
+    assert archive.channel_number is not None
+    assert not archive.streams.exists()
+    assert not m.ChannelProfileMembership.objects.filter(
+        channel=archive, channel_profile=profile, enabled=True,
+    ).exists(), "a recordings-only container was published as Live TV"
+
+
+def scenario_existing_archive_memberships_preserve_live_tv_exclusion_and_dvr_access(env):
+    m = env.m
+    profiles = [m.ChannelProfile.objects.create(name=n) for n in ("Jellyfin", "Sports")]
+    archive = env.plugin._ensure_archive_channel("Matchups Recordings")
+    for profile in profiles:
+        m.ChannelProfileMembership.objects.create(
+            channel=archive, channel_profile=profile, enabled=profile.name == "Sports",
+        )
+    recording = m.Recording.objects.create(
+        channel=archive, start_time=_now() - timedelta(hours=3),
+        end_time=_now() - timedelta(hours=1), custom_properties={"status": "completed"},
+    )
+    user_ch, _ = _seed_source_channel(env)
+    owned = _publish(env, [_row(401, _now() + timedelta(hours=1), user_ch.id)])
+    live = owned["ranked_matchups:CFB:401"]
+    assert list(m.ChannelProfileMembership.objects.filter(
+        channel=archive, enabled=True,
+    ).values_list("channel_profile__name", flat=True)) == ["Sports"]
+    assert m.ChannelProfileMembership.objects.filter(channel=live, enabled=True).count() == 2
+    recording.refresh_from_db()
+    assert recording.channel_id == archive.pk
+    assert recording.custom_properties == {"status": "completed"}
+    assert m.Channel.objects.filter(pk=archive.pk, channel_number=9999).exists()
+
+
+def scenario_dry_run_leaves_archive_memberships_out_of_the_sync(env):
+    m = env.m
+    profile = m.ChannelProfile.objects.create(name="Jellyfin")
+    archive = env.plugin._ensure_archive_channel("Matchups Recordings")
+    row = m.ChannelProfileMembership.objects.create(channel=archive, channel_profile=profile, enabled=False)
+    stats = env.plugin._sync_profile_memberships({}, dry_run=True)
+    row.refresh_from_db()
+    assert row.enabled is False
+    assert stats["channels"] == 0
+    assert stats["disabled"] == 0
+    assert stats["enabled"] == 0
+
+
 def scenario_empty_slate_rewrites_the_recording_stops_file(env):
     """A live stop planned by an earlier apply must not survive a slate that no
     longer plans it. The reaper loop fires whatever recording_stops.json holds."""

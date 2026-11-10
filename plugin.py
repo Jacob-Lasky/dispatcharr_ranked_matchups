@@ -1650,7 +1650,7 @@ def _profile_summary(stats: Optional[Dict[str, Any]]) -> str:
 def _sync_profile_memberships(settings: Dict[str, Any], dry_run: bool = False) -> Dict[str, Any]:
     """Make our channels visible in the configured Dispatcharr Channel Profiles.
 
-    Operates on EVERY channel we own (`_owned_tvg_id_q`), not just the ones this
+    Operates on every live channel we own (`_owned_tvg_id_q`), not just the ones this
     run created, so an install upgrading from a version without this feature
     heals on its first apply instead of only fixing channels that happen to
     churn. Ownership is the whole authorization story here: we created the
@@ -1669,6 +1669,10 @@ def _sync_profile_memberships(settings: Dict[str, Any], dry_run: bool = False) -
     absent row (it never bulk-creates disabled ones), and manufacturing a
     disabled row per channel per profile would write thousands of rows to say
     nothing.
+
+    Leave the streamless recordings archive's memberships to the user. They
+    also govern DVR access, so enabling it everywhere publishes an unplayable
+    live channel, while disabling it everywhere hides recordings from viewers.
 
     DO NOT swap the queryset .update() for per-row .save(): `Channel` carries a
     destructive post_save (see the epg_data write in _action_apply), and while
@@ -1697,7 +1701,8 @@ def _sync_profile_memberships(settings: Dict[str, Any], dry_run: bool = False) -
         )
 
     owned_ids = list(
-        Channel.objects.filter(_owned_tvg_id_q()).values_list("id", flat=True)
+        Channel.objects.filter(_owned_tvg_id_q()).exclude(tvg_id=ARCHIVE_TVG_ID)
+        .values_list("id", flat=True)
     )
     stats = {
         "selected": selected_names,
@@ -11769,7 +11774,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.36.3"
+    version = "1.36.4"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
