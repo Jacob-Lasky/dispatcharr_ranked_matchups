@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.37.0 (unreleased)
+
+- Show a cached 1080p matchup card when every real feed fails, with cached team
+  crests or initials, kickoff time before start and an outage message afterward.
+  The existing scheduler checks recovery and switches active proxy sessions back
+  to a responding feed. Slates use known provider media formats where available.
+  No extra container or persistent background loop is required.
+- Release is blocked on Dispatcharr 0.33 live continuity: a matched-format
+  source switch leaves an existing Jellyfin HLS session on the old slate after
+  a backward timestamp jump. A codec/layout mismatch also corrupts final DVR
+  audio despite successful segment capture and remux.
+
 ## 1.36.5
 
 - Retry an empty automatic recording once at kickoff when an event-only feed

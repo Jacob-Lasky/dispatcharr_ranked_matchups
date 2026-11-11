@@ -5,6 +5,8 @@ which is why apply re-homes recordings before it deletes a channel (#146), and a
 harness that got it wrong would pass a test that loses the user's recordings.
 """
 
+import uuid
+
 from django.db import models
 from django.utils import timezone
 
@@ -37,6 +39,7 @@ class Stream(models.Model):
 
 
 class Channel(models.Model):
+    uuid = models.UUIDField(default=uuid.uuid4, unique=True)
     channel_number = models.FloatField(db_index=True, null=True, blank=True)
     name = models.CharField(max_length=512)
     logo = models.ForeignKey(

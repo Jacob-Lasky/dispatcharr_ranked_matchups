@@ -124,6 +124,8 @@ def spawned(plugin, monkeypatch):
     monkeypatch.setattr(plugin.threading, "Thread", Tracking)
     monkeypatch.setattr(plugin, "_migrate_stored_settings", lambda: None)
     monkeypatch.delenv(plugin.tasks.PIPELINE_CHILD_ENV, raising=False)
+    from dispatcharr_ranked_matchups import slate
+    monkeypatch.setattr(slate, "install_route", lambda: None)
     return names
 
 

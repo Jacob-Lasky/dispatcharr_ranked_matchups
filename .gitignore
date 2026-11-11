@@ -34,3 +34,6 @@ __pycache__/
 *.swp
 .DS_Store
 dg_snapshot.json
+
+# Generated outage video cache
+slates/

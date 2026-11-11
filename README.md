@@ -25,6 +25,28 @@ Raw signal contributions are summed and compressed to a 0-10 ★ score using a
 tanh curve so top games asymptote without losing differentiation among the
 rest.
 
+## Feed outages
+
+When every provider feed on a matchup channel fails, the plugin attaches a
+TV-sized card with the teams, cached game-thumbs crests (initials when absent),
+and either “Live at … ET” or “Feed unavailable, retrying”. A working feed keeps
+normal Dispatcharr failover. Recovery checks run from the existing scheduler;
+active sessions switch back through Dispatcharr's change-stream API. **Check
+matchup feeds** runs the same check manually. Provider limits also apply to
+probes: insufficient capacity is unknown, never proof that a feed failed.
+
+Artwork is rendered at 1920×1080 and cached under `slates/` beside the plugin.
+The low-frame-rate loop has silent audio, repeated video headers and continuous
+media clocks. Encoding follows known provider probe stats, falling back to
+H.264 1080p and AC-3 stereo at 48 kHz. Dispatcharr 0.33 has upstream limitations
+when a recovering provider changes its audio codec/layout; matching known stats
+reduces that risk. A synthetic AAC stereo → AC-3 5.1 switch kept raw DVR
+segments audible but produced invalid audio in the final MKV. Even with matching
+AAC stereo, an existing Jellyfin HLS session froze on the slate after a backward
+PTS/DTS jump; the matched DVR recording recovered correctly. **This candidate
+is not ready to deploy on 0.33 until timestamp continuity is fixed.** The
+loopback-only Django route uses the existing web server.
+
 ## Why I built this
 
 My background is in data science and I love sports, and I'm pretty agnostic to
