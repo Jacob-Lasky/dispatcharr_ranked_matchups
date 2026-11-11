@@ -25,6 +25,28 @@ Raw signal contributions are summed and compressed to a 0-10 ★ score using a
 tanh curve so top games asymptote without losing differentiation among the
 rest.
 
+## Feed outages
+
+When every provider feed on a matchup channel fails, the plugin attaches a
+TV-sized card with the teams and cached SportsDB team crests (initials when absent),
+and either “Live at … ET” or “Feed unavailable, retrying”. A working feed keeps
+normal Dispatcharr failover. Recovery checks run from the existing scheduler;
+active sessions switch back through Dispatcharr's change-stream API. **Check
+matchup feeds** runs the same check manually. Provider limits also apply to
+probes: insufficient capacity is unknown, never proof that a feed failed.
+
+Artwork is rendered at 1920×1080 and cached under `slates/` beside the plugin.
+The low-frame-rate loop has silent audio, repeated video headers and continuous
+media clocks. Encoding follows known provider probe stats, falling back to
+H.264 1080p and AC-3 stereo at 48 kHz. Dispatcharr 0.33 has upstream limitations
+when a recovering provider changes its audio codec/layout; matching known stats
+reduces that risk. Individual crests come from the same SportsDB provider and
+download/cache helpers as matchup posters, retain available transparency, and
+fit inside the circle with padding. Initials fallbacks log the missing-logo reason.
+The loopback-only Django route uses the existing web server.
+
+Jellyfin may need a re-tune when the game goes live, the same as any Dispatcharr failover.
+
 ## Why I built this
 
 My background is in data science and I love sports, and I'm pretty agnostic to
@@ -289,6 +311,7 @@ outage) deleted it. Watch the provider's own channel for that game and update.
 | `show_status` | Print the current curated list with per-game score breakdown, and end with a verdict on the last background run (see [Did the last run work?](#did-the-last-run-work)). No writes. | — |
 | `preview_names` | Render the channel-name and description templates against sample games so you can check the layout before applying. Reports template problems on the last line; the variable list is in each template's help text. No writes, no API calls. | — |
 | `reap_now` | Drop games that finished more than `remove_finished_after_minutes` ago and backfill from the bench. Re-fetches nothing. | `cache.json` + DB |
+| `check_feeds` | Probe each matchup channel's feeds; attach an outage card only when every feed fails, and switch active viewers and recordings back once one recovers (see [Feed outages](#feed-outages)). Optional `channel_id` limits it to one channel. The scheduler runs the same check between slots. | DB + `slates/` (honors `dry_run`) |
 
 ### Did the last run work?
 

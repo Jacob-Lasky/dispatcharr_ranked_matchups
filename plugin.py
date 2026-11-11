@@ -5106,7 +5106,7 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
         # game's PRIMARY and cache it as the match, which then has to be undone
         # downstream. Taking it out of the candidate set means the match never
         # references it. Empty set = no filtering, so the default is unchanged.
-        for s in Stream.objects.filter(name_q).only("id", "name"):
+        for s in Stream.objects.filter(name_q).exclude(tvg_id__startswith="ranked_matchups_slate:").only("id", "name"):
             if s.id in excluded_stream_ids:
                 stats["policy_streams_excluded"] += 1
                 continue
@@ -5146,6 +5146,13 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
 
     lookup.stats = stats
     return lookup
+
+
+# ---------- matchup feed outages ----------
+
+def _action_check_feeds(settings):
+    from . import slate
+    return slate.check(sys.modules[__name__], settings)
 
 
 # ---------- apply ----------
@@ -10523,8 +10530,24 @@ def _scheduler_sleep(stop_event, timeout):
     """Close the DB connection (see _scheduler_close_db), THEN park on the stop
     event. Every scheduler sleep MUST go through here so a parked scheduler holds
     no connection. Returns True if the stop event fired (caller should exit)."""
-    _scheduler_close_db()
-    return stop_event.wait(timeout=timeout)
+    registry = _scheduler_registry()
+    callback = getattr(registry, 'feed_check', None) if registry.stop_event is stop_event else None
+    if callback is None:
+        _scheduler_close_db()
+        return stop_event.wait(timeout=timeout)
+    deadline = time.monotonic() + max(0, timeout)
+    while True:
+        try:
+            callback = getattr(registry, 'feed_check', callback)
+            callback()
+        except Exception as exc:
+            logger.warning('[ranked_matchups] feed check failed (%s)', type(exc).__name__)
+        _scheduler_close_db()
+        remaining = deadline - time.monotonic()
+        if stop_event.wait(timeout=min(10, max(0, remaining))):
+            return True
+        if remaining <= 10:
+            return False
 
 
 def _scheduler_loop(plugin_ref, stop_event):
@@ -11715,6 +11738,7 @@ _ACTION_HANDLERS = {
     # Locked wrapper, NOT the bare _action_reap: reap deletes channels and
     # then re-applies, so it races apply exactly as apply races itself.
     "reap_now": _action_reap_locked,
+    "check_feeds": _action_check_feeds,
 }
 
 
@@ -11805,7 +11829,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.36.5"
+    version = "1.37.0"
 
     def __init__(self):
         # The scheduler reads settings live from the DB on each tick rather than
@@ -11877,14 +11901,22 @@ class Plugin:
                 "anyway, since a scheduler that runs nowhere is the worse failure",
                 os.getpid(), where)
         self._start_reaper()
+        from . import slate
+        slate.install_route()
+        reg.feed_check = lambda: slate.check(sys.modules[__name__], self.get_current_settings(), scheduled=True)
+        # Upgrade a scheduler sleeping in pre-slate code, once per worker.
+        target = getattr(reg.thread, '_target', None)
+        prior_sleep = getattr(target, '__globals__', {}).get('_scheduler_sleep')
+        if (prior_sleep is not None and '_scheduler_registry' not in prior_sleep.__code__.co_names):
+            _stop_scheduler(reg.thread, reg.stop_event, 'enable feed checks')
         if not _may_start(reg, "scheduler"):
             return
         stop_event = threading.Event()
         t = threading.Thread(target=_scheduler_loop, args=(self, stop_event), daemon=True,
                              name="ranked_matchups-scheduler")
-        t.start()
         reg.thread = t
         reg.stop_event = stop_event
+        t.start()
         logger.info("[ranked_matchups] scheduler thread started (pid=%s, %s)", os.getpid(), where)
 
     def _start_reaper(self):
@@ -11903,9 +11935,9 @@ class Plugin:
             target=_reaper_loop, args=(self, stop_event), daemon=True,
             name="ranked_matchups-reaper",
         )
-        t.start()
         reg.thread = t
         reg.stop_event = stop_event
+        t.start()
         logger.info("[ranked_matchups] reaper thread started (pid=%s, %s)",
                     os.getpid(), _process_label())
 

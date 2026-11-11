@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.36.5",
+  "version": "1.37.0",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -889,6 +889,11 @@
     }
   ],
   "actions": [
+    {
+      "id": "check_feeds",
+      "label": "Check matchup feeds now",
+      "description": "Probe matchup feeds and attach an outage slate only when all fail. Restore recovered live feeds for active viewers and recordings. Optional channel_id limits the check to one matchup. Honors dry_run."
+    },
     {
       "id": "refresh",
       "label": "Refresh curated list",

@@ -80,10 +80,10 @@ class TestOneWriter:
 
     def test_no_other_json_state_writer_hand_rolls_the_replace(self):
         """logos.download_to_file streams image BYTES, so it cannot use a JSON
-        helper; it is the one allowed exception and is pinned below."""
+        helper; slate.render publishes video BYTES too. These are the allowed exceptions and is pinned below."""
         allowed = {("_util.py", "write_json_atomic")}
         others = [c for c in _replace_calls() if c not in allowed]
-        assert others == [("logos.py", "download_to_file")], others
+        assert sorted(others) == [("logos.py", "download_to_file"), ("slate.py", "render")], others
 
     def test_the_image_download_temp_is_per_thread_too(self):
         src = open(os.path.join(REPO_ROOT, "logos.py"), encoding="utf-8").read()
