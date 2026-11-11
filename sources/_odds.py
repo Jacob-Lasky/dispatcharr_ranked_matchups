@@ -31,13 +31,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
 
 from .._http import get_within_deadline
+from .. import storage
 from .._util import key_id, redact_secrets, write_json_atomic
 
 logger = logging.getLogger(__name__)
@@ -49,9 +49,7 @@ ODDS_CACHE_TTL = timedelta(hours=24)
 EXHAUSTED_BACKOFF = timedelta(hours=24)
 # Beside cache.json, in the plugin folder. Sources run in the pipeline
 # subprocess, so the file is shared across refreshes and workers.
-CACHE_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "odds_cache.json",
-)
+CACHE_PATH = storage.path("odds_cache.json")
 
 _OUT_OF_CREDITS = "OUT_OF_USAGE_CREDITS"
 # Events that kicked off longer ago than this are dropped from what is

@@ -70,7 +70,7 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Optional
 
 from ._util import write_json_atomic
-from . import health
+from . import health, storage
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.tasks")
 
@@ -78,9 +78,7 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.tasks")
 # renamed clones (e.g., `dispatcharr_ranked_matchups-phase-e`) hash to the
 # same Redis namespace plugin.py uses. Must stay in sync with the derivation
 # at the top of plugin.py.
-PLUGIN_KEY = os.path.basename(
-    os.path.dirname(os.path.abspath(__file__))
-).replace(" ", "_").lower()
+PLUGIN_KEY = storage.plugin_key()
 
 _INFLIGHT_KEY = f"plugins:{PLUGIN_KEY}:inflight"
 # Covers one pipeline child (_SUBPROCESS_TIMEOUT_SECONDS, 25 min) with margin.
@@ -310,7 +308,7 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
 # good cache (or "Cache empty") as if nothing were wrong. A file, not Redis,
 # because the answer has to survive a container restart and be readable by
 # every uwsgi worker; it sits beside cache.json for the same reason.
-LAST_RUN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_run.json")
+LAST_RUN_PATH = storage.path("last_run.json")
 
 
 def _as_int(value: Any) -> int:
@@ -603,6 +601,8 @@ def _run_pipeline_child(action: str, settings: Dict[str, Any]) -> Dict[str, Any]
     # django.setup() in the child runs plugin discovery, which used to start a
     # second scheduler and reaper inside every pipeline subprocess.
     env[PIPELINE_CHILD_ENV] = "1"
+    env[storage.DATA_ENV] = storage.path("")
+    env[storage.KEY_ENV] = PLUGIN_KEY
     env[PIPELINE_DEADLINE_ENV] = repr(time.monotonic() + _SUBPROCESS_TIMEOUT_SECONDS)
     forwarded = os.pathsep.join(p for p in sys.path if p)
     env["PYTHONPATH"] = (

@@ -385,6 +385,11 @@ def rematch(plugin, store, monkeypatch):
 
 
 class TestRematchAfterM3U:
+    def test_queued_rematch_does_not_consume_previous_result(self, plugin, store, rematch):
+        _state, _runs = rematch
+        assert plugin._maybe_rematch_after_m3u(SETTINGS, now=NOW, run_pipeline=lambda s: None)
+        assert store.ttls[plugin._REMATCH_COOLDOWN_KEY] == 3600
+
     def test_m3u_refresh_after_ours_with_a_live_game_runs_once(self, plugin, rematch):
         # WITNESS: nothing re-matched before; the channel stayed empty (503).
         _state, runs = rematch

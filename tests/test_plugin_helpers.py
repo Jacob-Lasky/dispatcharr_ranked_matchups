@@ -1364,8 +1364,9 @@ class TestPluginKey:
             "See the load-bearing comment above the PLUGIN_KEY assignment "
             "in plugin.py for why."
         )
-        # Affirm the correct shape is in place.
-        assert "PLUGIN_KEY = os.path.basename(PLUGIN_DIR)" in src
+        # v3 supplies the canonical key; storage falls back to the install
+        # folder on legacy hosts and forwards the key to subprocesses.
+        assert "PLUGIN_KEY = storage.plugin_key()" in src
 
     def test_derivation_ignores_package_namespace(self, tmp_path):
         # The actual bug had nothing to do with the folder name being

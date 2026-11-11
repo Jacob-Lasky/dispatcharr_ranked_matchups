@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.38.0
+
+- Support Dispatcharr plugins v3 with manifest schema 2 and explicit capabilities,
+  one leader-managed scheduler, queued actions and progress, while retaining 0.33
+  compatibility from the same distribution.
+- Keep caches, recording tombstones, numbering, legacy keys and slates in v3's
+  durable data directory, importing the old files once without replacing state.
+  Keep the subprocess boundary and Redis locks across both runtime paths.
+
 ## 1.37.0
 
 - Show a cached 1080p matchup card when every real feed fails, with cached team

@@ -41,14 +41,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, NamedTuple, Optional
 
+from .. import storage
 from .._util import parse_iso_utc, write_json_atomic
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.season_store")
 
 # Beside cache.json, in the plugin folder (as `_odds.CACHE_PATH`).
-STORE_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "season_cache",
-)
+STORE_DIR = storage.path("season_cache")
 
 # How old a complete read may be and still stand in for a failed one.
 #
