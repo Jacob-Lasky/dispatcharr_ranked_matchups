@@ -78,6 +78,7 @@ from ._util import (
 # live in the uwsgi worker process and write progress to a Redis key the
 # show_status action reads.
 from . import tasks  # noqa: F401, E402
+from . import storage  # noqa: E402
 # Pure auto-record policy (#216); the ORM calls around it live in this file.
 from . import recording as recording_policy  # noqa: E402
 from . import merged_settings  # noqa: E402
@@ -92,7 +93,7 @@ PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 # (lowercased, spaces->underscores) per apps/plugins/loader.py. Use the same
 # derivation here, or get_current_settings() silently returns {} and the
 # scheduler thread idles forever with no error in the logs.
-PLUGIN_KEY = os.path.basename(PLUGIN_DIR).replace(" ", "_").lower()
+PLUGIN_KEY = storage.plugin_key()
 
 logger = logging.getLogger(f"plugins.{PLUGIN_KEY}")
 
@@ -334,15 +335,15 @@ _FAVORITES_ONLY_ACTIVE_MODES = frozenset({
     _FAVORITES_ONLY_STRICT, _FAVORITES_ONLY_POSTSEASON,
 })
 
-CACHE_PATH = os.path.join(PLUGIN_DIR, "cache.json")
+CACHE_PATH = storage.path("cache.json")
 # Auto-record bookkeeping (#216): which recordings the plugin created, and
 # tombstones for ones the user deleted so they are not re-created. A file, not
 # the DB, because the tombstone must outlive the Recording row it describes.
-RECORDING_STATE_PATH = os.path.join(PLUGIN_DIR, "recordings_state.json")
+RECORDING_STATE_PATH = storage.path("recordings_state.json")
 # Planned stops of RUNNING recordings (#216 phase C). Written whole by apply
 # under the scheduler lock, only ever READ by the live handoff timer, so the
 # timer never races apply's writes. A separate file from the state on purpose.
-RECORDING_STOPS_PATH = os.path.join(PLUGIN_DIR, "recording_stops.json")
+RECORDING_STOPS_PATH = storage.path("recording_stops.json")
 # The floor KICKOFF numbering last used (#219), and the kickoff offset and
 # number each channel published from it was numbered for (#278). Auto mode reads
 # the floor back instead of re-deriving it from the user's lineup on every
@@ -351,26 +352,26 @@ RECORDING_STOPS_PATH = os.path.join(PLUGIN_DIR, "recording_stops.json")
 # its number when a game below it leaves (see _place_kickoff_numbers). A file,
 # not a setting: writing it into PluginConfig.settings would replace the user's
 # "0 = auto" with a literal number in the settings form.
-NUMBERING_STATE_PATH = os.path.join(PLUGIN_DIR, "numbering_state.json")
+NUMBERING_STATE_PATH = storage.path("numbering_state.json")
 # Sidecar cache for LLM-rewritten descriptions. Separate from cache.json so the
 # main cache file stays purely deterministic (score, breakdown, score_notes
 # unchanged) and the LLM cache can be safely deleted to force regen without
 # losing scoring state.
-LLM_DESCRIPTIONS_CACHE_PATH = os.path.join(PLUGIN_DIR, "llm_descriptions_cache.json")
+LLM_DESCRIPTIONS_CACHE_PATH = storage.path("llm_descriptions_cache.json")
 # Sidecar cache for SportsDB matchup-thumbnail URLs (marker -> url). Persists
 # across runs so apply only HTTP-probes each marker once per _POSITIVE_TTL /
 # _NEGATIVE_TTL window. Safe to delete to force re-resolution.
-SPORTSDB_THUMB_CACHE_PATH = os.path.join(PLUGIN_DIR, "sportsdb_thumb_cache.json")
+SPORTSDB_THUMB_CACHE_PATH = storage.path("sportsdb_thumb_cache.json")
 # Same shape for the game-thumbs tier (#174). A SEPARATE file, not a shared one
 # with a key prefix: ThumbCache.prune() drops every key that isn't a live marker,
 # so two providers sharing a file would each prune the other's entries away.
-GAMETHUMBS_CACHE_PATH = os.path.join(PLUGIN_DIR, "gamethumbs_cache.json")
-CFBD_KEY_PATH = os.path.join(PLUGIN_DIR, "cfbd_api_key")
-FD_KEY_PATH = os.path.join(PLUGIN_DIR, "football_data_api_key")
-ODDS_KEY_PATH = os.path.join(PLUGIN_DIR, "odds_api_key")
-ANTHROPIC_KEY_PATH = os.path.join(PLUGIN_DIR, "anthropic_api_key")
-BOXING_KEY_PATH = os.path.join(PLUGIN_DIR, "boxing_data_api_key")
-SPORTSDB_KEY_PATH = os.path.join(PLUGIN_DIR, "sportsdb_api_key")
+GAMETHUMBS_CACHE_PATH = storage.path("gamethumbs_cache.json")
+CFBD_KEY_PATH = storage.path("cfbd_api_key")
+FD_KEY_PATH = storage.path("football_data_api_key")
+ODDS_KEY_PATH = storage.path("odds_api_key")
+ANTHROPIC_KEY_PATH = storage.path("anthropic_api_key")
+BOXING_KEY_PATH = storage.path("boxing_data_api_key")
+SPORTSDB_KEY_PATH = storage.path("sportsdb_api_key")
 # Free public test tier. Patreon keys unlock higher rate limits per
 # https://www.thesportsdb.com/api.php.
 SPORTSDB_DEFAULT_KEY = "3"
@@ -10712,7 +10713,7 @@ def _slot_already_covered(slot: datetime) -> bool:
 
 
 def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
-                        slot: datetime, times: List[Tuple[int, int]], tz) -> bool:
+                        slot: datetime, times: List[Tuple[int, int]], tz, *, run_pipeline=None) -> bool:
     """Run the scheduled auto_pipeline for `slot` once, across all workers.
 
     Returns True only if the stop event fired while waiting (the caller
@@ -10721,6 +10722,7 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
     wait for the same reason the loop re-reads them after its long sleep
     (#223): a user can turn auto-refresh off while the run is waiting.
     """
+    run_pipeline = run_pipeline or tasks.run_scheduled_pipeline
     woke = datetime.now(timezone.utc)  # before the claim, which can stall on Redis
     claim = _claim_scheduled_slot(slot)
     if claim == _SLOT_ELSEWHERE:
@@ -10739,7 +10741,7 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
             f"it was already past {deadline.isoformat()} when it could have started")
     if claim == _SLOT_UNKNOWN:
         if datetime.now(timezone.utc) <= deadline:
-            tasks.run_scheduled_pipeline(settings)
+            run_pipeline(settings)
         else:
             tasks.record_skipped_run(tasks.SCHEDULED_RUN_KIND, late)
         return False
@@ -10749,7 +10751,7 @@ def _run_scheduled_slot(plugin_ref, stop_event, settings: Dict[str, Any],
         # slot's run past its deadline (into the next slot's time).
         if datetime.now(timezone.utc) <= deadline:
             attempted = True
-            if tasks.run_scheduled_pipeline(settings, record_skip=False):
+            if run_pipeline(settings, record_skip=False):
                 return False
         if datetime.now(timezone.utc) + timedelta(seconds=_SCHEDULED_RETRY_SECONDS) > deadline:
             reason = _run_lock_unavailable_reason() if attempted else late
@@ -11095,7 +11097,7 @@ def _games_in_rematch_window(games: List[Dict[str, Any]], now: datetime) -> List
     return out
 
 
-def _maybe_rematch_after_m3u(settings: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+def _maybe_rematch_after_m3u(settings: Dict[str, Any], now: Optional[datetime] = None, *, run_pipeline=None) -> bool:
     """Run the auto_pipeline when an M3U refresh landed after our matches were
     taken, while a curated game is in the window. Returns True if it ran.
 
@@ -11135,21 +11137,27 @@ def _maybe_rematch_after_m3u(settings: Dict[str, Any], now: Optional[datetime] =
         "new or renamed feeds",
         _fmt_run_time(stamp.isoformat(), tz), _fmt_run_time(matched.isoformat(), tz),
         len(soon))
-    if tasks.run_m3u_rematch_pipeline(settings):
-        last = tasks.read_last_run() or {}
-        if last.get("kind") == "m3u_rematch" and last.get("status") == "ok":
-            try:
-                r.expire(key, _REMATCH_COOLDOWN_AFTER_OK_SECONDS)
-            except Exception:
-                pass  # the hour-long cooldown stands; the schedule still runs
+    ran = (run_pipeline or tasks.run_m3u_rematch_pipeline)(settings)
+    if ran is None:  # queued on v3; the action adjusts its cooldown on completion
         return True
-    # Lock held: lift the cooldown so a later tick retries. The holder is
-    # usually a refresh itself, which makes this one unnecessary.
+    last = tasks.read_last_run() or {}
+    _finish_m3u_rematch(ran, last if last.get("kind") == "m3u_rematch" else {}, r)
+    return bool(ran)
+
+
+def _finish_m3u_rematch(ran, result, redis_client=None):
+    """Apply the cooldown to this run's outcome, never a previously queued run."""
     try:
-        r.delete(key)
+        if redis_client is None:
+            from core.utils import RedisClient
+            redis_client = RedisClient.get_client()
+        if ran:
+            if result.get('status') == 'ok':
+                redis_client.expire(_REMATCH_COOLDOWN_KEY, _REMATCH_COOLDOWN_AFTER_OK_SECONDS)
+        else:
+            redis_client.delete(_REMATCH_COOLDOWN_KEY)
     except Exception:
-        pass
-    return False
+        pass  # the hour-long cooldown stands; the schedule still runs
 
 
 def _reaper_loop(plugin_ref, stop_event):
@@ -11829,9 +11837,17 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.37.0"
+    version = "1.38.0"
 
     def __init__(self):
+        # v3 owns the one persistent service. Every web worker still installs
+        # the slate route; it uses Dispatcharr's existing HTTP server.
+        if storage.managed_services():
+            if os.environ.get(tasks.PIPELINE_CHILD_ENV) != "1":
+                _migrate_stored_settings()
+                from . import slate
+                slate.install_route()
+            return
         # The scheduler reads settings live from the DB on each tick rather than
         # relying on stale init-time settings.
         reg = _scheduler_registry()
@@ -11919,6 +11935,19 @@ class Plugin:
         t.start()
         logger.info("[ranked_matchups] scheduler thread started (pid=%s, %s)", os.getpid(), where)
 
+    def on_leader_acquired(self, context):
+        from . import lifecycle
+        storage.configure(context)
+        context["start_service"](
+            lambda stop_event: lifecycle.serve(self, context, stop_event),
+            name="matchups-scheduler",
+        )
+
+    def on_leader_lost(self, context):
+        # Dispatcharr has already signalled/joined the service. No unmanaged
+        # threads or sockets need teardown here.
+        pass
+
     def _start_reaper(self):
         """Start the finished-game reaper (#196), idempotently.
 
@@ -11963,7 +11992,10 @@ class Plugin:
         so stop() reclaims the live thread even if it was started by a different
         module incarnation than the one this instance belongs to.
         """
-        del context  # unused; conform to loader's stop(context) shape
+        if storage.managed_services():
+            # The host signals/joins the service before on_leader_lost. stop()
+            # may run in a locked DB transaction: never close connections here.
+            return
         reg = _scheduler_registry()
         _clear_if_exited(reg, "stop signal")
 
@@ -11977,10 +12009,14 @@ class Plugin:
             params: Optional[Dict[str, Any]] = None,
             context: Optional[Dict[str, Any]] = None):
         ctx = context or {}
+        storage.configure(ctx)
         settings = dict(ctx.get("settings") or {})
         if params:
             settings.update(params)
         try:
+            if callable(ctx.get("dispatch_task")):
+                from . import lifecycle
+                return lifecycle.run(self, action, settings, ctx)
             # _ACTION_HANDLERS is the single dispatch table. refresh + auto_pipeline
             # map to ASYNC entrypoints because they run too long for browser / axios
             # default fetch timeouts (~30s): they queue and return a task id, and the

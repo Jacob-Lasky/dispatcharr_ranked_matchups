@@ -235,33 +235,28 @@ class _TrackedAdapter(HTTPAdapter):
 
 # ---------- urllib: http.client connections that hand their socket over ----------
 
-class _TrackedConnectionMixin:
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        create = self._create_connection  # socket.create_connection, per instance
+def _tracked_class(http_class: type):
+    """Factory rather than subclass: v3 guards the stdlib constructors.
 
-        def _create_and_track(*a: Any, **kw: Any) -> socket.socket:
+    Keep construction through the imported http.client module so capability
+    checks still run. A guard may replace its classes with wrapped functions,
+    which cannot be used as base classes or as issubclass() arguments.
+    """
+    def connect(*args, **kwargs):
+        constructor = getattr(http.client, http_class.__name__)
+        connection = constructor(*args, **kwargs)
+        create = connection._create_connection
+
+        def create_and_track(*a, **kw):
             sock = create(*a, **kw)
             _track(sock)
             return sock
 
-        # connect() opens the TCP socket through this attribute, and
-        # HTTPSConnection.connect wraps TLS around what it returns.
-        self._create_connection = _create_and_track
+        # Capture before TLS/headers/body, preserving whole-response deadlines.
+        connection._create_connection = create_and_track
+        return connection
 
-
-class _TrackedHTTPLibConnection(_TrackedConnectionMixin, http.client.HTTPConnection):
-    pass
-
-
-class _TrackedHTTPSLibConnection(_TrackedConnectionMixin, http.client.HTTPSConnection):
-    pass
-
-
-def _tracked_class(http_class: type) -> type:
-    if issubclass(http_class, http.client.HTTPSConnection):
-        return _TrackedHTTPSLibConnection
-    return _TrackedHTTPLibConnection
+    return connect
 
 
 class _TrackedHTTPHandler(urllib.request.HTTPHandler):

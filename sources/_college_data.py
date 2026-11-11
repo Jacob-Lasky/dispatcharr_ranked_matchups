@@ -51,15 +51,14 @@ from typing import Any, Callable, Dict, NamedTuple, Optional
 import requests
 
 from .._http import get_within_deadline
+from .. import storage
 from .._util import key_id, parse_iso_utc, write_json_atomic
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.college_data")
 
 # Beside cache.json, in the plugin folder (as `_season_store.STORE_DIR`). Sources run in the
 # pipeline subprocess, one refresh at a time (the run lock), so there is one writer.
-CACHE_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "college_cache",
-)
+CACHE_DIR = storage.path("college_cache")
 
 FRESH_FOR = timedelta(hours=12)
 # How old a kept poll may be and still stand in for a failed /rankings. A poll is published

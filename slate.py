@@ -31,7 +31,8 @@ PROBE_SECONDS = 6
 OWNER = 'ranked_matchups_slate'
 def cache_dir(data_dir=None):
     """Persistent data root; v3 can pass context['data_dir'] here directly."""
-    return Path(data_dir or Path(__file__).resolve().parent) / 'slates'
+    from . import storage
+    return Path(data_dir or storage.path('')) / 'slates'
 
 
 class _Process:
@@ -278,6 +279,13 @@ def view(request, until, digest):
         return HttpResponse(status=403)
     if request.method != 'GET' or not re.fullmatch('[0-9a-f]{64}', digest):
         return HttpResponse(status=404)
+    from . import storage
+    if storage.managed_services():
+        from apps.plugins.loader import PluginManager
+        loaded = PluginManager.get().get_plugin(storage.plugin_key())
+        if loaded is None:
+            return HttpResponse(status=404)
+        storage.configure({'data_dir': loaded.data_dir})
     clip = cache_dir() / f'{digest}.mp4'
     if not clip.is_file() or until <= time.time():
         return HttpResponse(status=404)

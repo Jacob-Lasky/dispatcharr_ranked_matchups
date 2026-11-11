@@ -35,7 +35,7 @@ active sessions switch back through Dispatcharr's change-stream API. **Check
 matchup feeds** runs the same check manually. Provider limits also apply to
 probes: insufficient capacity is unknown, never proof that a feed failed.
 
-Artwork is rendered at 1920×1080 and cached under `slates/` beside the plugin.
+Artwork is rendered at 1920×1080 and cached under `slates/` in plugin storage.
 The low-frame-rate loop has silent audio, repeated video headers and continuous
 media clocks. Encoding follows known provider probe stats, falling back to
 H.264 1080p and AC-3 stereo at 48 kHz. Dispatcharr 0.33 has upstream limitations
@@ -188,6 +188,29 @@ advertised it as pending.
 PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for a step-by-step
 guide. For requests, [open an issue](../../issues/new/choose) and the
 form will collect everything needed to scope it.
+
+## Dispatcharr compatibility
+
+The same plugin supports Dispatcharr 0.33 and the upcoming plugins v3 system.
+On v3, an administrator approves the declared capabilities when enabling it.
+The v3 system uses **manifest schema 2**. It runs one leader-managed scheduler,
+queues heavy actions through Dispatcharr, and reports start/completion progress.
+The Redis run lock and scheduled-slot claims still protect writes during a
+leadership change. CPU and bulk database work remain in bounded subprocesses.
+On 0.33, the existing scheduler and action behavior is retained.
+
+V3 keeps runtime files in the host-provided `data_dir`, including recording
+bookkeeping, numbering, caches, legacy key files and slate clips. The first run
+copies existing files without overwriting durable state. Bundled resources stay
+in the code directory. On 0.33 these files remain in the installed plugin folder.
+
+Capabilities: background tasks, a persistent service, subprocesses, outbound
+network access, writes outside plugin storage (channel logos and temporary
+process output), proxy internals (slate/recovery checks), and external Python
+dependencies already supplied by Dispatcharr. It binds no listener, reads no
+user-account data, and dispatches no first-party Celery tasks.
+
+The live v3 upgrade check is deferred until a Dispatcharr release includes v3.
 
 ## Install
 
@@ -364,7 +387,7 @@ schedule** (a day's request kept failing; games already published for that day
 stay on air), and **a list where nothing is playable**, meaning no game
 matched a stream in your channels — run **Diagnose matching** for that one.
 
-The verdict is kept in `last_run.json` beside `cache.json` in the plugin
+The verdict is kept in `last_run.json` beside `cache.json` in the plugin storage
 directory, so it survives a container restart. For more detail, the container
 log carries each source's error; a run that hits the internal time limit now
 logs the tail of its own progress and names the step it reached.
@@ -376,9 +399,10 @@ refresh after its estimated end, which on a five-a-day schedule can be hours
 after the final whistle. A refresh never removes a game that is still on air,
 even when its sport's feed has already dropped it, that feed is down, or the
 feed lost only the day the game is on. That holds after an upgrade too, when
-Dispatcharr replaces the plugin folder and `cache.json` with it: the plugin
-also records each published game in its own guide entry and reads it back
-from there. Two settings change when a finished game goes, both off by
+Dispatcharr 0.33 replaces the plugin folder and `cache.json` with it; v3 keeps
+the cache in its durable data directory. The plugin also records each published
+game in its own guide entry and reads it back from there. Two settings change
+when a finished game goes, both off by
 default:
 
 | Setting | Effect |

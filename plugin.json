@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.37.0",
+  "version": "1.38.0",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -892,22 +892,26 @@
     {
       "id": "check_feeds",
       "label": "Check matchup feeds now",
-      "description": "Probe matchup feeds and attach an outage slate only when all fail. Restore recovered live feeds for active viewers and recordings. Optional channel_id limits the check to one matchup. Honors dry_run."
+      "description": "Probe matchup feeds and attach an outage slate only when all fail. Restore recovered live feeds for active viewers and recordings. Optional channel_id limits the check to one matchup. Honors dry_run.",
+      "async": true
     },
     {
       "id": "refresh",
       "label": "Refresh curated list",
-      "description": "Pull games from enabled sport sources, score, EPG-match to Dispatcharr channels, write cache.json. No DB writes to channels. Runs in the background, typically several minutes on a full slate; the button returns immediately. Click 'Show current state' to watch progress and to see whether the last run succeeded."
+      "description": "Pull games from enabled sport sources, score, EPG-match to Dispatcharr channels, write cache.json. No DB writes to channels. Runs in the background, typically several minutes on a full slate; the button returns immediately. Click 'Show current state' to watch progress and to see whether the last run succeeded.",
+      "async": true
     },
     {
       "id": "apply",
       "label": "Apply to Dispatcharr",
-      "description": "Use cache to update target channel profile membership and (if enabled) rename matched channels. Honors dry_run. Synchronous: the button waits for the result."
+      "description": "Use cache to update target channel profile membership and (if enabled) rename matched channels. Honors dry_run. Dispatcharr 0.33 waits for the result; v3 reports completion in task history.",
+      "async": true
     },
     {
       "id": "auto_pipeline",
       "label": "Refresh + apply now",
-      "description": "Run refresh then apply end-to-end. The daily scheduler invokes this; this button lets you trigger it on demand. Runs in the background, typically several minutes on a full slate; the button returns immediately. Click 'Show current state' to watch progress and to see whether the last run succeeded."
+      "description": "Run refresh then apply end-to-end. The daily scheduler invokes this; this button lets you trigger it on demand. Runs in the background, typically several minutes on a full slate; the button returns immediately. Click 'Show current state' to watch progress and to see whether the last run succeeded.",
+      "async": true
     },
     {
       "id": "show_status",
@@ -930,14 +934,26 @@
       "description": "Drop games that ended more than 'Remove finished games after' minutes ago, and backfill from the bench. Does not re-fetch anything.",
       "button_label": "Reap",
       "button_variant": "outline",
-      "button_color": "orange"
+      "button_color": "orange",
+      "async": true
     },
     {
       "id": "rematch",
       "label": "Match cached games + apply",
       "description": "Pick up new feeds without fetching schedules or scoring.",
       "button_label": "Match + apply",
-      "button_variant": "outline"
+      "button_variant": "outline",
+      "async": true
     }
+  ],
+  "manifest_version": 2,
+  "capabilities": [
+    "background_tasks",
+    "persistent_service",
+    "subprocess",
+    "outbound_network",
+    "filesystem_write",
+    "proxy_internals",
+    "external_dependencies"
   ]
 }
