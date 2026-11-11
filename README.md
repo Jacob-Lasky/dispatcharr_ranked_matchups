@@ -334,6 +334,7 @@ outage) deleted it. Watch the provider's own channel for that game and update.
 | `show_status` | Print the current curated list with per-game score breakdown, and end with a verdict on the last background run (see [Did the last run work?](#did-the-last-run-work)). No writes. | — |
 | `preview_names` | Render the channel-name and description templates against sample games so you can check the layout before applying. Reports template problems on the last line; the variable list is in each template's help text. No writes, no API calls. | — |
 | `reap_now` | Drop games that finished more than `remove_finished_after_minutes` ago and backfill from the bench. Re-fetches nothing. | `cache.json` + DB |
+| `check_recording_finals` | Stop running plugin DVR captures whose exact ESPN fixture is final; keep partial files. Optional `recording_id` limits the check. | DB + ESPN (honors `dry_run`) |
 | `check_feeds` | Probe each matchup channel's feeds; attach an outage card only when every feed fails, and switch active viewers and recordings back once one recovers (see [Feed outages](#feed-outages)). Optional `channel_id` limits it to one channel. The scheduler runs the same check between slots. | DB + `slates/` (honors `dry_run`) |
 
 ### Did the last run work?
@@ -808,6 +809,17 @@ does not have to be a Favorite, and listing it does not change its score.
   the game's expected end, plus **Keep recording after the scheduled end**
   (default 120 minutes, for overtime and delays). Never the "Upcoming" block
   that sits in the guide before the game.
+- **When the game finishes.** The background timer checks running plugin
+  recordings against ESPN every minute, independently of Refresh and Apply.
+  An exact fixture marked final is stopped through Dispatcharr's Stop action,
+  retaining the recording and partial file. It matches both teams and kickoff;
+  ESPN-backed game markers must also match the event ID. Cancelled, postponed,
+  missing or ambiguous fixtures never trigger a stop. Recordings you edited
+  are left alone; missing ownership history also retains the scheduled window. College basketball,
+  college football, NFL, NBA, WNBA, NHL, MLB and NCAA soccer are covered;
+  other sources and ESPN outages retain the scheduled window above. Existing
+  scheduled recordings are covered too. **Check recording finals** runs the
+  same guarded check on demand (optional `recording_id` via the API).
 - **How many at once.** **Recordings at once** defaults to automatic: your
   tightest M3U account limit (Max Streams) minus **Streams kept free for live
   TV** (default 1). When more games overlap than there are slots, the earliest
