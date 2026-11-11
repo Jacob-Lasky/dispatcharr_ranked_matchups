@@ -311,6 +311,7 @@ outage) deleted it. Watch the provider's own channel for that game and update.
 | `show_status` | Print the current curated list with per-game score breakdown, and end with a verdict on the last background run (see [Did the last run work?](#did-the-last-run-work)). No writes. | — |
 | `preview_names` | Render the channel-name and description templates against sample games so you can check the layout before applying. Reports template problems on the last line; the variable list is in each template's help text. No writes, no API calls. | — |
 | `reap_now` | Drop games that finished more than `remove_finished_after_minutes` ago and backfill from the bench. Re-fetches nothing. | `cache.json` + DB |
+| `check_feeds` | Probe each matchup channel's feeds; attach an outage card only when every feed fails, and switch active viewers and recordings back once one recovers (see [Feed outages](#feed-outages)). Optional `channel_id` limits it to one channel. The scheduler runs the same check between slots. | DB + `slates/` (honors `dry_run`) |
 
 ### Did the last run work?
 
