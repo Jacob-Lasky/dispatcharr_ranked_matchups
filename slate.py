@@ -173,7 +173,7 @@ def media_format(streams):
             'width': width // 2 * 2, 'height': height // 2 * 2}
 
 
-def render(game, now, streams=()):
+def render(game, now, streams=(), channel_id=None):
     from . import logos, gamethumbs, plugin
     _, status = caption(game, now)
     composite = Path(logos.LOGO_DIR) / logos.marker_to_filename(
@@ -209,15 +209,34 @@ def render(game, now, streams=()):
                 raise RuntimeError('Slate video rendering failed')
             os.replace(work / 'clip.mp4', target)
     end = plugin._game_end_utc(game)
-    return f'http://127.0.0.1:5656/{ROUTE}/{int(end.timestamp())}/{digest}.ts'
+    channel = f'?channel={channel_id}' if channel_id else ''
+    return f'http://127.0.0.1:5656/{ROUTE}/{int(end.timestamp())}/{digest}.ts{channel}'
 
 
-def packets(clip, until):
+def _channel_clock(channel_id):
+    from .slate_clock import snapshot
+    if not channel_id:
+        return snapshot([], time.time())
+    from core.utils import RedisClient
+    from apps.proxy.live_proxy.redis_keys import RedisKeys
+    redis = RedisClient.get_buffer()
+    index = int(redis.get(RedisKeys.buffer_index(channel_id)) or 0)
+    # Bounded tail read, after Dispatcharr closes/flushed the previous input.
+    # Include older chunks for sparsely repeated PSI/PES clocks and PID counters.
+    indices = list(range(max(1, index - 2), index + 1))
+    chunks = redis.mget([RedisKeys.buffer_chunk(channel_id, i) for i in indices]) if indices else []
+    received = redis.zscore(RedisKeys.chunk_timestamps(channel_id), str(index))
+    return snapshot([chunk for chunk in chunks if chunk], received or time.time())
+
+
+def packets(clip, until, channel_id=None):
     """A request-scoped remux; MP4 looping keeps timestamps advancing at 1x.
 
     Looping a short TS with ffmpeg -re slows below real time at every wrap,
     which makes Dispatcharr declare a healthy slate to be buffering.
     """
+    from .slate_clock import Clock
+    clock = Clock(_channel_clock(channel_id))
     code, info = _run(['ffprobe', '-v', 'error', '-show_entries',
         'stream=codec_type,codec_name,sample_rate,avg_frame_rate', '-of', 'json', str(clip)], 5)
     if code:
@@ -237,16 +256,23 @@ def packets(clip, until):
         '-re', '-stream_loop', '-1', '-i', str(clip), '-c', 'copy',
         '-bsf:v', f'setts=pts={video_clock}:dts={video_clock}',
         '-bsf:a', f'setts=pts={audio_clock}:dts={audio_clock}',
-        '-mpegts_flags', '+resend_headers', '-flush_packets', '1', '-f', 'mpegts', 'pipe:1'], write_fd)
+        '-mpegts_flags', '+resend_headers+initial_discontinuity',
+        '-mpegts_copyts', '1', '-muxdelay', '0', '-muxpreload', '0',
+        '-flush_packets', '1', '-f', 'mpegts', 'pipe:1'], write_fd)
     os.close(write_fd)
     try:
+        pending = bytearray()
         while time.time() < until:
             if not select.select([read_fd], [], [], 10)[0]:
                 break
             data = os.read(read_fd, 188 * 7)
             if not data:
                 break
-            yield data
+            pending.extend(data)
+            size = len(pending) // 188 * 188
+            if size:
+                yield clock.rewrite(pending[:size])
+                del pending[:size]
     finally:
         child.close()
         os.close(read_fd)
@@ -265,7 +291,14 @@ def view(request, until, digest):
     clip = cache_dir() / f'{digest}.mp4'
     if not clip.is_file() or until <= time.time():
         return HttpResponse(status=404)
-    response = StreamingHttpResponse(packets(clip, until), content_type='video/mp2t')
+    channel_id = request.GET.get('channel')
+    if channel_id:
+        from uuid import UUID
+        try:
+            channel_id = str(UUID(channel_id))
+        except ValueError:
+            return HttpResponse(status=404)
+    response = StreamingHttpResponse(packets(clip, until, channel_id), content_type='video/mp2t')
     response['Cache-Control'] = 'no-store'
     response['X-Accel-Buffering'] = 'no'
     return response
@@ -397,7 +430,7 @@ def reconcile(plugin, channel, game, now):
         return 'live'
     if unknown:
         return 'unknown'
-    url = render(game, now, real)
+    url = render(game, now, real, channel_id=_key(channel))
     with transaction.atomic():
         # Serialize with apply/reap, and discard a probe if apply changed the
         # provider membership while it ran. No Channel.save(), no EPG signals.

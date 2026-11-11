@@ -11,6 +11,11 @@
   source switch leaves an existing Jellyfin HLS session on the old slate after
   a backward timestamp jump. A codec/layout mismatch also corrupts final DVR
   audio despite successful segment capture and remux.
+- A plain provider-to-provider control reproduces the timestamp freeze. Slate
+  packets now inherit buffered PTS/DTS/PCR and PID counters with elapsed time,
+  preserving payload when marking discontinuities and starting at zero for a
+  cold channel. The installed input profile's remux resets this inherited clock;
+  the candidate remains blocked rather than retiming the whole channel.
 
 ## 1.36.5
 
