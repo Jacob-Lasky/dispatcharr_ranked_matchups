@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.38.1
+
+- Stop plugin DVR recordings when ESPN confirms their exact fixture is final,
+  checking every minute independently of the scoring pipeline. Reuse Dispatcharr's
+  Stop action to keep partial files. Cover existing scheduled recordings, retain
+  padded windows on unknown/cancelled/postponed events, and add an on-demand check.
+
 ## 1.38.0
 
 - Support Dispatcharr plugins v3 with manifest schema 2 and explicit capabilities,

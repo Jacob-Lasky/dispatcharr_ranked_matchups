@@ -20,7 +20,7 @@ def test_v3_manifest_uses_supported_schema_and_exact_disclosures():
         'filesystem_write', 'proxy_internals', 'external_dependencies',
     }
     assert {a['id'] for a in manifest['actions'] if a.get('async')} == {
-        *lifecycle.PIPELINE_ACTIONS, 'check_feeds',
+        *lifecycle.PIPELINE_ACTIONS, 'check_feeds', 'check_recording_finals',
     }
 
 

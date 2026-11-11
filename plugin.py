@@ -1292,7 +1292,15 @@ def _reason_props(ar: "_AutoRecord", marker: str) -> Dict[str, Any]:
     if meta is None:
         return {}
     cand, teams, league, game = meta
-    return recording_policy.reason_properties(cand, teams, league, game)
+    props = recording_policy.reason_properties(cand, teams, league, game)
+    from . import recording_finals
+    fixture = recording_finals.target({
+        "sport_prefix": league, "home": game[0], "away": game[1],
+        "start_time_utc": cand.kickoff.isoformat(),
+    }, marker)
+    if fixture:
+        props[recording_finals.TARGET_KEY] = fixture
+    return props
 
 
 def _backfill_reason(ar: "_AutoRecord", marker: str, existing) -> None:
@@ -5150,6 +5158,13 @@ def _build_epg_lookup(local_tz=timezone.utc, excluded_stream_ids=frozenset()):
 
 
 # ---------- matchup feed outages ----------
+
+def _action_check_recording_finals(settings):
+    from . import recording_finals
+    count = recording_finals.check(sys.modules[__name__], settings)
+    return {"status": "ok", "stopped": count,
+            "message": f"ESPN final check: stopped {count} recording(s); partial files kept."}
+
 
 def _action_check_feeds(settings):
     from . import slate
@@ -10889,7 +10904,7 @@ def _next_reap_delay(settings: Dict[str, Any]) -> float:
 # How often the reaper loop wakes at the latest, so a stop planned by an apply
 # in another worker is noticed well before its time (the loop otherwise sleeps
 # until the next reap, which can be hours away).
-_HANDOFF_RECHECK_SECONDS = 300
+_HANDOFF_RECHECK_SECONDS = 60
 
 
 def _cached_live_starts() -> Tuple[Dict[str, Optional[datetime]], set]:
@@ -10934,9 +10949,15 @@ def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> 
     keeps recording rather than handing its slot to a game that cannot be
     recorded. Only I/O, so it is safe on the gevent hub (no subprocess)."""
     now = now or datetime.now(timezone.utc)
+    from . import recording_finals
+    try:
+        final_stops = recording_finals.check(sys.modules[__name__], settings, now=now, scheduled=True)
+    except Exception as exc:
+        logger.warning('[ranked_matchups] ESPN final checks unavailable (%s)', type(exc).__name__)
+        final_stops = 0
     due = recording_policy.due_stops(_read_stops(), now)
     if not due:
-        return 0
+        return final_stops
     from django.db import transaction
     from apps.channels.models import Channel, ChannelStream, Recording
     from apps.epg.models import ProgramData
@@ -11024,7 +11045,7 @@ def _run_due_stops(settings: Dict[str, Any], now: Optional[datetime] = None) -> 
             logger.exception("[ranked_matchups] handoff for recording %s failed", rid)
     if done:
         _invalidate_epg_output_cache()
-    return done
+    return done + final_stops
 
 
 # ---------- rematch after an M3U update ----------
@@ -11747,6 +11768,7 @@ _ACTION_HANDLERS = {
     # then re-applies, so it races apply exactly as apply races itself.
     "reap_now": _action_reap_locked,
     "check_feeds": _action_check_feeds,
+    "check_recording_finals": _action_check_recording_finals,
 }
 
 
@@ -11837,7 +11859,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.38.0"
+    version = "1.38.1"
 
     def __init__(self):
         # v3 owns the one persistent service. Every web worker still installs
@@ -11919,7 +11941,14 @@ class Plugin:
         self._start_reaper()
         from . import slate
         slate.install_route()
-        reg.feed_check = lambda: slate.check(sys.modules[__name__], self.get_current_settings(), scheduled=True)
+        def check_background():
+            from . import recording_finals
+            settings = self.get_current_settings()
+            recording_finals.check(sys.modules[__name__], settings, scheduled=True)
+            slate.check(sys.modules[__name__], settings, scheduled=True)
+        # The scheduler and reaper cannot both own the pipeline lock. Check
+        # finals from both so a long reap OR scoring run cannot delay DVR stops.
+        reg.feed_check = check_background
         # Upgrade a scheduler sleeping in pre-slate code, once per worker.
         target = getattr(reg.thread, '_target', None)
         prior_sleep = getattr(target, '__globals__', {}).get('_scheduler_sleep')
@@ -11957,6 +11986,8 @@ class Plugin:
         churned a thread and leaked a DB connection per poll in #82.
         """
         reg = _reaper_registry()
+        if reg.thread is not None and not getattr(reg, 'final_checks', False):
+            _stop_scheduler(reg.thread, reg.stop_event, 'enable ESPN recording final checks')
         if not _may_start(reg, "reaper"):
             return
         stop_event = threading.Event()
@@ -11966,6 +11997,7 @@ class Plugin:
         )
         reg.thread = t
         reg.stop_event = stop_event
+        reg.final_checks = True
         t.start()
         logger.info("[ranked_matchups] reaper thread started (pid=%s, %s)",
                     os.getpid(), _process_label())
