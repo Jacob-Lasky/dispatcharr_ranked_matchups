@@ -387,7 +387,7 @@ schedule** (a day's request kept failing; games already published for that day
 stay on air), and **a list where nothing is playable**, meaning no game
 matched a stream in your channels — run **Diagnose matching** for that one.
 
-The verdict is kept in `last_run.json` beside `cache.json` in plugin storage
+The verdict is kept in `last_run.json` beside `cache.json` in the plugin storage
 directory, so it survives a container restart. For more detail, the container
 log carries each source's error; a run that hits the internal time limit now
 logs the tail of its own progress and names the step it reached.
