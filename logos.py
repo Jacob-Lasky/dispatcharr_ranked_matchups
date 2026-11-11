@@ -320,7 +320,7 @@ def _hint_matches(event: dict, sport_prefix: Optional[str]) -> bool:
     return hint.lower() in haystack
 
 
-def _http_get_json(url: str, endpoint: str) -> Optional[dict]:
+def _http_get_json(url: str, endpoint: str, timeout: float = _HTTP_TIMEOUT_S) -> Optional[dict]:
     """Single-shot JSON GET. Returns None on any failure (network, parse, HTTP).
 
     `endpoint` is a STATIC label naming which SportsDB endpoint this was
@@ -337,7 +337,7 @@ def _http_get_json(url: str, endpoint: str) -> Optional[dict]:
     """
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
-        status, body = urlopen_read(req, timeout=_HTTP_TIMEOUT_S)
+        status, body = urlopen_read(req, timeout=timeout)
         if status != 200:
             return None
         return json.loads(body)
@@ -487,6 +487,64 @@ def download_thumb(thumb_url: str, dest_path: str) -> bool:
     """
     status, _ = download_to_file(thumb_url, dest_path)
     return status == 200
+
+
+def cached_team_badge(team: str, sport: str, directory: str,
+                      api_key: str = "3") -> tuple[Optional[str], str]:
+    """Reuse the poster provider, downloader and cache for individual crests.
+
+    A poster is not a reliable source of separate logos: layouts and team order
+    vary. SportsDB's team records supply the original badge, usually transparent.
+    College crests identify the university; SportsDB commonly catalogs these
+    shared marks under its NCAA football team rather than a basketball row.
+    """
+    hint = _SPORT_HINT.get(sport)
+    if not team or is_field_event(team) or not hint:
+        return None, "no team badge mapping for this competition"
+    os.makedirs(directory, exist_ok=True)
+    marker = f"team:{sport}:{team.strip().casefold()}"
+    path = os.path.join(directory, hashlib.sha256(marker.encode()).hexdigest() + '.png')
+    if os.path.isfile(path):
+        return path, "cached badge"
+    cache = ThumbCache(os.path.join(directory, 'cache.json'))
+    fresh, url = cache.get(marker)
+    if not fresh:
+        query = urllib.parse.quote(_strip_trailing_qualifier(team))
+        endpoint = f"https://www.thesportsdb.com/api/v1/json/{urllib.parse.quote(api_key or '3')}/searchteams.php?t={query}"
+        payload = _http_get_json(endpoint, "searchteams", timeout=10)
+        if payload is None:
+            return None, "team lookup unavailable"
+        expected_sport = {'CFB': 'american football',
+                          'NHL': 'ice hockey'}.get(sport)
+        candidates = [row for row in payload.get('teams') or []
+            if hint.casefold() in (row.get('strLeague') or '').casefold()
+            and (not expected_sport or expected_sport == (row.get('strSport') or '').casefold())]
+        if sport == 'CBB':
+            basketball = [row for row in candidates if (row.get('strSport') or '').casefold() == 'basketball']
+            candidates = basketball or [row for row in candidates
+                if (row.get('strSport') or '').casefold() == 'american football'
+                and (row.get('strTeam') or '').strip().casefold() == team.strip().casefold()]
+        # The endpoint searches by name. Reject ambiguous replies rather than
+        # silently assigning the wrong team's badge to a matchup.
+        url = candidates[0].get('strBadge') if len(candidates) == 1 else None
+        cache.put(marker, url)
+        cache.save()
+    if not url:
+        return None, "no unambiguous team badge in the poster provider"
+    status, _ = download_to_file(url, path, timeout=4)
+    if status != 200:
+        return None, "team badge download unavailable"
+    # Verify the decoded image before making it part of a rendered card.
+    try:
+        from PIL import Image
+        with Image.open(path) as image:
+            image.load()
+            if not image.convert('RGBA').getchannel('A').getbbox():
+                raise ValueError('empty badge')
+    except (OSError, ValueError):
+        _unlink_quietly(path)
+        return None, "team badge image invalid or empty"
+    return path, "downloaded badge"
 
 
 class ThumbCache:

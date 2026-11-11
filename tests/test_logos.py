@@ -664,7 +664,7 @@ class TestApiKeyNeverReachesTheLog:
 
     def test_call_sites_pass_a_static_label(self):
         # A label built from the url would defeat the whole point, so assert the
-        # arguments at both call sites are literal strings.
+        # arguments at every call site are literal strings.
         import ast
         src = open(os.path.join(REPO_ROOT, "logos.py"), encoding="utf-8").read()
         labels = []
@@ -674,4 +674,4 @@ class TestApiKeyNeverReachesTheLog:
                 assert len(node.args) == 2, ast.dump(node)
                 assert isinstance(node.args[1], ast.Constant), ast.dump(node.args[1])
                 labels.append(node.args[1].value)
-        assert sorted(labels) == ["lookupleague", "searchevents"], labels
+        assert sorted(labels) == ["lookupleague", "searchevents", "searchteams"], labels

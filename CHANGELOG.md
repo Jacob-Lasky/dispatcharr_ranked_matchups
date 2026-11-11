@@ -1,21 +1,16 @@
 # Changelog
 
-## 1.37.0 (unreleased)
+## 1.37.0
 
 - Show a cached 1080p matchup card when every real feed fails, with cached team
   crests or initials, kickoff time before start and an outage message afterward.
   The existing scheduler checks recovery and switches active proxy sessions back
   to a responding feed. Slates use known provider media formats where available.
   No extra container or persistent background loop is required.
-- Release is blocked on Dispatcharr 0.33 live continuity: a matched-format
-  source switch leaves an existing Jellyfin HLS session on the old slate after
-  a backward timestamp jump. A codec/layout mismatch also corrupts final DVR
-  audio despite successful segment capture and remux.
-- A plain provider-to-provider control reproduces the timestamp freeze. Slate
-  packets now inherit buffered PTS/DTS/PCR and PID counters with elapsed time,
-  preserving payload when marking discontinuities and starting at zero for a
-  cold channel. The installed input profile's remux resets this inherited clock;
-  the candidate remains blocked rather than retiming the whole channel.
+- Individual team crests use the existing SportsDB poster provider and cache
+  helpers, preserving transparency and fitting inside padded badge circles.
+  Missing or ambiguous crests use initials and log the reason.
+- Jellyfin may need a re-tune when the game goes live, the same as any Dispatcharr failover.
 
 ## 1.36.5
 

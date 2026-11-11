@@ -28,7 +28,7 @@ rest.
 ## Feed outages
 
 When every provider feed on a matchup channel fails, the plugin attaches a
-TV-sized card with the teams, cached game-thumbs crests (initials when absent),
+TV-sized card with the teams and cached SportsDB team crests (initials when absent),
 and either “Live at … ET” or “Feed unavailable, retrying”. A working feed keeps
 normal Dispatcharr failover. Recovery checks run from the existing scheduler;
 active sessions switch back through Dispatcharr's change-stream API. **Check
@@ -40,18 +40,12 @@ The low-frame-rate loop has silent audio, repeated video headers and continuous
 media clocks. Encoding follows known provider probe stats, falling back to
 H.264 1080p and AC-3 stereo at 48 kHz. Dispatcharr 0.33 has upstream limitations
 when a recovering provider changes its audio codec/layout; matching known stats
-reduces that risk. A synthetic AAC stereo → AC-3 5.1 switch kept raw DVR
-segments audible but produced invalid audio in the final MKV. Even with matching
-AAC stereo, an existing Jellyfin HLS session froze on the slate after a backward
-PTS/DTS jump; the matched DVR recording recovered correctly. **This candidate
-is not ready to deploy on 0.33 until timestamp continuity is fixed.** A matched
-provider-to-provider control reproduces the same freeze without a slate. The
-candidate continues slate PTS/DTS/PCR and per-PID counters from the channel's
-Redis buffer, including elapsed time and switch discontinuity flags. However,
-the installed input profile remuxes without `-copyts`, resetting those source
-timestamps and counters before they reach viewers. Changing the whole channel's
-clock or input profile is outside this candidate's slate-only fix. The
-loopback-only Django route uses the existing web server.
+reduces that risk. Individual crests come from the same SportsDB provider and
+download/cache helpers as matchup posters, retain available transparency, and
+fit inside the circle with padding. Initials fallbacks log the missing-logo reason.
+The loopback-only Django route uses the existing web server.
+
+Jellyfin may need a re-tune when the game goes live, the same as any Dispatcharr failover.
 
 ## Why I built this
 

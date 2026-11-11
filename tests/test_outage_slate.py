@@ -121,7 +121,7 @@ def scenario_fair_scheduler_visits_later_channels(env):
     redis.exists.return_value=False
     redis.zscore.side_effect=lambda key,pk:scores.get(pk)
     redis.zadd.side_effect=lambda key,values:scores.update(values)
-    def reconcile(plugin,ch,game,now):
+    def reconcile(plugin,ch,game,now,settings=None):
         seen.append(ch.pk);clock[0]+=24;return 'live'
     utils=ModuleType('core.utils');utils.RedisClient=SimpleNamespace(get_client=lambda:redis)
     with patch.dict(sys.modules,{'core.utils':utils}),patch.object(slate,'reconcile',side_effect=reconcile),patch.object(slate,'active_stream',side_effect=lambda ch: {'stream_id':'active'} if ch.pk == first_id else None),patch.object(slate.time,'monotonic',side_effect=lambda:clock[0]),patch.object(slate.time,'time',side_effect=lambda:clock[0]),patch.object(slate,'cache_dir',return_value=__import__('pathlib').Path('/does-not-exist-w323')):

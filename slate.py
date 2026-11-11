@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import select
@@ -116,26 +117,23 @@ def _draw_card(spec, destination):
         draw.text((x, y), value, font=font, fill=fill, anchor='mm')
     draw.rounded_rectangle((96, 90, 1824, 990), radius=44, outline='#33465f', width=2)
     text((spec.get('league') or 'RANKED MATCHUPS').upper(), 960, 165, 28, '#91aacb', 1600)
-    composite = None
-    try:
-        with Image.open(spec['composite']) as source:
-            # game-thumbs style 1 (the plugin's existing cached PNG contract)
-            # places away/home crests at 20%/80% with the league at the centre.
-            composite = source.convert('RGBA')
-    except (OSError, ValueError, KeyError):
-        pass
-    for name, x, fraction in ((spec['away'], 535, 0.2), (spec['home'], 1385, 0.8)):
+    for side, name, x in (('away', spec['away'], 535), ('home', spec['home'], 1385)):
         box = (x - 165, 285, x + 165, 615)
         draw.ellipse(box, fill='#1e3049', outline='#456180', width=3)
         crop = None
-        if composite:
-            w, h = composite.size
-            crop = composite.crop((int(w * (fraction - .15)), int(h * .12),
-                                   int(w * (fraction + .15)), int(h * .88)))
-            if not crop.getchannel('A').getbbox():
-                crop = None
+        try:
+            with Image.open((spec.get('logos') or {}).get(side) or '') as source:
+                crop = source.convert('RGBA')
+                bounds = crop.getchannel('A').getbbox()
+                crop = crop.crop(bounds) if bounds else None
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
         if crop is not None:
-            crop = ImageOps.contain(crop, (300, 300))
+            # The bounding-box diagonal fits a 280px circle, leaving 25px
+            # padding inside the 330px badge even for square/tall crests.
+            ratio = 280 / math.hypot(crop.width, crop.height)
+            crop = ImageOps.contain(crop, (max(1, round(crop.width * ratio)),
+                                         max(1, round(crop.height * ratio))))
             image.paste(crop, (x - crop.width // 2, 450 - crop.height // 2), crop)
         else:
             initials = ''.join(part[0] for part in name.split() if part)[:3].upper() or '?'
@@ -173,20 +171,38 @@ def media_format(streams):
             'width': width // 2 * 2, 'height': height // 2 * 2}
 
 
-def render(game, now, streams=(), channel_id=None):
-    from . import logos, gamethumbs, plugin
+def artwork_spec(game, now, streams=(), settings=None):
+    """The production card specification, also used by artwork proof tools."""
+    from . import logos, plugin
+    settings = settings or {}
     _, status = caption(game, now)
-    composite = Path(logos.LOGO_DIR) / logos.marker_to_filename(
-        plugin._build_marker_key(game), gamethumbs.FILE_EXT)
-    spec = {'card_version': 2, 'home': game.get('home', ''), 'away': game.get('away', ''),
+    badges, reasons = {}, {}
+    key = plugin._resolve_key(settings, 'sportsdb_api_key', plugin.SPORTSDB_KEY_PATH) or plugin.SPORTSDB_DEFAULT_KEY
+    for side in ('away', 'home'):
+        if settings.get('enable_matchup_logos', True):
+            badges[side], reasons[side] = logos.cached_team_badge(
+                game.get(side, ''), game.get('sport_prefix', ''), str(cache_dir() / 'team-logos'), key)
+        else:
+            badges[side], reasons[side] = None, 'matchup logos disabled'
+    return {'card_version': 3, 'home': game.get('home', ''), 'away': game.get('away', ''),
             'league': game.get('sport_label') or game.get('sport_prefix', ''),
-            'status': status, 'composite': str(composite), 'media': media_format(streams)}
+            'status': status, 'logos': badges, 'logo_reasons': reasons, 'media': media_format(streams)}
+
+
+def render(game, now, streams=(), settings=None):
+    from . import plugin
+    spec = artwork_spec(game, now, streams, settings)
     # The cache changes only for the matchup or status, never on a monitor tick.
-    digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+    digest = hashlib.sha256(json.dumps({k:v for k,v in spec.items()
+        if k != 'logo_reasons'}, sort_keys=True).encode()).hexdigest()
     root = cache_dir()
     root.mkdir(parents=True, exist_ok=True)
     target = root / f'{digest}.mp4'
     if not target.exists():
+        for side, path in spec['logos'].items():
+            if not path:
+                logger.info('[ranked_matchups] slate initials for %s: %s',
+                            spec[side], spec['logo_reasons'][side])
         with tempfile.TemporaryDirectory(dir=root) as directory:
             work = Path(directory)
             (work / 'spec.json').write_text(json.dumps(spec), encoding='utf-8')
@@ -209,34 +225,15 @@ def render(game, now, streams=(), channel_id=None):
                 raise RuntimeError('Slate video rendering failed')
             os.replace(work / 'clip.mp4', target)
     end = plugin._game_end_utc(game)
-    channel = f'?channel={channel_id}' if channel_id else ''
-    return f'http://127.0.0.1:5656/{ROUTE}/{int(end.timestamp())}/{digest}.ts{channel}'
+    return f'http://127.0.0.1:5656/{ROUTE}/{int(end.timestamp())}/{digest}.ts'
 
 
-def _channel_clock(channel_id):
-    from .slate_clock import snapshot
-    if not channel_id:
-        return snapshot([], time.time())
-    from core.utils import RedisClient
-    from apps.proxy.live_proxy.redis_keys import RedisKeys
-    redis = RedisClient.get_buffer()
-    index = int(redis.get(RedisKeys.buffer_index(channel_id)) or 0)
-    # Bounded tail read, after Dispatcharr closes/flushed the previous input.
-    # Include older chunks for sparsely repeated PSI/PES clocks and PID counters.
-    indices = list(range(max(1, index - 2), index + 1))
-    chunks = redis.mget([RedisKeys.buffer_chunk(channel_id, i) for i in indices]) if indices else []
-    received = redis.zscore(RedisKeys.chunk_timestamps(channel_id), str(index))
-    return snapshot([chunk for chunk in chunks if chunk], received or time.time())
-
-
-def packets(clip, until, channel_id=None):
+def packets(clip, until):
     """A request-scoped remux; MP4 looping keeps timestamps advancing at 1x.
 
     Looping a short TS with ffmpeg -re slows below real time at every wrap,
     which makes Dispatcharr declare a healthy slate to be buffering.
     """
-    from .slate_clock import Clock
-    clock = Clock(_channel_clock(channel_id))
     code, info = _run(['ffprobe', '-v', 'error', '-show_entries',
         'stream=codec_type,codec_name,sample_rate,avg_frame_rate', '-of', 'json', str(clip)], 5)
     if code:
@@ -256,23 +253,16 @@ def packets(clip, until, channel_id=None):
         '-re', '-stream_loop', '-1', '-i', str(clip), '-c', 'copy',
         '-bsf:v', f'setts=pts={video_clock}:dts={video_clock}',
         '-bsf:a', f'setts=pts={audio_clock}:dts={audio_clock}',
-        '-mpegts_flags', '+resend_headers+initial_discontinuity',
-        '-mpegts_copyts', '1', '-muxdelay', '0', '-muxpreload', '0',
-        '-flush_packets', '1', '-f', 'mpegts', 'pipe:1'], write_fd)
+        '-mpegts_flags', '+resend_headers+initial_discontinuity', '-flush_packets', '1', '-f', 'mpegts', 'pipe:1'], write_fd)
     os.close(write_fd)
     try:
-        pending = bytearray()
         while time.time() < until:
             if not select.select([read_fd], [], [], 10)[0]:
                 break
             data = os.read(read_fd, 188 * 7)
             if not data:
                 break
-            pending.extend(data)
-            size = len(pending) // 188 * 188
-            if size:
-                yield clock.rewrite(pending[:size])
-                del pending[:size]
+            yield data
     finally:
         child.close()
         os.close(read_fd)
@@ -291,14 +281,7 @@ def view(request, until, digest):
     clip = cache_dir() / f'{digest}.mp4'
     if not clip.is_file() or until <= time.time():
         return HttpResponse(status=404)
-    channel_id = request.GET.get('channel')
-    if channel_id:
-        from uuid import UUID
-        try:
-            channel_id = str(UUID(channel_id))
-        except ValueError:
-            return HttpResponse(status=404)
-    response = StreamingHttpResponse(packets(clip, until, channel_id), content_type='video/mp2t')
+    response = StreamingHttpResponse(packets(clip, until), content_type='video/mp2t')
     response['Cache-Control'] = 'no-store'
     response['X-Accel-Buffering'] = 'no'
     return response
@@ -386,7 +369,7 @@ def _recent_real_data(channel, active, real_ids):
         return False
 
 
-def reconcile(plugin, channel, game, now):
+def reconcile(plugin, channel, game, now, settings=None):
     from apps.channels.models import Channel, ChannelStream, Stream
     from apps.m3u.models import M3UAccount, CUSTOM_M3U_ACCOUNT_NAME
     from django.db import transaction
@@ -430,7 +413,7 @@ def reconcile(plugin, channel, game, now):
         return 'live'
     if unknown:
         return 'unknown'
-    url = render(game, now, real, channel_id=_key(channel))
+    url = render(game, now, real, settings=settings)
     with transaction.atomic():
         # Serialize with apply/reap, and discard a probe if apply changed the
         # provider membership while it ran. No Channel.save(), no EPG signals.
@@ -488,7 +471,7 @@ def check(plugin, settings, scheduled=False):
             cooldown = f'ranked_matchups:slate:checked:{channel.pk}'
             if scheduled and redis.exists(cooldown):
                 continue
-            result = reconcile(plugin, channel, games[channel.tvg_id], datetime.now(timezone.utc))
+            result = reconcile(plugin, channel, games[channel.tvg_id], datetime.now(timezone.utc), settings)
             counts[result] = counts.get(result, 0) + 1
             redis.setex(cooldown, INTERVAL if active_stream(channel) else 60, '1')
             redis.zadd(checked, {str(channel.pk): time.time()})

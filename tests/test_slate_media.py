@@ -11,23 +11,28 @@ from dispatcharr_ranked_matchups import slate,logos
 
 
 def test_cached_crests_and_independent_missing_logo(tmp_path):
-    composite=Image.new('RGBA',(995,346))
-    ImageDraw.Draw(composite).rectangle((130,90,270,250),fill='red')
-    path=tmp_path/'crests.png';composite.save(path)
+    badge=Image.new('RGBA',(500,500))
+    ImageDraw.Draw(badge).rectangle((50,50,450,450),fill='red')
+    path=tmp_path/'crest.png';badge.save(path)
     card=tmp_path/'card.png'
     slate._draw_card({'home':'NC State','away':'Wake Forest','league':'NCAA Basketball',
-        'status':'Live at 7:00 PM ET','composite':str(path)},card)
+        'status':'Live at 7:00 PM ET','logos':{'away':str(path),'home':None}},card)
     with Image.open(card) as image:
         assert image.size==(1920,1080)
         away=image.crop((400,310,670,590));home=image.crop((1250,310,1520,590))
         assert sum(r>200 and g<60 for r,g,b in away.getdata())>1000
         assert sum(r>200 and g>200 and b>200 for r,g,b in home.getdata())>1000
+        # Even a square crest's corners stay inside the padded badge circle.
+        red=[(x,y) for y in range(285,616) for x in range(370,701)
+             if image.getpixel((x,y))==(255,0,0)]
+        assert max((x-535)**2+(y-450)**2 for x,y in red) <= 141**2
 
 
 @pytest.mark.skipif(not shutil.which('ffmpeg'),reason='media integration needs ffmpeg')
 def test_loop_clocks_headers_and_cache(tmp_path,monkeypatch,plugin):
     monkeypatch.setattr(slate,'cache_dir',lambda:tmp_path/'slates')
     monkeypatch.setattr(logos,'LOGO_DIR',str(tmp_path))
+    monkeypatch.setattr(logos,'cached_team_badge',lambda *a:(None,'test missing badge'))
     now=datetime.now(timezone.utc)
     game={'home':'NC State','away':'Wake Forest','sport_prefix':'CBB',
           'start_time_utc':(now+timedelta(minutes=40)).isoformat(),'extra':{'cbb_id':'w323'}}
