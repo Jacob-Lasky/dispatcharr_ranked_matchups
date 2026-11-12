@@ -9,9 +9,7 @@ name: Auto-Document PR
 # and only then commits and pushes. A non-markdown change aborts the job
 # before anything is pushed. Claude never holds push credentials, so the
 # forgeable-author / force-push / --output=file escape hatches a git-capable
-# agent would have are structurally absent. The same step refuses a pass that
-# removes markdown the PR itself added (.github/scripts/keep-pr-docs.sh, #247):
-# the prompt asks for that, and on PR #246 the model deleted it anyway.
+# agent would have are structurally absent.
 #
 # The push uses the job's GITHUB_TOKEN. That prevents a self-retrigger LOOP,
 # and it does not prevent a run being CREATED. Measured on PR #48, 2026-09-03:
@@ -31,7 +29,7 @@ name: Auto-Document PR
 # not on every push. To refresh docs after later pushes, use "Re-run jobs":
 # checkout is by branch name, so a re-run diffs the CURRENT branch tip.
 #
-# Actions are pinned to reviewed commit SHAs (claude-code-action v1.0.248,
+# Actions are pinned to reviewed commit SHAs (claude-code-action v1.0.235,
 # checkout v7.0.1) because a moving tag is incompatible with a hard boundary.
 # DO NOT swap either SHA for a tag (`@v1`, `@v7`, `@main`): the boundary below
 # is only as strong as the exact code that was reviewed, and an upstream owner
@@ -85,7 +83,7 @@ jobs:
           wc -c "$RUNNER_TEMP/pr.diff"
 
       - name: Update documentation with Claude
-        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790 # v1.0.235
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
@@ -106,25 +104,45 @@ jobs:
             - Keep edits surgical: update what the diff made stale, add what it
               made necessary. Do not rewrite unrelated sections or restructure
               documents.
+            - Do not copy text the code already prints for its user (help
+              text, error or refusal messages) into a doc; point to the
+              behavior instead. Still document what a reader needs BEFORE
+              meeting that text: preconditions, required flags, recovery.
+            - Some files carry a size budget a test enforces: Grep the tests
+              for "budget" and for the file's name before growing a file.
+              Never leave such a file over its budget. If a needed addition
+              does not fit, leave it out rather than cut unrelated guidance
+              to make room.
             - If the documentation is already accurate, change nothing and say so.
+          # DO NOT change --model to a moving alias (opus, opus[1m]). CI wants
+          # a hard pin so a docs run is reproducible and cannot change model
+          # under a rerun. The cost is that it must be bumped BY HAND each
+          # release; that is the accepted trade, not an oversight.
+          #
+          # THE PIN IS COUPLED TO THE ACTION SHA ABOVE. claude-code-action
+          # hard-pins the Claude Code CLI it installs (CLAUDE_CODE_VERSION in
+          # its base-action/action.yml), and a model id the CLI predates is
+          # rejected at runtime with HTTP 400. Measured 2026-09-28:
+          #   v1.0.199 -> CLI 2.1.239   v1.0.216 -> CLI 2.1.261
+          #   v1.0.232 -> CLI 2.1.280   v1.0.235 -> CLI 2.1.283
+          # claude-opus-5-5 needs CLI 2.1.280 or newer, so v1.0.216 would have
+          # failed every run. Bump BOTH together, and check the action tag's
+          # bundled CLI is new enough for the model before changing either.
+          # Read a tag's CLI with:
+          #   git show <tag>:base-action/action.yml | grep CLAUDE_CODE_VERSION
+          # in a clone of anthropics/claude-code-action.
+          #
+          # A repo can ENFORCE this instead of trusting the comment; pocket-dev
+          # does, in mobile/test/server/docsWorkflowModel.test.js. Copy that
+          # test into any repo with a JS test runner and the coupling stops
+          # being something a future editor has to remember.
           claude_args: >-
             --model claude-opus-5-5
             --allowedTools "Read,Glob,Grep,Edit(**/*.md),Write(**/*.md)"
             --disallowedTools "Bash"
 
-      # claude-code-action restores CLAUDE.md and other config from the BASE branch before the
-      # model runs and leaves them that way (PR #338: keep-pr-docs.sh then refused every PR that
-      # adds CLAUDE.md lines). The script puts the PR's copies back, merges the model's markdown
-      # edits onto them, and fails on a model change to protected non-markdown. Its header has the
-      # rules. DO NOT move this step before the Claude step.
-      - name: Put back the PR's copies of the paths the action restored from base
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
-        run: bash .github/scripts/restore-pr-config.sh "$BASE_REF"
-
       - name: Validate markdown-only changes, then commit and push
         env:
-          BASE_REF: ${{ github.event.pull_request.base.ref }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
           START_SHA: ${{ steps.prep.outputs.start_sha }}
           PR_NUM: ${{ github.event.pull_request.number }}
@@ -152,7 +170,6 @@ jobs:
             echo "Documentation already accurate; nothing to commit."
             exit 0
           fi
-          bash .github/scripts/keep-pr-docs.sh "origin/$BASE_REF"
           git add -A
           git diff --cached --name-only -z | validate
           git config user.name "claude-docs"
