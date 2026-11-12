@@ -3,4 +3,4 @@
 from .plugin import Plugin
 
 __all__ = ["Plugin"]
-__version__ = "1.38.1"
+__version__ = "1.38.2"

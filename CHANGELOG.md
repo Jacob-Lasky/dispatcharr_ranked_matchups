@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.38.2
+
+- Skip outage probes during M3U fetch/parse and re-check channel/stream rows
+  immediately before Dispatcharr's switch lookup, avoiding missing-row errors.
+- Log expected college quota holds once as a warning without a traceback,
+  while keeping cached rankings or previous games.
+- Fetch weekly college polls at most daily and persist a shared 750-attempt
+  monthly ceiling, counting failures too. A month of two-hourly refreshes
+  measures 498 calls against the shared 1,000-call free tier.
+
 ## 1.38.1
 
 - Stop plugin DVR recordings when ESPN confirms their exact fixture is final,

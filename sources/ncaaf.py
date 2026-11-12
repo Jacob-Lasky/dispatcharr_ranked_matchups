@@ -32,8 +32,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._college_data import POLL_STANDS_IN, get_answer, get_json, line_objects, require_rows
-from .base import GameRow, RankingsUnavailable, SeasonUnavailable
+from ._college_data import CollegeQuotaUnavailable, POLL_STANDS_IN, get_answer, get_json, line_objects, require_rows
+from .base import GameRow, RankingsUnavailable, SeasonUnavailable, warn_quota
 from .points_based import PointsBasedSportSource
 from .._util import parse_iso_utc
 
@@ -247,6 +247,8 @@ class NcaafSource(PointsBasedSportSource):
                 CFBD_BASE, "/rankings", {"year": year}, self.api_key, timeout=15,
                 log_tag="ncaaf", stale_for=POLL_STANDS_IN, check=self._poll_from,
             )
+        except CollegeQuotaUnavailable:
+            raise
         except Exception as e:
             logger.error(
                 "[ncaaf] /rankings request failed (%s); NCAAF's previous games "
@@ -327,6 +329,8 @@ class NcaafSource(PointsBasedSportSource):
                 CFBD_BASE, "/games", {"year": year, "seasonType": "regular"}, self.api_key,
                 timeout=60, log_tag="ncaaf", check=require_rows,
             )
+        except CollegeQuotaUnavailable:
+            raise
         except Exception as e:
             logger.error("[ncaaf] /games failed: %s", e)
             # DO NOT cache a failure: a transient error must not freeze an
@@ -434,6 +438,9 @@ class NcaafSource(PointsBasedSportSource):
                 CFBD_BASE, "/lines", {"year": year, "seasonType": "regular"},
                 self.api_key, timeout=30, log_tag="ncaaf", check=require_rows,
             )
+        except CollegeQuotaUnavailable as e:
+            warn_quota(logger, "[ncaaf] /lines failed: %s", e)
+            return {}
         except Exception as e:
             logger.warning("[ncaaf] /lines failed: %s", e)
             return {}

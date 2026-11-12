@@ -30,8 +30,8 @@ import logging
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from ._college_data import POLL_STANDS_IN, get_answer, get_json, line_objects, require_rows
-from .base import GameRow, RankingsUnavailable, SeasonUnavailable, report_lost_day_range
+from ._college_data import CollegeQuotaUnavailable, POLL_STANDS_IN, get_answer, get_json, line_objects, require_rows
+from .base import GameRow, RankingsUnavailable, SeasonUnavailable, report_lost_day_range, warn_quota
 from .points_based import PointsBasedSportSource
 from ._espn import upcoming_window
 from .._util import parse_iso_utc
@@ -238,6 +238,8 @@ class NcaamSource(PointsBasedSportSource):
                 CBB_BASE, "/rankings", {"season": season}, self.api_key, timeout=15,
                 log_tag="ncaam", stale_for=POLL_STANDS_IN, check=self._poll_from,
             )
+        except CollegeQuotaUnavailable:
+            raise
         except Exception as e:
             logger.error("[ncaam] /rankings failed: %s", e)
             raise RankingsUnavailable(f"/rankings failed: {e}") from e
@@ -289,6 +291,8 @@ class NcaamSource(PointsBasedSportSource):
                 CBB_BASE, "/games", _date_range(start, end), self.api_key, timeout=30,
                 log_tag="ncaam", check=require_rows,
             )
+        except CollegeQuotaUnavailable:
+            raise
         except Exception as e:
             logger.error("[ncaam] /games failed: %s", e)
             return None
@@ -301,6 +305,9 @@ class NcaamSource(PointsBasedSportSource):
                 CBB_BASE, "/lines", _date_range(start, end), self.api_key, timeout=30,
                 log_tag="ncaam", check=require_rows,
             )
+        except CollegeQuotaUnavailable as e:
+            warn_quota(logger, "[ncaam] /lines failed: %s", e)
+            return {}
         except Exception as e:
             logger.warning("[ncaam] /lines failed: %s", e)
             return {}
@@ -432,6 +439,8 @@ class NcaamSource(PointsBasedSportSource):
                     CBB_BASE, "/games", _date_range(start, end), self.api_key, timeout=30,
                     log_tag="ncaam", check=require_rows,
                 )
+            except CollegeQuotaUnavailable:
+                raise
             except Exception as e:
                 logger.warning("[ncaam] full-season chunk %s..%s failed: %s",
                                start.date(), end.date(), e)

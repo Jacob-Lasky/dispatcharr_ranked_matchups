@@ -94,6 +94,32 @@ class RankingsUnavailable(FeedUnavailable):
     `fetch_upcoming` so the refresh holds the source's previous games."""
 
 
+class QuotaUnavailable(RankingsUnavailable):
+    """Expected provider budget hold; preserve through season fallback too."""
+
+
+_quota_warnings: ContextVar[Optional[List[str]]] = ContextVar('quota_warnings', default=None)
+
+
+@contextmanager
+def recording_quota_warnings() -> Iterator[List[str]]:
+    """Collect quota fallbacks for one refresh source, avoiding layered warnings."""
+    messages: List[str] = []
+    token = _quota_warnings.set(messages)
+    try:
+        yield messages
+    finally:
+        _quota_warnings.reset(token)
+
+
+def warn_quota(log: Any, message: str, *args: Any) -> None:
+    messages = _quota_warnings.get()
+    if messages is None:
+        log.warning(message, *args)
+    else:
+        messages.append(message % args if args else message)
+
+
 class SeasonUnavailable(FeedUnavailable):
     """A points-based source's full-season list could not be fetched whole
     (#289): raised out of `_fetch_full_season_games`, where

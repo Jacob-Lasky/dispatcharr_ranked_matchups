@@ -180,9 +180,16 @@ def test_probe_owns_pool_slot_without_creating_a_preview(monkeypatch):
     utils=ModuleType('core.utils');utils.RedisClient=SimpleNamespace(get_client=lambda:redis)
     urls=ModuleType('apps.proxy.live_proxy.url_utils')
     urls.get_stream_info_for_switch=Mock(return_value={'url':'http://127.0.0.1/test','user_agent':'test'})
+    models=ModuleType('apps.channels.models')
+    models.Channel=Mock();models.Channel.objects.filter.return_value.exists.return_value=True
+    models.Stream=Mock();models.Stream.objects.filter.return_value.exists.return_value=True
+    accounts=ModuleType('apps.m3u.models');accounts.M3UAccount=Mock()
+    accounts.M3UAccount.objects.filter.return_value.exists.return_value=False
+    monkeypatch.setitem(sys.modules,'apps.channels.models',models)
+    monkeypatch.setitem(sys.modules,'apps.m3u.models',accounts)
     for name,module in [('apps.m3u.connection_pool',pool),('core.utils',utils),('apps.proxy.live_proxy.url_utils',urls)]:monkeypatch.setitem(sys.modules,name,module)
     profiles=Mock();profiles.filter.return_value.order_by.return_value=[profile]
-    stream=SimpleNamespace(pk=3,m3u_account=SimpleNamespace(profiles=profiles))
+    stream=SimpleNamespace(pk=3,m3u_account_id=4,m3u_account=SimpleNamespace(profiles=profiles))
     # No get_stream/release_stream methods: touching a preview is a hard failure.
     monkeypatch.setattr(slate,'_run',lambda *a,**k:(0,b'x'*256))
     assert slate.probe(SimpleNamespace(uuid='test-channel'),stream) is True
@@ -195,3 +202,54 @@ def test_probe_owns_pool_slot_without_creating_a_preview(monkeypatch):
     monkeypatch.setattr(slate,'_run',lambda *a,**k:(_ for _ in ()).throw(TimeoutError()))
     assert slate.probe(SimpleNamespace(uuid='test-channel'),stream) is False
     pool.release_profile_slot.assert_called_once_with(21,redis)
+
+
+@pytest.mark.parametrize('missing', ['Stream', 'Channel', 'refresh'])
+def test_probe_rechecks_rows_after_reserving_a_slot(monkeypatch, caplog, missing):
+    """A refresh deletes a row AFTER the scheduler captured it / reserved a slot.
+
+    Dispatcharr's lookup logs an ERROR before returning an error dict; merely
+    catching its result cannot keep the sentinel quiet.
+    """
+    import logging
+    import sys
+    from types import ModuleType, SimpleNamespace
+    from unittest.mock import Mock
+    from dispatcharr_ranked_matchups import slate
+
+    models = ModuleType('apps.channels.models')
+    for name in ('Channel', 'Stream'):
+        setattr(models, name, Mock())
+        getattr(models, name).objects.filter.return_value.exists.return_value = True
+    accounts = ModuleType('apps.m3u.models')
+    accounts.M3UAccount = Mock()
+    accounts.M3UAccount.objects.filter.return_value.exists.return_value = False
+    pool = ModuleType('apps.m3u.connection_pool')
+    def reserve(*args):
+        if missing == 'refresh':
+            accounts.M3UAccount.objects.filter.return_value.exists.return_value = True
+        else:
+            getattr(models, missing).objects.filter.return_value.exists.return_value = False
+        return True, 1, None
+    pool.reserve_profile_slot = reserve
+    pool.release_profile_slot = Mock()
+    urls = ModuleType('apps.proxy.live_proxy.url_utils')
+    def lookup(*args):
+        logging.getLogger('live_proxy.url_utils').error('No row matches the given query.')
+        return {'error': 'No row matches the given query.'}
+    urls.get_stream_info_for_switch = Mock(side_effect=lookup)
+    utils = ModuleType('core.utils')
+    utils.RedisClient = SimpleNamespace(get_client=lambda: 'redis')
+    for name, module in [('apps.channels.models', models), ('apps.m3u.models', accounts),
+                         ('apps.m3u.connection_pool', pool), ('core.utils', utils),
+                         ('apps.proxy.live_proxy.url_utils', urls)]:
+        monkeypatch.setitem(sys.modules, name, module)
+    profiles = Mock()
+    profiles.filter.return_value.order_by.return_value = [SimpleNamespace(pk=21)]
+    stream = SimpleNamespace(pk=3, m3u_account_id=4, m3u_account=SimpleNamespace(profiles=profiles))
+    with caplog.at_level(logging.DEBUG):
+        assert slate.probe(SimpleNamespace(uuid='gone-channel'), stream) is None
+    urls.get_stream_info_for_switch.assert_not_called()
+    pool.release_profile_slot.assert_called_once_with(21, 'redis')
+    assert not any(r.levelno >= logging.WARNING for r in caplog.records)
+    assert 'skipping probe' in caplog.text

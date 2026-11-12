@@ -331,6 +331,8 @@ def probe(channel, stream):
     from apps.proxy.live_proxy.url_utils import get_stream_info_for_switch
     from apps.m3u.connection_pool import reserve_profile_slot, release_profile_slot
     from core.utils import RedisClient
+    from apps.channels.models import Channel, Stream
+    from apps.m3u.models import M3UAccount
     if not stream.m3u_account:
         return False
     redis = RedisClient.get_client()
@@ -342,6 +344,15 @@ def probe(channel, stream):
     # preview key would let a concurrent preview reuse it and lose its slot
     # when the probe finishes. No preview/channel assignments are touched.
     try:
+        # The scheduler's objects can outlive an M3U refresh. Dispatcharr's
+        # switch lookup logs ERROR before returning its missing-row result;
+        # check fresh querysets after reserving, immediately before that call.
+        if (M3UAccount.objects.filter(pk=stream.m3u_account_id,
+                                     status__in=('fetching', 'parsing')).exists()
+                or not Channel.objects.filter(uuid=channel.uuid).exists()
+                or not Stream.objects.filter(pk=stream.pk).exists()):
+            logger.debug('skipping probe: channel/stream removed or M3U refresh in progress')
+            return None
         info = get_stream_info_for_switch(_key(channel), stream.pk, profile.pk)
         if 'error' in info:
             return None

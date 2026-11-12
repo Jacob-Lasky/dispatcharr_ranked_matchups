@@ -201,12 +201,18 @@ def test_ncaam_a_read_under_another_poll_does_not_stand_in(monkeypatch, store):
     stub_requests_get(monkeypatch, get)
     monkeypatch.setattr(ncaam.NcaamSource, "_current_season_year", staticmethod(lambda: 2026))
     ncaam.NcaamSource(api_key="k")._fetch_games_cached()
+    college = importlib.import_module(f"{PKG}._college_data")
+    poll_path = college._path(college._question(ncaam.CBB_BASE, "/rankings", {"season": 2026}))
+    # Exercise a changed poll independently of its daily cache TTL, while the
+    # original season is still inside the 36-hour fallback window.
+    os.unlink(poll_path)
     state.update(poll=["Duke", "Kansas"], games_ok=False)
     store.clock["now"] = T0 + LATER_THAN_COLLEGE_CACHE
     later = ncaam.NcaamSource(api_key="k")
     assert later._fetch_games_cached() == []
     assert later.season_fallback() is None
     state["poll"] = ["Duke"]
+    os.unlink(poll_path)
     store.clock["now"] += LATER_THAN_COLLEGE_CACHE   # a refresh that asks for the poll again
     same_poll = ncaam.NcaamSource(api_key="k")
     same_poll._fetch_games_cached()

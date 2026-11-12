@@ -12,14 +12,20 @@ since November 1.
 The budget now. Nine questions, whatever the lookahead: NCAAF /rankings, the season's /games
 and the season's /lines (ONE question, not one per week: a 90-day lookahead once asked eleven);
 NCAAM /rankings, the window's /games and /lines, and three season /games chunks. Each answer is
-kept for FRESH_FOR, so a question is asked at most twice a day, three times on the day the NCAAM
-window moves: about 20 calls a day, ~620 in a 31-day month, under the pool with headroom.
+kept for FRESH_FOR (12 h), while weekly polls are kept for POLL_FRESH_FOR (24 h).
+A month of two-hourly refreshes with a moving 90-day window measures 498 calls.
+Every outbound attempt, successful or not, is also reserved on disk against a
+750-attempt monthly ceiling shared by both APIs through the key. This leaves
+250 calls of the 1,000-call pool untouched even with failures or parameter churn.
 
 So, per question (API, path and parameters):
 
-- The answer is kept on disk for FRESH_FOR and served from there without a request.
+- The answer is kept on disk for FRESH_FOR (polls: POLL_FRESH_FOR) and served
+  from there without a request. The transport performs no automatic retries.
 - On the exact `Monthly call quota exceeded.` 429, no request is made with that key until the
-  pool resets (the 1st of the next month, 00:00 UTC), logged plainly once. Each key has its own
+  pool resets (the 1st of the next month, 00:00 UTC). Quota holds log one warning
+  without a traceback: here when a kept poll stands in, or in refresh when
+  previous games are held. Each key has its own
   wait: a new key is not held by the old one's, and the old one's is not cleared by the new
   one's answers.
 - A failed or refused request raises `CollegeDataUnavailable`, and the caller's existing failure
@@ -34,8 +40,8 @@ So, per question (API, path and parameters):
 - `get_answer` returns when the answer was fetched, so a caller that keeps a derived copy (the
   season store) dates it by the data, not by the refresh that read it from here.
 
-DO NOT shorten FRESH_FOR, add a question per refresh (or per week, day or team), or drop the
-quota wait without redoing the budget above: each one multiplies the month's calls.
+DO NOT shorten either freshness interval, add a question per refresh (or per week, day or team),
+or drop the quota wait/attempt ceiling without redoing the budget: each multiplies calls.
 """
 from __future__ import annotations
 
@@ -53,6 +59,7 @@ import requests
 from .._http import get_within_deadline
 from .. import storage
 from .._util import key_id, parse_iso_utc, write_json_atomic
+from .base import QuotaUnavailable, warn_quota
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.college_data")
 
@@ -61,6 +68,10 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.college_data")
 CACHE_DIR = storage.path("college_cache")
 
 FRESH_FOR = timedelta(hours=12)
+POLL_FRESH_FOR = timedelta(days=1)
+# Both APIs share the free tier. Count ATTEMPTS, including failures, before
+# sending: parameter churn and repeated bad answers must not burn the pool.
+MONTHLY_ATTEMPTS = 750
 # How old a kept poll may be and still stand in for a failed /rankings. A poll is published
 # weekly, so last week's is the current one until the next arrives: a little over a week.
 POLL_STANDS_IN = timedelta(days=8)
@@ -75,6 +86,10 @@ _VERSION = 1
 class CollegeDataUnavailable(RuntimeError):
     """No answer: the request failed or was refused, or the month's pool is used up, and no
     kept answer is recent enough to stand in. The message never carries the key."""
+
+
+class CollegeQuotaUnavailable(CollegeDataUnavailable, QuotaUnavailable):
+    """Expected quota hold, logged once by the refresh that holds prior games."""
 
 
 class Answer(NamedTuple):
@@ -124,13 +139,16 @@ def _read(path: str, compressed: bool) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
-def _write(path: str, data: Dict[str, Any], compressed: bool) -> None:
-    """Never raises: an answer that cannot be kept is logged and the refresh goes on."""
+def _write(path: str, data: Dict[str, Any], compressed: bool) -> bool:
+    """Return whether state was saved; never raise. Budget writes must succeed
+    before sending a request; an answer that cannot be kept is still usable."""
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         write_json_atomic(path, data, compress=compressed, separators=(",", ":"))
+        return True
     except (OSError, TypeError, ValueError) as e:
         logger.warning("[college_data] could not write %s: %s", path, e)
+        return False
 
 
 def _kept(question: str, now: datetime) -> Optional[Answer]:
@@ -194,6 +212,27 @@ def _prune() -> None:
                 pass
 
 
+def _reserve_attempt(now: datetime, kid: str) -> Optional[str]:
+    """The pipeline run lock provides one writer across workers/subprocesses.
+
+    Persist before sending, so a timeout/crash still spends its attempt. A
+    failed write refuses the request rather than bypassing the monthly bound.
+    """
+    data = _read(_quota_path(), compressed=False) or {}
+    usage = data.get('usage', {})
+    month = now.strftime('%Y-%m')
+    current = usage.get(kid, {})
+    attempts = current.get('attempts', 0) if current.get('month') == month else 0
+    if attempts >= MONTHLY_ATTEMPTS:
+        return (f"local {MONTHLY_ATTEMPTS}-attempt monthly budget used up until "
+                f"{_next_reset(now).isoformat()} (free tier: 1,000 calls a month shared by both APIs)")
+    usage[kid] = {'month': month, 'attempts': attempts + 1}
+    data['usage'] = usage
+    if not _write(_quota_path(), data, compressed=False):
+        raise CollegeDataUnavailable('not asked: monthly attempt counter could not be saved')
+    return None
+
+
 def _quota_refusal(r: Any) -> bool:
     if r.status_code != 429:
         return False
@@ -220,20 +259,28 @@ def get_answer(
     stale_for = min(stale_for, MAX_STALE)
     question = _question(base, path, params)
     kept = _kept(question, now)
-    if kept is not None and now - kept.fetched_at < FRESH_FOR:
+    fresh_for = POLL_FRESH_FOR if path == '/rankings' else FRESH_FOR
+    if kept is not None and now - kept.fetched_at < fresh_for:
         return kept
 
-    def stand_in(why: str) -> Answer:
+    def stand_in(why: str, *, quota: bool = False) -> Answer:
         if kept is not None and now - kept.fetched_at < stale_for:
-            logger.warning("[%s] %s %s; using the answer kept %.1f h ago", log_tag, path, why,
-                           (now - kept.fetched_at).total_seconds() / 3600)
+            emit = (lambda message, *args: warn_quota(logger, message, *args)) if quota else logger.warning
+            emit("[%s] %s %s; using the answer kept %.1f h ago", log_tag, path, why,
+                 (now - kept.fetched_at).total_seconds() / 3600)
             return kept
-        raise CollegeDataUnavailable(f"{path} {why}")
+        error = CollegeQuotaUnavailable if quota else CollegeDataUnavailable
+        raise error(f"{path} {why}")
 
     kid = key_id(api_key)
     until = _waits(now).get(kid)
     if until is not None:
-        return stand_in(f"not asked: the month's free-tier calls are used up until {until}")
+        return stand_in(f"not asked: the month's free-tier calls are used up until {until} "
+                        "(1,000 calls a month shared by both APIs)", quota=True)
+
+    refused = _reserve_attempt(now, kid)
+    if refused is not None:
+        return stand_in(refused, quota=True)
 
     try:
         r = get_within_deadline(requests, f"{base}{path}", headers={"Authorization": f"Bearer {api_key}"},
@@ -248,13 +295,8 @@ def get_answer(
             return stand_in(f"answered HTTP {r.status_code}")
         reset = _next_reset(now)
         _record_quota(now, kid, wait_until=reset)
-        logger.warning(
-            "[college_data] CollegeFootballData's free tier is 1,000 calls a month shared with "
-            "CollegeBasketballData, and this month's are used up: no college data requests with "
-            "this key until %s. Kept answers stand in meanwhile; the key itself is fine.",
-            reset.isoformat(),
-        )
-        return stand_in(f"refused: the month's free-tier calls are used up until {reset.isoformat()}")
+        return stand_in(f"refused: the month's free-tier calls are used up until {reset.isoformat()} "
+                        "(1,000 calls a month shared by both APIs)", quota=True)
     try:
         body = r.json()
     except ValueError:
