@@ -69,10 +69,10 @@ def _ask(college, now=NOW, key=KEY, path="/rankings", params=None, stale_for=Non
 
 def test_an_answer_is_kept_for_twelve_hours(college, http):
     calls, _ = http
-    assert _ask(college) == POLL
-    assert _ask(college, now=NOW + timedelta(hours=11, minutes=59)) == POLL
+    assert _ask(college, path='/games') == POLL
+    assert _ask(college, path='/games', now=NOW + timedelta(hours=11, minutes=59)) == POLL
     assert len(calls) == 1
-    _ask(college, now=NOW + timedelta(hours=12))
+    _ask(college, path='/games', now=NOW + timedelta(hours=12))
     assert len(calls) == 2
 
 
@@ -92,9 +92,10 @@ def test_the_key_goes_in_a_header_and_never_into_a_file(college, http):
 def test_the_used_up_month_stops_every_question_until_the_reset(college, http, caplog):
     calls, queue = http
     queue.append(QUOTA)
-    with pytest.raises(college.CollegeDataUnavailable, match="used up until 2026-12-01T00:00:00"):
+    with pytest.raises(college.CollegeDataUnavailable, match="used up until 2026-12-01T00:00:00") as exc:
         _ask(college)
-    assert "1,000 calls a month" in caplog.text
+    assert "1,000 calls a month" in str(exc.value)
+    assert not caplog.records  # the refresh owns the single hold warning
     for later in (NOW + timedelta(hours=1), NOW + timedelta(days=10)):
         with pytest.raises(college.CollegeDataUnavailable, match="not asked"):
             _ask(college, now=later, path="/games")
@@ -198,10 +199,10 @@ def test_a_malformed_poll_never_replaces_a_good_one(college, http, monkeypatch):
     clock = {"now": NOW}
     monkeypatch.setattr(college, "_now", lambda: clock["now"])
     assert ncaaf.NcaafSource(api_key=KEY)._fetch_rankings(2026) == {"Georgia": 1}
-    clock["now"] = NOW + timedelta(hours=13)
+    clock["now"] = NOW + timedelta(hours=25)
     queue.append(FakeResp(200, [{"week": 12, "polls": [{"poll": "AP Top 25", "ranks": None}]}]))
     assert ncaaf.NcaafSource(api_key=KEY)._fetch_rankings(2026) == {"Georgia": 1}   # the kept poll
-    clock["now"] = NOW + timedelta(hours=13, minutes=5)
+    clock["now"] = NOW + timedelta(hours=25, minutes=5)
     fixed = [{"week": 12, "polls": [{"poll": "AP Top 25", "ranks": [{"school": "Ohio State", "rank": 1}]}]}]
     queue.append(FakeResp(200, fixed))
     assert ncaaf.NcaafSource(api_key=KEY)._fetch_rankings(2026) == {"Ohio State": 1}
@@ -354,7 +355,7 @@ def test_a_month_of_refreshes_fits_the_pool(college, monkeypatch):
             src._fetch_games_cached()
     by_path = collections.Counter(u.split(".com")[0][-8:] + u.split(".com")[1] for u in calls)
     print("calls in 31 days:", len(calls), dict(by_path))
-    assert 450 <= len(calls) <= 700, (len(calls), by_path)   # all nine questions, ~560 measured
+    assert 450 <= len(calls) <= 700, (len(calls), by_path)   # all nine questions, 498 measured
 
 
 def test_no_other_module_calls_the_college_apis_directly():
@@ -371,3 +372,145 @@ def test_no_other_module_calls_the_college_apis_directly():
                         "get_within_deadline" in text or "import requests" in text):
                     offenders.append(name)
     assert offenders == []
+
+
+@pytest.mark.parametrize('sport', ['ncaaf', 'ncaam'])
+@pytest.mark.parametrize('prior', [False, True])
+def test_quota_refresh_holds_previous_games_with_one_warning(
+        college, http, monkeypatch, refresh_env, plugin, caplog, sport, prior):
+    """A monthly refusal currently logs at the source AND refresh with a traceback."""
+    import logging
+    module = importlib.import_module(f'dispatcharr_ranked_matchups.sources.{sport}')
+    cls = module.NcaafSource if sport == 'ncaaf' else module.NcaamSource
+    write, run, read = refresh_env
+    src = cls(api_key=KEY)
+    if prior:
+        from tests.test_keep_on_air import _row
+        write([_row(plugin, 'Alabama', 'Georgia', datetime.now(UTC) + timedelta(hours=2),
+                    label=src.sport_label, prefix=src.sport_prefix, cfbd_id=401, channel_id=5)])
+    calls, queue = http
+    queue.append(QUOTA)
+    for _ in range(2):  # the first 429 and the already-known quota wait
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            result = run([cls(api_key=KEY)])
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1, caplog.text
+        assert warnings[0].levelno == logging.WARNING
+        assert warnings[0].exc_info is None
+        assert 'held' in warnings[0].getMessage()
+        assert '2026-12-01' in warnings[0].getMessage()
+        assert result['status'] != 'error'
+        if prior:
+            assert [g['home'] for g in read()['games']] == ['Alabama']
+    assert len(calls) == 1
+
+
+def test_quota_kept_poll_logs_one_warning_without_traceback(college, http, caplog):
+    import logging
+    _calls, queue = http
+    _ask(college)
+    queue.append(QUOTA)
+    with caplog.at_level(logging.WARNING):
+        assert _ask(college, now=NOW + timedelta(hours=25), stale_for=college.POLL_STANDS_IN) == POLL
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, caplog.text
+    assert warnings[0].levelno == logging.WARNING and warnings[0].exc_info is None
+    assert 'using the answer kept' in warnings[0].getMessage()
+
+
+@pytest.mark.parametrize('sport', ['ncaaf', 'ncaam'])
+@pytest.mark.parametrize('cached_games', [False, True])
+def test_quota_refresh_combines_cached_poll_and_missing_feed_warnings(
+        college, http, monkeypatch, refresh_env, caplog, sport, cached_games):
+    """A kept poll and missing games/odds share the same expected quota hold."""
+    import logging
+    module = importlib.import_module(f'dispatcharr_ranked_matchups.sources.{sport}')
+    cls = module.NcaafSource if sport == 'ncaaf' else module.NcaamSource
+    clock = {'now': NOW}
+    monkeypatch.setattr(college, '_now', lambda: clock['now'])
+    src = cls(api_key=KEY)
+    calls, queue = http
+    if sport == 'ncaam':
+        queue.append(FakeResp(body=[{'pollType': 'AP Top 25', 'week': 3,
+                                    'team': 'Duke', 'ranking': 1}]))
+    src._fetch_rankings(src._season())
+    clock['now'] += timedelta(hours=25)
+    if cached_games:
+        # The real games readers take their answer from disk. Only the poll
+        # and odds need to stand in / degrade when this quota wait is active.
+        body = [{'id': 1, 'homeTeam': 'Duke', 'awayTeam': 'UNC',
+                 'homeClassification': 'fbs', 'awayClassification': 'fbs',
+                 'startDate': (datetime.now(UTC) + timedelta(hours=2)).isoformat()}]
+        queue.append(FakeResp(body=body))
+        if sport == 'ncaaf':
+            src._fetch_raw_season(src._season())
+        else:
+            window = module.upcoming_window(7)
+            src._fetch_games(window.first_day, window.last_day)
+    kid = importlib.import_module('dispatcharr_ranked_matchups._util').key_id(KEY)
+    college._record_quota(clock['now'], kid, wait_until=datetime(2026, 12, 1, tzinfo=UTC))
+    before = len(calls)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        result = refresh_env[1]([cls(api_key=KEY)])
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, caplog.text
+    assert warnings[0].levelno == logging.WARNING and warnings[0].exc_info is None
+    assert '2026-12-01' in warnings[0].getMessage()
+    assert result['status'] != 'error'
+    assert len(calls) == before
+
+
+def test_poll_is_fetched_once_a_day(college, http):
+    calls, _queue = http
+    _ask(college)
+    _ask(college, now=NOW + timedelta(hours=23, minutes=59))
+    assert len(calls) == 1
+    _ask(college, now=NOW + timedelta(days=1))
+    assert len(calls) == 2
+
+
+def test_monthly_attempt_ceiling_counts_failures_across_both_apis(college, http):
+    """Bad payloads and timeouts spend calls too, even though they are not cached."""
+    import requests
+    calls, queue = http
+    for i in range(760):
+        queue.append(requests.Timeout('deadline'))
+        with pytest.raises(college.CollegeDataUnavailable):
+            college.get_json(BASE if i % 2 else 'https://api.collegebasketballdata.com',
+                             '/games', {'question': i}, KEY, timeout=1, log_tag='t',
+                             check=college.require_rows, now=NOW)
+    assert len(calls) == 750
+    # The counter survives the next interpreter / refresh and is shared by both APIs.
+    quota = json.load(open(os.path.join(college.CACHE_DIR, 'quota.json')))
+    assert 750 in [u['attempts'] for u in quota['usage'].values()]
+    queue.clear()
+    _ask(college, now=datetime(2026, 12, 1, tzinfo=UTC), path='/games')
+    assert len(calls) == 751
+
+
+@pytest.mark.parametrize('sport', ['ncaaf', 'ncaam'])
+def test_season_read_preserves_the_expected_quota_hold(college, http, caplog, sport):
+    """A fresh poll may be cached when the season read uses the last call."""
+    module = importlib.import_module(f'dispatcharr_ranked_matchups.sources.{sport}')
+    cls = module.NcaafSource if sport == 'ncaaf' else module.NcaamSource
+    src = cls(api_key=KEY)
+    if sport == 'ncaam':
+        src._poll_memo = (src._season(), {'Duke': 1})
+    _calls, queue = http
+    queue.append(QUOTA)
+    with pytest.raises(college.CollegeQuotaUnavailable):
+        src.require_season()
+    assert not caplog.records  # the refresh will log the hold once
+
+
+def test_unexpected_source_failure_keeps_its_traceback(refresh_env, http, caplog):
+    import logging
+    from dispatcharr_ranked_matchups.sources.ncaaf import NcaafSource
+    from requests import ConnectionError
+    _calls, queue = http
+    queue.append(ConnectionError('refused'))
+    with caplog.at_level(logging.WARNING):
+        refresh_env[1]([NcaafSource(api_key=KEY)])
+    assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)

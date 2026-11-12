@@ -4233,11 +4233,14 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # sibling is indistinguishable from an empty schedule and is not caught.
     pulled_by_label: Dict[str, int] = {}
     raised_labels: set = set()
+    quota_holds: List[str] = []
+    quota_notes: List[str] = []
     # Days a per-day sweep asked for and got no answer for (#261), by label.
     # The sweep still returns its other days, so without this a lost day reads
     # as a quiet one and the games published for it are dropped.
     lost_days_by_label: Dict[str, set] = {}
-    from .sources.base import recording_lost_days
+    from .sources.base import recording_lost_days, recording_quota_warnings
+    from .sources._college_data import CollegeQuotaUnavailable
     # Read here, not at the favorites-only gate below, because the season
     # check in the fetch loop asks the same gate whether a source's games
     # will be scored at all.
@@ -4246,32 +4249,39 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     for src in sources:
         pulled_by_label.setdefault(src.sport_label, 0)
         try:
-            with recording_lost_days() as lost_days:
-                games = src.fetch_upcoming(days_ahead=lookahead)
-            # Placed BEFORE the season check: the favorites-only gate it asks
-            # keeps a non-favorite game in postseason mode only once the
-            # bracket has stamped its round (#243), so a playoff game checked
-            # unplaced would be dropped here, skip its seeding season, and
-            # then be kept and scored by the real gate below (#289 review).
-            _place_in_bracket(src, games, for_scoring=False)
-            # A season the simulator would replay with holes in it is an
-            # outage, like a failed rank feed (#283), so the label's previous
-            # games are held, scored as they were, instead of republished with
-            # no standings stakes (#289). Asked only when a game of this
-            # source will be scored for importance: none fetched, all dropped
-            # by the favorites-only gate, or importance turned off, and this
-            # check asks for no season. (A playoff source's seeding season
-            # was read when the sources were built, whatever the slate.)
-            if weights.importance > 0 and _filter_favorites_only(
-                    games, [src] * len(games), favorites, fav_only_mode,
-                    always_keep=recorded_teams)[0]:
-                _require_seasons(src)
+            with recording_quota_warnings() as quota_warnings:
+                with recording_lost_days() as lost_days:
+                    games = src.fetch_upcoming(days_ahead=lookahead)
+                # Placed BEFORE the season check: the favorites-only gate it asks
+                # keeps a non-favorite game in postseason mode only once the
+                # bracket has stamped its round (#243), so a playoff game checked
+                # unplaced would be dropped here, skip its seeding season, and
+                # then be kept and scored by the real gate below (#289 review).
+                _place_in_bracket(src, games, for_scoring=False)
+                # A season the simulator would replay with holes in it is an
+                # outage, like a failed rank feed (#283), so the label's previous
+                # games are held, scored as they were, instead of republished with
+                # no standings stakes (#289). Asked only when a game of this
+                # source will be scored for importance: none fetched, all dropped
+                # by the favorites-only gate, or importance turned off, and this
+                # check asks for no season. (A playoff source's seeding season
+                # was read when the sources were built, whatever the slate.)
+                if weights.importance > 0 and _filter_favorites_only(
+                        games, [src] * len(games), favorites, fav_only_mode,
+                        always_keep=recorded_teams)[0]:
+                    _require_seasons(src)
         except Exception as e:
-            logger.exception("[ranked_matchups] source %s fetch failed", src.sport_label)
-            src_summary.append(_source_error_entry(src.sport_label, e))
+            if isinstance(e, CollegeQuotaUnavailable):
+                entry = _source_error_entry(src.sport_label, e) + "; previous games held this refresh"
+                quota_holds.append(entry)
+                src_summary.append(entry)
+            else:
+                logger.exception("[ranked_matchups] source %s fetch failed", src.sport_label)
+                src_summary.append(_source_error_entry(src.sport_label, e))
             raised_labels.add(src.sport_label)
             continue
         pulled_by_label[src.sport_label] += len(games)
+        quota_notes.extend(quota_warnings)
         all_games.extend(games)
         game_sources.extend([src] * len(games))
         if lost_days:
@@ -4286,6 +4296,7 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
             src_summary.append(f"{src.sport_label}: {len(games)} games")
             logger.info("[ranked_matchups] %s: pulled %d games", src.sport_label, len(games))
 
+    src_summary.extend(quota_notes)
     # 1-. Games already on air, games whose source came back empty, and games
     # dated on a day their source's sweep lost, stay on air (#240, #261). See
     # _rows_to_hold. `held` is keyed by marker; the ones this fetch still
@@ -4841,7 +4852,12 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     # a background run leaves.
     problems = _slate_problems(src_summary, games_payload)
     for problem in problems:
-        logger.warning("[ranked_matchups] refresh: %s", problem)
+        # The existing source-failure summary is the quota warning too. Do
+        # not emit a second warning for the same expected hold above it.
+        detail = "; " + " | ".join(quota_holds + quota_notes) if quota_holds and problem == problems[0] else ""
+        logger.warning("[ranked_matchups] refresh: %s%s", problem, detail)
+    if quota_notes and not quota_holds:
+        logger.warning("[ranked_matchups] %s", " | ".join(quota_notes))
     lead = "".join(f"WARNING: {p}. " for p in problems)
     return {
         "status": "ok",
@@ -11859,7 +11875,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.38.1"
+    version = "1.38.2"
 
     def __init__(self):
         # v3 owns the one persistent service. Every web worker still installs

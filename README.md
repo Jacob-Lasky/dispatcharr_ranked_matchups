@@ -34,6 +34,8 @@ normal Dispatcharr failover. Recovery checks run from the existing scheduler;
 active sessions switch back through Dispatcharr's change-stream API. **Check
 matchup feeds** runs the same check manually. Provider limits also apply to
 probes: insufficient capacity is unknown, never proof that a feed failed.
+Probes also defer while their M3U account is fetching/parsing, and re-check
+channel and stream existence immediately before asking Dispatcharr for a URL.
 
 Artwork is rendered at 1920×1080 and cached under `slates/` in plugin storage.
 The low-frame-rate loop has silent audio, repeated video headers and continuous
@@ -46,6 +48,15 @@ fit inside the circle with padding. Initials fallbacks log the missing-logo reas
 The loopback-only Django route uses the existing web server.
 
 Jellyfin may need a re-tune when the game goes live, the same as any Dispatcharr failover.
+
+CollegeFootballData and CollegeBasketballData share a free-tier pool of 1,000
+calls per month through one key. The plugin caches game/line answers for 12 hours
+and weekly polls for 24 hours. A 31-day replay with refreshes every two hours
+uses 498 calls; a persistent ceiling also limits both APIs together to 750
+attempts per UTC month, including timeouts and failed answers. The remaining
+250 calls provide margin for other use of the key. On quota exhaustion, requests
+wait until the first of next month: a recent cached poll or previous games stand
+in, with a warning and no quota traceback. No paid plan is needed.
 
 ## Why I built this
 

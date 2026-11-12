@@ -34,7 +34,8 @@ from typing import Any, Dict, List, Optional
 
 from . import _season_store
 from .base import (
-    FeedUnavailable, GameRow, MatchResult, SeasonUnavailable, SportSource, recording_lost_days,
+    FeedUnavailable, GameRow, MatchResult, QuotaUnavailable, SeasonUnavailable, SportSource, recording_lost_days,
+    warn_quota,
 )
 from .._util import poisson_sample as _poisson
 
@@ -102,6 +103,7 @@ class PointsBasedSportSource(SportSource):
         self._all_games_cache: Optional[List[Dict[str, Any]]] = None
         self._strengths_cache: Optional[Dict[str, Dict[str, float]]] = None
         self._initial_state_cache: Optional[Dict[str, Any]] = None
+        self._quota_hold: Optional[QuotaUnavailable] = None
 
     # ---------- subclass hook ----------
 
@@ -183,6 +185,8 @@ class PointsBasedSportSource(SportSource):
                 out = self._fetch_full_season_games()
         except FeedUnavailable as e:
             failure = str(e) or type(e).__name__
+            if isinstance(e, QuotaUnavailable):
+                self._quota_hold = e
         else:
             if lost:
                 days = sorted(lost)
@@ -194,10 +198,12 @@ class PointsBasedSportSource(SportSource):
             if kept is None or not kept.games:
                 # No kept read, or an empty one (an offseason): nothing to
                 # stand in, so `require_season` holds the label (#289).
-                logger.warning("[points_based] %s season not simulated: %s",
-                               self.sport_label, failure)
+                if self._quota_hold is None:
+                    logger.warning("[points_based] %s season not simulated: %s",
+                                   self.sport_label, failure)
                 return []
-            logger.warning(
+            emit = (lambda message, *args: warn_quota(logger, message, *args)) if self._quota_hold else logger.warning
+            emit(
                 "[points_based] %s season read failed (%s); simulating the last "
                 "complete read, from %s", self.sport_label, failure, kept.read_at.isoformat())
             self._season_fallback_at = kept.read_at
@@ -257,6 +263,8 @@ class PointsBasedSportSource(SportSource):
         the refresh asks."""
         self._fetch_games_cached()
         if self._season_failure is not None and self._season_fallback_at is None:
+            if self._quota_hold is not None:
+                raise self._quota_hold
             raise SeasonUnavailable(f"season not fetched whole: {self._season_failure}")
 
     # ---------- importance interface ----------
