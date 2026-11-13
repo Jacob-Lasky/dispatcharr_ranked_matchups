@@ -8,6 +8,7 @@ so viewers and the DVR keep their original connection and output segments.
 from __future__ import annotations
 
 import hashlib
+from copy import copy
 import json
 import logging
 import math
@@ -328,17 +329,38 @@ def active_stream(channel):
 
 def probe(channel, stream):
     """True = decodable video, False = failed feed, None = no safe probe slot."""
-    from apps.proxy.live_proxy.url_utils import get_stream_info_for_switch
-    from apps.m3u.connection_pool import reserve_profile_slot, release_profile_slot
     from core.utils import RedisClient
-    from apps.channels.models import Channel, Stream
-    from apps.m3u.models import M3UAccount
     if not stream.m3u_account:
         return False
     redis = RedisClient.get_client()
+    # Workers already serialize checks per channel. Share one probe lease too:
+    # different channels must not fill the provider pool with background work.
+    lock = redis.lock('ranked_matchups:slate:probe', timeout=180, blocking=False)
+    if not lock.acquire():
+        return None
+    try:
+        return _probe(channel, stream, redis)
+    finally:
+        lock.release()
+
+
+def _probe(channel, stream, redis):
+    from apps.proxy.live_proxy.url_utils import get_stream_info_for_switch
+    from apps.m3u.connection_pool import reserve_profile_slot, release_profile_slot
+    from apps.channels.models import Channel, Stream
+    from apps.m3u.models import M3UAccount
     profiles = stream.m3u_account.profiles.filter(is_active=True).order_by('-is_default', 'pk')
-    profile = next((p for p in profiles if reserve_profile_slot(p, redis)[0]), None)
-    if profile is None:
+    for candidate in profiles:
+        if candidate.max_streams == 1:
+            continue
+        # DO NOT save this copy. Keep one slot for a foreground tune, using
+        # core's atomic INCR-first reservation rather than a racy capacity read.
+        profile = copy(candidate)
+        if profile.max_streams:
+            profile.max_streams -= 1
+        if reserve_profile_slot(profile, redis)[0]:
+            break
+    else:
         return None
     # This raw pool reservation belongs only to this probe. Publishing a user
     # preview key would let a concurrent preview reuse it and lose its slot
@@ -367,7 +389,8 @@ def probe(channel, stream):
         except TimeoutError:
             return False
     finally:
-        release_profile_slot(profile.pk, redis)
+        if release_profile_slot(profile.pk, redis) is False:
+            logger.warning('probe slot release failed for profile %s; counter may be stale', profile.pk)
 
 
 def switch(channel, stream_id):

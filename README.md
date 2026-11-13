@@ -33,7 +33,9 @@ and either “Live at … ET” or “Feed unavailable, retrying”. A working f
 normal Dispatcharr failover. Recovery checks run from the existing scheduler;
 active sessions switch back through Dispatcharr's change-stream API. **Check
 matchup feeds** runs the same check manually. Provider limits also apply to
-probes: insufficient capacity is unknown, never proof that a feed failed.
+probes: only one background probe runs across workers, and limited profiles
+keep one slot free for foreground tuning. A one-connection profile is never
+probed. Insufficient capacity is unknown, never proof that a feed failed.
 Probes also defer while their M3U account is fetching/parsing, and re-check
 channel and stream existence immediately before asking Dispatcharr for a URL.
 

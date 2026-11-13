@@ -173,10 +173,10 @@ def test_probe_owns_pool_slot_without_creating_a_preview(monkeypatch):
     from unittest.mock import Mock
     import sys
     pool=ModuleType('apps.m3u.connection_pool')
-    profile=SimpleNamespace(pk=21)
+    profile=SimpleNamespace(pk=21, max_streams=4)
     pool.reserve_profile_slot=Mock(return_value=(True,1,None))
     pool.release_profile_slot=Mock(return_value=True)
-    redis=object()
+    redis=Mock()
     utils=ModuleType('core.utils');utils.RedisClient=SimpleNamespace(get_client=lambda:redis)
     urls=ModuleType('apps.proxy.live_proxy.url_utils')
     urls.get_stream_info_for_switch=Mock(return_value={'url':'http://127.0.0.1/test','user_agent':'test'})
@@ -239,17 +239,18 @@ def test_probe_rechecks_rows_after_reserving_a_slot(monkeypatch, caplog, missing
         return {'error': 'No row matches the given query.'}
     urls.get_stream_info_for_switch = Mock(side_effect=lookup)
     utils = ModuleType('core.utils')
-    utils.RedisClient = SimpleNamespace(get_client=lambda: 'redis')
+    redis = Mock()
+    utils.RedisClient = SimpleNamespace(get_client=lambda: redis)
     for name, module in [('apps.channels.models', models), ('apps.m3u.models', accounts),
                          ('apps.m3u.connection_pool', pool), ('core.utils', utils),
                          ('apps.proxy.live_proxy.url_utils', urls)]:
         monkeypatch.setitem(sys.modules, name, module)
     profiles = Mock()
-    profiles.filter.return_value.order_by.return_value = [SimpleNamespace(pk=21)]
+    profiles.filter.return_value.order_by.return_value = [SimpleNamespace(pk=21, max_streams=4)]
     stream = SimpleNamespace(pk=3, m3u_account_id=4, m3u_account=SimpleNamespace(profiles=profiles))
     with caplog.at_level(logging.DEBUG):
         assert slate.probe(SimpleNamespace(uuid='gone-channel'), stream) is None
     urls.get_stream_info_for_switch.assert_not_called()
-    pool.release_profile_slot.assert_called_once_with(21, 'redis')
+    pool.release_profile_slot.assert_called_once_with(21, redis)
     assert not any(r.levelno >= logging.WARNING for r in caplog.records)
     assert 'skipping probe' in caplog.text
