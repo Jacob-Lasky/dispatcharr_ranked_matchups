@@ -822,7 +822,7 @@ does not have to be a Favorite, and listing it does not change its score.
   that sits in the guide before the game.
 - **When the game finishes.** The background timer checks running plugin
   recordings against ESPN every minute, independently of Refresh and Apply.
-  An exact fixture marked final is stopped through Dispatcharr's Stop action,
+  An exact fixture marked final uses Dispatcharr's graceful recorder shutdown,
   retaining the recording and partial file. It matches both teams and kickoff;
   ESPN-backed game markers must also match the event ID. Cancelled, postponed,
   missing or ambiguous fixtures never trigger a stop. Recordings you edited
