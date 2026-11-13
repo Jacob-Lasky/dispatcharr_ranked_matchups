@@ -40,7 +40,7 @@ class Rows:
     ('legacy_moved', 0), ('already_edited', 0), ('state_missing', 0),
 ])
 def test_final_stops_running_recording_without_a_handoff(plugin, monkeypatch, scenario, expected):
-    rec = SimpleNamespace(pk=58, id=58, channel_id=390871,
+    rec = SimpleNamespace(pk=58, id=58, task_id="dvr-recording-58", channel_id=390871,
         start_time=KICK + timedelta(minutes=5), end_time=KICK + timedelta(hours=6),
         custom_properties={"ranked_matchups_marker": MARKER, "status": "recording",
                            "program": {"start_time": (KICK-timedelta(minutes=30)).isoformat()}})
@@ -85,30 +85,68 @@ def test_final_stops_running_recording_without_a_handoff(plugin, monkeypatch, sc
     core.RedisClient = SimpleNamespace(get_client=lambda: Redis())
     monkeypatch.setitem(sys.modules, 'core.utils', core)
     calls = []
-    class StopView:
-        def stop(self, request, pk=None):
-            row = self.get_object()
-            calls.append(pk)
-            row.custom_properties["status"] = "stopped"
-            return SimpleNamespace(status_code=200)
-    views = ModuleType("apps.channels.api_views")
-    views.RecordingViewSet = StopView
-    monkeypatch.setitem(sys.modules, "apps.channels.api_views", views)
+    monkeypatch.setitem(sys.modules, 'apps.channels.signals',
+                        SimpleNamespace(revoke_task=calls.append))
     settings = {'dry_run': True} if scenario == 'dry_run' else {}
     assert plugin._run_due_stops(settings, now=KICK + timedelta(hours=3)) == expected
     assert calls == []  # teardown must wait until the stopped flag commits
     for callback in after_commit:
         assert rec.custom_properties['status'] == 'stopped'
         callback()
-    assert calls == ([58] if expected else [])
+    assert calls == ([rec.task_id] if expected else [])
     if expected:
         assert rec.custom_properties["status"] == "stopped"
         assert plugin._run_due_stops(settings, now=KICK + timedelta(hours=3)) == 0
-        assert calls == [58]
+        assert calls == [rec.task_id]
     else:
         assert rec == original
 
 from dispatcharr_ranked_matchups import recording_finals as finals
+
+
+def test_final_stop_leaves_capture_transport_for_recorder_to_close(monkeypatch):
+    """Disconnecting first makes ffmpeg reconnect into a proxy 503 (W332)."""
+    rec = SimpleNamespace(pk=63, task_id='dvr-recording-63', channel_id=400633,
+        start_time=KICK, end_time=KICK + timedelta(hours=4),
+        custom_properties={'ranked_matchups_marker': MARKER, 'status': 'stopped'})
+    monkeypatch.setitem(sys.modules, 'apps.channels.models',
+                        SimpleNamespace(Recording=SimpleNamespace(objects=Rows(rec))))
+    disconnected, revoked = [], []
+    class StopView:
+        def stop(self, request, pk=None):
+            disconnected.append(pk)
+            return SimpleNamespace(status_code=200)
+    monkeypatch.setitem(sys.modules, 'apps.channels.api_views',
+                        SimpleNamespace(RecordingViewSet=StopView))
+    monkeypatch.setitem(sys.modules, 'apps.channels.signals',
+                        SimpleNamespace(revoke_task=revoked.append))
+    finals._finish_stop(rec.pk, finals._identity(rec))
+    assert disconnected == [], 'the recorder must stop ffmpeg before its proxy connection closes'
+    assert revoked == [rec.task_id]
+
+@pytest.mark.parametrize('changed', ['missing', 'identity', 'status', 'revocation_failure'])
+def test_stop_callback_rechecks_row_and_retains_committed_stop(monkeypatch, caplog, changed):
+    rec = SimpleNamespace(pk=63, task_id='dvr-recording-63', channel_id=400633,
+        start_time=KICK, end_time=KICK + timedelta(hours=4),
+        custom_properties={'ranked_matchups_marker': MARKER, 'status': 'stopped'})
+    identity = finals._identity(rec)
+    if changed == 'identity':
+        rec.channel_id += 1
+    if changed == 'status':
+        rec.custom_properties['status'] = 'recording'
+    monkeypatch.setitem(sys.modules, 'apps.channels.models', SimpleNamespace(
+        Recording=SimpleNamespace(objects=Rows(None if changed == 'missing' else rec))))
+    revoked = []
+    def revoke(task_id):
+        revoked.append(task_id)
+        raise RuntimeError('broker unavailable')
+    monkeypatch.setitem(sys.modules, 'apps.channels.signals', SimpleNamespace(revoke_task=revoke))
+    finals._finish_stop(rec.pk, identity)
+    assert revoked == ([rec.task_id] if changed == 'revocation_failure' else [])
+    if changed == 'revocation_failure':
+        assert rec.custom_properties['status'] == 'stopped'  # recorder still sees the stop
+        assert 'task revocation for recording 63 failed (RuntimeError)' in caplog.text
+
 
 @pytest.mark.parametrize('status', ['STATUS_CANCELED', 'STATUS_POSTPONED', 'STATUS_SUSPENDED',
                                     'STATUS_DELAYED', 'STATUS_IN_PROGRESS', 'STATUS_SCHEDULED'])

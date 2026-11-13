@@ -2,7 +2,7 @@
 
 EPG windows are conservative fallbacks, not game clocks. Never interpret a
 missing, postponed or cancelled fixture as final. Network I/O precedes row
-locks; the recording identity is checked again before Dispatcharr's Stop runs.
+locks; the recording identity is checked again before revoking its DVR task.
 """
 from datetime import datetime, timedelta, timezone
 import logging
@@ -122,24 +122,24 @@ def _managed(rec, state):
 
 
 def _finish_stop(rid, identity):
-    """Native teardown only after the stopped flag is visible to the DVR task."""
+    """Let run_recording interrupt ffmpeg and remux before transport teardown."""
     from apps.channels.models import Recording
     try:
         current = Recording.objects.filter(pk=rid).first()
         if (current is None or _identity(current) != identity
                 or recording.rec_status(current) != 'stopped'):
             return
-        from apps.channels.api_views import RecordingViewSet
-        view = RecordingViewSet()
-        view.get_object = lambda: current
-        response = view.stop(None, pk=rid)
-        if response.status_code != 200:
-            logger.warning('[ranked_matchups] native Stop for recording %s returned %s',
-                           rid, response.status_code)
+        from apps.channels.signals import revoke_task
+        # Native revocation removes a queued task without terminating an active
+        # worker. Its recorder polls our committed stopped flag every 2 seconds,
+        # sends SIGINT to ffmpeg (as at scheduled end), then finalizes the MKV.
+        # RecordingViewSet.stop disconnects proxy clients FIRST, causing a 503
+        # reconnect and unexpected_exit retry before that poll can run (W332).
+        revoke_task(current.task_id)
     except Exception as exc:
         # The committed flag still tells run_recording to interrupt ffmpeg
-        # and retain the file, even if optional teardown fails.
-        logger.warning('[ranked_matchups] native Stop teardown for recording %s failed (%s)',
+        # and retain the file even if task revocation fails.
+        logger.warning('[ranked_matchups] task revocation for recording %s failed (%s)',
                        rid, type(exc).__name__)
 
 
@@ -224,17 +224,16 @@ def check(plugin, settings, *, now=None, scheduled=False):
                             or not recording.is_in_progress(current)
                             or not _managed(current, recording.load_state(plugin.RECORDING_STATE_PATH))):
                         continue
-                    # Core Stop commits this flag before starting its client
-                    # teardown. Preserve that ordering under our outer row lock:
-                    # publish the same stop properties, then run native Stop
-                    # after commit (it accepts an already-stopped capture).
+                    # Publish the native stopped flag before revocation. The
+                    # active recorder must close ffmpeg itself, while its proxy
+                    # connection is still healthy, exactly as at scheduled end.
                     current.custom_properties = recording.stopped_properties(
                         current.custom_properties, now)
                     current.save(update_fields=['custom_properties'])
                     transaction.on_commit(
                         lambda rid=current.pk, expected=identity: _finish_stop(rid, expected))
                 stopped += 1
-                logger.info('[ranked_matchups] ESPN final %s: stopped recording %s (partial file kept)',
+                logger.info('[ranked_matchups] ESPN final %s: requested graceful stop for recording %s (partial file kept)',
                             event['id'], rec.pk)
             except Exception as exc:
                 logger.warning('[ranked_matchups] final check for recording %s failed (%s)',

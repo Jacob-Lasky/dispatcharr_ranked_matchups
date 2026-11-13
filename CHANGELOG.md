@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.38.3
+
+- Stop final-game DVR captures without disconnecting their proxy clients first.
+  Commit the stopped flag, revoke the task without terminating its worker, and
+  let Dispatcharr's recorder interrupt ffmpeg and finalize the MKV as at scheduled
+  end. Avoid the proxy 503 ERROR and unexpected-exit retry on early stops.
+
 ## 1.38.2
 
 - Skip outage probes during M3U fetch/parse and re-check channel/stream rows
