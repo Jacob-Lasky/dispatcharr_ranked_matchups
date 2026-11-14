@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.38.7
+
+- Defer outage feed probes on an Xtream Codes account unless the provider
+  itself (`player_api.php` `active_cons` / `max_connections`) has room for the
+  probe plus one foreground tune. Dispatcharr's pool counts only its own
+  reservations, while the provider still counts sessions recent probes hung
+  up. On a full line, each probe made the provider drop the oldest session,
+  which was a live DVR recording. A full line is skipped for 30 seconds per
+  provider login, and a profile with its own login is tried next. A missing
+  or unreadable connection count defers the probe.
+
 ## 1.38.3
 
 - Stop final-game DVR captures without disconnecting their proxy clients first.

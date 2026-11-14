@@ -491,6 +491,15 @@ class TestRedactSecrets:
                "?regions=uk&apiKey=SECRET123 (Caused by NewConnectionError(...))")
         assert "SECRET123" not in _util.redact_secrets(msg)
 
+    def test_masks_xc_login_inside_a_connectionerror_message(self):
+        msg = ("HTTPSConnectionPool(host='provider.test', port=443): "
+               "Max retries exceeded with url: /player_api.php"
+               "?username=LINEUSER&password=LINEPASS (Caused by ReadTimeoutError(...))")
+        out = _util.redact_secrets(msg)
+        assert "LINEUSER" not in out and "LINEPASS" not in out
+        assert "username=***&password=***" in out
+        assert "player_api.php" in out
+
     def test_masks_sportsdb_path_segment_key(self):
         out = _util.redact_secrets(
             "https://www.thesportsdb.com/api/v1/json/MYPATREONKEY/searchevents.php?e=a_vs_b"

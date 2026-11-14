@@ -26,10 +26,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import requests
+
 logger = logging.getLogger(__name__)
 ROUTE = 'plugins/ranked-matchups/slate'
 INTERVAL = 10
 PROBE_SECONDS = 6
+# Provider headroom read (player_api.php). Bounded well under PROBE_SECONDS so
+# the 120s reconcile budget still covers every stream on a slow provider.
+PROVIDER_CHECK_SECONDS = 4
+# A provider that reported no spare connection is not asked again for this
+# long: reconcile walks every real stream, and each would otherwise re-query.
+PROVIDER_FULL_SECONDS = 30
 OWNER = 'ranked_matchups_slate'
 def cache_dir(data_dir=None):
     """Persistent data root; v3 can pass context['data_dir'] here directly."""
@@ -365,6 +373,10 @@ def _probe(channel, stream, redis):
     from apps.channels.models import Channel, Stream
     from apps.m3u.models import M3UAccount
     profiles = stream.m3u_account.profiles.filter(is_active=True).order_by('-is_default', 'pk')
+    # ONE provider-check budget across every profile, so reconcile's
+    # PROBE_SECONDS + PROVIDER_CHECK_SECONDS per stream holds however many
+    # profiles a full or slow line makes this walk.
+    checks_until = time.monotonic() + PROVIDER_CHECK_SECONDS
     for candidate in profiles:
         if candidate.max_streams == 1:
             continue
@@ -373,8 +385,19 @@ def _probe(channel, stream, redis):
         profile = copy(candidate)
         if profile.max_streams:
             profile.max_streams -= 1
-        if reserve_profile_slot(profile, redis)[0]:
-            break
+        if not reserve_profile_slot(profile, redis)[0]:
+            continue
+        # A profile can carry its own credentials, i.e. its own provider line,
+        # so a full line moves on to the next profile rather than giving up.
+        try:
+            remaining = checks_until - time.monotonic()
+            if remaining >= 1 and _provider_has_headroom(stream.m3u_account, candidate, redis,
+                                                         timeout=remaining):
+                break
+        except BaseException:
+            release_profile_slot(profile.pk, redis)
+            raise
+        release_profile_slot(profile.pk, redis)
     else:
         return None
     # This raw pool reservation belongs only to this probe. Publishing a user
@@ -406,6 +429,69 @@ def _probe(channel, stream, redis):
     finally:
         if release_profile_slot(profile.pk, redis) is False:
             logger.warning('probe slot release failed for profile %s; counter may be stale', profile.pk)
+
+
+def _provider_has_headroom(account, profile, redis, timeout=PROVIDER_CHECK_SECONDS):
+    """False when the PROVIDER would have no connection left for a foreground tune.
+
+    Dispatcharr's pool counts only its own reservations. An Xtream Codes
+    provider counts every session it still holds open, including ones it has
+    not yet expired after a probe's ffmpeg hung up. JAKE-226 (2026-11-14):
+    Dispatcharr counted 1 of 4 on profile 4 while player_api.php reported
+    active_cons 4 of 4. Each further probe pushed the line over its limit and
+    the provider dropped the OLDEST session, which was DVR recording 61's live
+    feed, every 20-40 seconds. With probes held off, active_cons fell to 1
+    within a minute and the drops stopped. So the reservation in `_probe` is
+    necessary but not sufficient: DO NOT drop this check because the pool
+    counter looks healthy.
+
+    The probe would add one session, and one must stay free for a foreground
+    tune, so probing needs active_cons + 2 <= max_connections. Non-XC accounts
+    have no such endpoint and keep the pool-only behaviour, and so does an XC
+    reply without a positive max_connections (no limit to respect). A failed
+    or unreadable reply, including a limited line whose active_cons is missing
+    or invalid, defers the probe: it is a background check, and an `unknown`
+    verdict changes nothing on air. The full verdict is cached per provider
+    login (server + username), because profiles can carry their own.
+    """
+    if getattr(account, 'account_type', None) != 'XC':
+        return True
+    from apps.m3u.credentials import get_transformed_credentials
+    from ._util import http_get_json
+    server, username, password = get_transformed_credentials(account, profile)
+    if not (server and username and password):
+        return False
+    # Keyed by the login, not the account: profiles with their own credentials
+    # are separate provider lines. Hashed so no username reaches Redis.
+    line = hashlib.sha256(f'{server}\0{username}'.encode()).hexdigest()[:16]
+    full_key = f'ranked_matchups:slate:provider_full:{line}'
+    if redis.exists(full_key):
+        return False
+    agent = account.get_user_agent()
+    headers = {'User-Agent': agent.user_agent} if getattr(agent, 'user_agent', None) else None
+    data = http_get_json(requests, server.rstrip('/') + '/player_api.php', log=logger,
+                         tag='ranked_matchups.slate', timeout=timeout,
+                         params={'username': username, 'password': password}, headers=headers)
+    info = data.get('user_info') if isinstance(data, dict) else None
+    if not isinstance(info, dict):
+        return False
+    try:
+        limit = int(info.get('max_connections') or 0)
+    except (TypeError, ValueError):
+        return False
+    if limit <= 0:
+        return True
+    try:
+        # A limited line with no readable count is unknown usage, never zero.
+        active = int(info['active_cons'])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if 0 <= active and active + 2 <= limit:
+        return True
+    redis.setex(full_key, PROVIDER_FULL_SECONDS, '1')
+    logger.info('[ranked_matchups] feed probe deferred: provider reports %d of %d connections '
+                'in use on M3U account %s', active, limit, account.pk)
+    return False
 
 
 def switch(channel, stream_id):
@@ -451,7 +537,7 @@ def reconcile(plugin, channel, game, now, settings=None):
         live, unknown = None, False
         deadline = time.monotonic() + 120
         for stream in real:
-            if time.monotonic() + PROBE_SECONDS > deadline:
+            if time.monotonic() + PROBE_SECONDS + PROVIDER_CHECK_SECONDS > deadline:
                 return 'unknown'  # never outlive the 180s coordination lock
             verdict = probe(channel, stream)
             if verdict is True:

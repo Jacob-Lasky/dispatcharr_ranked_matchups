@@ -35,7 +35,13 @@ active sessions switch back through Dispatcharr's change-stream API. **Check
 matchup feeds** runs the same check manually. Provider limits also apply to
 probes: only one background probe runs across workers, and limited profiles
 keep one slot free for foreground tuning. A one-connection profile is never
-probed. Insufficient capacity is unknown, never proof that a feed failed.
+probed. On Xtream Codes accounts a probe also asks the provider itself
+(`player_api.php`) how many connections it counts, and runs only when the
+provider has room for the probe plus one foreground tune. The provider can
+still be counting sessions that Dispatcharr has already released. A full
+provider login is skipped for 30 seconds, and the next profile with its own
+login is tried. A missing or unreadable count defers the probe. Insufficient
+capacity is unknown, never proof that a feed failed.
 Probes also defer while their M3U account is fetching/parsing, and re-check
 channel and stream existence immediately before asking Dispatcharr for a URL.
 When the Dispatcharr M3U Reservation Guard is installed, probes also supply an
