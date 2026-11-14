@@ -287,3 +287,25 @@ def test_reconcile_budgets_the_provider_check_before_each_probe():
     from dispatcharr_ranked_matchups import slate
     assert 'time.monotonic() + PROBE_SECONDS + PROVIDER_CHECK_SECONDS > deadline' in inspect.getsource(slate.reconcile)
     assert slate.PROVIDER_CHECK_SECONDS < slate.PROBE_SECONDS
+
+
+def test_provider_checks_share_one_budget_across_profiles(provider, monkeypatch):
+    """A slow full line must not buy the next profile a fresh 4s check, or
+    reconcile's per-stream budget (and the 180s probe lease) can be overrun."""
+    s = provider
+    first, second = SimpleNamespace(pk=4, max_streams=4), SimpleNamespace(pk=6, max_streams=4)
+    s.stream.m3u_account.profiles.filter.return_value.order_by.return_value = [first, second]
+    logins = {4: ('http://provider.test', 'slow-user', 'a'), 6: ('http://provider.test', 'other-user', 'b')}
+    sys.modules['apps.m3u.credentials'].get_transformed_credentials.side_effect = lambda acct, prof: logins[prof.pk]
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(s.slate.time, 'monotonic', lambda: clock.now)
+    timeouts = []
+    def slow(requests_mod, url, **kwargs):
+        timeouts.append(kwargs['timeout'])
+        clock.now += kwargs['timeout'] - 0.5
+        return {'user_info': {'max_connections': '4', 'active_cons': '4'}}
+    from dispatcharr_ranked_matchups import _util
+    monkeypatch.setattr(_util, 'http_get_json', slow)
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert timeouts == [s.slate.PROVIDER_CHECK_SECONDS], 'second profile got its own provider check'
+    assert s.used == 0 and s.opened == 0 and not s.locked

@@ -373,6 +373,10 @@ def _probe(channel, stream, redis):
     from apps.channels.models import Channel, Stream
     from apps.m3u.models import M3UAccount
     profiles = stream.m3u_account.profiles.filter(is_active=True).order_by('-is_default', 'pk')
+    # ONE provider-check budget across every profile, so reconcile's
+    # PROBE_SECONDS + PROVIDER_CHECK_SECONDS per stream holds however many
+    # profiles a full or slow line makes this walk.
+    checks_until = time.monotonic() + PROVIDER_CHECK_SECONDS
     for candidate in profiles:
         if candidate.max_streams == 1:
             continue
@@ -386,7 +390,9 @@ def _probe(channel, stream, redis):
         # A profile can carry its own credentials, i.e. its own provider line,
         # so a full line moves on to the next profile rather than giving up.
         try:
-            if _provider_has_headroom(stream.m3u_account, candidate, redis):
+            remaining = checks_until - time.monotonic()
+            if remaining >= 1 and _provider_has_headroom(stream.m3u_account, candidate, redis,
+                                                         timeout=remaining):
                 break
         except BaseException:
             release_profile_slot(profile.pk, redis)
@@ -425,7 +431,7 @@ def _probe(channel, stream, redis):
             logger.warning('probe slot release failed for profile %s; counter may be stale', profile.pk)
 
 
-def _provider_has_headroom(account, profile, redis):
+def _provider_has_headroom(account, profile, redis, timeout=PROVIDER_CHECK_SECONDS):
     """False when the PROVIDER would have no connection left for a foreground tune.
 
     Dispatcharr's pool counts only its own reservations. An Xtream Codes
@@ -464,7 +470,7 @@ def _provider_has_headroom(account, profile, redis):
     agent = account.get_user_agent()
     headers = {'User-Agent': agent.user_agent} if getattr(agent, 'user_agent', None) else None
     data = http_get_json(requests, server.rstrip('/') + '/player_api.php', log=logger,
-                         tag='ranked_matchups.slate', timeout=PROVIDER_CHECK_SECONDS,
+                         tag='ranked_matchups.slate', timeout=timeout,
                          params={'username': username, 'password': password}, headers=headers)
     info = data.get('user_info') if isinstance(data, dict) else None
     if not isinstance(info, dict):

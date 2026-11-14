@@ -590,6 +590,9 @@ def group_advance_text(group_stage: Optional[Dict[str, Any]]) -> str:
 #      which is visible at the container's default INFO level.
 #   2. Path-segment keys. TheSportsDB carries the key as a path component
 #      (/api/v1/json/<KEY>/...), so any composed SportsDB URL contains it.
+#   3. Xtream Codes logins. The outage probe's player_api.php check sends the
+#      provider `username` and `password` as query params (JAKE-226); the
+#      username is half of the login, so it is masked like the password.
 #
 # Both key fields are input_type=password in plugin.json, which masks the form
 # input and does nothing for logs, and Dispatcharr logs go to container stdout.
@@ -599,7 +602,7 @@ def group_advance_text(group_stage: Optional[Dict[str, Any]]) -> str:
 # DO NOT log a raw URL or a raw `requests` exception from a call that carries a
 # key. Wrap it in redact_secrets(). See #156.
 _SECRET_QUERY_PARAM_RE = re.compile(
-    r'''(["']?(?:api[_-]?key|token|secret|password)["']?\s*[=:]\s*)'''
+    r'''(["']?(?:api[_-]?key|token|secret|password|username)["']?\s*[=:]\s*)'''
     r'''(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^&\s"'<>]+)''', re.IGNORECASE
 )
 _SECRET_PATH_SEGMENT_RE = re.compile(r"(/(?:api/v\d+/json|api/push)/)([^/\s?\"']+)", re.IGNORECASE)
