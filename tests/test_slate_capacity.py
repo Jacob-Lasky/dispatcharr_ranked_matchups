@@ -154,3 +154,91 @@ def test_probe_exposes_owner_and_client_during_acquire_and_release(capacity, mon
                                 liveness_key='ranked_matchups:slate:probe')
     assert active == []
     assert s.used == 0
+
+
+@pytest.fixture
+def provider(capacity, monkeypatch):
+    """An Xtream Codes account whose provider reports its own session count."""
+    from dispatcharr_ranked_matchups import _util
+    s = capacity
+    s.keys = {}
+    s.redis.exists.side_effect = lambda key: key in s.keys
+    s.redis.setex.side_effect = lambda key, ttl, value: s.keys.__setitem__(key, ttl)
+    s.reply = {'user_info': {'max_connections': '4', 'active_cons': '1'}}
+    s.requests = []
+    def fetch(requests_mod, url, **kwargs):
+        s.requests.append((url, kwargs))
+        return s.reply
+    monkeypatch.setattr(_util, 'http_get_json', fetch)
+    creds = ModuleType('apps.m3u.credentials')
+    creds.get_transformed_credentials = Mock(return_value=('http://provider.test', 'user', 'secret'))
+    monkeypatch.setitem(sys.modules, 'apps.m3u.credentials', creds)
+    s.stream.m3u_account.account_type = 'XC'
+    s.stream.m3u_account.pk = 4
+    s.stream.m3u_account.get_user_agent = lambda: SimpleNamespace(user_agent='TiviMate/5')
+    s.opened = 0
+    def decode(*args, **kwargs):
+        s.opened += 1
+        return 0, b'x' * 256
+    monkeypatch.setattr(s.slate, '_run', decode)
+    return s
+
+
+@pytest.mark.parametrize('active, expected', [('1', True), ('2', True), ('3', None), ('4', None), ('5', None)])
+def test_probe_respects_sessions_the_provider_still_counts(provider, active, expected):
+    """JAKE-226: the pool said 1 of 4 while the provider said 4 of 4, and each
+    probe made the provider drop the live DVR feed. A probe needs one session
+    for itself and must leave one for a foreground tune."""
+    s = provider
+    s.reply['user_info']['active_cons'] = active
+    assert s.slate.probe(s.channel, s.stream) is expected
+    assert s.opened == (1 if expected else 0), 'feed opened without provider headroom'
+    assert s.used == 0, 'probe slot leaked on the deferral path'
+    assert not s.locked
+    url, kwargs = s.requests[0]
+    assert url == 'http://provider.test/player_api.php'
+    assert kwargs['params'] == {'username': 'user', 'password': 'secret'}
+    assert kwargs['headers'] == {'User-Agent': 'TiviMate/5'}
+    assert kwargs['timeout'] <= s.slate.PROBE_SECONDS
+
+
+def test_full_provider_is_not_asked_again_by_every_stream(provider):
+    s = provider
+    s.reply['user_info']['active_cons'] = '4'
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert len(s.requests) == 1
+    assert s.keys == {'ranked_matchups:slate:provider_full:4': s.slate.PROVIDER_FULL_SECONDS}
+    assert s.used == 0
+
+
+@pytest.mark.parametrize('reply', [None, {}, {'user_info': None}, {'user_info': {'max_connections': 'x'}}])
+def test_unreadable_provider_reply_defers_the_probe(provider, reply):
+    s = provider
+    s.reply = reply
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert s.opened == 0
+    assert s.used == 0
+    assert not s.locked
+
+
+def test_unresolvable_profile_credentials_defer_the_probe(provider):
+    s = provider
+    sys.modules['apps.m3u.credentials'].get_transformed_credentials.return_value = (None, None, None)
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert s.requests == [] and s.opened == 0 and s.used == 0
+
+
+@pytest.mark.parametrize('limit', ['0', None, ''])
+def test_provider_without_a_connection_limit_is_probed(provider, limit):
+    s = provider
+    s.reply['user_info'] = {'max_connections': limit, 'active_cons': '9'}
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert s.opened == 1
+
+
+def test_non_xc_account_keeps_pool_only_behaviour(provider):
+    s = provider
+    s.stream.m3u_account.account_type = 'STD'
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert s.requests == []
