@@ -381,17 +381,23 @@ def _probe(channel, stream, redis):
         profile = copy(candidate)
         if profile.max_streams:
             profile.max_streams -= 1
-        if reserve_profile_slot(profile, redis)[0]:
-            break
+        if not reserve_profile_slot(profile, redis)[0]:
+            continue
+        # A profile can carry its own credentials, i.e. its own provider line,
+        # so a full line moves on to the next profile rather than giving up.
+        try:
+            if _provider_has_headroom(stream.m3u_account, candidate, redis):
+                break
+        except BaseException:
+            release_profile_slot(profile.pk, redis)
+            raise
+        release_profile_slot(profile.pk, redis)
     else:
         return None
     # This raw pool reservation belongs only to this probe. Publishing a user
     # preview key would let a concurrent preview reuse it and lose its slot
     # when the probe finishes. No preview/channel assignments are touched.
     try:
-        # Released by the finally below like any other early return.
-        if not _provider_has_headroom(stream.m3u_account, candidate, redis):
-            return None
         # The scheduler's objects can outlive an M3U refresh. Dispatcharr's
         # switch lookup logs ERROR before returning its missing-row result;
         # check fresh querysets after reserving, immediately before that call.
@@ -437,18 +443,23 @@ def _provider_has_headroom(account, profile, redis):
     tune, so probing needs active_cons + 2 <= max_connections. Non-XC accounts
     have no such endpoint and keep the pool-only behaviour, and so does an XC
     reply without a positive max_connections (no limit to respect). A failed
-    or unreadable reply defers the probe: it is a background check, and an
-    `unknown` verdict changes nothing on air.
+    or unreadable reply, including a limited line whose active_cons is missing
+    or invalid, defers the probe: it is a background check, and an `unknown`
+    verdict changes nothing on air. The full verdict is cached per provider
+    login (server + username), because profiles can carry their own.
     """
     if getattr(account, 'account_type', None) != 'XC':
         return True
-    full_key = f'ranked_matchups:slate:provider_full:{account.pk}'
-    if redis.exists(full_key):
-        return False
     from apps.m3u.credentials import get_transformed_credentials
     from ._util import http_get_json
     server, username, password = get_transformed_credentials(account, profile)
     if not (server and username and password):
+        return False
+    # Keyed by the login, not the account: profiles with their own credentials
+    # are separate provider lines. Hashed so no username reaches Redis.
+    line = hashlib.sha256(f'{server}\0{username}'.encode()).hexdigest()[:16]
+    full_key = f'ranked_matchups:slate:provider_full:{line}'
+    if redis.exists(full_key):
         return False
     agent = account.get_user_agent()
     headers = {'User-Agent': agent.user_agent} if getattr(agent, 'user_agent', None) else None
@@ -460,10 +471,16 @@ def _provider_has_headroom(account, profile, redis):
         return False
     try:
         limit = int(info.get('max_connections') or 0)
-        active = int(info.get('active_cons') or 0)
     except (TypeError, ValueError):
         return False
-    if limit <= 0 or active + 2 <= limit:
+    if limit <= 0:
+        return True
+    try:
+        # A limited line with no readable count is unknown usage, never zero.
+        active = int(info['active_cons'])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if 0 <= active and active + 2 <= limit:
         return True
     redis.setex(full_key, PROVIDER_FULL_SECONDS, '1')
     logger.info('[ranked_matchups] feed probe deferred: provider reports %d of %d connections '
@@ -514,7 +531,7 @@ def reconcile(plugin, channel, game, now, settings=None):
         live, unknown = None, False
         deadline = time.monotonic() + 120
         for stream in real:
-            if time.monotonic() + PROBE_SECONDS > deadline:
+            if time.monotonic() + PROBE_SECONDS + PROVIDER_CHECK_SECONDS > deadline:
                 return 'unknown'  # never outlive the 180s coordination lock
             verdict = probe(channel, stream)
             if verdict is True:

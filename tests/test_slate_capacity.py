@@ -208,11 +208,20 @@ def test_full_provider_is_not_asked_again_by_every_stream(provider):
     assert s.slate.probe(s.channel, s.stream) is None
     assert s.slate.probe(s.channel, s.stream) is None
     assert len(s.requests) == 1
-    assert s.keys == {'ranked_matchups:slate:provider_full:4': s.slate.PROVIDER_FULL_SECONDS}
+    assert list(s.keys.values()) == [s.slate.PROVIDER_FULL_SECONDS]
+    [key] = s.keys
+    assert key.startswith('ranked_matchups:slate:provider_full:')
+    assert 'user' not in key.rsplit(':', 1)[1] and 'provider.test' not in key, 'login leaked into Redis key'
     assert s.used == 0
 
 
-@pytest.mark.parametrize('reply', [None, {}, {'user_info': None}, {'user_info': {'max_connections': 'x'}}])
+@pytest.mark.parametrize('reply', [
+    None, {}, {'user_info': None}, {'user_info': {'max_connections': 'x'}},
+    {'user_info': {'max_connections': '4'}},
+    {'user_info': {'max_connections': '4', 'active_cons': None}},
+    {'user_info': {'max_connections': '4', 'active_cons': ''}},
+    {'user_info': {'max_connections': '4', 'active_cons': '-1'}},
+])
 def test_unreadable_provider_reply_defers_the_probe(provider, reply):
     s = provider
     s.reply = reply
@@ -242,3 +251,39 @@ def test_non_xc_account_keeps_pool_only_behaviour(provider):
     s.stream.m3u_account.account_type = 'STD'
     assert s.slate.probe(s.channel, s.stream) is True
     assert s.requests == []
+
+
+def test_full_line_moves_on_to_a_profile_with_its_own_login(provider):
+    """Profiles can carry their own credentials: one full provider line must
+    neither stop the probe nor mark the other login full."""
+    s = provider
+    first, second = SimpleNamespace(pk=4, max_streams=4), SimpleNamespace(pk=6, max_streams=4)
+    s.stream.m3u_account.profiles.filter.return_value.order_by.return_value = [first, second]
+    logins = {4: ('http://provider.test', 'full-user', 'a'), 6: ('http://provider.test', 'spare-user', 'b')}
+    sys.modules['apps.m3u.credentials'].get_transformed_credentials.side_effect = lambda acct, prof: logins[prof.pk]
+    def fetch(requests_mod, url, **kwargs):
+        s.requests.append((url, kwargs))
+        used = '4' if kwargs['params']['username'] == 'full-user' else '1'
+        return {'user_info': {'max_connections': '4', 'active_cons': used}}
+    from dispatcharr_ranked_matchups import _util
+    _util.http_get_json = fetch
+    reserved = []
+    reserve = s.pool.reserve_profile_slot.side_effect
+    s.pool.reserve_profile_slot.side_effect = lambda prof, client: (reserved.append(prof.pk), reserve(prof, client))[1]
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert reserved == [4, 6]
+    assert s.opened == 1 and s.used == 0
+    assert len(s.keys) == 1
+    s.requests.clear()
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert [kw['params']['username'] for _, kw in s.requests] == ['spare-user'], 'full verdict not reused, or spare login blocked'
+
+
+def test_reconcile_budgets_the_provider_check_before_each_probe():
+    """reconcile needs Django, so pin the call-site contract: a probe may now
+    spend PROVIDER_CHECK_SECONDS on player_api.php before ffmpeg starts, and
+    the 120s walk must stay inside the 180s probe lease."""
+    import inspect
+    from dispatcharr_ranked_matchups import slate
+    assert 'time.monotonic() + PROBE_SECONDS + PROVIDER_CHECK_SECONDS > deadline' in inspect.getsource(slate.reconcile)
+    assert slate.PROVIDER_CHECK_SECONDS < slate.PROBE_SECONDS

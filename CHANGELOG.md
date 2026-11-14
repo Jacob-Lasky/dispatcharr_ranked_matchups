@@ -7,7 +7,9 @@
   probe plus one foreground tune. Dispatcharr's pool counts only its own
   reservations, while the provider still counts sessions recent probes hung
   up. On a full line, each probe made the provider drop the oldest session,
-  which was a live DVR recording. A full reply is cached for 30 seconds.
+  which was a live DVR recording. A full line is skipped for 30 seconds per
+  provider login, and a profile with its own login is tried next. A missing
+  or unreadable connection count defers the probe.
 
 ## 1.38.3
 
