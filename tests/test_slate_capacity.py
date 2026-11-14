@@ -387,3 +387,14 @@ def test_second_profile_on_a_full_login_is_marked_without_asking_again(provider)
     assert {'ranked_matchups:slate:provider_full_profile:4',
             'ranked_matchups:slate:provider_full_profile:6'} <= set(s.keys)
     assert s.used == 0 and s.opened == 0
+
+
+def test_unresolvable_first_profile_falls_back_to_the_next(provider):
+    s = provider
+    first, second = SimpleNamespace(pk=4, max_streams=4), SimpleNamespace(pk=6, max_streams=4)
+    s.stream.m3u_account.profiles.filter.return_value.order_by.return_value = [first, second]
+    logins = {4: (None, None, None), 6: ('http://provider.test', 'other-user', 'b')}
+    sys.modules['apps.m3u.credentials'].get_transformed_credentials.side_effect = lambda acct, prof: logins[prof.pk]
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert [kw['params']['username'] for _, kw in s.requests] == ['other-user']
+    assert s.opened == 1 and s.used == 0 and not s.locked

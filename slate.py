@@ -516,7 +516,9 @@ def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_C
     defers the probe: it is a background check, and an `unknown` verdict
     changes nothing on air. A full line is cached for PROVIDER_FULL_SECONDS
     per login and per profile (the profile key lets `_probe` skip it before
-    reserving or transforming credentials).
+    reserving or transforming credentials). Both keys only defer: a profile
+    whose login was just changed, or that shares a login whose line key
+    expired first, can wait up to PROVIDER_FULL_SECONDS more.
     """
     from ._util import http_get_json
     server, username, password, line = login
