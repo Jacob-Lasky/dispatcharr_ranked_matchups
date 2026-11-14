@@ -114,7 +114,8 @@ def test_probe_releases_lock_and_slot_after_lookup_failure(capacity):
     assert not s.locked
 
 
-def test_probe_exposes_owner_and_client_during_acquire_and_release(capacity, monkeypatch):
+@pytest.mark.parametrize('runtime', ['core', 'installed', 'reload'])
+def test_probe_exposes_owner_and_client_during_acquire_and_release(capacity, monkeypatch, runtime):
     s = capacity
     active = []
     guard = ModuleType('apps.m3u.reservation_guard')
@@ -126,11 +127,18 @@ def test_probe_exposes_owner_and_client_during_acquire_and_release(capacity, mon
         finally:
             active.pop()
     guard.scope = scope
-    monkeypatch.setitem(sys.modules, 'apps.m3u.reservation_guard', guard)
+    monkeypatch.setitem(sys.modules, 'apps.m3u.reservation_guard', guard if runtime != 'reload' else None)
+    # The loader temporarily evicts the file-backed alias during a reload;
+    # the installed runtime guard deliberately survives in this registry.
+    if runtime == 'core':
+        monkeypatch.delitem(sys.modules, '_dispatcharr_m3u_pool_guard', raising=False)
+    else:
+        monkeypatch.setitem(sys.modules, '_dispatcharr_m3u_pool_guard', SimpleNamespace(module=guard))
     reserve = s.pool.reserve_profile_slot.side_effect
     release = s.pool.release_profile_slot.side_effect
     observed = []
     def acquire(profile, client):
+        assert active, 'reservation owner missing during loader eviction'
         observed.append(('acquire', active[0]))
         return reserve(profile, client)
     def free(profile, client):

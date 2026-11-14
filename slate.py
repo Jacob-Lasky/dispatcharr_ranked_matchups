@@ -340,14 +340,19 @@ def probe(channel, stream):
     if not lock.acquire():
         return None
     try:
-        try:
-            from apps.m3u.reservation_guard import scope
-        except ImportError:
-            owner = nullcontext()
+        # The plugin loader evicts file-backed aliases during reload. The
+        # installed guard survives there and owns the pool's active ContextVar.
+        installed = sys.modules.get('_dispatcharr_m3u_pool_guard')
+        if installed is not None:
+            scope = installed.module.scope
         else:
-            owner = scope(f'probe:{channel.uuid}', client_id=f'probe:{channel.uuid}',
-                          kind='task', channel=str(channel.uuid),
-                          liveness_key='ranked_matchups:slate:probe')
+            try:
+                from apps.m3u.reservation_guard import scope
+            except ImportError:
+                scope = None
+        owner = (scope(f'probe:{channel.uuid}', client_id=f'probe:{channel.uuid}',
+                       kind='task', channel=str(channel.uuid),
+                       liveness_key='ranked_matchups:slate:probe') if scope else nullcontext())
         with owner:
             return _probe(channel, stream, redis)
     finally:
