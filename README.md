@@ -38,7 +38,8 @@ keep one slot free for foreground tuning. A one-connection profile is never
 probed. On Xtream Codes accounts a probe also asks the provider itself
 (`player_api.php`) how many connections it counts, and runs only when the
 provider has room for the probe plus one foreground tune. The provider can
-still be counting sessions that Dispatcharr has already released. A full
+still be counting sessions that Dispatcharr has already released, and its
+count lags, so probes from the last minute are added to it. A full
 provider login is skipped for 30 seconds, and the next profile with its own
 login is tried. A missing or unreadable count defers the probe. Insufficient
 capacity is unknown, never proof that a feed failed.

@@ -164,6 +164,18 @@ def provider(capacity, monkeypatch):
     s.keys = {}
     s.redis.exists.side_effect = lambda key: key in s.keys
     s.redis.setex.side_effect = lambda key, ttl, value: s.keys.__setitem__(key, ttl)
+    s.zsets = {}
+    def zadd(key, mapping):
+        s.zsets.setdefault(key, {}).update(mapping)
+    def zremrangebyscore(key, low, high):
+        z = s.zsets.get(key, {})
+        for member in [m for m, score in z.items() if score <= float(high)]:
+            del z[member]
+    def zcount(key, low, high):
+        return sum(1 for score in s.zsets.get(key, {}).values() if score >= float(low))
+    s.redis.zadd.side_effect = zadd
+    s.redis.zremrangebyscore.side_effect = zremrangebyscore
+    s.redis.zcount.side_effect = zcount
     s.reply = {'user_info': {'max_connections': '4', 'active_cons': '1'}}
     s.requests = []
     def fetch(requests_mod, url, **kwargs):
@@ -208,10 +220,10 @@ def test_full_provider_is_not_asked_again_by_every_stream(provider):
     assert s.slate.probe(s.channel, s.stream) is None
     assert s.slate.probe(s.channel, s.stream) is None
     assert len(s.requests) == 1
-    assert list(s.keys.values()) == [s.slate.PROVIDER_FULL_SECONDS]
-    [key] = s.keys
-    assert key.startswith('ranked_matchups:slate:provider_full:')
+    assert set(s.keys.values()) == {s.slate.PROVIDER_FULL_SECONDS}
+    [key] = [k for k in s.keys if k.startswith('ranked_matchups:slate:provider_full:')]
     assert 'user' not in key.rsplit(':', 1)[1] and 'provider.test' not in key, 'login leaked into Redis key'
+    assert 'ranked_matchups:slate:provider_full_profile:4' in s.keys
     assert s.used == 0
 
 
@@ -273,7 +285,9 @@ def test_full_line_moves_on_to_a_profile_with_its_own_login(provider):
     assert s.slate.probe(s.channel, s.stream) is True
     assert reserved == [4, 6]
     assert s.opened == 1 and s.used == 0
-    assert len(s.keys) == 1
+    assert sorted(k.rsplit(':', 1)[0] for k in s.keys) == [
+        'ranked_matchups:slate:provider_full', 'ranked_matchups:slate:provider_full_profile']
+    assert 'ranked_matchups:slate:provider_full_profile:4' in s.keys
     s.requests.clear()
     assert s.slate.probe(s.channel, s.stream) is True
     assert [kw['params']['username'] for _, kw in s.requests] == ['spare-user'], 'full verdict not reused, or spare login blocked'
@@ -309,3 +323,78 @@ def test_provider_checks_share_one_budget_across_profiles(provider, monkeypatch)
     assert s.slate.probe(s.channel, s.stream) is None
     assert timeouts == [s.slate.PROVIDER_CHECK_SECONDS], 'second profile got its own provider check'
     assert s.used == 0 and s.opened == 0 and not s.locked
+
+
+def test_recent_probes_count_because_the_provider_figure_lags(provider):
+    """JAKE-226 follow-up: a check 5s after a probe opened still reported the
+    pre-probe count, a second probe opened and the live feed dropped. Our own
+    probes from the last minute are added to the provider's figure."""
+    s = provider
+    s.reply['user_info']['active_cons'] = '2'
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert s.slate.probe(s.channel, s.stream) is None, 'second probe trusted a lagging provider count'
+    assert s.opened == 1 and s.used == 0 and not s.locked
+    [probes] = [k for k in s.zsets if k.startswith('ranked_matchups:slate:provider_probes:')]
+    assert len(s.zsets[probes]) == 1
+    s.redis.expire.assert_any_call(probes, 2 * s.slate.PROVIDER_SESSION_LINGER_SECONDS)
+
+
+def test_recent_probe_stops_counting_after_the_linger_window(provider, monkeypatch):
+    s = provider
+    clock = SimpleNamespace(now=1_000_000.0)
+    monkeypatch.setattr(s.slate.time, 'time', lambda: clock.now)
+    s.reply['user_info']['active_cons'] = '1'
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert s.slate.probe(s.channel, s.stream) is True   # 1 + 1 recent + 2 <= 4
+    assert s.slate.probe(s.channel, s.stream) is None   # 1 + 2 recent + 2 > 4
+    s.keys.clear()
+    clock.now += s.slate.PROVIDER_SESSION_LINGER_SECONDS + 1
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert s.opened == 3 and s.used == 0
+
+
+def test_line_known_full_is_skipped_before_reserving_a_slot(provider):
+    """Reconcile walks every stream of every channel; against a line already
+    known full each walk must not reserve and release a pool slot (about 100
+    pool log lines a minute in the first deploy)."""
+    s = provider
+    s.reply['user_info']['active_cons'] = '4'
+    assert s.slate.probe(s.channel, s.stream) is None
+    reserved = s.pool.reserve_profile_slot.call_count
+    for _ in range(5):
+        assert s.slate.probe(s.channel, s.stream) is None
+    assert s.pool.reserve_profile_slot.call_count == reserved, 'slot churn against a full line'
+    # Dispatcharr logs the credential-bearing URL at INFO on every transform.
+    assert sys.modules['apps.m3u.credentials'].get_transformed_credentials.call_count == 1
+    assert len(s.requests) == 1 and s.used == 0
+
+
+def test_probe_note_failure_still_releases_the_slot(provider):
+    s = provider
+    s.redis.zadd.side_effect = RuntimeError('redis down')
+    with pytest.raises(RuntimeError, match='redis down'):
+        s.slate.probe(s.channel, s.stream)
+    assert s.used == 0 and not s.locked and s.opened == 0
+
+
+def test_second_profile_on_a_full_login_is_marked_without_asking_again(provider):
+    s = provider
+    first, second = SimpleNamespace(pk=4, max_streams=4), SimpleNamespace(pk=6, max_streams=4)
+    s.stream.m3u_account.profiles.filter.return_value.order_by.return_value = [first, second]
+    s.reply['user_info']['active_cons'] = '4'
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert len(s.requests) == 1, 'same login asked twice'
+    assert {'ranked_matchups:slate:provider_full_profile:4',
+            'ranked_matchups:slate:provider_full_profile:6'} <= set(s.keys)
+    assert s.used == 0 and s.opened == 0
+
+
+def test_unresolvable_first_profile_falls_back_to_the_next(provider):
+    s = provider
+    first, second = SimpleNamespace(pk=4, max_streams=4), SimpleNamespace(pk=6, max_streams=4)
+    s.stream.m3u_account.profiles.filter.return_value.order_by.return_value = [first, second]
+    logins = {4: (None, None, None), 6: ('http://provider.test', 'other-user', 'b')}
+    sys.modules['apps.m3u.credentials'].get_transformed_credentials.side_effect = lambda acct, prof: logins[prof.pk]
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert [kw['params']['username'] for _, kw in s.requests] == ['other-user']
+    assert s.opened == 1 and s.used == 0 and not s.locked
