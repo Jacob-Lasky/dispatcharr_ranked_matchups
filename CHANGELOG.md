@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.38.8
+
+- Add this plugin's own feed probes from the last 60 seconds to the provider's
+  `active_cons` before probing an Xtream Codes line. The provider's figure lags:
+  live on 1.38.7, a check 5 seconds after a probe still showed the old count, a
+  second probe opened, and the live recording's feed dropped 3 seconds later.
+- Skip a line already known full before reserving a pool slot, ending a
+  reserve/release per stream (about 100 pool log lines a minute) while full.
+
 ## 1.38.7
 
 - Defer outage feed probes on an Xtream Codes account unless the provider

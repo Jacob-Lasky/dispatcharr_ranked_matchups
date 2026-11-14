@@ -38,6 +38,11 @@ PROVIDER_CHECK_SECONDS = 4
 # A provider that reported no spare connection is not asked again for this
 # long: reconcile walks every real stream, and each would otherwise re-query.
 PROVIDER_FULL_SECONDS = 30
+# How long a probe this plugin opened is assumed to still count on the
+# provider. Measured JAKE-226 (2026-11-14): with probes stopped, active_cons
+# fell 4 -> 1 within one minute; and a check 5s after a probe opened still
+# reported the pre-probe count, so the provider's figure lags.
+PROVIDER_SESSION_LINGER_SECONDS = 60
 OWNER = 'ranked_matchups_slate'
 def cache_dir(data_dir=None):
     """Persistent data root; v3 can pass context['data_dir'] here directly."""
@@ -377,8 +382,17 @@ def _probe(channel, stream, redis):
     # PROBE_SECONDS + PROVIDER_CHECK_SECONDS per stream holds however many
     # profiles a full or slow line makes this walk.
     checks_until = time.monotonic() + PROVIDER_CHECK_SECONDS
+    line = None
     for candidate in profiles:
         if candidate.max_streams == 1:
+            continue
+        # A profile can carry its own credentials, i.e. its own provider line,
+        # so a full or unresolvable line moves on to the next profile. Both are
+        # decided BEFORE reserving: reconcile walks every stream of every
+        # channel, and a reserve/release per stream against a line already
+        # known full is pure churn (about 100 pool log lines a minute, live).
+        login = _xc_login(stream.m3u_account, candidate)
+        if login is False or (login and redis.exists(_line_key('full', login[3]))):
             continue
         # DO NOT save this copy. Keep one slot for a foreground tune, using
         # core's atomic INCR-first reservation rather than a racy capacity read.
@@ -387,12 +401,13 @@ def _probe(channel, stream, redis):
             profile.max_streams -= 1
         if not reserve_profile_slot(profile, redis)[0]:
             continue
-        # A profile can carry its own credentials, i.e. its own provider line,
-        # so a full line moves on to the next profile rather than giving up.
+        if login is None:
+            break
         try:
             remaining = checks_until - time.monotonic()
-            if remaining >= 1 and _provider_has_headroom(stream.m3u_account, candidate, redis,
+            if remaining >= 1 and _provider_has_headroom(login, stream.m3u_account, redis,
                                                          timeout=remaining):
+                line = login[3]
                 break
         except BaseException:
             release_profile_slot(profile.pk, redis)
@@ -404,6 +419,10 @@ def _probe(channel, stream, redis):
     # preview key would let a concurrent preview reuse it and lose its slot
     # when the probe finishes. No preview/channel assignments are touched.
     try:
+        if line:
+            # Counted from now, before the feed opens: an aborted probe only
+            # makes the next check more cautious; a missed one could overrun.
+            _note_probe(redis, line)
         # The scheduler's objects can outlive an M3U refresh. Dispatcharr's
         # switch lookup logs ERROR before returning its missing-row result;
         # check fresh querysets after reserving, immediately before that call.
@@ -431,7 +450,38 @@ def _probe(channel, stream, redis):
             logger.warning('probe slot release failed for profile %s; counter may be stale', profile.pk)
 
 
-def _provider_has_headroom(account, profile, redis, timeout=PROVIDER_CHECK_SECONDS):
+def _xc_login(account, profile):
+    """`(server, username, password, line)` for an Xtream Codes profile, None
+    for a non-XC account, False when the profile's login cannot be resolved.
+
+    `line` identifies the provider login (server + username), not the account:
+    profiles can carry their own credentials, i.e. separate provider lines.
+    It is hashed so no username reaches Redis.
+    """
+    if getattr(account, 'account_type', None) != 'XC':
+        return None
+    from apps.m3u.credentials import get_transformed_credentials
+    server, username, password = get_transformed_credentials(account, profile)
+    if not (server and username and password):
+        return False
+    line = hashlib.sha256(f'{server}\0{username}'.encode()).hexdigest()[:16]
+    return server, username, password, line
+
+
+def _line_key(kind, line):
+    return f'ranked_matchups:slate:provider_{kind}:{line}'
+
+
+def _note_probe(redis, line):
+    key = _line_key('probes', line)
+    now = time.time()
+    # Unique member: equal timestamps must not collapse two probes into one.
+    redis.zadd(key, {f'{now:.6f}:{os.urandom(4).hex()}': now})
+    redis.zremrangebyscore(key, '-inf', now - PROVIDER_SESSION_LINGER_SECONDS)
+    redis.expire(key, 2 * PROVIDER_SESSION_LINGER_SECONDS)
+
+
+def _provider_has_headroom(login, account, redis, timeout=PROVIDER_CHECK_SECONDS):
     """False when the PROVIDER would have no connection left for a foreground tune.
 
     Dispatcharr's pool counts only its own reservations. An Xtream Codes
@@ -445,28 +495,22 @@ def _provider_has_headroom(account, profile, redis, timeout=PROVIDER_CHECK_SECON
     necessary but not sufficient: DO NOT drop this check because the pool
     counter looks healthy.
 
+    The provider's figure also LAGS: in the first deploy a check 5s after a
+    probe opened still reported the pre-probe count, a second probe opened,
+    and the live feed dropped 3s later. So every probe this plugin opened on
+    the line in the last PROVIDER_SESSION_LINGER_SECONDS is added to it. That
+    double-counts a probe the provider already reports, which only defers.
+
     The probe would add one session, and one must stay free for a foreground
-    tune, so probing needs active_cons + 2 <= max_connections. Non-XC accounts
-    have no such endpoint and keep the pool-only behaviour, and so does an XC
-    reply without a positive max_connections (no limit to respect). A failed
-    or unreadable reply, including a limited line whose active_cons is missing
-    or invalid, defers the probe: it is a background check, and an `unknown`
-    verdict changes nothing on air. The full verdict is cached per provider
-    login (server + username), because profiles can carry their own.
+    tune, so probing needs in_use + 2 <= max_connections. A reply without a
+    positive max_connections has no limit to respect. A failed or unreadable
+    reply, including a limited line whose active_cons is missing or invalid,
+    defers the probe: it is a background check, and an `unknown` verdict
+    changes nothing on air. A full line is cached per login for
+    PROVIDER_FULL_SECONDS.
     """
-    if getattr(account, 'account_type', None) != 'XC':
-        return True
-    from apps.m3u.credentials import get_transformed_credentials
     from ._util import http_get_json
-    server, username, password = get_transformed_credentials(account, profile)
-    if not (server and username and password):
-        return False
-    # Keyed by the login, not the account: profiles with their own credentials
-    # are separate provider lines. Hashed so no username reaches Redis.
-    line = hashlib.sha256(f'{server}\0{username}'.encode()).hexdigest()[:16]
-    full_key = f'ranked_matchups:slate:provider_full:{line}'
-    if redis.exists(full_key):
-        return False
+    server, username, password, line = login
     agent = account.get_user_agent()
     headers = {'User-Agent': agent.user_agent} if getattr(agent, 'user_agent', None) else None
     data = http_get_json(requests, server.rstrip('/') + '/player_api.php', log=logger,
@@ -486,11 +530,15 @@ def _provider_has_headroom(account, profile, redis, timeout=PROVIDER_CHECK_SECON
         active = int(info['active_cons'])
     except (KeyError, TypeError, ValueError):
         return False
-    if 0 <= active and active + 2 <= limit:
+    if active < 0:
+        return False
+    recent = int(redis.zcount(_line_key('probes', line),
+                              time.time() - PROVIDER_SESSION_LINGER_SECONDS, '+inf') or 0)
+    if active + recent + 2 <= limit:
         return True
-    redis.setex(full_key, PROVIDER_FULL_SECONDS, '1')
+    redis.setex(_line_key('full', line), PROVIDER_FULL_SECONDS, '1')
     logger.info('[ranked_matchups] feed probe deferred: provider reports %d of %d connections '
-                'in use on M3U account %s', active, limit, account.pk)
+                'in use on M3U account %s, plus %d recent probe(s)', active, limit, account.pk, recent)
     return False
 
 
