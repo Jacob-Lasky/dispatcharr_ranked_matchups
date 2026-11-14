@@ -1,5 +1,6 @@
 """Foreground tuning must keep a slot while independent workers check feeds."""
 import sys
+from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -111,3 +112,37 @@ def test_probe_releases_lock_and_slot_after_lookup_failure(capacity):
         s.slate.probe(s.channel, s.stream)
     assert s.used == 0
     assert not s.locked
+
+
+def test_probe_exposes_owner_and_client_during_acquire_and_release(capacity, monkeypatch):
+    s = capacity
+    active = []
+    guard = ModuleType('apps.m3u.reservation_guard')
+    @contextmanager
+    def scope(owner, **identity):
+        active.append((owner, identity))
+        try:
+            yield
+        finally:
+            active.pop()
+    guard.scope = scope
+    monkeypatch.setitem(sys.modules, 'apps.m3u.reservation_guard', guard)
+    reserve = s.pool.reserve_profile_slot.side_effect
+    release = s.pool.release_profile_slot.side_effect
+    observed = []
+    def acquire(profile, client):
+        observed.append(('acquire', active[0]))
+        return reserve(profile, client)
+    def free(profile, client):
+        observed.append(('release', active[0]))
+        return release(profile, client)
+    s.pool.reserve_profile_slot.side_effect = acquire
+    s.pool.release_profile_slot.side_effect = free
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert [event[0] for event in observed] == ['acquire', 'release']
+    for _, (owner, identity) in observed:
+        assert owner == 'probe:test-channel'
+        assert identity == dict(client_id='probe:test-channel', kind='task', channel='test-channel',
+                                liveness_key='ranked_matchups:slate:probe')
+    assert active == []
+    assert s.used == 0
