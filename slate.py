@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from copy import copy
+from contextlib import nullcontext
 import json
 import logging
 import math
@@ -339,7 +340,16 @@ def probe(channel, stream):
     if not lock.acquire():
         return None
     try:
-        return _probe(channel, stream, redis)
+        try:
+            from apps.m3u.reservation_guard import scope
+        except ImportError:
+            owner = nullcontext()
+        else:
+            owner = scope(f'probe:{channel.uuid}', client_id=f'probe:{channel.uuid}',
+                          kind='task', channel=str(channel.uuid),
+                          liveness_key='ranked_matchups:slate:probe')
+        with owner:
+            return _probe(channel, stream, redis)
     finally:
         lock.release()
 

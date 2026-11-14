@@ -38,6 +38,10 @@ keep one slot free for foreground tuning. A one-connection profile is never
 probed. Insufficient capacity is unknown, never proof that a feed failed.
 Probes also defer while their M3U account is fetching/parsing, and re-check
 channel and stream existence immediately before asking Dispatcharr for a URL.
+When the Dispatcharr M3U Reservation Guard is installed, probes also supply an
+owner and client ID tied to the global probe lease. This lets the guard log and
+reclaim a reservation left behind after its probe exits. Standard Dispatcharr
+installations continue to use their normal connection pool.
 
 Artwork is rendered at 1920×1080 and cached under `slates/` in plugin storage.
 The low-frame-rate loop has silent audio, repeated video headers and continuous
