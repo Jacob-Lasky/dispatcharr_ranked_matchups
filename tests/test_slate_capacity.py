@@ -220,10 +220,10 @@ def test_full_provider_is_not_asked_again_by_every_stream(provider):
     assert s.slate.probe(s.channel, s.stream) is None
     assert s.slate.probe(s.channel, s.stream) is None
     assert len(s.requests) == 1
-    assert list(s.keys.values()) == [s.slate.PROVIDER_FULL_SECONDS]
-    [key] = s.keys
-    assert key.startswith('ranked_matchups:slate:provider_full:')
+    assert set(s.keys.values()) == {s.slate.PROVIDER_FULL_SECONDS}
+    [key] = [k for k in s.keys if k.startswith('ranked_matchups:slate:provider_full:')]
     assert 'user' not in key.rsplit(':', 1)[1] and 'provider.test' not in key, 'login leaked into Redis key'
+    assert 'ranked_matchups:slate:provider_full_profile:4' in s.keys
     assert s.used == 0
 
 
@@ -285,7 +285,9 @@ def test_full_line_moves_on_to_a_profile_with_its_own_login(provider):
     assert s.slate.probe(s.channel, s.stream) is True
     assert reserved == [4, 6]
     assert s.opened == 1 and s.used == 0
-    assert len(s.keys) == 1
+    assert sorted(k.rsplit(':', 1)[0] for k in s.keys) == [
+        'ranked_matchups:slate:provider_full', 'ranked_matchups:slate:provider_full_profile']
+    assert 'ranked_matchups:slate:provider_full_profile:4' in s.keys
     s.requests.clear()
     assert s.slate.probe(s.channel, s.stream) is True
     assert [kw['params']['username'] for _, kw in s.requests] == ['spare-user'], 'full verdict not reused, or spare login blocked'
@@ -362,6 +364,8 @@ def test_line_known_full_is_skipped_before_reserving_a_slot(provider):
     for _ in range(5):
         assert s.slate.probe(s.channel, s.stream) is None
     assert s.pool.reserve_profile_slot.call_count == reserved, 'slot churn against a full line'
+    # Dispatcharr logs the credential-bearing URL at INFO on every transform.
+    assert sys.modules['apps.m3u.credentials'].get_transformed_credentials.call_count == 1
     assert len(s.requests) == 1 and s.used == 0
 
 
@@ -371,3 +375,15 @@ def test_probe_note_failure_still_releases_the_slot(provider):
     with pytest.raises(RuntimeError, match='redis down'):
         s.slate.probe(s.channel, s.stream)
     assert s.used == 0 and not s.locked and s.opened == 0
+
+
+def test_second_profile_on_a_full_login_is_marked_without_asking_again(provider):
+    s = provider
+    first, second = SimpleNamespace(pk=4, max_streams=4), SimpleNamespace(pk=6, max_streams=4)
+    s.stream.m3u_account.profiles.filter.return_value.order_by.return_value = [first, second]
+    s.reply['user_info']['active_cons'] = '4'
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert len(s.requests) == 1, 'same login asked twice'
+    assert {'ranked_matchups:slate:provider_full_profile:4',
+            'ranked_matchups:slate:provider_full_profile:6'} <= set(s.keys)
+    assert s.used == 0 and s.opened == 0
