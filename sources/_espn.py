@@ -942,8 +942,18 @@ def fetch_season_type_windows(
     `http_get` is injected for the reason given in `sweep_upcoming_scoreboard`:
     each source's tests patch its OWN `_http_get`, and a request made from in
     here would turn those patches into silent live calls.
+
+    A failed request (`http_get` returned None) is retried ONCE (#355): on
+    2026-11-17 one 15s timeout, with ESPN answering in 0.14s soon after, made
+    the College Cup raise `CalendarUnavailable` and sit out the refresh.
+    Both callers memoise the result per refresh, so a sustained outage costs
+    one extra request per season year, not one per call (#228). DO NOT retry
+    a malformed calendar: ESPN serves the same one again.
     """
-    data = http_get(f"{ESPN_CORE_SOCCER_BASE}/{league_slug}/seasons/{year}")
+    url = f"{ESPN_CORE_SOCCER_BASE}/{league_slug}/seasons/{year}"
+    data = http_get(url)
+    if data is None:
+        data = http_get(url)
     if not isinstance(data, dict):
         return None
     types = data.get("types")

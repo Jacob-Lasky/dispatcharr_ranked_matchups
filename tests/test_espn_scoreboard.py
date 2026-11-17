@@ -492,6 +492,11 @@ def test_busy_day_reaches_the_upcoming_sweep(monkeypatch):
     monkeypatch.setattr(ncaa_soccer, "_http_get", emu)
     src = ncaa_soccer.NcaaSoccerSource(gender="w")
     monkeypatch.setattr(src, "_fetch_rankings", lambda *a, **k: {})
+    # The events sit on tomorrow's REAL date, so pin the regular-season
+    # cutoff past them. Without it the test fails every year from the
+    # women's cutoff in mid-November to the next season (found 2026-11-17,
+    # #355): the source then correctly reads them as College Cup games.
+    monkeypatch.setattr(src, "_regular_season_cutoff", lambda: when + timedelta(days=30))
     assert len(src.fetch_upcoming(days_ahead=7)) == 101
 
 

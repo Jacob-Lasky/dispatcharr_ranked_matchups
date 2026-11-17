@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.38.9
+
+- Retry a failed request for ESPN's NCAA soccer season calendar once before
+  treating the calendar as missing (#355). One request that timed out at 15s
+  made the College Cup source raise `CalendarUnavailable`, log an ERROR and
+  sit out the whole refresh while ESPN was otherwise healthy; the regular
+  NCAA soccer source fell back to its fixed cutoff date the same way. A
+  sustained outage still raises and still holds the published rows (#240),
+  at the cost of one extra request per season year per refresh.
+- Pin the regular-season cutoff in an upcoming-sweep test that used the real
+  clock and failed every year after the women's mid-November cutoff.
+
 ## 1.38.8
 
 - Add this plugin's own feed probes from the last 60 seconds to the provider's

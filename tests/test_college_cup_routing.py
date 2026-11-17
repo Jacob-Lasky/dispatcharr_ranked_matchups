@@ -227,7 +227,25 @@ class TestCalendarUnavailable:
         pinned = datetime(2025, 11, 14, 12, 0, tzinfo=timezone.utc)
         with pytest.raises(cup_mod.CalendarUnavailable):
             _upcoming(src, cup_mod, fake, pinned, 0)
-        assert len([u for u in fake.urls if "/seasons/" in u]) == 1
+        # One request plus its single retry (#355), then memoised: the
+        # 25-event board does not ask again per event.
+        assert len([u for u in fake.urls if "/seasons/" in u]) == 2
+
+    def test_one_dropped_calendar_request_is_retried(self):
+        """#355: one timed-out calendar request (2026-11-17, ESPN healthy
+        again 0.14s later) raised CalendarUnavailable for the whole refresh.
+        The retry gets the calendar, so the board publishes normally."""
+        src, fake = _cup("m2025", not_yet_played=True)
+        dropped = []
+
+        def flaky(url, *a, **k):
+            if "/seasons/" in url and not dropped:
+                dropped.append(url)
+                return None
+            return fake(url, *a, **k)
+        rows = _upcoming(src, cup_mod, flaky, datetime(2025, 12, 5, 15, 0, tzinfo=timezone.utc), 7)
+        assert len(dropped) == 1
+        assert Counter(r.extra["stage"] for r in rows) == {"E8": 4, "F4": 2}
 
     def test_tagged_rows_are_not_published_without_a_calendar(self):
         """2024 tagged every event, so routing needs no calendar; but the
@@ -494,6 +512,32 @@ class TestSeasonTypeWindows:
         None, {}, {"types": {"items": []}}, {"types": []}, {"types": {"items": "x"}}, "oops"])
     def test_nothing_usable_is_none(self, payload):
         assert _espn.fetch_season_type_windows("x", 2025, lambda u: payload) is None
+
+    def test_a_failed_request_is_retried_once(self):
+        """#355: one timed-out request no longer voids the calendar."""
+        replies = [None, {"types": {"count": 3, "items": self._GOOD}}]
+        urls = []
+
+        def get(u):
+            urls.append(u)
+            return replies.pop(0)
+        ws = _espn.fetch_season_type_windows("usa.ncaa.m.1", 2025, get)
+        assert [w.slug for w in ws] == ["first-round", "second-round", "no-type"]
+        assert len(urls) == 2 and urls[0] == urls[1]
+
+    def test_a_sustained_outage_costs_one_retry(self):
+        urls = []
+        assert _espn.fetch_season_type_windows("x", 2025, lambda u: urls.append(u)) is None
+        assert len(urls) == 2
+
+    def test_a_malformed_calendar_is_not_retried(self):
+        urls = []
+
+        def get(u):
+            urls.append(u)
+            return {"types": {"items": "x"}}
+        assert _espn.fetch_season_type_windows("x", 2025, get) is None
+        assert len(urls) == 1
 
     def test_boundary_minute_belongs_to_the_earlier_round(self):
         ws = _espn.fetch_season_type_windows(
