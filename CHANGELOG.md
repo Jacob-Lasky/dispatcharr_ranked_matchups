@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.39.0
+
+Adopts the rest of Dispatcharr 0.34's plugin features (#358). **Requires
+0.34 for the new settings controls**; see the README's "Upgrading to 1.39.0".
+
+- Settings are grouped into collapsible sections. Sport Sources and Curation
+  open by default; API Keys, Health monitoring, Interestingness Weights,
+  Channel Name & Description, Apply Behavior, Recording and Auto-Refresh start
+  collapsed. Section wording is unchanged.
+- **Channel Profiles to enable**, **Demote stream groups** and **Exclude
+  stream groups** are pickers listing the install's own profiles and channel
+  groups; **Leagues to record** picks from the league codes (the order picked
+  is the priority). **Scoring weights** and **League weights** are row tables.
+  Saved comma-separated and `name=number` text is rewritten as the new shape
+  on first load and still read wherever it remains; a saved name that no
+  longer exists stays selected, marked `(not found)`, so a save never fails on
+  it.
+- The description template box opens six lines tall.
+- **Remove finished games now** asks for confirmation.
+- Run history records `partial` for a run that finished with data warnings
+  (a source that errored, nothing playable) or whose scoring failed and
+  matching recovered; `last_run.json` and Show current state are unchanged.
+- No new capability, so no re-approval: the plugin queues no M3U or EPG
+  refresh, so `celery_dispatch` does not apply. No change to scoring,
+  matching or numbering.
+
 ## 1.38.9
 
 - Retry a failed request for ESPN's NCAA soccer season calendar once before

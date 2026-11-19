@@ -814,11 +814,12 @@ opt-in regardless of preset. `high_curation` tilts toward stakes
 ### Knob reference
 
 The recipes above cover the common goals. For reference, each weight on
-`manual`. All of them live in ONE setting, **Scoring weights**, written as
-`name=number` entries separated by commas (for example
-`favorite=8, spread=1`); leave it blank for every default, and name only the
-weights you want to change. An entry the plugin cannot read (an unknown name,
-a value that is not a number) is skipped and logged, never fatal. Before
+`manual`. All of them live in ONE setting, **Scoring weights**, a table with
+one row per weight you change: pick the Signal, set its Weight (for example
+`favorite` at 8 and `spread` at 1); leave it empty for every default. Before
+1.39.0 (#358) this was `name=number` text separated by commas; saved text is
+turned into rows on upgrade and is still read if present. A row the plugin
+cannot read (no weight yet) is skipped and logged, never fatal. Before
 #208 these were seven separate `weight_<name>` fields; values saved there are
 carried into Scoring weights automatically on upgrade (#208).
 
@@ -845,8 +846,9 @@ sensitivity.
 ### League weights
 
 The **League weights** setting (#309) multiplies the whole raw score of every
-game in a league, written as `LEAGUE=number` entries separated by commas, for
-example `NFL=1.5, EPL=0.7`. The league is the code at the start of each channel
+game in a league: a table with one row per league, its code and its weight,
+for example `NFL` at 1.5 and `EPL` at 0.7 (before 1.39.0, `LEAGUE=number`
+text such as `NFL=1.5, EPL=0.7`, still read if present). The league is the code at the start of each channel
 name (`sport_prefix`: `NFL`, `NHL`, `CFB`, `EPL`, `UCL`, `LaLiga`...), matched
 in any case. A league you do not name stays at 1.
 

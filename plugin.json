@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "1.38.9",
+  "version": "1.39.0",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -15,9 +15,14 @@
     },
     {
       "id": "_section_sources",
+      "type": "section",
+      "label": "Sport Sources"
+    },
+    {
+      "id": "_section_sources_note",
       "type": "info",
-      "label": "Sport Sources",
-      "description": "Toggle which sports/leagues the curator pulls from. Related leagues share one dropdown (Off / either one / both)."
+      "description": "Toggle which sports/leagues the curator pulls from. Related leagues share one dropdown (Off / either one / both).",
+      "section": "_section_sources"
     },
     {
       "id": "ncaaf",
@@ -38,7 +43,8 @@
           "label": "D1 FBS + FCS"
         }
       ],
-      "help_text": "AP Top-25 + games + betting lines from CollegeFootballData.com; requires the CFBD API key below. Offseason → no rows. Pick which divisions to pull. CFBD's feed also carries Division II and III, which can never score (they are outside the simulated season) yet still add to the refresh — opening week 2026 was 157 games of which only 27 involved an FBS team, so FBS only is the recommended setting. Adding FCS widens the simulated season and scores those games with FBS win-count bands (6 wins = bowl eligible), an approximation since FCS has a different postseason."
+      "help_text": "AP Top-25 + games + betting lines from CollegeFootballData.com; requires the CFBD API key below. Offseason → no rows. Pick which divisions to pull. CFBD's feed also carries Division II and III, which can never score (they are outside the simulated season) yet still add to the refresh — opening week 2026 was 157 games of which only 27 involved an FBS team, so FBS only is the recommended setting. Adding FCS widens the simulated season and scores those games with FBS win-count bands (6 wins = bowl eligible), an approximation since FCS has a different postseason.",
+      "section": "_section_sources"
     },
     {
       "id": "ncaa_basketball",
@@ -63,70 +69,80 @@
           "label": "Men's + Women's"
         }
       ],
-      "help_text": "Men's: AP Top-25 + games + betting lines from CollegeBasketballData.com, using the same Bearer token as CFBD (the CFBD API key below). Women's: D1 regular season + March Madness from ESPN's unofficial API + AP Top 25, no key needed; win-count bands are 20+ tournament bubble, 25+ at-large lock, 28+ top-4 seed, 32+ #1 seed contention, and the bracket runs R64 → Sweet 16 → Final Four → National Championship. Season runs Nov-Apr; offseason returns no rows."
+      "help_text": "Men's: AP Top-25 + games + betting lines from CollegeBasketballData.com, using the same Bearer token as CFBD (the CFBD API key below). Women's: D1 regular season + March Madness from ESPN's unofficial API + AP Top 25, no key needed; win-count bands are 20+ tournament bubble, 25+ at-large lock, 28+ top-4 seed, 32+ #1 seed contention, and the bracket runs R64 → Sweet 16 → Final Four → National Championship. Season runs Nov-Apr; offseason returns no rows.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_epl",
       "type": "boolean",
       "label": "English Premier League (EPL)",
       "default": false,
-      "help_text": "Football-Data.org primary, The Odds API for spread signal. Requires the Football-Data.org API key below."
+      "help_text": "Football-Data.org primary, The Odds API for spread signal. Requires the Football-Data.org API key below.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_championship",
       "type": "boolean",
       "label": "EFL Championship",
       "default": false,
-      "help_text": "Second tier of English football. Standings position used as the rank slot — top 6 makes playoffs. Requires the Football-Data.org API key below."
+      "help_text": "Second tier of English football. Standings position used as the rank slot — top 6 makes playoffs. Requires the Football-Data.org API key below.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_ucl",
       "type": "boolean",
       "label": "UEFA Champions League",
       "default": false,
-      "help_text": "Knockout/group stage. Position-as-rank doesn't apply cleanly so favorites + odds carry the signal."
+      "help_text": "Knockout/group stage. Position-as-rank doesn't apply cleanly so favorites + odds carry the signal.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_bundesliga",
       "type": "boolean",
       "label": "Bundesliga (Germany, top flight)",
       "default": false,
-      "help_text": "18 teams, 34 matchdays. Top 4 → UCL, 5-6 → Europa/Conference, 16 → relegation playoff, 17-18 → direct relegation. Requires Football-Data.org key."
+      "help_text": "18 teams, 34 matchdays. Top 4 → UCL, 5-6 → Europa/Conference, 16 → relegation playoff, 17-18 → direct relegation. Requires Football-Data.org key.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_la_liga",
       "type": "boolean",
       "label": "La Liga (Spain, top flight)",
       "default": false,
-      "help_text": "20 teams, 38 matchdays. Top 4 → UCL, 5-7 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key."
+      "help_text": "20 teams, 38 matchdays. Top 4 → UCL, 5-7 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_serie_a",
       "type": "boolean",
       "label": "Serie A (Italy, top flight)",
       "default": false,
-      "help_text": "20 teams, 38 matchdays. Top 4 → UCL, 5-7 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key."
+      "help_text": "20 teams, 38 matchdays. Top 4 → UCL, 5-7 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_ligue_1",
       "type": "boolean",
       "label": "Ligue 1 (France, top flight)",
       "default": false,
-      "help_text": "18 teams, 34 matchdays. Top 3 → UCL (4th = UCL playoff), 5 → Europa, bottom 3 → relegation. Requires Football-Data.org key."
+      "help_text": "18 teams, 34 matchdays. Top 3 → UCL (4th = UCL playoff), 5 → Europa, bottom 3 → relegation. Requires Football-Data.org key.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_world_cup",
       "type": "boolean",
       "label": "FIFA World Cup",
       "default": false,
-      "help_text": "Quadrennial international tournament. Both phases are produced: every group-stage match plus the knockout bracket (LAST_32 in the new 48-team format → R16 → QF → SF → Final). The group stage alone is dozens of matches across all participating nations; to see only your country's games, list it in Favorites and set 'Favorites only' below (knockout rounds still score on stage). Requires Football-Data.org key."
+      "help_text": "Quadrennial international tournament. Both phases are produced: every group-stage match plus the knockout bracket (LAST_32 in the new 48-team format → R16 → QF → SF → Final). The group stage alone is dozens of matches across all participating nations; to see only your country's games, list it in Favorites and set 'Favorites only' below (knockout rounds still score on stage). Requires Football-Data.org key.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_euros",
       "type": "boolean",
       "label": "UEFA European Championship (EURO)",
       "default": false,
-      "help_text": "UEFA's quadrennial national-team tournament. Both phases are produced: every group-stage match plus the knockout bracket (R16 → QF → SF → Final). The group stage alone is dozens of matches across all participating nations; to see only your country's games, list it in Favorites and set 'Favorites only' below (knockout rounds still score on stage). Requires Football-Data.org key."
+      "help_text": "UEFA's quadrennial national-team tournament. Both phases are produced: every group-stage match plus the knockout bracket (R16 → QF → SF → Final). The group stage alone is dozens of matches across all participating nations; to see only your country's games, list it in Favorites and set 'Favorites only' below (knockout rounds still score on stage). Requires Football-Data.org key.",
+      "section": "_section_sources"
     },
     {
       "id": "intl_friendlies",
@@ -151,21 +167,24 @@
           "label": "Men's + Women's"
         }
       ],
-      "help_text": "Senior national-team friendlies and FIFA-window warm-ups (e.g. a USMNT or USWNT tune-up the week before a tournament) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite national team are shown (see 'Friendlies: favorites only' below); add the team to Favorites using the country name as ESPN spells it (e.g. \"United States\", not \"USA\"). Offseason → no rows. No API key required."
+      "help_text": "Senior national-team friendlies and FIFA-window warm-ups (e.g. a USMNT or USWNT tune-up the week before a tournament) from ESPN's unofficial API. Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite national team are shown (see 'Friendlies: favorites only' below); add the team to Favorites using the country name as ESPN spells it (e.g. \"United States\", not \"USA\"). Offseason → no rows. No API key required.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_club_friendlies",
       "type": "boolean",
       "label": "Club Friendlies (Pre-Season)",
       "default": false,
-      "help_text": "Club friendlies from ESPN's unofficial API: pre-season tours and mid-season exhibitions (e.g. Wrexham v Leeds United in late July). Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite club are shown (see \"Friendlies: favorites only\" below); add the club to Favorites using the full name as ESPN spells it (e.g. \"Leeds United\", not \"Leeds\"; \"Tottenham Hotspur\", not \"Spurs\"). Most useful in July and early August, when every league below is between seasons and returns no games. Offseason → no rows. No API key required."
+      "help_text": "Club friendlies from ESPN's unofficial API: pre-season tours and mid-season exhibitions (e.g. Wrexham v Leeds United in late July). Exhibition games: no standings/importance signal, so they surface via favorite + rivalry + narrative only. By default only friendlies involving a Favorite club are shown (see \"Friendlies: favorites only\" below); add the club to Favorites using the full name as ESPN spells it (e.g. \"Leeds United\", not \"Leeds\"; \"Tottenham Hotspur\", not \"Spurs\"). Most useful in July and early August, when every league below is between seasons and returns no games. Offseason → no rows. No API key required.",
+      "section": "_section_sources"
     },
     {
       "id": "friendlies_favorites_only",
       "type": "boolean",
       "label": "Friendlies: favorites only",
       "default": true,
-      "help_text": "When on (default), the friendlies settings above (International Friendlies, men's and women's, and Club Friendlies) show ONLY games involving a team in your Favorites. A friendly is an exhibition with no standings or rank, so a game between two teams you don't follow has nothing to earn a guide slot, and an unfiltered slate produces dozens of them (Kenya vs Lesotho, Cambodia vs Hong Kong, Bromley vs Crystal Palace, ...). Match by the name as ESPN spells it (\"United States\", not \"USA\"; \"Leeds United\", not \"Leeds\"). Turn this OFF to see every friendly in the lookahead window. No effect unless International or Club Friendlies is on."
+      "help_text": "When on (default), the friendlies settings above (International Friendlies, men's and women's, and Club Friendlies) show ONLY games involving a team in your Favorites. A friendly is an exhibition with no standings or rank, so a game between two teams you don't follow has nothing to earn a guide slot, and an unfiltered slate produces dozens of them (Kenya vs Lesotho, Cambodia vs Hong Kong, Bromley vs Crystal Palace, ...). Match by the name as ESPN spells it (\"United States\", not \"USA\"; \"Leeds United\", not \"Leeds\"). Turn this OFF to see every friendly in the lookahead window. No effect unless International or Club Friendlies is on.",
+      "section": "_section_sources"
     },
     {
       "id": "english_cups",
@@ -190,112 +209,128 @@
           "label": "EFL Cup + FA Cup"
         }
       ],
-      "help_text": "The EFL (Carabao) Cup, all 92 Premier League and EFL clubs, and the FA Cup proper rounds (first round through the final; the qualifying rounds are a separate competition and are not included). Both come from ESPN's unofficial API (no key needed). NOT available from Football-Data.org: it gates every domestic cup behind a paid plan, so the free-tier key returns HTTP 403 for them. Knockout competitions with no league table, so there is no importance simulation and no ranks; a tie scores on its round (early rounds low, quarterfinal onward high) plus favorite, rivalry, and narrative. Early-round ties DO score low on purpose: an EFL Cup second-round Wednesday is ~25 fixtures and they belong at the bottom of the list, where 'Max curated games' trims them. Premier League and Championship clubs enter the FA Cup at the third round, which is when its ties start scoring meaningfully."
+      "help_text": "The EFL (Carabao) Cup, all 92 Premier League and EFL clubs, and the FA Cup proper rounds (first round through the final; the qualifying rounds are a separate competition and are not included). Both come from ESPN's unofficial API (no key needed). NOT available from Football-Data.org: it gates every domestic cup behind a paid plan, so the free-tier key returns HTTP 403 for them. Knockout competitions with no league table, so there is no importance simulation and no ranks; a tie scores on its round (early rounds low, quarterfinal onward high) plus favorite, rivalry, and narrative. Early-round ties DO score low on purpose: an EFL Cup second-round Wednesday is ~25 fixtures and they belong at the bottom of the list, where 'Max curated games' trims them. Premier League and Championship clubs enter the FA Cup at the third round, which is when its ties start scoring meaningfully.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_eredivisie",
       "type": "boolean",
       "label": "Eredivisie (Netherlands, top flight)",
       "default": false,
-      "help_text": "18 teams, 34 matchdays. Top 3 → UCL/qualifying, 4-5 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key."
+      "help_text": "18 teams, 34 matchdays. Top 3 → UCL/qualifying, 4-5 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_primeira_liga",
       "type": "boolean",
       "label": "Primeira Liga (Portugal, top flight)",
       "default": false,
-      "help_text": "18 teams, 34 matchdays. Top 3 → UCL/qualifying, 4-5 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key."
+      "help_text": "18 teams, 34 matchdays. Top 3 → UCL/qualifying, 4-5 → Europa/Conference, bottom 3 → relegation. Requires Football-Data.org key.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_brazilian_serie_a",
       "type": "boolean",
       "label": "Brazilian Série A",
       "default": false,
-      "help_text": "Top flight of Brazilian football. 20 teams, 38 matchdays. Top 6 → Copa Libertadores, 7-12 → Sudamericana, bottom 4 → relegation. Requires Football-Data.org key."
+      "help_text": "Top flight of Brazilian football. 20 teams, 38 matchdays. Top 6 → Copa Libertadores, 7-12 → Sudamericana, bottom 4 → relegation. Requires Football-Data.org key.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_nfl",
       "type": "boolean",
       "label": "NFL (regular season + playoffs)",
       "default": false,
-      "help_text": "Regular season uses win count (7+ bubble, 9+ playoff-secured, 11+ division winner, 13+ #1 seed) over the 17-game season. Playoffs are single-game elimination: Wild Card → Divisional → Conference Championship → Super Bowl → Champion. No API key required — uses ESPN's unofficial site.api.espn.com."
+      "help_text": "Regular season uses win count (7+ bubble, 9+ playoff-secured, 11+ division winner, 13+ #1 seed) over the 17-game season. Playoffs are single-game elimination: Wild Card → Divisional → Conference Championship → Super Bowl → Champion. No API key required — uses ESPN's unofficial site.api.espn.com.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_nhl",
       "type": "boolean",
       "label": "NHL (regular season + Stanley Cup Playoffs)",
       "default": false,
-      "help_text": "Regular season uses standings points (95+ bubble, 100+ playoff-secured, 110+ division pace, 125+ Presidents' Trophy). Playoffs are best-of-7 each round. No API key required — official api-web.nhle.com."
+      "help_text": "Regular season uses standings points (95+ bubble, 100+ playoff-secured, 110+ division pace, 125+ Presidents' Trophy). Playoffs are best-of-7 each round. No API key required — official api-web.nhle.com.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_mlb",
       "type": "boolean",
       "label": "MLB (regular season + postseason)",
       "default": false,
-      "help_text": "Regular season uses win count (85+ bubble, 90+ playoff-secured, 95+ division pace, 105+ elite). Postseason mixes series lengths: Wild Card best-of-3, Division Series best-of-5, LCS / World Series best-of-7. No API key required — official statsapi.mlb.com."
+      "help_text": "Regular season uses win count (85+ bubble, 90+ playoff-secured, 95+ division pace, 105+ elite). Postseason mixes series lengths: Wild Card best-of-3, Division Series best-of-5, LCS / World Series best-of-7. No API key required — official statsapi.mlb.com.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_nba",
       "type": "boolean",
       "label": "NBA (regular season + playoffs)",
       "default": false,
-      "help_text": "Regular season uses win count (40+ play-in bubble, 50+ playoff-secured, 55+ top-seed pace, 65+ elite). Playoffs are best-of-7 each round (R1 / Conf Semis / Conf Finals / NBA Finals). No API key required — uses ESPN's unofficial site.api.espn.com (stats.nba.com is WAF-blocked from most homelab egress)."
+      "help_text": "Regular season uses win count (40+ play-in bubble, 50+ playoff-secured, 55+ top-seed pace, 65+ elite). Playoffs are best-of-7 each round (R1 / Conf Semis / Conf Finals / NBA Finals). No API key required — uses ESPN's unofficial site.api.espn.com (stats.nba.com is WAF-blocked from most homelab egress).",
+      "section": "_section_sources"
     },
     {
       "id": "enable_mls",
       "type": "boolean",
       "label": "MLS (regular season + Cup playoffs)",
       "default": false,
-      "help_text": "MLS regular season with per-conference standings importance + the MLS Cup playoff bracket. Regular season uses standings points (3 W / 1 D / 0 L) with per-conference bands: 30+ playoff bubble, 45+ secured, 55+ top-4 home field, 70+ Supporters' Shield. Postseason is mixed-format: Wild Card single-leg play-in -> Round One best-of-3 -> Conference Semis single-leg -> Conference Final single-leg -> MLS Cup Final single-leg -> Champion. ESPN's unofficial site.api.espn.com for schedule + /standings for conference rosters; The Odds API key enables closeness via soccer_usa_mls."
+      "help_text": "MLS regular season with per-conference standings importance + the MLS Cup playoff bracket. Regular season uses standings points (3 W / 1 D / 0 L) with per-conference bands: 30+ playoff bubble, 45+ secured, 55+ top-4 home field, 70+ Supporters' Shield. Postseason is mixed-format: Wild Card single-leg play-in -> Round One best-of-3 -> Conference Semis single-leg -> Conference Final single-leg -> MLS Cup Final single-leg -> Champion. ESPN's unofficial site.api.espn.com for schedule + /standings for conference rosters; The Odds API key enables closeness via soccer_usa_mls.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_nwsl",
       "type": "boolean",
       "label": "NWSL (National Women's Soccer League)",
       "default": false,
-      "help_text": "NWSL games surface with favorite + closeness scoring only in V1 (same scope as MLS — no standings importance or playoff bracket yet). ESPN unofficial API + Odds API (soccer_usa_nwsl). No ESPN key required."
+      "help_text": "NWSL games surface with favorite + closeness scoring only in V1 (same scope as MLS — no standings importance or playoff bracket yet). ESPN unofficial API + Odds API (soccer_usa_nwsl). No ESPN key required.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_liga_mx",
       "type": "boolean",
       "label": "Liga MX (Mexican top flight)",
       "default": false,
-      "help_text": "Mexican Apertura + Clausura + Liguilla playoff. Schedule + closeness scoring only in V1 (same minimal scope as MLS / NWSL). ESPN unofficial API + Odds API (soccer_mexico_ligamx). Relevant for US viewers with Univision / Telemundo channels in their EPG."
+      "help_text": "Mexican Apertura + Clausura + Liguilla playoff. Schedule + closeness scoring only in V1 (same minimal scope as MLS / NWSL). ESPN unofficial API + Odds API (soccer_mexico_ligamx). Relevant for US viewers with Univision / Telemundo channels in their EPG.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_f1",
       "type": "boolean",
       "label": "Formula 1",
       "default": false,
-      "help_text": "~24 Grands Prix per year. Each scheduled race surfaces in the guide as a single 'Event'-tier entry — no per-driver importance ranking (the rarity of races makes 'show if toggled' the right product). No API key required — ESPN unofficial."
+      "help_text": "~24 Grands Prix per year. Each scheduled race surfaces in the guide as a single 'Event'-tier entry — no per-driver importance ranking (the rarity of races makes 'show if toggled' the right product). No API key required — ESPN unofficial.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_nascar",
       "type": "boolean",
       "label": "NASCAR Cup Series",
       "default": false,
-      "help_text": "~36 Cup Series races per year. Same field-event shape as F1: each race is one 'Event'-tier row. No API key required — ESPN unofficial."
+      "help_text": "~36 Cup Series races per year. Same field-event shape as F1: each race is one 'Event'-tier row. No API key required — ESPN unofficial.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_golf",
       "type": "boolean",
       "label": "PGA Tour (incl. majors)",
       "default": false,
-      "help_text": "PGA Tour tour stops + the four majors (Masters / PGA Championship / US Open / The Open). Major tournaments get a higher score tier ('Major') than regular tour stops ('Event'). No API key required — ESPN unofficial."
+      "help_text": "PGA Tour tour stops + the four majors (Masters / PGA Championship / US Open / The Open). Major tournaments get a higher score tier ('Major') than regular tour stops ('Event'). No API key required — ESPN unofficial.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_ufc",
       "type": "boolean",
       "label": "UFC",
       "default": false,
-      "help_text": "Each UFC fight card surfaces as one entry in the guide (the card title carries the headliner, e.g., 'UFC 309: Jones vs. Miocic'). Numbered PPVs get a higher tier ('Major') than Fight Nights and ESPN cards ('Event'). No API key required — ESPN unofficial."
+      "help_text": "Each UFC fight card surfaces as one entry in the guide (the card title carries the headliner, e.g., 'UFC 309: Jones vs. Miocic'). Numbered PPVs get a higher tier ('Major') than Fight Nights and ESPN cards ('Event'). No API key required — ESPN unofficial.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_boxing",
       "type": "boolean",
       "label": "Boxing",
       "default": false,
-      "help_text": "Each professional boxing card surfaces as one 'Event'-tier entry (the card title carries the headliner, e.g., 'Gassiev vs. Kadiru: IBA Pro 19'); explicit world-title cards get 'Major'. REQUIRES the Boxing Data API key below — ESPN has no boxing feed. Free tier looks ahead about 7 days. Note: covers boxing only; UFC/MMA is the separate 'UFC' toggle, and kickboxing/bare-knuckle have no free feed."
+      "help_text": "Each professional boxing card surfaces as one 'Event'-tier entry (the card title carries the headliner, e.g., 'Gassiev vs. Kadiru: IBA Pro 19'); explicit world-title cards get 'Major'. REQUIRES the Boxing Data API key below — ESPN has no boxing feed. Free tier looks ahead about 7 days. Note: covers boxing only; UFC/MMA is the separate 'UFC' toggle, and kickboxing/bare-knuckle have no free feed.",
+      "section": "_section_sources"
     },
     {
       "id": "tennis",
@@ -320,14 +355,16 @@
           "label": "ATP + WTA"
         }
       ],
-      "help_text": "Each active tournament surfaces as one entry. The four Grand Slams (Wimbledon / Australian Open / French Open / US Open) and the year-end ATP / WTA Finals get the 'Major' tier; regular tour stops get 'Event'. No API key required — ESPN unofficial."
+      "help_text": "Each active tournament surfaces as one entry. The four Grand Slams (Wimbledon / Australian Open / French Open / US Open) and the year-end ATP / WTA Finals get the 'Major' tier; regular tour stops get 'Event'. No API key required — ESPN unofficial.",
+      "section": "_section_sources"
     },
     {
       "id": "enable_wnba",
       "type": "boolean",
       "label": "WNBA (regular season + playoffs)",
       "default": false,
-      "help_text": "Regular season uses win count (20+ bubble, 25+ playoff-secured, 30+ top-seed pace, 35+ elite) over the 40-game season. Playoffs have mixed series lengths: R1 best-of-3, Semifinals best-of-5, Finals best-of-5 in 2024 / best-of-7 in 2025+. No API key required — uses ESPN's unofficial site.api.espn.com."
+      "help_text": "Regular season uses win count (20+ bubble, 25+ playoff-secured, 30+ top-seed pace, 35+ elite) over the 40-game season. Playoffs have mixed series lengths: R1 best-of-3, Semifinals best-of-5, Finals best-of-5 in 2024 / best-of-7 in 2025+. No API key required — uses ESPN's unofficial site.api.espn.com.",
+      "section": "_section_sources"
     },
     {
       "id": "ncaa_baseball_softball",
@@ -352,7 +389,8 @@
           "label": "Baseball + Softball"
         }
       ],
-      "help_text": "D1 regular seasons from ESPN's unofficial API, ranked by the D1Baseball.com Top 25 (baseball) and the ESPN/USA Softball Collegiate Top 25 (softball). Win-count bands for both: 30+ tournament bubble, 35+ at-large lock, 40+ top regional seed, 45+ national seed, 50+ #1 overall contention. The CWS / WCWS brackets are not yet modeled (favorites + rank still surface postseason matchups). No API key required."
+      "help_text": "D1 regular seasons from ESPN's unofficial API, ranked by the D1Baseball.com Top 25 (baseball) and the ESPN/USA Softball Collegiate Top 25 (softball). Win-count bands for both: 30+ tournament bubble, 35+ at-large lock, 40+ top regional seed, 45+ national seed, 50+ #1 overall contention. The CWS / WCWS brackets are not yet modeled (favorites + rank still surface postseason matchups). No API key required.",
+      "section": "_section_sources"
     },
     {
       "id": "ncaa_soccer",
@@ -377,13 +415,20 @@
           "label": "Men's + Women's"
         }
       ],
-      "help_text": "D1 regular season + College Cup tournament bracket. ESPN unofficial API + United Soccer Coaches Top 25 poll. Regular-season standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. Postseason is single-game elimination: the men's 48-team field gives the top 16 seeds byes (R1 → R2 → Sweet 16 → Elite 8 → College Cup semis → final), the women's is a full 64-team field over 6 rounds. No API key required."
+      "help_text": "D1 regular season + College Cup tournament bracket. ESPN unofficial API + United Soccer Coaches Top 25 poll. Regular-season standings points (3 W / 1 D / 0 L): 25+ tournament bubble, 35+ at-large lock, 45+ top regional, 50+ national seed. Postseason is single-game elimination: the men's 48-team field gives the top 16 seeds byes (R1 → R2 → Sweet 16 → Elite 8 → College Cup semis → final), the women's is a full 64-team field over 6 rounds. No API key required.",
+      "section": "_section_sources"
     },
     {
       "id": "_section_health",
-      "type": "info",
+      "type": "section",
       "label": "Health monitoring (optional)",
-      "description": "Push run health and feed refresh health to your own heartbeat monitors. Leave blank to disable."
+      "collapsed": true
+    },
+    {
+      "id": "_section_health_note",
+      "type": "info",
+      "description": "Push run health and feed refresh health to your own heartbeat monitors. Leave blank to disable.",
+      "section": "_section_health"
     },
     {
       "id": "health_push_url",
@@ -391,7 +436,8 @@
       "input_type": "password",
       "label": "Health push URL (optional)",
       "default": "",
-      "help_text": "Kuma-compatible push URL for pipeline health. Sends UP only after a healthy Refresh + apply run; errors, timeouts, stale matches and live channels with no streams send DOWN. Warns after 17m30s. Set the monitor interval longer than your largest scheduled gap plus 50 minutes, so a missed run expires in the monitor."
+      "help_text": "Kuma-compatible push URL for pipeline health. Sends UP only after a healthy Refresh + apply run; errors, timeouts, stale matches and live channels with no streams send DOWN. Warns after 17m30s. Set the monitor interval longer than your largest scheduled gap plus 50 minutes, so a missed run expires in the monitor.",
+      "section": "_section_health"
     },
     {
       "id": "refresh_health_push_url",
@@ -399,13 +445,20 @@
       "input_type": "password",
       "label": "M3U/EPG refresh health push URL (optional)",
       "default": "",
-      "help_text": "Separate Kuma-compatible push monitor for Dispatcharr feed refreshes. Checks active providers every five minutes for failed refreshes or scheduled feeds overdue by 25 minutes. Use at least a one-hour monitor interval to cover a pipeline and its recovery. Built-in custom M3U and dummy EPG sources are excluded."
+      "help_text": "Separate Kuma-compatible push monitor for Dispatcharr feed refreshes. Checks active providers every five minutes for failed refreshes or scheduled feeds overdue by 25 minutes. Use at least a one-hour monitor interval to cover a pipeline and its recovery. Built-in custom M3U and dummy EPG sources are excluded.",
+      "section": "_section_health"
     },
     {
       "id": "_section_keys",
-      "type": "info",
+      "type": "section",
       "label": "API Keys",
-      "description": "Paste your keys below (masked in the UI). Settings take precedence; if blank, the plugin falls back to <plugin_dir>/<keyname>_api_key on disk (chmod 600)."
+      "collapsed": true
+    },
+    {
+      "id": "_section_keys_note",
+      "type": "info",
+      "description": "Paste your keys below (masked in the UI). Settings take precedence; if blank, the plugin falls back to <plugin_dir>/<keyname>_api_key on disk (chmod 600).",
+      "section": "_section_keys"
     },
     {
       "id": "cfbd_api_key",
@@ -413,7 +466,8 @@
       "input_type": "password",
       "label": "CollegeFootballData.com API key",
       "default": "",
-      "help_text": "Register: https://collegefootballdata.com/key (free tier: 1,000 calls a month, one pool for both APIs; the plugin keeps answers for 12 hours to fit it). The same key works for collegebasketballdata.com — one key powers both NCAAF and NCAAM, including the Monte Carlo importance signal."
+      "help_text": "Register: https://collegefootballdata.com/key (free tier: 1,000 calls a month, one pool for both APIs; the plugin keeps answers for 12 hours to fit it). The same key works for collegebasketballdata.com — one key powers both NCAAF and NCAAM, including the Monte Carlo importance signal.",
+      "section": "_section_keys"
     },
     {
       "id": "football_data_api_key",
@@ -421,7 +475,8 @@
       "input_type": "password",
       "label": "Football-Data.org API key",
       "default": "",
-      "help_text": "Register: https://www.football-data.org/client/register (free, 10 req/min). Free tier covers EPL, EFL Championship, UCL, Bundesliga, La Liga, Serie A, Ligue 1, and 5 more competitions."
+      "help_text": "Register: https://www.football-data.org/client/register (free, 10 req/min). Free tier covers EPL, EFL Championship, UCL, Bundesliga, La Liga, Serie A, Ligue 1, and 5 more competitions.",
+      "section": "_section_keys"
     },
     {
       "id": "boxing_data_api_key",
@@ -429,7 +484,8 @@
       "input_type": "password",
       "label": "Boxing Data API key (RapidAPI)",
       "default": "",
-      "help_text": "Register: https://rapidapi.com/bengroves1993/api/boxing-data-api (free tier, no credit card). Powers the 'Boxing' source. Free tier looks ahead about 7 days per refresh."
+      "help_text": "Register: https://rapidapi.com/bengroves1993/api/boxing-data-api (free tier, no credit card). Powers the 'Boxing' source. Free tier looks ahead about 7 days per refresh.",
+      "section": "_section_keys"
     },
     {
       "id": "odds_api_key",
@@ -437,7 +493,8 @@
       "input_type": "password",
       "label": "The Odds API key (optional)",
       "default": "",
-      "help_text": "Register: https://the-odds-api.com (free 500 req/mo). Powers the close-game / spread signal across all enabled sports. If blank, that signal is skipped — other signals still fire."
+      "help_text": "Register: https://the-odds-api.com (free 500 req/mo). Powers the close-game / spread signal across all enabled sports. If blank, that signal is skipped — other signals still fire.",
+      "section": "_section_keys"
     },
     {
       "id": "anthropic_api_key",
@@ -445,7 +502,8 @@
       "input_type": "password",
       "label": "Anthropic API key (optional)",
       "default": "",
-      "help_text": "Register: https://console.anthropic.com — used for two things, both optional: (1) EPG-to-channel matching when the regex pre-filter is ambiguous (cheap, Haiku, ~$0.0001 per ambiguous match), (2) LLM-rewritten EPG descriptions when 'Enable LLM-rewritten EPG descriptions' below is on. Only required if either is engaged."
+      "help_text": "Register: https://console.anthropic.com — used for two things, both optional: (1) EPG-to-channel matching when the regex pre-filter is ambiguous (cheap, Haiku, ~$0.0001 per ambiguous match), (2) LLM-rewritten EPG descriptions when 'Enable LLM-rewritten EPG descriptions' below is on. Only required if either is engaged.",
+      "section": "_section_keys"
     },
     {
       "id": "sportsdb_api_key",
@@ -453,7 +511,8 @@
       "input_type": "password",
       "label": "TheSportsDB API key (optional)",
       "default": "",
-      "help_text": "Powers the per-matchup channel logo: TheSportsDB pre-renders a 960x540 graphic (both crests + league wordmark + region backdrop) for every event in its database. Blank means use the free public test tier ('3'), which is rate-limited but works for typical refresh cadence. Patreon keys unlock higher limits — see https://www.thesportsdb.com/api.php. When no matchup graphic is found (offseason, untracked league, field-event sport like F1/golf/UFC/tennis), the virtual channel falls back through game-thumbs, then the league/tournament badge, then the matched source channel's logo."
+      "help_text": "Powers the per-matchup channel logo: TheSportsDB pre-renders a 960x540 graphic (both crests + league wordmark + region backdrop) for every event in its database. Blank means use the free public test tier ('3'), which is rate-limited but works for typical refresh cadence. Patreon keys unlock higher limits — see https://www.thesportsdb.com/api.php. When no matchup graphic is found (offseason, untracked league, field-event sport like F1/golf/UFC/tennis), the virtual channel falls back through game-thumbs, then the league/tournament badge, then the matched source channel's logo.",
+      "section": "_section_keys"
     },
     {
       "id": "model",
@@ -474,27 +533,35 @@
           "label": "Claude Opus 4.7"
         }
       ],
-      "help_text": "Model used for ambiguous EPG matching and (if enabled) narrative scoring."
+      "help_text": "Model used for ambiguous EPG matching and (if enabled) narrative scoring.",
+      "section": "_section_keys"
     },
     {
       "id": "_section_filter",
+      "type": "section",
+      "label": "Curation"
+    },
+    {
+      "id": "_section_filter_note",
       "type": "info",
-      "label": "Curation",
-      "description": "How many games make the cut and which teams always show."
+      "description": "How many games make the cut and which teams always show.",
+      "section": "_section_filter"
     },
     {
       "id": "favorites",
       "type": "string",
       "label": "Favorite teams (comma-separated)",
       "default": "",
-      "help_text": "Substring-matched against home/away team names (with team-qualifier whitelist for soccer suffixes like 'FC', 'AFC', 'City', 'United'). Always shown regardless of rank, with a flat score boost. Teams in playoff races still get the 'impact-on-favorite' signal automatically when they sit near a favorite's position."
+      "help_text": "Substring-matched against home/away team names (with team-qualifier whitelist for soccer suffixes like 'FC', 'AFC', 'City', 'United'). Always shown regardless of rank, with a flat score boost. Teams in playoff races still get the 'impact-on-favorite' signal automatically when they sit near a favorite's position.",
+      "section": "_section_filter"
     },
     {
       "id": "recorded_teams",
       "type": "string",
       "label": "Recorded teams (comma-separated)",
       "default": "",
-      "help_text": "Every game involving one of these teams is always added to Top Matchups and set to record in Dispatcharr's DVR, covering the game itself (from 30 minutes before kickoff to the end, plus the post-roll below), never the Upcoming block. They do not need to be Favorites, and listing one here does not raise its score. Matching works like Favorites. For F1, NASCAR, golf, tennis and UFC the plugin sees the event name, not the drivers or players, so enter an event name (Monaco, Masters) rather than a person. Games set to record show a red dot in the guide (TV apps download the guide on their own schedule, so a change can take a few hours to appear there). Adding or removing a team takes effect on the next Apply (a team whose games are not listed yet needs a Refresh to fetch them); removing one cancels its recordings that have not started; a recording you delete from the DVR tab stays deleted."
+      "help_text": "Every game involving one of these teams is always added to Top Matchups and set to record in Dispatcharr's DVR, covering the game itself (from 30 minutes before kickoff to the end, plus the post-roll below), never the Upcoming block. They do not need to be Favorites, and listing one here does not raise its score. Matching works like Favorites. For F1, NASCAR, golf, tennis and UFC the plugin sees the event name, not the drivers or players, so enter an event name (Monaco, Masters) rather than a person. Games set to record show a red dot in the guide (TV apps download the guide on their own schedule, so a change can take a few hours to appear there). Adding or removing a team takes effect on the next Apply (a team whose games are not listed yet needs a Refresh to fetch them); removing one cancels its recordings that have not started; a recording you delete from the DVR tab stays deleted.",
+      "section": "_section_filter"
     },
     {
       "id": "favorites_only",
@@ -515,7 +582,8 @@
           "label": "Favorites only, but show all postseason/playoff games"
         }
       ],
-      "help_text": "Restricts the curated guide to games involving a team in your Favorites list above. 'Favorites only' shows ONLY your teams across every enabled sport, so an event like the World Cup shows just your country's matches instead of all 48. 'Favorites only, but show all postseason/playoff games' adds back the big championship games (NFL playoffs, NCAA tournament, NHL/NBA/MLB playoffs, soccer knockout rounds) even when no favorite is playing, while regular-season games and World Cup / EURO group-stage games stay limited to your favorites. No effect unless you've listed at least one Favorite team (otherwise it would blank your guide). Independent of the Friendlies favorites gate above."
+      "help_text": "Restricts the curated guide to games involving a team in your Favorites list above. 'Favorites only' shows ONLY your teams across every enabled sport, so an event like the World Cup shows just your country's matches instead of all 48. 'Favorites only, but show all postseason/playoff games' adds back the big championship games (NFL playoffs, NCAA tournament, NHL/NBA/MLB playoffs, soccer knockout rounds) even when no favorite is playing, while regular-season games and World Cup / EURO group-stage games stay limited to your favorites. No effect unless you've listed at least one Favorite team (otherwise it would blank your guide). Independent of the Friendlies favorites gate above.",
+      "section": "_section_filter"
     },
     {
       "id": "curation_preset",
@@ -540,7 +608,8 @@
           "label": "High coverage (~50 games, include smaller stakes)"
         }
       ],
-      "help_text": "Bundles weight + max_games tuning into one knob so you don't have to tune each weight by hand. Picking anything other than 'manual' overrides the Scoring weights and Max curated games settings below with the preset's values. Stick with 'manual' if you've hand-tuned weights."
+      "help_text": "Bundles weight + max_games tuning into one knob so you don't have to tune each weight by hand. Picking anything other than 'manual' overrides the Scoring weights and Max curated games settings below with the preset's values. Stick with 'manual' if you've hand-tuned weights.",
+      "section": "_section_filter"
     },
     {
       "id": "max_games",
@@ -549,7 +618,8 @@
       "default": 25,
       "min": 1,
       "max": 60,
-      "help_text": "How many games the curated list keeps, highest-scored first. Capped at 60: above that, the per-game preview and logo lookups that run during Apply can outlast the internal run lock and let a second run start against the same channels. Ignored when a Curation preset other than Manual is selected."
+      "help_text": "How many games the curated list keeps, highest-scored first. Capped at 60: above that, the per-game preview and logo lookups that run during Apply can outlast the internal run lock and let a second run start against the same channels. Ignored when a Curation preset other than Manual is selected.",
+      "section": "_section_filter"
     },
     {
       "id": "min_score",
@@ -558,90 +628,172 @@
       "default": 0,
       "min": 0,
       "max": 10,
-      "help_text": "Leaves out games scoring below this (the ★ score in each channel name, 0-10), so a quiet day shows fewer channels instead of filling up with low-stakes games. Works together with 'Max curated games': you get the games at or above this score, up to that maximum, so for \"every game above 2.0\" set this to 2 and raise the maximum. Favorite teams, Recorded teams and a game already on air are always kept. 0 (the default) turns it off. Takes effect on the next Refresh, and applies whatever the Curation preset. Not the same as 'Placeholder threshold', which decides which games get a channel before a broadcast is found."
+      "help_text": "Leaves out games scoring below this (the ★ score in each channel name, 0-10), so a quiet day shows fewer channels instead of filling up with low-stakes games. Works together with 'Max curated games': you get the games at or above this score, up to that maximum, so for \"every game above 2.0\" set this to 2 and raise the maximum. Favorite teams, Recorded teams and a game already on air are always kept. 0 (the default) turns it off. Takes effect on the next Refresh, and applies whatever the Curation preset. Not the same as 'Placeholder threshold', which decides which games get a channel before a broadcast is found.",
+      "section": "_section_filter"
     },
     {
       "id": "remove_finished_after_minutes",
       "type": "number",
       "label": "Remove finished games after (minutes)",
       "default": 0,
-      "help_text": "Minutes past a game's estimated end before its channel is removed from the group, without waiting for the next scheduled refresh. The end is estimated with the same per-sport window the EPG matcher uses (about 4 hours for gridiron, 2.5 for soccer, 3 for a soccer knockout or cup tie that can go to penalties), so this is measured from THAT, not from kickoff. 0 disables reaping and finished games stay until the next refresh. A background thread wakes at the next game's deadline rather than polling."
+      "help_text": "Minutes past a game's estimated end before its channel is removed from the group, without waiting for the next scheduled refresh. The end is estimated with the same per-sport window the EPG matcher uses (about 4 hours for gridiron, 2.5 for soccer, 3 for a soccer knockout or cup tie that can go to penalties), so this is measured from THAT, not from kickoff. 0 disables reaping and finished games stay until the next refresh. A background thread wakes at the next game's deadline rather than polling.",
+      "section": "_section_filter"
     },
     {
       "id": "bench_size",
       "type": "number",
       "label": "Bench size (backfill stock)",
       "default": 0,
-      "help_text": "How many EXTRA scored games to keep beyond the maximum, ready to take the place of games that finish. Without a bench the group simply shrinks through the day. These games are already fetched and scored, so the only added cost is matching them to a broadcast. 0 disables backfill. Needs 'Remove finished games after' to be set."
+      "help_text": "How many EXTRA scored games to keep beyond the maximum, ready to take the place of games that finish. Without a bench the group simply shrinks through the day. These games are already fetched and scored, so the only added cost is matching them to a broadcast. 0 disables backfill. Needs 'Remove finished games after' to be set.",
+      "section": "_section_filter"
     },
     {
       "id": "lookahead_days",
       "type": "number",
       "label": "Lookahead window (days)",
       "default": 7,
-      "help_text": "How far ahead to pull games. 7 = next week. Bigger = more games to score. Capped at 400."
+      "help_text": "How far ahead to pull games. 7 = next week. Bigger = more games to score. Capped at 400.",
+      "section": "_section_filter"
     },
     {
       "id": "local_timezone",
       "type": "string",
       "label": "Local timezone (IANA name)",
       "default": "UTC",
-      "help_text": "IANA tz name like 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'Australia/Sydney'. Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones. Falls back to UTC if the name isn't recognized. Used to determine which games are 'today' and to format kickoff times in the EPG description."
+      "help_text": "IANA tz name like 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'Australia/Sydney'. Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones. Falls back to UTC if the name isn't recognized. Used to determine which games are 'today' and to format kickoff times in the EPG description.",
+      "section": "_section_filter"
     },
     {
       "id": "llm_descriptions_enabled",
       "type": "boolean",
       "label": "LLM-rewritten EPG descriptions",
       "default": false,
-      "help_text": "When on, Claude writes each curated game's EPG description as a 2-3 sentence natural-prose preview instead of the built-in 'Matchday X. Tagline. Source: ...' layout. With a Description template set, the prose goes wherever the template puts {llm} instead, and no call is made if the template has no {llm}. Uses the Anthropic key + 'Claude model' setting above; falls back to the built-in description if the key is missing or the API call fails. Cached per game in llm_descriptions_cache.json so a re-apply doesn't re-bill. Cost: ~$0.001 per game (Haiku 4.5), about $2-3/month at default refresh cadence."
+      "help_text": "When on, Claude writes each curated game's EPG description as a 2-3 sentence natural-prose preview instead of the built-in 'Matchday X. Tagline. Source: ...' layout. With a Description template set, the prose goes wherever the template puts {llm} instead, and no call is made if the template has no {llm}. Uses the Anthropic key + 'Claude model' setting above; falls back to the built-in description if the key is missing or the API call fails. Cached per game in llm_descriptions_cache.json so a re-apply doesn't re-bill. Cost: ~$0.001 per game (Haiku 4.5), about $2-3/month at default refresh cadence.",
+      "section": "_section_filter"
     },
     {
       "id": "_section_scoring",
-      "type": "info",
+      "type": "section",
       "label": "Interestingness Weights",
-      "description": "Each signal contributes to a 0-10 score. Tweak if a signal feels under/over-weighted. Score breakdown is stored per-game in cache.json so you can inspect. Don't want to do the math? Use the 'Curation preset' dropdown above. For worked examples of 'I want X, so I change Y', see the Tuning recipes: https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/blob/main/SCORING.md#tuning"
+      "collapsed": true
+    },
+    {
+      "id": "_section_scoring_note",
+      "type": "info",
+      "description": "Each signal contributes to a 0-10 score. Tweak if a signal feels under/over-weighted. Score breakdown is stored per-game in cache.json so you can inspect. Don't want to do the math? Use the 'Curation preset' dropdown above. For worked examples of 'I want X, so I change Y', see the Tuning recipes: https://github.com/Jacob-Lasky/dispatcharr_ranked_matchups/blob/main/SCORING.md#tuning",
+      "section": "_section_scoring"
     },
     {
       "id": "scoring_weights",
-      "type": "string",
+      "type": "table",
       "label": "Scoring weights",
-      "default": "",
-      "placeholder": "e.g. favorite=8, spread=1, importance=3",
-      "help_text": "Blank = defaults. Override any signal's weight as name=number, comma-separated. Names and defaults: rank=1 (rank pair: both ranked > one ranked > neither), spread=3 (close game: devigged moneyline coin-flip-ness for soccer, normalized point spread for NCAAF / NCAAM), favorite=6 (flat boost per favorite-team game), rivalry=2 (flat boost on a known rivalry), tournament=1.5 (knockout-stage cup games), importance=3 (Monte Carlo importance for titles, playoff spots and relegation, including in-league favorites' stakes; 0 disables it), narrative=0 (LLM-judged storyline score; > 0 enables Claude narrative scoring and needs the Anthropic key). Ignored unless Curation preset is 'manual'."
+      "default": [],
+      "help_text": "No rows = defaults. Override a signal's weight with a row: pick the Signal, set its Weight. Signals and defaults: rank=1 (rank pair: both ranked > one ranked > neither), spread=3 (close game: devigged moneyline coin-flip-ness for soccer, normalized point spread for NCAAF / NCAAM), favorite=6 (flat boost per favorite-team game), rivalry=2 (flat boost on a known rivalry), tournament=1.5 (knockout-stage cup games), importance=3 (Monte Carlo importance for titles, playoff spots and relegation, including in-league favorites' stakes; 0 disables it), narrative=0 (LLM-judged storyline score; > 0 enables Claude narrative scoring and needs the Anthropic key). Ignored unless Curation preset is 'manual'.",
+      "section": "_section_scoring",
+      "columns": [
+        {
+          "id": "name",
+          "label": "Signal",
+          "type": "select",
+          "options": [
+            {
+              "value": "rank",
+              "label": "rank (rank pair, default 1)"
+            },
+            {
+              "value": "spread",
+              "label": "spread (close game, default 3)"
+            },
+            {
+              "value": "favorite",
+              "label": "favorite (favorite team, default 6)"
+            },
+            {
+              "value": "rivalry",
+              "label": "rivalry (rivalry, default 2)"
+            },
+            {
+              "value": "tournament",
+              "label": "tournament (knockout stage, default 1.5)"
+            },
+            {
+              "value": "narrative",
+              "label": "narrative (LLM narrative, default 0)"
+            },
+            {
+              "value": "importance",
+              "label": "importance (Monte Carlo importance, default 3)"
+            }
+          ]
+        },
+        {
+          "id": "weight",
+          "label": "Weight",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "id": "scoring_weights_help",
+      "type": "info",
+      "description": "No rows = defaults. Override a signal's weight with a row: pick the Signal, set its Weight. Signals and defaults: rank=1 (rank pair: both ranked > one ranked > neither), spread=3 (close game: devigged moneyline coin-flip-ness for soccer, normalized point spread for NCAAF / NCAAM), favorite=6 (flat boost per favorite-team game), rivalry=2 (flat boost on a known rivalry), tournament=1.5 (knockout-stage cup games), importance=3 (Monte Carlo importance for titles, playoff spots and relegation, including in-league favorites' stakes; 0 disables it), narrative=0 (LLM-judged storyline score; > 0 enables Claude narrative scoring and needs the Anthropic key). Ignored unless Curation preset is 'manual'.",
+      "section": "_section_scoring"
     },
     {
       "id": "league_weights",
       "label": "League weights",
-      "type": "string",
-      "default": "",
-      "placeholder": "e.g. NFL=1.5, EPL=0.7",
-      "help_text": "Blank = every league counts the same. Make some leagues count more (or less) than others as LEAGUE=number, comma-separated. The league is the code at the start of each channel name (NFL, NHL, CFB, EPL, UCL, LaLiga...), in any case. The number multiplies every game in that league before the 0-10 score is worked out, so NFL=1.5 lifts NFL games up the list and EPL=0.5 pushes Premier League games down; 0 scores a league at zero, so its games rank below every scored game on the same day (games with a favorite team still come first, and are never dropped). Leagues you leave out stay at 1; the most a weight can be is 100. Applies whatever the Curation preset is, from the next Refresh."
+      "type": "table",
+      "default": [],
+      "help_text": "No rows = every league counts the same. Make some leagues count more (or less) than others with a row per league: its code and a number. The league is the code at the start of each channel name (NFL, NHL, CFB, EPL, UCL, LaLiga...), in any case. The number multiplies every game in that league before the 0-10 score is worked out, so NFL at 1.5 lifts NFL games up the list and EPL at 0.5 pushes Premier League games down; 0 scores a league at zero, so its games rank below every scored game on the same day (games with a favorite team still come first, and are never dropped). Leagues you leave out stay at 1; the most a weight can be is 100. Applies whatever the Curation preset is, from the next Refresh.",
+      "section": "_section_scoring",
+      "columns": [
+        {
+          "id": "name",
+          "label": "League",
+          "type": "string"
+        },
+        {
+          "id": "weight",
+          "label": "Weight",
+          "type": "number"
+        }
+      ]
+    },
+    {
+      "id": "league_weights_help",
+      "type": "info",
+      "description": "No rows = every league counts the same. Make some leagues count more (or less) than others with a row per league: its code and a number. The league is the code at the start of each channel name (NFL, NHL, CFB, EPL, UCL, LaLiga...), in any case. The number multiplies every game in that league before the 0-10 score is worked out, so NFL at 1.5 lifts NFL games up the list and EPL at 0.5 pushes Premier League games down; 0 scores a league at zero, so its games rank below every scored game on the same day (games with a favorite team still come first, and are never dropped). Leagues you leave out stay at 1; the most a weight can be is 100. Applies whatever the Curation preset is, from the next Refresh.",
+      "section": "_section_scoring"
     },
     {
       "id": "adaptive_scoring",
       "type": "boolean",
       "label": "Adaptive (season-relative) scoring",
       "default": false,
-      "help_text": "Off (default) = absolute scoring: raw signal sum compressed via fixed tanh curve. ★10 saturates late-season; early-season weeks feel flat. On = each refresh batch's median raw score sets the scale, so the top games of any week always feel like top games. Recommended once the season is in full swing; leave off for the simpler absolute mode."
+      "help_text": "Off (default) = absolute scoring: raw signal sum compressed via fixed tanh curve. ★10 saturates late-season; early-season weeks feel flat. On = each refresh batch's median raw score sets the scale, so the top games of any week always feel like top games. Recommended once the season is in full swing; leave off for the simpler absolute mode.",
+      "section": "_section_scoring"
     },
     {
       "id": "importance_seasons",
       "type": "number",
       "label": "Importance: simulated seasons per league",
       "default": 2000,
-      "help_text": "How many times each league's remaining season is simulated to measure how much each game matters for titles, playoff spots and relegation. Every game in a league is read off the same simulated seasons, so the cost is per league, not per game: 2000 takes about two minutes for a full slate of several hundred games. More is steadier, fewer is faster; below 500 the ranking starts to wobble between refreshes."
+      "help_text": "How many times each league's remaining season is simulated to measure how much each game matters for titles, playoff spots and relegation. Every game in a league is read off the same simulated seasons, so the cost is per league, not per game: 2000 takes about two minutes for a full slate of several hundred games. More is steadier, fewer is faster; below 500 the ranking starts to wobble between refreshes.",
+      "section": "_section_scoring"
     },
     {
       "id": "_section_naming",
-      "type": "info",
-      "label": "Channel Name & Description"
+      "type": "section",
+      "label": "Channel Name & Description",
+      "collapsed": true
     },
     {
       "id": "name_template",
       "type": "string",
       "label": "Channel name template",
       "default": "{league_short} {favorite_star}★{score} · {away_team}{ (rank_away)} at {home_team}{ (rank_home)}{ · tagline}",
-      "help_text": "Sonarr/Radarr-style template for the channel name. Plain text is literal; a {group} holds one variable plus any literal characters glued to it, and the whole group disappears when the variable is blank (so an unranked team or a game with no tagline leaves no stray parens or separators). Variables: {league_short} {league_full} {away_team} {home_team} {rank_away} {rank_home} {rank_pair} {score} {favorite_star} {recording_dot} {tagline} {tournament} {venue} {game_date} {start_time} {kickoff} {rivalry}. Use the 'Test naming convention' button to preview before applying. Leave blank for the default shown above."
+      "help_text": "Sonarr/Radarr-style template for the channel name. Plain text is literal; a {group} holds one variable plus any literal characters glued to it, and the whole group disappears when the variable is blank (so an unranked team or a game with no tagline leaves no stray parens or separators). Variables: {league_short} {league_full} {away_team} {home_team} {rank_away} {rank_home} {rank_pair} {score} {favorite_star} {recording_dot} {tagline} {tournament} {venue} {game_date} {start_time} {kickoff} {rivalry}. Use the 'Test naming convention' button to preview before applying. Leave blank for the default shown above.",
+      "section": "_section_naming"
     },
     {
       "id": "description_template",
@@ -649,42 +801,55 @@
       "label": "Description template",
       "default": "",
       "placeholder": "{away_team} at {home_team}{ · tagline}{\n\nllm}",
-      "help_text": "Optional. What the guide shows as each game's description, using the same {group} rules as the channel name template above, and line breaks are kept. Leave blank for the built-in description. Every channel-name variable works here, plus {llm} (the Claude-written preview, needs 'LLM-rewritten EPG descriptions' on, blank otherwise), {details} (the built-in description) and {source_channel} (the channel the stream comes from). Example: {away_team} at {home_team}{ · kickoff}{ - llm}. Use 'Test naming convention' to preview."
+      "help_text": "Optional. What the guide shows as each game's description, using the same {group} rules as the channel name template above, and line breaks are kept. Leave blank for the built-in description. Every channel-name variable works here, plus {llm} (the Claude-written preview, needs 'LLM-rewritten EPG descriptions' on, blank otherwise), {details} (the built-in description) and {source_channel} (the channel the stream comes from). Example: {away_team} at {home_team}{ · kickoff}{ - llm}. Use 'Test naming convention' to preview.",
+      "section": "_section_naming",
+      "rows": 6
     },
     {
       "id": "_section_apply",
-      "type": "info",
+      "type": "section",
       "label": "Apply Behavior",
-      "description": "How matched channels are surfaced in Dispatcharr."
+      "collapsed": true
+    },
+    {
+      "id": "_section_apply_note",
+      "type": "info",
+      "description": "How matched channels are surfaced in Dispatcharr.",
+      "section": "_section_apply"
     },
     {
       "id": "channel_profile_name",
       "type": "string",
       "label": "Target group name",
       "default": "Top Matchups",
-      "help_text": "Apply creates virtual channels in this ChannelGroup, cloning streams from the matched source channels (source channels untouched). The plugin keeps its guide in an EPG source with the same name, created if missing (it must not share its name with an EPG source you fetch from a URL, a file or Schedules Direct: apply refuses that name); each virtual channel gets a ProgramData entry whose description explains WHY the game made the cut. Tip: prefix with '!' (e.g. '!Top Matchups') so it sorts to the top of your group list. If you rename the group, the next apply will detect the old group/source by tvg_id markers and move their channels and guide entries over automatically. NOTE: despite this setting's internal name, it is a channel GROUP, not a Dispatcharr Channel Profile. Profiles are set by 'Channel Profiles to enable' below."
+      "help_text": "Apply creates virtual channels in this ChannelGroup, cloning streams from the matched source channels (source channels untouched). The plugin keeps its guide in an EPG source with the same name, created if missing (it must not share its name with an EPG source you fetch from a URL, a file or Schedules Direct: apply refuses that name); each virtual channel gets a ProgramData entry whose description explains WHY the game made the cut. Tip: prefix with '!' (e.g. '!Top Matchups') so it sorts to the top of your group list. If you rename the group, the next apply will detect the old group/source by tvg_id markers and move their channels and guide entries over automatically. NOTE: despite this setting's internal name, it is a channel GROUP, not a Dispatcharr Channel Profile. Profiles are set by 'Channel Profiles to enable' below.",
+      "section": "_section_apply"
     },
     {
       "id": "enabled_channel_profiles",
-      "type": "string",
+      "type": "multiselect",
       "label": "Channel Profiles to enable",
-      "default": "",
-      "placeholder": "Sports, Soccer",
-      "help_text": "Comma-separated Dispatcharr Channel Profile names the curated channels should be visible in, spelled as they appear under Channel Profiles. LEAVE BLANK for all profiles, which is what a hand-created channel does. Dispatcharr only creates profile memberships for channels made through its own UI/API, so plugin-created channels are otherwise hidden in every named profile and show up only under 'All'. This setting is the source of truth: profiles you list are turned on for these channels and profiles you leave out are turned off, so a name removed here is removed from the profile on the next apply. Names that match no profile are reported in the Apply result and nothing is guessed."
+      "default": [],
+      "placeholder": "All profiles",
+      "help_text": "The Dispatcharr Channel Profiles the curated channels should be visible in. LEAVE BLANK for all profiles, which is what a hand-created channel does. Dispatcharr only creates profile memberships for channels made through its own UI/API, so plugin-created channels are otherwise hidden in every named profile and show up only under 'All'. This setting is the source of truth: profiles you list are turned on for these channels and profiles you leave out are turned off, so a name removed here is removed from the profile on the next apply. A profile that no longer exists is marked (not found) here and reported in the Apply result and nothing is guessed.",
+      "section": "_section_apply",
+      "options": []
     },
     {
       "id": "recordings_group_name",
       "type": "string",
       "label": "Recordings group name",
       "default": "Matchups Recordings",
-      "help_text": "Channel group that keeps your DVR recordings after a game's virtual channel is removed. When the plugin reaps a past game it would otherwise CASCADE-delete any recording made on that channel; instead the recording is re-homed into this group so it stays in the DVR tab. The group is created only when there is a recording to keep and removed again once empty. Must differ from the Target group name above (if they match, preservation is disabled and channels with recordings are kept instead of reaped)."
+      "help_text": "Channel group that keeps your DVR recordings after a game's virtual channel is removed. When the plugin reaps a past game it would otherwise CASCADE-delete any recording made on that channel; instead the recording is re-homed into this group so it stays in the DVR tab. The group is created only when there is a recording to keep and removed again once empty. Must differ from the Target group name above (if they match, preservation is disabled and channels with recordings are kept instead of reaped).",
+      "section": "_section_apply"
     },
     {
       "id": "virtual_channel_base",
       "type": "number",
       "label": "Starting channel number (0 = auto)",
       "default": 0,
-      "help_text": "Where our channels begin. What this does depends on 'Channel numbering' below. In Compact mode it is literal: 400 means the group starts at 400, skipping any number already in use elsewhere in your lineup. In Kickoff-time mode it is only a floor and the time-based part of the number dwarfs it, so 400 lands somewhere around 5,548,000 and you will not see 400 anywhere. Set to 0 to auto-pick. In Compact mode that means right after your highest existing channel. In Kickoff-time mode the floor is picked once (after your highest existing channel) and then kept, so adding or removing your own channels never renumbers the games. In both modes a number one of your other channels already uses is skipped."
+      "help_text": "Where our channels begin. What this does depends on 'Channel numbering' below. In Compact mode it is literal: 400 means the group starts at 400, skipping any number already in use elsewhere in your lineup. In Kickoff-time mode it is only a floor and the time-based part of the number dwarfs it, so 400 lands somewhere around 5,548,000 and you will not see 400 anywhere. Set to 0 to auto-pick. In Compact mode that means right after your highest existing channel. In Kickoff-time mode the floor is picked once (after your highest existing channel) and then kept, so adding or removing your own channels never renumbers the games. In both modes a number one of your other channels already uses is skipped.",
+      "section": "_section_apply"
     },
     {
       "id": "channel_numbering_mode",
@@ -701,42 +866,48 @@
           "label": "Compact range (e.g. 400-424)"
         }
       ],
-      "help_text": "How channel numbers are picked. Kickoff time (default) builds the number out of the game's start time, so the list sorts soonest-first and the numbers run to about 7 digits. Compact range puts your games exactly where you say: set the starting number to 400 and they run 400, 401, 402 and up. A game keeps its number until it finishes, and when it goes, the next game takes that number. Any number in the range that one of your other channels already uses is skipped, because the guide identifies a channel by its number alone and two channels sharing one breaks both, so give the plugin a stretch of your lineup with room in it."
+      "help_text": "How channel numbers are picked. Kickoff time (default) builds the number out of the game's start time, so the list sorts soonest-first and the numbers run to about 7 digits. Compact range puts your games exactly where you say: set the starting number to 400 and they run 400, 401, 402 and up. A game keeps its number until it finishes, and when it goes, the next game takes that number. Any number in the range that one of your other channels already uses is skipped, because the guide identifies a channel by its number alone and two channels sharing one breaks both, so give the plugin a stretch of your lineup with room in it.",
+      "section": "_section_apply"
     },
     {
       "id": "compact_band_size",
       "type": "number",
       "label": "Compact range size (0 = exactly the channel count)",
       "default": 0,
-      "help_text": "Compact mode only. How many channel numbers to reserve, counting up from the starting number. Leave it at 0 and it reserves exactly as many as you have channels, so a start of 400 with 25 channels gives you 400-424 and nothing else. Set it higher only if you want headroom, either to raise 'Maximum channels' later without moving everything, or because that stretch of your lineup is partly occupied and the plugin needs somewhere to put the games it cannot fit. Ignored in Kickoff-time mode."
+      "help_text": "Compact mode only. How many channel numbers to reserve, counting up from the starting number. Leave it at 0 and it reserves exactly as many as you have channels, so a start of 400 with 25 channels gives you 400-424 and nothing else. Set it higher only if you want headroom, either to raise 'Maximum channels' later without moving everything, or because that stretch of your lineup is partly occupied and the plugin needs somewhere to put the games it cannot fit. Ignored in Kickoff-time mode.",
+      "section": "_section_apply"
     },
     {
       "id": "favorites_first",
       "type": "boolean",
       "label": "Favorites first",
       "default": false,
-      "help_text": "Gives games involving your Favorite teams the lowest channel numbers, so they sit at the top of the list, while every other game is still shown below them. Kickoff-time numbering: favorites always come first, each block still sorted by start time, and the other games' numbers move up by 10,000,000 to make room. Compact range: a game never changes number once it has one, so favorites take the first numbers when the range fills, but one added later takes the next free number. In Kickoff-time mode, turning this on or off, or editing Favorite teams, renumbers the affected games once, and so does a game whose teams change to or from a favorite (a knockout slot filled by your team). Ordering by score is not offered, because scores change every refresh and the guide finds each game by its channel number, so the guide would show the wrong game."
+      "help_text": "Gives games involving your Favorite teams the lowest channel numbers, so they sit at the top of the list, while every other game is still shown below them. Kickoff-time numbering: favorites always come first, each block still sorted by start time, and the other games' numbers move up by 10,000,000 to make room. Compact range: a game never changes number once it has one, so favorites take the first numbers when the range fills, but one added later takes the next free number. In Kickoff-time mode, turning this on or off, or editing Favorite teams, renumbers the affected games once, and so does a game whose teams change to or from a favorite (a knockout slot filled by your team). Ordering by score is not offered, because scores change every refresh and the guide finds each game by its channel number, so the guide would show the wrong game.",
+      "section": "_section_apply"
     },
     {
       "id": "placeholder_min_score",
       "type": "number",
       "label": "Placeholder threshold (0-10)",
       "default": 5.0,
-      "help_text": "Games scoring above this get a placeholder channel even if no EPG match exists yet — appears in your guide as 'channel match pending', so big upcoming games (like Wrexham vs Middlesbrough) show up before the provider EPG publishes the broadcast info."
+      "help_text": "Games scoring above this get a placeholder channel even if no EPG match exists yet — appears in your guide as 'channel match pending', so big upcoming games (like Wrexham vs Middlesbrough) show up before the provider EPG publishes the broadcast info.",
+      "section": "_section_apply"
     },
     {
       "id": "dry_run",
       "type": "boolean",
       "label": "Dry run on Apply",
       "default": true,
-      "help_text": "When true, 'Apply' logs intended changes but does not write to the DB."
+      "help_text": "When true, 'Apply' logs intended changes but does not write to the DB.",
+      "section": "_section_apply"
     },
     {
       "id": "enable_matchup_logos",
       "type": "boolean",
       "label": "Per-matchup channel logos (TheSportsDB)",
       "default": true,
-      "help_text": "Replace each virtual channel's logo with TheSportsDB's pre-rendered 960x540 matchup graphic (both team crests + league wordmark + region backdrop). Resolved by team-name pair + date; cached per fixture for 14 days. When SportsDB has no thumbnail (offseason, untracked sport, field events like F1/golf/UFC/tennis) the logo falls back through game-thumbs, then the league/tournament badge, then the matched source channel's logo. Configure key under 'API Keys'."
+      "help_text": "Replace each virtual channel's logo with TheSportsDB's pre-rendered 960x540 matchup graphic (both team crests + league wordmark + region backdrop). Resolved by team-name pair + date; cached per fixture for 14 days. When SportsDB has no thumbnail (offseason, untracked sport, field events like F1/golf/UFC/tennis) the logo falls back through game-thumbs, then the league/tournament badge, then the matched source channel's logo. Configure key under 'API Keys'.",
+      "section": "_section_apply"
     },
     {
       "id": "gamethumbs_base_url",
@@ -744,14 +915,16 @@
       "label": "game-thumbs base URL",
       "default": "",
       "placeholder": "https://game-thumbs.tickarr.com",
-      "help_text": "OPTIONAL second source for per-matchup logos, used only when TheSportsDB has no thumbnail for a game. Blank (the default) means this tier is OFF and the plugin makes NO request to any third party: a game with no SportsDB thumbnail falls straight through to the league/tournament badge. Turning it on points your instance at a third-party service, which then sees which fixtures you curate and whose uptime your logos depend on — so the recommended way to use this is to self-host: `docker run -d -p 3000:3000 ghcr.io/sethwv/game-thumbs:latest` and put your own URL here. The public instance https://game-thumbs.tickarr.com also works and is rate-limited to 30 requests/minute, which the plugin paces under and retries once on. What you gain: game-thumbs composites the two teams' crests on demand, so it covers leagues SportsDB never indexed a graphic for (MLS, Brazilian Serie A, NCAA soccer). Measured on a live slate, it took a curated list from 6 real matchup images out of 23 to 23 out of 23. Requires 'Per-matchup channel logos' to be on."
+      "help_text": "OPTIONAL second source for per-matchup logos, used only when TheSportsDB has no thumbnail for a game. Blank (the default) means this tier is OFF and the plugin makes NO request to any third party: a game with no SportsDB thumbnail falls straight through to the league/tournament badge. Turning it on points your instance at a third-party service, which then sees which fixtures you curate and whose uptime your logos depend on — so the recommended way to use this is to self-host: `docker run -d -p 3000:3000 ghcr.io/sethwv/game-thumbs:latest` and put your own URL here. The public instance https://game-thumbs.tickarr.com also works and is rate-limited to 30 requests/minute, which the plugin paces under and retries once on. What you gain: game-thumbs composites the two teams' crests on demand, so it covers leagues SportsDB never indexed a graphic for (MLS, Brazilian Serie A, NCAA soccer). Measured on a live slate, it took a curated list from 6 real matchup images out of 23 to 23 out of 23. Requires 'Per-matchup channel logos' to be on.",
+      "section": "_section_apply"
     },
     {
       "id": "widen_stream_pool",
       "type": "boolean",
       "label": "Widen stream pool (extra fallback streams)",
       "default": false,
-      "help_text": "When a game airs on several provider channels that all name both teams, the matcher normally keeps just the one it judges best and discards the rest. Turn this on to also stack those other same-fixture channels as lower-priority fallback streams, so if the primary upstream goes down (e.g. a provider 503) the channel fails over instead of going dark. Only channels naming BOTH teams are stacked, never single-team-keyword guesses. Off by default: it trades tighter curation for resilience, and cannot help games your providers do not carry at all. This setting no longer affects stream ORDERING; use 'Preferred languages' for that."
+      "help_text": "When a game airs on several provider channels that all name both teams, the matcher normally keeps just the one it judges best and discards the rest. Turn this on to also stack those other same-fixture channels as lower-priority fallback streams, so if the primary upstream goes down (e.g. a provider 503) the channel fails over instead of going dark. Only channels naming BOTH teams are stacked, never single-team-keyword guesses. Off by default: it trades tighter curation for resilience, and cannot help games your providers do not carry at all. This setting no longer affects stream ORDERING; use 'Preferred languages' for that.",
+      "section": "_section_apply"
     },
     {
       "id": "stream_priority",
@@ -768,7 +941,8 @@
           "label": "Prefer US broadcasts (quality first, US breaks ties)"
         }
       ],
-      "help_text": "How a virtual channel's stacked fallback streams are ordered. 'Quality' prefers measured 59.94/60 fps streams for domestic North American leagues, then ffprobe resolution and bitrate. Unknown frame rates retain the previous quality order. It falls back to HD/FHD/UHD hints in the stream name when a stream was never probed. 'Prefer US broadcasts' keeps that quality ordering but, among streams of EQUAL quality, puts the US English feed (ESPN/FOX/NBC/ABC/CBS/etc.) ahead of Canadian (TSN/Sportsnet) and overseas feeds. It never promotes a lower-quality US feed over a higher-quality non-US one. US is detected from the stream name; Spanish-language US feeds (ESPN Deportes, Telemundo) are not treated as the preferred US feed. In both modes, known languages absent from Preferred languages stay behind eligible feeds, regardless of quality or channel curation. Within eligible feeds, quality still leads in Prefer US broadcasts mode."
+      "help_text": "How a virtual channel's stacked fallback streams are ordered. 'Quality' prefers measured 59.94/60 fps streams for domestic North American leagues, then ffprobe resolution and bitrate. Unknown frame rates retain the previous quality order. It falls back to HD/FHD/UHD hints in the stream name when a stream was never probed. 'Prefer US broadcasts' keeps that quality ordering but, among streams of EQUAL quality, puts the US English feed (ESPN/FOX/NBC/ABC/CBS/etc.) ahead of Canadian (TSN/Sportsnet) and overseas feeds. It never promotes a lower-quality US feed over a higher-quality non-US one. US is detected from the stream name; Spanish-language US feeds (ESPN Deportes, Telemundo) are not treated as the preferred US feed. In both modes, known languages absent from Preferred languages stay behind eligible feeds, regardless of quality or channel curation. Within eligible feeds, quality still leads in Prefer US broadcasts mode.",
+      "section": "_section_apply"
     },
     {
       "id": "language_preferences",
@@ -776,65 +950,239 @@
       "label": "Preferred languages",
       "default": "en",
       "placeholder": "en, de, es",
-      "help_text": "Ordered, comma-separated language codes deciding which stream a matchup channel plays FIRST when several carry the same game. 'en' prefers English commentary; 'de, en' prefers German and falls back to English. Earlier in the list wins. Streams whose language cannot be told from their name sort after your listed languages but ahead of languages you did not list, and NOTHING is ever removed for its language, so a backup feed stays reachable as a fallback. Leave blank to ignore language and order by quality alone. Language is read from the stream name (a 'DE:' or 'MX |' tag, a broadcaster like ZDF or Telemundo, an 'English Feed' label, or accented spelling), so it is best-effort: a German Bundesliga feed named 'Bayern Munich vs Dortmund' is indistinguishable from an English one, because the English club names ARE the German ones. Use 'Demote stream groups' below for those. Explicit En Español/(ESP) audio labels and M+/Movistar identify Spanish; TSN, Premier Sports, ESPN+ and FOX identify English unless an explicit audio label says otherwise. With Prefer US broadcasts, quality leads among eligible feeds; known unwanted languages remain backups."
+      "help_text": "Ordered, comma-separated language codes deciding which stream a matchup channel plays FIRST when several carry the same game. 'en' prefers English commentary; 'de, en' prefers German and falls back to English. Earlier in the list wins. Streams whose language cannot be told from their name sort after your listed languages but ahead of languages you did not list, and NOTHING is ever removed for its language, so a backup feed stays reachable as a fallback. Leave blank to ignore language and order by quality alone. Language is read from the stream name (a 'DE:' or 'MX |' tag, a broadcaster like ZDF or Telemundo, an 'English Feed' label, or accented spelling), so it is best-effort: a German Bundesliga feed named 'Bayern Munich vs Dortmund' is indistinguishable from an English one, because the English club names ARE the German ones. Use 'Demote stream groups' below for those. Explicit En Español/(ESP) audio labels and M+/Movistar identify Spanish; TSN, Premier Sports, ESPN+ and FOX identify English unless an explicit audio label says otherwise. With Prefer US broadcasts, quality leads among eligible feeds; known unwanted languages remain backups.",
+      "section": "_section_apply"
     },
     {
       "id": "fallback_only_groups",
-      "type": "string",
+      "type": "multiselect",
       "label": "Demote stream groups",
-      "default": "",
-      "placeholder": "Sports | DE Sports, Germany | Sports",
-      "help_text": "Comma-separated Dispatcharr channel-group names whose streams should be used only as a last resort. They stay attached and playable, but sort behind every other stream on the channel. This is the fix for backup feeds you keep in your M3U but do not want to hear: put their group here and they will only play if everything else fails. Names are matched case-insensitively and must match the group name exactly otherwise (copy it from the Channels page)."
+      "default": [],
+      "placeholder": "None",
+      "help_text": "Dispatcharr channel groups whose streams should be used only as a last resort. They stay attached and playable, but sort behind every other stream on the channel. This is the fix for backup feeds you keep in your M3U but do not want to hear: put their group here and they will only play if everything else fails.",
+      "section": "_section_apply",
+      "options": []
     },
     {
       "id": "excluded_groups",
-      "type": "string",
+      "type": "multiselect",
       "label": "Exclude stream groups",
-      "default": "",
-      "placeholder": "Adult | XXX, Latino | Sports",
-      "help_text": "Comma-separated channel-group names whose streams are never attached to a matchup channel at all. Stronger than 'Demote stream groups' above and worth reaching for only when you never want the group: an excluded stream is not available as a fallback either, so a game your providers only carry in that group will have no stream. Prefer demoting unless you mean it."
+      "default": [],
+      "placeholder": "None",
+      "help_text": "Channel groups whose streams are never attached to a matchup channel at all. Stronger than 'Demote stream groups' above and worth reaching for only when you never want the group: an excluded stream is not available as a fallback either, so a game your providers only carry in that group will have no stream. Prefer demoting unless you mean it.",
+      "section": "_section_apply",
+      "options": []
     },
     {
       "id": "_section_recording",
-      "type": "info",
+      "type": "section",
       "label": "Recording",
-      "description": "Auto-recording: your Recorded teams first, then the best ranked games in any spare slots."
+      "collapsed": true
+    },
+    {
+      "id": "_section_recording_note",
+      "type": "info",
+      "description": "Auto-recording: your Recorded teams first, then the best ranked games in any spare slots.",
+      "section": "_section_recording"
     },
     {
       "id": "recording_post_roll_minutes",
       "type": "number",
       "label": "Keep recording after the scheduled end (minutes)",
       "default": 120,
-      "help_text": "Padding after a game's scheduled end, for extra time, overtime, extra innings and delays. A recording that runs long costs disk; one that stops early loses the ending, so the default is generous."
+      "help_text": "Padding after a game's scheduled end, for extra time, overtime, extra innings and delays. A recording that runs long costs disk; one that stops early loses the ending, so the default is generous.",
+      "section": "_section_recording"
     },
     {
       "id": "recording_slots",
       "type": "number",
       "label": "Recordings at once (0 = automatic)",
       "default": 0,
-      "help_text": "The most recordings the plugin runs at the same time. Automatic uses your tightest M3U account limit (Max Streams) minus the reserve below. A number here can lower that, never raise it. Slots fill in kickoff order; what happens when a game kicks off and every slot is full is set by Recording preference. The apply result names any game that got no slot."
+      "help_text": "The most recordings the plugin runs at the same time. Automatic uses your tightest M3U account limit (Max Streams) minus the reserve below. A number here can lower that, never raise it. Slots fill in kickoff order; what happens when a game kicks off and every slot is full is set by Recording preference. The apply result names any game that got no slot.",
+      "section": "_section_recording"
     },
     {
       "id": "recording_stream_reserve",
       "type": "number",
       "label": "Streams kept free for live TV",
       "default": 1,
-      "help_text": "How many of your provider's streams automatic mode leaves unused, so a recording never takes the last stream someone needs to watch something else. Watching a game that is also recording shares one stream."
+      "help_text": "How many of your provider's streams automatic mode leaves unused, so a recording never takes the last stream someone needs to watch something else. Watching a game that is also recording shares one stream.",
+      "section": "_section_recording"
     },
     {
       "id": "record_ranked_games",
       "type": "boolean",
       "label": "Also record top-ranked games in spare slots",
       "default": false,
-      "help_text": "When on, slots your Recorded teams do not need go to the best ranked games on the list, from the leagues below. A ranked game is only recorded once a stream has been matched for it. Recorded teams always come first and are never interrupted by a ranked game."
+      "help_text": "When on, slots your Recorded teams do not need go to the best ranked games on the list, from the leagues below. A ranked game is only recorded once a stream has been matched for it. Recorded teams always come first and are never interrupted by a ranked game.",
+      "section": "_section_recording"
     },
     {
       "id": "record_leagues",
-      "type": "string",
-      "label": "Leagues to record (comma-separated, in priority order)",
-      "default": "",
-      "placeholder": "CFB, EPL, NFL",
-      "help_text": "Which leagues' ranked games may be recorded, using the league code at the start of each channel name (CFB, EPL, NFL, NHL, UCL...). Blank means every league. The order is the priority used by the League preference: earlier beats later. Recorded teams are recorded whatever their league."
+      "type": "multiselect",
+      "label": "Leagues to record (in priority order)",
+      "default": [],
+      "placeholder": "Every league",
+      "help_text": "Which leagues' ranked games may be recorded, by the league code at the start of each channel name. Blank means every league. The order you pick them in is the priority used by the League preference: earlier beats later. Recorded teams are recorded whatever their league.",
+      "section": "_section_recording",
+      "options": [
+        {
+          "value": "ATP",
+          "label": "ATP: ATP Tour"
+        },
+        {
+          "value": "BL1",
+          "label": "BL1: Bundesliga"
+        },
+        {
+          "value": "BOX",
+          "label": "BOX: Boxing"
+        },
+        {
+          "value": "BSA",
+          "label": "BSA: Campeonato Brasileiro Série A"
+        },
+        {
+          "value": "CBB",
+          "label": "CBB: NCAA Men's Basketball"
+        },
+        {
+          "value": "CFB",
+          "label": "CFB: NCAA Football"
+        },
+        {
+          "value": "CLUBFRIENDLY",
+          "label": "CLUBFRIENDLY: Club Friendly"
+        },
+        {
+          "value": "EFL",
+          "label": "EFL: EFL Championship"
+        },
+        {
+          "value": "EFLCUP",
+          "label": "EFLCUP: EFL Cup"
+        },
+        {
+          "value": "EPL",
+          "label": "EPL: English Premier League"
+        },
+        {
+          "value": "EURO",
+          "label": "EURO: UEFA European Championship"
+        },
+        {
+          "value": "Eredivisie",
+          "label": "Eredivisie"
+        },
+        {
+          "value": "F1",
+          "label": "F1: Formula 1"
+        },
+        {
+          "value": "FACUP",
+          "label": "FACUP: FA Cup"
+        },
+        {
+          "value": "FRIENDLY",
+          "label": "FRIENDLY: International Friendly"
+        },
+        {
+          "value": "FRIENDLYW",
+          "label": "FRIENDLYW: Women's International Friendly"
+        },
+        {
+          "value": "LaLiga",
+          "label": "LaLiga: La Liga"
+        },
+        {
+          "value": "LigaMX",
+          "label": "LigaMX: Liga MX"
+        },
+        {
+          "value": "Ligue1",
+          "label": "Ligue1: Ligue 1"
+        },
+        {
+          "value": "MLB",
+          "label": "MLB"
+        },
+        {
+          "value": "MLS",
+          "label": "MLS"
+        },
+        {
+          "value": "NASCAR",
+          "label": "NASCAR: NASCAR Cup Series"
+        },
+        {
+          "value": "NBA",
+          "label": "NBA"
+        },
+        {
+          "value": "NCAABSB",
+          "label": "NCAABSB: NCAA Baseball"
+        },
+        {
+          "value": "NCAAMSOC",
+          "label": "NCAAMSOC: NCAA Men's Soccer"
+        },
+        {
+          "value": "NCAASBL",
+          "label": "NCAASBL: NCAA Softball"
+        },
+        {
+          "value": "NCAAW",
+          "label": "NCAAW: NCAA Women's Basketball"
+        },
+        {
+          "value": "NCAAWSOC",
+          "label": "NCAAWSOC: NCAA Women's Soccer"
+        },
+        {
+          "value": "NFL",
+          "label": "NFL"
+        },
+        {
+          "value": "NHL",
+          "label": "NHL"
+        },
+        {
+          "value": "NWSL",
+          "label": "NWSL"
+        },
+        {
+          "value": "PGA",
+          "label": "PGA: PGA Tour"
+        },
+        {
+          "value": "PrimeiraLiga",
+          "label": "PrimeiraLiga: Primeira Liga"
+        },
+        {
+          "value": "SerieA",
+          "label": "SerieA: Serie A"
+        },
+        {
+          "value": "UCL",
+          "label": "UCL: UEFA Champions League"
+        },
+        {
+          "value": "UFC",
+          "label": "UFC"
+        },
+        {
+          "value": "WC",
+          "label": "WC: FIFA World Cup"
+        },
+        {
+          "value": "WNBA",
+          "label": "WNBA"
+        },
+        {
+          "value": "WTA",
+          "label": "WTA: WTA Tour"
+        }
+      ]
     },
     {
       "id": "recording_preference",
@@ -859,33 +1207,43 @@
           "label": "Prefer higher rating"
         }
       ],
-      "help_text": "What happens when a game kicks off and every slot is full. Earliest: first come, first recorded. Prefer favorites / league order / higher rating: the new game takes the slot of the lowest-priority ranked game recording at that moment if it wins on that preference, and the interrupted recording keeps what it captured. Ties never interrupt. In every mode a recorded team can take a ranked game's slot, and a recording that is only in its post-roll padding gives its slot to a new game. A recording that has already started is stopped at the handoff moment and keeps what it captured; if the game taking over has no stream yet, it keeps recording instead."
+      "help_text": "What happens when a game kicks off and every slot is full. Earliest: first come, first recorded. Prefer favorites / league order / higher rating: the new game takes the slot of the lowest-priority ranked game recording at that moment if it wins on that preference, and the interrupted recording keeps what it captured. Ties never interrupt. In every mode a recorded team can take a ranked game's slot, and a recording that is only in its post-roll padding gives its slot to a new game. A recording that has already started is stopped at the handoff moment and keeps what it captured; if the game taking over has no stream yet, it keeps recording instead.",
+      "section": "_section_recording"
     },
     {
       "id": "_section_schedule",
-      "type": "info",
+      "type": "section",
       "label": "Auto-Refresh",
-      "description": "Auto-refresh keeps the curated list fresh as ranks/games/EPG update."
+      "collapsed": true
+    },
+    {
+      "id": "_section_schedule_note",
+      "type": "info",
+      "description": "Auto-refresh keeps the curated list fresh as ranks/games/EPG update.",
+      "section": "_section_schedule"
     },
     {
       "id": "auto_refresh_enabled",
       "type": "boolean",
       "label": "Auto-refresh + apply on schedule",
       "default": false,
-      "help_text": "If on, runs refresh + apply at every time listed in 'Scheduled times'."
+      "help_text": "If on, runs refresh + apply at every time listed in 'Scheduled times'.",
+      "section": "_section_schedule"
     },
     {
       "id": "scheduled_times",
       "type": "string",
       "label": "Scheduled times (HHMM, comma-separated)",
       "default": "0400,1000,1600,2200",
-      "help_text": "Comma-separated 4-digit times in your local timezone. e.g. '0400' = 4 AM only; '0000,0600,1200,1800' = every 6 hours. Same format as event_channel_managarr."
+      "help_text": "Comma-separated 4-digit times in your local timezone. e.g. '0400' = 4 AM only; '0000,0600,1200,1800' = every 6 hours. Same format as event_channel_managarr.",
+      "section": "_section_schedule"
     },
     {
       "id": "debug_mode",
       "type": "boolean",
       "label": "Debug logging",
-      "default": false
+      "default": false,
+      "section": "_section_schedule"
     }
   ],
   "actions": [
@@ -942,7 +1300,12 @@
       "button_label": "Reap",
       "button_variant": "outline",
       "button_color": "orange",
-      "async": true
+      "async": true,
+      "confirm": {
+        "required": true,
+        "title": "Remove finished games now?",
+        "message": "Deletes the channels of games that ended more than 'Remove finished games after' minutes ago, then backfills from the bench. Channels with an active recording are kept."
+      }
     },
     {
       "id": "rematch",

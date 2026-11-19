@@ -309,7 +309,12 @@ class TestMigrateStoredSettings:
             "english_cups": "both",
             "ncaa_baseball_softball": "baseball",
             "ncaa_soccer": "men",
-            "scoring_weights": "rank=1, spread=0.1, favorite=6, rivalry=2, narrative=1",
+            # The #208 text, then converted to table rows (#358).
+            "scoring_weights": [
+                {"name": "rank", "weight": 1}, {"name": "spread", "weight": 0.1},
+                {"name": "favorite", "weight": 6}, {"name": "rivalry", "weight": 2},
+                {"name": "narrative", "weight": 1},
+            ],
             "settings_schema": 2,
         }
         # Nothing stored for tennis, so nothing is written for it.
@@ -331,13 +336,20 @@ class TestMigrateStoredSettings:
         it blank, not the legacy weights, so what was typed (blank included)
         is what was meant; the legacy weight_spread is not appended back
         (codex review round 2, #208)."""
-        out = ms.migrate_stored_settings({"scoring_weights": typed, "weight_spread": 1})
-        assert out["scoring_weights"] == typed
+        stored = {"scoring_weights": typed, "weight_spread": 1}
+        assert ms._merge_legacy_keys(stored)["scoring_weights"] == typed
+        # The full migration then makes the typed text rows (#358), and the
+        # rows score exactly as the text did.
+        out = ms.migrate_stored_settings(stored)
+        assert out["scoring_weights"] == ms.weight_rows("scoring_weights", typed)
         assert plugin._build_weights(out).spread == (4.0 if typed == "spread=4" else 3.0)
 
     def test_unsaved_weights_text_carries_legacy(self):
-        out = ms.migrate_stored_settings({"weight_spread": 1, "weight_rank": 0})
-        assert out["scoring_weights"] == "rank=0, spread=1"
+        stored = {"weight_spread": 1, "weight_rank": 0}
+        assert ms._merge_legacy_keys(stored)["scoring_weights"] == "rank=0, spread=1"
+        assert ms.migrate_stored_settings(stored)["scoring_weights"] == [
+            {"name": "rank", "weight": 0}, {"name": "spread", "weight": 1},
+        ]
 
     def test_a_saved_select_is_kept_even_at_off(self):
         """A modal holding pre-migration settings saved Tennis = Off over a

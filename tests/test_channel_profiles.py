@@ -45,10 +45,15 @@ class TestParseProfileNames:
         # reads as a bug.
         assert plugin._parse_name_list("Sports, sports, SPORTS") == ["Sports"]
 
-    def test_non_string_is_empty(self, plugin):
-        # Settings come out of a JSON blob, so a number or a list is reachable.
-        assert plugin._parse_name_list(["Sports"]) == []
+    def test_a_multiselect_list_is_read_like_the_text(self, plugin):
+        # #358: the setting is a multiselect, stored as a JSON list; saved
+        # installs can still hold the text until the migration lands.
+        assert plugin._parse_name_list(["Sports", " sports ", "", None, "NHL"]) == ["Sports", "NHL"]
+
+    def test_anything_else_is_empty(self, plugin):
+        # Settings come out of a JSON blob, so a number or a dict is reachable.
         assert plugin._parse_name_list(7) == []
+        assert plugin._parse_name_list({"Sports": True}) == []
 
     def test_name_containing_spaces_survives(self, plugin):
         assert plugin._parse_name_list("USL Super League, NHL") == [
@@ -150,13 +155,13 @@ class TestManifestMatchesCode:
     def test_the_field_the_code_reads_exists_in_the_manifest(self, plugin):
         # A rename on one side only means the UI writes a key nothing reads, and
         # the setting silently does nothing.
-        assert self._field(plugin)["type"] == "string"
+        assert self._field(plugin)["type"] == "multiselect"
 
     def test_manifest_default_is_blank_which_the_code_reads_as_all_profiles(self, plugin):
-        # Asserted against the literal "" rather than against the code's own
+        # Asserted against the literal [] rather than against the code's own
         # default, so flipping both in lockstep still trips this.
         field = self._field(plugin)
-        assert field["default"] == ""
+        assert field["default"] == []
         assert plugin._parse_name_list(field["default"]) == []
         assert plugin._select_profiles(["Sports"], [])[0] == ["Sports"]
 

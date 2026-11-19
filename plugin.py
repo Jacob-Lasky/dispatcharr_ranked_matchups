@@ -132,8 +132,8 @@ _PROVENANCE_UNCURATED = 1
 # carries "Sky Sport Premier League", a German feed named entirely in English,
 # and generic groups like "Sports | ESPN Unlimited" carry no signal at all).
 # Group identity is a user-authored policy boundary; only the user knows it.
-_FALLBACK_ONLY_GROUPS_SETTING = "fallback_only_groups"
-_EXCLUDED_GROUPS_SETTING = "excluded_groups"
+_FALLBACK_ONLY_GROUPS_SETTING = merged_settings.FALLBACK_ONLY_GROUPS_SETTING
+_EXCLUDED_GROUPS_SETTING = merged_settings.EXCLUDED_GROUPS_SETTING
 
 # Stream ordering preference. "quality" (default) keeps the historical
 # quality-only ordering; "us_preferred" keeps quality primary but breaks ties
@@ -184,32 +184,21 @@ _FAVORITES_ONLY_POSTSEASON = "postseason"  # favorites + any postseason game
 # is created with `channel_profile_ids` omitted (bulk_create over every profile
 # with enabled=True). So the out-of-the-box behavior matches a hand-created
 # channel, and the setting exists to NARROW that.
-_ENABLED_PROFILES_SETTING = "enabled_channel_profiles"
+_ENABLED_PROFILES_SETTING = merged_settings.ENABLED_PROFILES_SETTING
 
 
 def _parse_name_list(raw: Any) -> List[str]:
-    """Split a comma-separated setting into clean names.
+    """A name-list setting as clean names: a multiselect list (0.34, #358) or
+    the legacy comma-separated text.
 
-    Shared by `enabled_channel_profiles` (ChannelProfile names) and by #206's
-    `fallback_only_groups` / `excluded_groups` (ChannelGroup names). One parser
-    rather than three: the settings differ in what the names MEAN, not in how a
-    human types a comma-separated list, and a second copy would drift.
-
-    Order-preserving and case-insensitively deduped, because the value is
-    reported back to the user and a list echoing their typo twice reads as a
-    bug. Blank/None yields [], which every caller reads as "no restriction".
+    Shared by `enabled_channel_profiles` (ChannelProfile names), #206's
+    `fallback_only_groups` / `excluded_groups` (ChannelGroup names) and
+    `record_leagues`. One parser, `merged_settings.name_list`, rather than
+    four: the settings differ in what the names MEAN, not in how they are
+    stored, and a second copy would drift. Blank/None yields [], which every
+    caller reads as "no restriction".
     """
-    if not raw or not isinstance(raw, str):
-        return []
-    out: List[str] = []
-    seen = set()
-    for part in raw.split(","):
-        name = part.strip()
-        if not name or name.casefold() in seen:
-            continue
-        seen.add(name.casefold())
-        out.append(name)
-    return out
+    return merged_settings.name_list(raw)
 
 
 def _curated_stream_ids() -> set:
@@ -962,7 +951,7 @@ def _guide_kept_ids(channels, now: datetime) -> set:
 
 RECORDING_POST_ROLL_SETTING = "recording_post_roll_minutes"
 RECORD_RANKED_SETTING = "record_ranked_games"
-RECORD_LEAGUES_SETTING = "record_leagues"
+RECORD_LEAGUES_SETTING = merged_settings.RECORD_LEAGUES_SETTING
 RECORDING_PREFERENCE_SETTING = "recording_preference"
 RECORDING_SLOTS_SETTING = "recording_slots"
 RECORDING_RESERVE_SETTING = "recording_stream_reserve"
@@ -1034,7 +1023,7 @@ def _rematch_recorded_teams(games: List[Dict[str, Any]], settings: Dict[str, Any
 def _record_leagues(settings: Dict[str, Any]) -> List[str]:
     """`record_leagues`, casefolded, in the user's order (the order is the
     `league` preference's priority)."""
-    return [x.casefold() for x in _parse_favorites(settings.get(RECORD_LEAGUES_SETTING, ""))]
+    return [x.casefold() for x in _parse_name_list(settings.get(RECORD_LEAGUES_SETTING, ""))]
 
 
 def _ranked_eligible(g: Dict[str, Any], leagues: List[str],
@@ -4861,6 +4850,9 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     lead = "".join(f"WARNING: {p}. " for p in problems)
     return {
         "status": "ok",
+        # Structured copy of the WARNING lead, so a v3 run reports `partial`
+        # (lifecycle.host_outcome) without parsing the message.
+        "warnings": problems,
         "message": (
             lead
             + f"Refreshed: {len(games_payload)} games scored, {matched} matched to a broadcast. "
@@ -9377,6 +9369,8 @@ def _action_auto_pipeline_sync(settings: Dict[str, Any]) -> Dict[str, Any]:
         "status": r2.get("status", "ok"),
         "message": f"refresh: {r1.get('message')} | apply: {r2.get('message')}",
     }
+    if r1.get("warnings"):
+        out["warnings"] = r1["warnings"]
     if r2.get(tasks.APPLY_STOPPED_FOR_TIME):
         out[tasks.APPLY_STOPPED_FOR_TIME] = True  # the parent re-applies in a fresh child
     return out
@@ -11821,7 +11815,7 @@ def _read_settings_migrating() -> Optional[Dict[str, Any]]:
     if pc is None:
         return None
     stored = pc.settings if isinstance(pc.settings, dict) else {}
-    migrated = merged_settings.migrate_stored_settings(stored)
+    migrated = merged_settings.migrate_stored_settings(stored, _league_codes())
     if migrated is None:
         return dict(stored)
     try:
@@ -11840,8 +11834,8 @@ def _read_settings_migrating() -> Optional[Dict[str, Any]]:
         return dict(stored)
     if written:
         logger.info(
-            "[ranked_matchups] migrated saved settings to the merged layout "
-            "(#208): %s",
+            "[ranked_matchups] migrated saved settings to the current layout "
+            "(#208 merges, #358 lists and tables): %s",
             ", ".join(sorted(k for k in migrated if migrated.get(k) != stored.get(k))),
         )
         return migrated
@@ -11852,6 +11846,52 @@ def _read_settings_migrating() -> Optional[Dict[str, Any]]:
     if fresh is None or not isinstance(fresh.settings, dict):
         return {}
     return dict(fresh.settings)
+
+
+_MANIFEST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugin.json")
+_manifest_fields_cache: Optional[List[Dict[str, Any]]] = None
+
+
+def _manifest_fields() -> List[Dict[str, Any]]:
+    """plugin.json's `fields`, read once per module load. plugin.json is the
+    ONLY home of the field list (CLAUDE.md, file map); get_fields only fills
+    in options, it never declares a field of its own."""
+    global _manifest_fields_cache
+    if _manifest_fields_cache is None:
+        with open(_MANIFEST_PATH, encoding="utf-8") as f:
+            _manifest_fields_cache = json.load(f).get("fields") or []
+    return _manifest_fields_cache
+
+
+def _league_codes() -> Tuple[str, ...]:
+    """The Leagues to record options (league codes), from the manifest, so
+    the migration canonicalises a typed "epl" onto the "EPL" option. Empty
+    when the manifest cannot be read: the migration then keeps names as
+    typed, which every reader matches case-insensitively anyway."""
+    try:
+        for field in _manifest_fields():
+            if field.get("id") == RECORD_LEAGUES_SETTING:
+                return tuple(str(o["value"]) for o in field.get("options") or [])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ranked_matchups] could not read plugin.json league codes: %s", e)
+    return ()
+
+
+def _dynamic_field_options() -> Dict[str, List[str]]:
+    """Names that exist right now, for the multiselects whose options are the
+    install's own: Channel Profiles (in Dispatcharr's order) and channel
+    groups (by name, case-insensitively). Read at discovery, as Dispatcharr
+    builds get_fields then; a profile or group added later shows on the next
+    discovery or reload. All groups, not only ones holding streams: a user
+    may demote or exclude a group before its provider fills it."""
+    from apps.channels.models import ChannelGroup, ChannelProfile
+    profiles = list(ChannelProfile.objects.order_by("id").values_list("name", flat=True))
+    groups = sorted(ChannelGroup.objects.values_list("name", flat=True), key=str.casefold)
+    return {
+        _ENABLED_PROFILES_SETTING: profiles,
+        _FALLBACK_ONLY_GROUPS_SETTING: groups,
+        _EXCLUDED_GROUPS_SETTING: groups,
+    }
 
 
 def _migrate_stored_settings() -> None:
@@ -11875,7 +11915,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "1.38.9"
+    version = "1.39.0"
 
     def __init__(self):
         # v3 owns the one persistent service. Every web worker still installs
@@ -11979,6 +12019,26 @@ class Plugin:
         reg.stop_event = stop_event
         t.start()
         logger.info("[ranked_matchups] scheduler thread started (pid=%s, %s)", os.getpid(), where)
+
+    def get_fields(self, context):
+        """Dispatcharr 0.34 discovery hook: the manifest's fields with the
+        Channel Profile and channel group pickers' options read from the DB,
+        and every saved value kept as an option (`merged_settings.build_fields`
+        says why a missing one would break saving).
+
+        NEVER raises: an exception here fails the plugin's load. Any error
+        returns [], which the loader reads as "use the manifest fields", whose
+        pickers then offer only the static options; saved names stay saved.
+        `context["settings"]` is the raw stored dict, read before __init__'s
+        migration ran, so it can still hold the legacy strings."""
+        try:
+            saved = (context or {}).get("settings") or {}
+            return merged_settings.build_fields(
+                _manifest_fields(), saved, _dynamic_field_options())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[ranked_matchups] could not build settings fields; "
+                           "using plugin.json's: %s", e)
+            return []
 
     def on_leader_acquired(self, context):
         from . import lifecycle

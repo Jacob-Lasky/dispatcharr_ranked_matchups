@@ -552,6 +552,8 @@ def run_pipeline_subprocess(action: str, settings: Dict[str, Any]) -> Dict[str, 
     _update_inflight_phase(f"{follow_up} (fresh child)")
     again = _run_pipeline_child(follow_up, settings)
     out = dict(again)
+    if result.get("warnings") and not out.get("warnings"):
+        out["warnings"] = result["warnings"]  # the refresh's data warnings still stand
     # The follow-up's outcome FIRST: show_status cuts the message at 240
     # characters, and a long refresh summary first would hide why it failed.
     out["message"] = (
