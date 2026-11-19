@@ -128,7 +128,7 @@ class TestWeightTables:
 
 class TestMigration:
     def test_tower_settings(self):
-        out = ms.migrate_stored_settings(TOWER_STORED, ("CFB", "EPL"))
+        out = ms.migrate_stored_settings(TOWER_STORED, lambda: {"record_leagues": ["CFB"]})
         assert out["enabled_channel_profiles"] == ["Sports", "Baseball", "MLB", "Jellyfin"]
         assert out["fallback_only_groups"] == ["Sports | ESPN Unlimited"]
         assert out["scoring_weights"][1] == {"name": "spread", "weight": 0.1}
@@ -138,29 +138,48 @@ class TestMigration:
         assert out["max_games"] == 25 and out["settings_schema"] == 2
 
     def test_idempotent_and_none_when_current(self):
-        once = ms.migrate_stored_settings(TOWER_STORED, ())
-        assert ms.migrate_stored_settings(once, ()) is None
-        assert ms.migrate_stored_settings({}, ()) is None
+        once = ms.migrate_stored_settings(TOWER_STORED)
+        assert ms.migrate_stored_settings(once) is None
+        assert ms.migrate_stored_settings({}) is None
+
+    def test_known_names_are_read_only_when_a_name_list_is_text(self):
+        boom = Mock(side_effect=AssertionError("queried the DB for nothing"))
+        assert ms.migrate_stored_settings({"scoring_weights": "spread=2"}, boom) == {
+            "scoring_weights": [{"name": "spread", "weight": 2}]}
+        assert ms.migrate_stored_settings({"excluded_groups": ["A"]}, boom) is None
 
     def test_blank_strings_become_empty_lists(self):
         out = ms.migrate_stored_settings({"excluded_groups": "", "league_weights": "  "})
         assert out == {"excluded_groups": [], "league_weights": []}
 
     def test_record_leagues_are_canonicalised_onto_the_options(self):
-        out = ms.migrate_stored_settings({"record_leagues": "cfb, epl, Gone"}, ("CFB", "EPL"))
+        out = ms.migrate_stored_settings({"record_leagues": "cfb, epl, Gone"},
+                                         lambda: {"record_leagues": ("CFB", "EPL")})
         assert out["record_leagues"] == ["CFB", "EPL", "Gone"]
 
+    def test_profiles_and_groups_are_canonicalised_onto_the_installs_names(self):
+        # The readers match case-insensitively, so "sports" WAS the Sports
+        # profile; stored as typed it would show beside the option.
+        out = ms.migrate_stored_settings(
+            {"enabled_channel_profiles": "sports, Gone", "excluded_groups": "adult | xxx"},
+            lambda: {"enabled_channel_profiles": ["Sports"], "excluded_groups": ["Adult | XXX"]})
+        assert out["enabled_channel_profiles"] == ["Sports", "Gone"]
+        assert out["excluded_groups"] == ["Adult | XXX"]
+
     def test_behaviour_is_unchanged(self, plugin):
-        out = ms.migrate_stored_settings(TOWER_STORED, ())
+        out = ms.migrate_stored_settings(TOWER_STORED)
         assert plugin._build_weights(out) == plugin._build_weights(TOWER_STORED)
         assert plugin._group_policy(out) == plugin._group_policy(TOWER_STORED)
         assert (plugin._parse_name_list(out["enabled_channel_profiles"])
                 == plugin._parse_name_list(TOWER_STORED["enabled_channel_profiles"]))
 
-    def test_plugin_passes_the_manifest_league_codes(self, plugin):
+    def test_plugin_passes_the_manifest_league_codes(self, plugin, monkeypatch):
         codes = plugin._league_codes()
         assert "EPL" in codes and "CFB" in codes
         assert codes == tuple(o["value"] for o in _by_id()["record_leagues"]["options"])
+        # A failed DB read still canonicalises league codes.
+        monkeypatch.setattr(plugin, "_dynamic_field_options", Mock(side_effect=RuntimeError("db")))
+        assert plugin._known_names() == {"record_leagues": codes}
 
 
 class TestBuildFields:
@@ -172,9 +191,9 @@ class TestBuildFields:
 
     def test_dynamic_options_and_saved_names_kept(self):
         saved = {
-            "enabled_channel_profiles": "Sports, Renamed",     # legacy text
-            "excluded_groups": ["B", "Gone"],                   # list
-            "record_leagues": "epl, Mystery",
+            "enabled_channel_profiles": ["Sports", "Renamed", "soccer"],
+            "excluded_groups": ["B", "Gone"],
+            "record_leagues": ["EPL", "Mystery"],
         }
         manifest = _fields()
         before = json.dumps(manifest)
@@ -183,33 +202,68 @@ class TestBuildFields:
         assert out["enabled_channel_profiles"]["options"] == [
             {"value": "Sports", "label": "Sports"}, {"value": "Soccer", "label": "Soccer"},
             {"value": "Renamed", "label": "Renamed" + ms.MISSING_OPTION_SUFFIX},
+            # Matches Soccer case-insensitively, as the readers do: not missing.
+            {"value": "soccer", "label": "soccer"},
         ]
         assert [o["value"] for o in out["excluded_groups"]["options"]] == ["A", "B", "Gone"]
         assert [o["value"] for o in out["fallback_only_groups"]["options"]] == ["A", "B"]
         leagues = [o["value"] for o in out["record_leagues"]["options"]]
-        # "epl" is the EPL option, not a second entry; an unknown code is kept.
-        assert leagues.count("EPL") == 1 and "epl" not in leagues
-        assert leagues[-1] == "Mystery"
+        assert leagues.count("EPL") == 1 and leagues[-1] == "Mystery"
+
+    def test_a_setting_still_stored_as_text_is_served_as_text(self):
+        # A failed migration write: as a multiselect, the string would crash
+        # the settings page (Field.jsx maps over the value).
+        saved = {"excluded_groups": "Adult | XXX", "league_weights": "NFL=2"}
+        out = {f["id"]: f for f in ms.build_fields(_fields(), saved, self.DYNAMIC)}
+        for fid in saved:
+            assert out[fid]["type"] == "string" and out[fid]["default"] == ""
+            assert "options" not in out[fid] and "columns" not in out[fid]
+        assert out["fallback_only_groups"]["type"] == "multiselect"
+
+    def test_unreadable_names_keep_the_saved_ones_without_calling_them_missing(self):
+        dynamic = {k: None for k in self.DYNAMIC}
+        saved = {"enabled_channel_profiles": ["Sports"]}
+        out = {f["id"]: f for f in ms.build_fields(_fields(), saved, dynamic)}
+        assert out["enabled_channel_profiles"]["options"] == [{"value": "Sports", "label": "Sports"}]
+        assert out["excluded_groups"]["options"] == []
 
     def test_every_saved_value_passes_the_hosts_save_validation(self):
         # The check update_settings runs (loader._validate_multiselect_value).
         saved = ms.migrate_stored_settings(
-            {"enabled_channel_profiles": "Old, Sports", "record_leagues": "nfl"}, ("NFL",))
+            {"enabled_channel_profiles": "Old, sports", "record_leagues": "nfl"},
+            lambda: {"record_leagues": ("NFL",), **self.DYNAMIC})
         for f in ms.build_fields(_fields(), saved, self.DYNAMIC):
             if f["type"] == "multiselect" and f["id"] in saved:
                 allowed = {o["value"] for o in f["options"]}
                 assert all(str(v) in allowed for v in saved[f["id"]]), f["id"]
 
     def test_get_fields_never_raises(self, plugin, monkeypatch):
-        monkeypatch.setattr(plugin, "_dynamic_field_options",
-                            Mock(side_effect=RuntimeError("no db")))
+        monkeypatch.setattr(plugin, "_manifest_fields", Mock(side_effect=OSError("gone")))
         assert plugin.Plugin.get_fields(None, {"settings": {}}) == []
 
-    def test_get_fields_uses_the_db_names(self, plugin, monkeypatch):
+    def test_get_fields_keeps_saved_names_when_the_db_names_fail(self, plugin, monkeypatch):
+        monkeypatch.setattr(plugin, "_read_settings_migrating", lambda: None)
+        monkeypatch.setattr(plugin, "_dynamic_field_options",
+                            Mock(side_effect=RuntimeError("no db")))
+        ctx = {"settings": {"enabled_channel_profiles": ["Sports"]}}
+        out = {f["id"]: f for f in plugin.Plugin.get_fields(None, ctx)}
+        assert out["enabled_channel_profiles"]["options"] == [{"value": "Sports", "label": "Sports"}]
+
+    def test_get_fields_reads_the_stored_settings_not_the_stale_context(self, plugin, monkeypatch):
+        # The loader's context copy predates __init__'s migration.
+        monkeypatch.delenv(plugin.tasks.PIPELINE_CHILD_ENV, raising=False)
+        monkeypatch.setattr(plugin, "_read_settings_migrating",
+                            lambda: {"excluded_groups": ["A"]})
         monkeypatch.setattr(plugin, "_dynamic_field_options", lambda: self.DYNAMIC)
-        out = {f["id"]: f for f in plugin.Plugin.get_fields(None, {"settings": {}})}
+        ctx = {"settings": {"excluded_groups": "A"}}
+        out = {f["id"]: f for f in plugin.Plugin.get_fields(None, ctx)}
+        assert out["excluded_groups"]["type"] == "multiselect"
         assert [o["value"] for o in out["enabled_channel_profiles"]["options"]] == ["Sports", "Soccer"]
         assert [f["id"] for f in out.values()] == [f["id"] for f in _fields()]
+        # A failed re-read falls back to the context copy, served safely.
+        monkeypatch.setattr(plugin, "_read_settings_migrating", Mock(side_effect=RuntimeError("db")))
+        out = {f["id"]: f for f in plugin.Plugin.get_fields(None, ctx)}
+        assert out["excluded_groups"]["type"] == "string"
 
 
 class TestManifestLayout:

@@ -297,7 +297,7 @@ derby. New rivalries are added to `rivalries.json`.
 ### Signal: narrative (off by default)
 
 If you enable the LLM narrative bonus (set `narrative` above 0 in
-**Scoring weights**, e.g. `narrative=1`, and
+**Scoring weights**, e.g. a `narrative` row with weight 1, and
 provide an Anthropic API key), the plugin asks Claude to score a game
 0-10 based on backstory: recent form, rivalries the rivalry DB
 doesn't know about, ongoing storylines (manager firings, transfer
@@ -757,7 +757,8 @@ are two layers of control, and most people never leave the first:
    that bundles every weight plus `max_games`. Pick one and you are done.
 2. **Manual weights**: set `curation_preset` to `manual` and the
    **Scoring weights** setting (plus `max_games`) takes over, so you can
-   nudge a single signal by naming just that one, e.g. `favorite=8`.
+   nudge a single signal by adding a row for just that one, e.g. Signal
+   `favorite`, Weight 8.
 
 Picking any preset other than `manual` IGNORES the **Scoring weights**
 setting and `max_games`. If you have hand-tuned weights you want to keep,
@@ -773,6 +774,9 @@ Each recipe is a starting point, not a law. The arrows show the change
 from the default (`balanced`) values. Run **Refresh + apply now** after
 changing settings, or wait for the next scheduled refresh, to see the new
 ordering (scores are worked out at Refresh; **Apply** alone reuses them).
+In the Change column, `favorite=12` is shorthand for a **Scoring weights**
+row with Signal `favorite` and Weight 12, and `NFL=1.5` for a **League
+weights** row with League `NFL` and Weight 1.5.
 
 | I want... | Change | Why it works |
 |---|---|---|

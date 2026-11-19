@@ -567,15 +567,20 @@ class TestInitRunsTheMigration:
                 return True
 
         reg, rreg = plugin._scheduler_registry(), plugin._reaper_registry()
-        saved = (reg.thread, reg.stop_event, rreg.thread, rreg.stop_event)
+        saved = (reg.thread, reg.stop_event, rreg.thread, rreg.stop_event,
+                 getattr(rreg, "final_checks", None))
         calls = []
         try:
             reg.thread, reg.stop_event = _Live(), threading.Event()
             rreg.thread, rreg.stop_event = _Live(), threading.Event()
+            # A CURRENT reaper (1.38.1+). Without the flag, _start_reaper
+            # restarts the live thread first, joining this stub; the test then
+            # passed only when an earlier test had left the flag set.
+            rreg.final_checks = True
             monkeypatch.setattr(plugin, "_migrate_stored_settings", lambda: calls.append(1))
             plugin.Plugin()
         finally:
-            reg.thread, reg.stop_event, rreg.thread, rreg.stop_event = saved
+            reg.thread, reg.stop_event, rreg.thread, rreg.stop_event, rreg.final_checks = saved
         assert calls == [1]
 
     def test_not_in_the_pipeline_child(self, plugin, monkeypatch):

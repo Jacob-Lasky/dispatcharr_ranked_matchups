@@ -11815,7 +11815,7 @@ def _read_settings_migrating() -> Optional[Dict[str, Any]]:
     if pc is None:
         return None
     stored = pc.settings if isinstance(pc.settings, dict) else {}
-    migrated = merged_settings.migrate_stored_settings(stored, _league_codes())
+    migrated = merged_settings.migrate_stored_settings(stored, _known_names)
     if migrated is None:
         return dict(stored)
     try:
@@ -11875,6 +11875,19 @@ def _league_codes() -> Tuple[str, ...]:
     except Exception as e:  # noqa: BLE001
         logger.warning("[ranked_matchups] could not read plugin.json league codes: %s", e)
     return ()
+
+
+def _known_names() -> Dict[str, Sequence[str]]:
+    """The names each name-list picker offers, for the migration's case
+    canonicalisation: the league codes, plus the install's profiles and
+    groups when the DB answers. A failed read leaves those names as typed,
+    which every reader matches case-insensitively anyway."""
+    known: Dict[str, Sequence[str]] = {RECORD_LEAGUES_SETTING: _league_codes()}
+    try:
+        known.update(_dynamic_field_options())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ranked_matchups] could not read profile and group names: %s", e)
+    return known
 
 
 def _dynamic_field_options() -> Dict[str, List[str]]:
@@ -12026,15 +12039,37 @@ class Plugin:
         and every saved value kept as an option (`merged_settings.build_fields`
         says why a missing one would break saving).
 
-        NEVER raises: an exception here fails the plugin's load. Any error
-        returns [], which the loader reads as "use the manifest fields", whose
-        pickers then offer only the static options; saved names stay saved.
-        `context["settings"]` is the raw stored dict, read before __init__'s
-        migration ran, so it can still hold the legacy strings."""
+        The fields are built from the STORED settings re-read here, not from
+        `context["settings"]`: the loader captures that before __init__'s
+        migration runs, so it still holds the legacy strings on the first
+        discovery after an upgrade. A setting still stored as a string (its
+        migration write failed) is served as text rather than crash the page.
+        A failed profile/group read keeps every saved name as an option, so
+        saving still validates.
+
+        NEVER raises: an exception here fails the plugin's load. Any other
+        error returns [], which the loader reads as "use the manifest fields".
+        """
         try:
-            saved = (context or {}).get("settings") or {}
-            return merged_settings.build_fields(
-                _manifest_fields(), saved, _dynamic_field_options())
+            saved = None
+            if os.environ.get(tasks.PIPELINE_CHILD_ENV) != "1":
+                # The pipeline child never migrates (see __init__).
+                try:
+                    saved = _read_settings_migrating()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[ranked_matchups] could not re-read settings for the "
+                                   "settings fields: %s", e)
+            if saved is None:
+                saved = (context or {}).get("settings") or {}
+            try:
+                dynamic = _dynamic_field_options()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[ranked_matchups] could not read profile and group names "
+                               "for the settings pickers: %s", e)
+                dynamic = {k: None for k in (_ENABLED_PROFILES_SETTING,
+                                             _FALLBACK_ONLY_GROUPS_SETTING,
+                                             _EXCLUDED_GROUPS_SETTING)}
+            return merged_settings.build_fields(_manifest_fields(), saved, dynamic)
         except Exception as e:  # noqa: BLE001
             logger.warning("[ranked_matchups] could not build settings fields; "
                            "using plugin.json's: %s", e)

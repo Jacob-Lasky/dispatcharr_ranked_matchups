@@ -65,7 +65,7 @@ Pure: no Django, no I/O, so the whole fallback is unit-testable.
 """
 import math
 from dataclasses import fields as _dataclass_fields
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .scoring import Weights
 from .sources.ncaaf import DEFAULT_DIVISIONS, DIVISION_SETS
@@ -521,17 +521,39 @@ def weight_rows(setting_id: str, raw: Any) -> List[Dict[str, Any]]:
     return rows
 
 
+KnownNames = Callable[[], Dict[str, Sequence[str]]]
+
+
+def _canonical(names: Optional[Sequence[str]]) -> Dict[str, str]:
+    """{casefolded name: its spelling}, the first spelling winning, for
+    `name_list`'s `canonical`. Every reader of these settings matches names
+    case-insensitively, so "sports" and "Sports" are the same choice."""
+    out: Dict[str, str] = {}
+    for name in names or ():
+        out.setdefault(str(name).casefold(), str(name))
+    return out
+
+
 def _convert_list_settings(stored: Dict[str, Any],
-                           league_codes: Tuple[str, ...]) -> Dict[str, Any]:
+                           known_names: Optional[KnownNames]) -> Dict[str, Any]:
     """`stored` with every legacy string in a #358 list setting rewritten as
     a list (see the section comment). Keys that are absent stay absent: the
-    manifest default fills them in, and an absent key is not a saved one."""
+    manifest default fills them in, and an absent key is not a saved one.
+
+    `known_names()` gives, per setting, the names the pickers offer (league
+    codes, the install's profiles and groups). A typed name matching one
+    case-insensitively is stored in the option's spelling, so it shows as
+    that option, not beside it as "(not found)". Called only when there is a
+    string to convert, because it can cost DB queries."""
     out = dict(stored)
-    canonical = {code.casefold(): code for code in league_codes}
+    if not any(isinstance(out.get(k), str) for k in NAME_LIST_SETTINGS):
+        known: Dict[str, Sequence[str]] = {}
+    else:
+        known = (known_names() if known_names else None) or {}
     for key in NAME_LIST_SETTINGS:
         raw = out.get(key)
         if isinstance(raw, str):
-            out[key] = name_list(raw, canonical if key == RECORD_LEAGUES_SETTING else None)
+            out[key] = name_list(raw, _canonical(known.get(key)))
     for key in WEIGHT_TABLE_SETTINGS:
         raw = out.get(key)
         if isinstance(raw, str):
@@ -540,7 +562,7 @@ def _convert_list_settings(stored: Dict[str, Any],
 
 
 def migrate_stored_settings(stored: Dict[str, Any],
-                            league_codes: Tuple[str, ...] = ()) -> Optional[Dict[str, Any]]:
+                            known_names: Optional[KnownNames] = None) -> Optional[Dict[str, Any]]:
     """The stored dict brought to the current layout, or None when it is
     already there.
 
@@ -550,10 +572,10 @@ def migrate_stored_settings(stored: Dict[str, Any],
     the first's output, so seven legacy `weight_<name>` numbers end up as
     Scoring weights rows. The #358 step is keyed on the value's TYPE, not on
     a stamp: a string in one of those settings is always the old shape,
-    whoever wrote it. `league_codes` are the Leagues to record options, so
-    "epl" migrates as the "EPL" the picker offers."""
+    whoever wrote it. `known_names` (see `_convert_list_settings`) makes a
+    typed "epl" migrate as the "EPL" the picker offers."""
     merged = _merge_legacy_keys(stored)
-    out = _convert_list_settings(merged if merged is not None else stored, tuple(league_codes))
+    out = _convert_list_settings(merged if merged is not None else stored, known_names)
     return None if out == stored else out
 
 
@@ -561,35 +583,58 @@ def _option(value: str, label: Optional[str] = None) -> Dict[str, str]:
     return {"value": value, "label": label if label is not None else value}
 
 
-def build_fields(fields: List[Dict[str, Any]], saved: Dict[str, Any],
-                 dynamic_options: Dict[str, List[str]]) -> List[Dict[str, Any]]:
-    """The manifest's fields with each multiselect's options filled in for
-    this install: `Plugin.get_fields`' body, pure so it can be tested.
+def _legacy_text_field(field: Dict[str, Any]) -> Dict[str, Any]:
+    """`field` as the plain text field it was before #358, for a setting
+    whose STORED value is still the legacy string (the migration's write
+    failed or lost a race and is retried on the next read). Rendered as a
+    multiselect, that string crashes the settings page (`.map` on a string);
+    as text it shows and saves, and every reader accepts it."""
+    out = {k: v for k, v in field.items() if k not in ("options", "columns")}
+    out["type"] = "string"
+    out["default"] = ""
+    return out
 
-    `dynamic_options` maps a field id to the names that exist right now
-    (Channel Profiles, channel groups); a field not in it keeps its manifest
-    options (Leagues to record's static league codes). Every value saved in
-    `saved` (the raw stored dict, which may still hold the legacy string)
-    that is not an option is appended, labelled MISSING_OPTION_SUFFIX when it
-    is a name the install no longer has, so the picker shows it and a save
-    does not fail on it (see the section comment). Option values are
-    compared exactly, as `_validate_multiselect_value` compares them."""
+
+def build_fields(fields: List[Dict[str, Any]], saved: Dict[str, Any],
+                 dynamic_options: Dict[str, Optional[List[str]]]) -> List[Dict[str, Any]]:
+    """The manifest's fields made safe and complete for this install:
+    `Plugin.get_fields`' body, pure so it can be tested.
+
+    `saved` is the STORED dict. A multiselect or table whose stored value is
+    still a string is served as text (`_legacy_text_field`). Otherwise each
+    multiselect gets its options: `dynamic_options[id]` is the names that
+    exist right now (Channel Profiles, channel groups), or None when they
+    could not be read; a field not in it keeps its manifest options (the
+    league codes). Every saved value that is not an option is then appended,
+    so the picker shows it and a save does not fail on it (see the section
+    comment). Its label says MISSING_OPTION_SUFFIX only when the install's
+    names were read and none matches it even case-insensitively (the readers
+    match that way, so such a name still works). Option values are compared
+    exactly, as `_validate_multiselect_value` compares them."""
     out: List[Dict[str, Any]] = []
     for field in fields:
         field = dict(field)
-        if field.get("type") == "multiselect":
-            fid = field.get("id")
+        fid = field.get("id")
+        ftype = field.get("type")
+        if ftype in ("multiselect", "table") and isinstance(saved.get(fid), str):
+            out.append(_legacy_text_field(field))
+            continue
+        if ftype == "multiselect":
+            known = True
             if fid in dynamic_options:
-                options = [_option(n) for n in dynamic_options[fid]]
+                names = dynamic_options[fid]
+                known = names is not None
+                options = [_option(n) for n in names or ()]
             else:
                 options = [dict(o) for o in field.get("options") or []]
             offered = {o["value"] for o in options}
-            canonical = ({o["value"].casefold(): o["value"] for o in options}
-                         if fid == RECORD_LEAGUES_SETTING else None)
-            for name in name_list(saved.get(fid), canonical):
-                if name not in offered:
-                    options.append(_option(name, name + MISSING_OPTION_SUFFIX))
-                    offered.add(name)
+            folded = {v.casefold() for v in offered}
+            for name in name_list(saved.get(fid)):
+                if name in offered:
+                    continue
+                missing = known and name.casefold() not in folded
+                options.append(_option(name, name + MISSING_OPTION_SUFFIX if missing else name))
+                offered.add(name)
             field["options"] = options
         out.append(field)
     return out
