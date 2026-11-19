@@ -297,7 +297,7 @@ derby. New rivalries are added to `rivalries.json`.
 ### Signal: narrative (off by default)
 
 If you enable the LLM narrative bonus (set `narrative` above 0 in
-**Scoring weights**, e.g. `narrative=1`, and
+**Scoring weights**, e.g. a `narrative` row with weight 1, and
 provide an Anthropic API key), the plugin asks Claude to score a game
 0-10 based on backstory: recent form, rivalries the rivalry DB
 doesn't know about, ongoing storylines (manager firings, transfer
@@ -757,7 +757,8 @@ are two layers of control, and most people never leave the first:
    that bundles every weight plus `max_games`. Pick one and you are done.
 2. **Manual weights**: set `curation_preset` to `manual` and the
    **Scoring weights** setting (plus `max_games`) takes over, so you can
-   nudge a single signal by naming just that one, e.g. `favorite=8`.
+   nudge a single signal by adding a row for just that one, e.g. Signal
+   `favorite`, Weight 8.
 
 Picking any preset other than `manual` IGNORES the **Scoring weights**
 setting and `max_games`. If you have hand-tuned weights you want to keep,
@@ -773,6 +774,9 @@ Each recipe is a starting point, not a law. The arrows show the change
 from the default (`balanced`) values. Run **Refresh + apply now** after
 changing settings, or wait for the next scheduled refresh, to see the new
 ordering (scores are worked out at Refresh; **Apply** alone reuses them).
+In the Change column, `favorite=12` is shorthand for a **Scoring weights**
+row with Signal `favorite` and Weight 12, and `NFL=1.5` for a **League
+weights** row with League `NFL` and Weight 1.5.
 
 | I want... | Change | Why it works |
 |---|---|---|
@@ -814,11 +818,12 @@ opt-in regardless of preset. `high_curation` tilts toward stakes
 ### Knob reference
 
 The recipes above cover the common goals. For reference, each weight on
-`manual`. All of them live in ONE setting, **Scoring weights**, written as
-`name=number` entries separated by commas (for example
-`favorite=8, spread=1`); leave it blank for every default, and name only the
-weights you want to change. An entry the plugin cannot read (an unknown name,
-a value that is not a number) is skipped and logged, never fatal. Before
+`manual`. All of them live in ONE setting, **Scoring weights**, a table with
+one row per weight you change: pick the Signal, set its Weight (for example
+`favorite` at 8 and `spread` at 1); leave it empty for every default. Before
+1.39.0 (#358) this was `name=number` text separated by commas; saved text is
+turned into rows on upgrade and is still read if present. A row the plugin
+cannot read (no weight yet) is skipped and logged, never fatal. Before
 #208 these were seven separate `weight_<name>` fields; values saved there are
 carried into Scoring weights automatically on upgrade (#208).
 
@@ -845,8 +850,9 @@ sensitivity.
 ### League weights
 
 The **League weights** setting (#309) multiplies the whole raw score of every
-game in a league, written as `LEAGUE=number` entries separated by commas, for
-example `NFL=1.5, EPL=0.7`. The league is the code at the start of each channel
+game in a league: a table with one row per league, its code and its weight,
+for example `NFL` at 1.5 and `EPL` at 0.7 (before 1.39.0, `LEAGUE=number`
+text such as `NFL=1.5, EPL=0.7`, still read if present). The league is the code at the start of each channel
 name (`sport_prefix`: `NFL`, `NHL`, `CFB`, `EPL`, `UCL`, `LaLiga`...), matched
 in any case. A league you do not name stays at 1.
 

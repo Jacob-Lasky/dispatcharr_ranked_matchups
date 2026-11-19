@@ -216,7 +216,7 @@ form will collect everything needed to scope it.
 
 ## Dispatcharr compatibility
 
-The same plugin supports Dispatcharr 0.33 and the upcoming plugins v3 system.
+The same plugin runs on Dispatcharr 0.33 and on the plugins v3 system (0.34.0 and newer); the 1.39 settings controls need 0.34.
 On v3, an administrator approves the declared capabilities when enabling it.
 The v3 system uses **manifest schema 2**. It runs one leader-managed scheduler,
 queues heavy actions through Dispatcharr, and reports start/completion progress.
@@ -233,9 +233,29 @@ Capabilities: background tasks, a persistent service, subprocesses, outbound
 network access, writes outside plugin storage (channel logos and temporary
 process output), proxy internals (slate/recovery checks), and external Python
 dependencies already supplied by Dispatcharr. It binds no listener, reads no
-user-account data, and dispatches no first-party Celery tasks.
+user-account data, and dispatches no first-party Celery tasks (it never queues
+an M3U or EPG refresh, so it does not declare `celery_dispatch`).
 
-The live v3 upgrade check is deferred until a Dispatcharr release includes v3.
+Dispatcharr 0.34.0 (2026-11) is the first release with v3. From 1.39.0 the
+settings use its collapsible sections (Sport Sources and Curation open, the
+rest collapsed), pickers for profiles, channel groups and recorded leagues,
+and tables for the two weight settings. Run history marks a run that finished
+with warnings (a source that failed, or a scoring failure that matching
+recovered) as `partial`, and a clean one as `ok`.
+
+### Upgrading to 1.39.0: saved list settings
+
+Four settings that were comma-separated text are now pickers (**Channel
+Profiles to enable**, **Demote stream groups**, **Exclude stream groups**,
+**Leagues to record**), and **Scoring weights** and **League weights** are now
+tables of rows instead of `name=number` text. Nothing needs re-entering: the
+first time Dispatcharr loads 1.39.0 it rewrites the saved text as the new
+shape, keeping the order, and the plugin reads both shapes, so behaviour does
+not change. A saved name that no longer exists (a renamed profile or group)
+stays selected and shows as `(not found)` so you can remove it. In the weight
+tables, an entry the old text form already skipped as unreadable (an unknown
+signal, a value that is not a number) is not carried over. Dispatcharr only
+shows these controls on 0.34 or newer, so stay on 1.38.x for older releases.
 
 ## Install
 
@@ -274,12 +294,12 @@ The live v3 upgrade check is deferred until a Dispatcharr release includes v3.
      automatically (see [Recording your teams](#recording-your-teams))
    - Pick your **Local timezone** so "today" classification + EPG dates are
      right
-   - Tune **Scoring weights** if a signal feels under/over-weighted (one
-     line of `name=number` entries, e.g. `favorite=8, spread=1`; blank keeps
-     the defaults, see [SCORING.md](SCORING.md#tuning))
-   - Set **League weights** to favour some leagues over others (e.g.
-     `NFL=1.5, EPL=0.7`; the code is the one at the start of each channel
-     name, see [SCORING.md](SCORING.md#league-weights))
+   - Tune **Scoring weights** if a signal feels under/over-weighted (one row
+     per signal you change, e.g. `favorite` at 8 and `spread` at 1; no rows
+     keeps the defaults, see [SCORING.md](SCORING.md#tuning))
+   - Set **League weights** to favour some leagues over others (rows such as
+     `NFL` at 1.5 and `EPL` at 0.7; the code is the one at the start of each
+     channel name, see [SCORING.md](SCORING.md#league-weights))
 
 4. Turn off **Dry run on Apply** (on by default; it prevents channel creation),
    then run **Refresh + apply now** to populate.
@@ -801,9 +821,9 @@ Apply now sets that membership itself:
 
 - **Blank (the default): every profile**, which is what a hand-created channel
   gets in Dispatcharr.
-- **A comma-separated list** (`Sports, Soccer`) restricts them to those
-  profiles. Names are matched case-insensitively against the names shown under
-  Channel Profiles.
+- **Picked profiles** (`Sports`, `Soccer`) restrict them to those profiles.
+  The picker lists the profiles that exist when Dispatcharr loads the plugin;
+  one created later appears after the next plugin reload.
 
 The setting is the source of truth and it converges: profiles you list are
 turned on and profiles you leave out are turned off, so removing a name here
@@ -860,8 +880,9 @@ does not have to be a Favorite, and listing it does not change its score.
   change can take a few hours to show there.
 - **Ranked games in spare slots.** Turn on **Also record top-ranked games in
   spare slots** and slots your recorded teams do not need go to the best games
-  on the list, from **Leagues to record** (league codes as they appear at the
-  start of channel names, e.g. `CFB, EPL, NFL`; blank means every league). A
+  on the list, from **Leagues to record** (pick league codes as they appear at
+  the start of channel names, e.g. `CFB`, `EPL`, `NFL`, in priority order;
+  none picked means every league). A
   ranked game is only recorded once a stream has been matched for it and
   attached to its channel.
 - **Who wins a slot.** Slots always fill in kickoff order. **Recording

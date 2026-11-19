@@ -862,8 +862,8 @@ class TestBuildWeights:
             f for f in manifest["fields"]
             if f["id"] == merged_settings.SCORING_WEIGHTS_SETTING
         )
-        assert field["type"] == "string"
-        assert field["default"] == ""
+        assert field["type"] == "table"
+        assert field["default"] == []
         stated = {
             name: float(value)
             for name, value in re.findall(r"\b([a-z]+)=([0-9.]+)", field["help_text"])
@@ -873,6 +873,15 @@ class TestBuildWeights:
             "tournament": 1.5, "importance": 3.0, "narrative": 0.0,
         }
         assert stated == expected
+        # The Signal column's option labels state the defaults a second time
+        # (#358), and offer every weight, in Weights order.
+        signal = next(c for c in field["columns"] if c["id"] == merged_settings.WEIGHT_ROW_NAME)
+        assert [o["value"] for o in signal["options"]] == list(merged_settings.WEIGHT_NAMES)
+        labelled = {
+            o["value"]: float(re.search(r"default ([0-9.]+)\)$", o["label"]).group(1))
+            for o in signal["options"]
+        }
+        assert labelled == expected
         assert {n: getattr(defaults, n) for n in merged_settings.WEIGHT_NAMES} == expected, (
             "Weights defaults changed: update the Scoring weights help text "
             "in plugin.json AND this test's literal together."
@@ -3617,10 +3626,10 @@ class TestGroupPolicyParsing:
         import json
         fields = json.load(open(os.path.join(REPO_ROOT, "plugin.json"), encoding="utf-8"))["fields"]
         field = next(f for f in fields if f["id"] == getattr(plugin, setting_attr))
-        assert field["type"] == "string"
+        assert field["type"] == "multiselect"
         # Blank by default: neither list may silently drop or demote a stream on
         # a fresh install. #138 wanted the global sweep and must keep working.
-        assert field["default"] == ""
+        assert field["default"] == []
 
 
 class TestPoolEntryKeyPolicy:
@@ -4056,7 +4065,12 @@ class TestManifestFieldsSurviveTheSerializer:
 
     Mirrors the serializer's real contract, read off PluginFieldSerializer in a
     live Dispatcharr 0.30.0 container on 2026-08-31 (every key below is a
-    CharField or a ChoiceField there, and none of them accepts null).
+    CharField or a ChoiceField there, and none of them accepts null), and
+    re-read at v0.34.1 on 2026-11-19 (#358), which added `section`,
+    `collapsed`, `columns`, `accept`, `max_size` and `rows`, and the types in
+    `apps/plugins/field_versions.py`. The 0.34 types and attributes need
+    `manifest_version` 1 or later; below that the loader DROPS the type and
+    STRIPS the attribute (`_normalize_fields`), checked here too.
 
     HONEST LIMIT, and it matters: this is a COPY of the contract, not the
     serializer itself. Dispatcharr is not importable from the test container, so
@@ -4081,11 +4095,17 @@ class TestManifestFieldsSurviveTheSerializer:
     ALLOWED_KEYS = frozenset({
         "id", "label", "type", "default", "help_text", "description",
         "placeholder", "input_type", "min", "max", "step", "value", "options",
+        "section", "collapsed", "columns", "accept", "max_size", "rows",
     })
     REQUIRED_KEYS = frozenset({"id", "type"})
     VALID_TYPES = frozenset({
         "boolean", "info", "number", "select", "string", "text",
+        "multiselect", "section", "table", "file",
     })
+    # field_versions.py at v0.34.1: min_manifest_version 1 for each.
+    V1_TYPES = frozenset({"multiselect", "section", "table", "file"})
+    V1_KEYS = frozenset({"section", "collapsed", "columns", "accept", "max_size", "rows"})
+    COLUMN_TYPES = frozenset({"string", "number", "boolean", "select"})
 
     @pytest.fixture(scope="class")
     @staticmethod
@@ -4165,11 +4185,45 @@ class TestManifestFieldsSurviveTheSerializer:
                     offenders.append((f.get("id"), k, type(f[k]).__name__))
         assert not offenders, f"non-string values in string keys: {offenders}"
 
-    def test_the_three_new_206_fields_are_present_and_string_typed(self, fields):
+    def test_the_034_features_have_the_manifest_version_they_need(self, fields):
+        import json
+        with open(os.path.join(REPO_ROOT, "plugin.json"), encoding="utf-8") as fh:
+            version = json.load(fh).get("manifest_version", 0)
+        uses = [f["id"] for f in fields
+                if f["type"] in self.V1_TYPES or self.V1_KEYS & set(f)]
+        assert uses, "positive control: the manifest uses 0.34 field features (#358)"
+        assert version >= 1, f"manifest_version {version} drops or strips: {uses}"
+
+    def test_table_columns_match_the_column_serializer(self, fields):
+        tables = [f for f in fields if f["type"] == "table"]
+        assert tables, "positive control: the manifest has table fields (#358)"
+        for f in tables:
+            assert f.get("columns"), f"{f['id']} is a table with no columns"
+            for c in f["columns"]:
+                assert isinstance(c.get("id"), str) and c["id"], (f["id"], c)
+                assert c.get("type") in self.COLUMN_TYPES, (f["id"], c)
+                if c["type"] == "select":
+                    assert c.get("options"), (f["id"], c)
+                    for o in c["options"]:
+                        assert isinstance(o.get("value"), str), (f["id"], o)
+                        assert isinstance(o.get("label"), str), (f["id"], o)
+
+    def test_every_section_reference_names_a_declared_section(self, fields):
+        sections = [f["id"] for f in fields if f["type"] == "section"]
+        assert sections, "positive control: the manifest declares sections (#358)"
+        dangling = [(f["id"], f["section"]) for f in fields
+                    if "section" in f and f["section"] not in sections]
+        # An undeclared section renders the field ungrouped (Plugins.md).
+        assert not dangling, f"fields naming an undeclared section: {dangling}"
+
+    def test_the_three_new_206_fields_are_present(self, fields):
         by_id = {f["id"]: f for f in fields}
         for fid in ("language_preferences", "fallback_only_groups", "excluded_groups"):
             assert fid in by_id, f"{fid} missing from the manifest"
-            assert by_id[fid]["type"] == "string"
+            # language_preferences is ordered text; the two group lists are
+            # pickers since #358, whose options get_fields reads from the DB.
+            expected = "string" if fid == "language_preferences" else "multiselect"
+            assert by_id[fid]["type"] == expected
             # help_text is what the user reads to understand a free-text field;
             # a string setting with no guidance is unusable.
             assert by_id[fid].get("help_text")

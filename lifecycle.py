@@ -44,6 +44,34 @@ def _pipeline(action, settings, kind, *, record_skip=True):
     return ran, result
 
 
+def host_outcome(result):
+    """The status Dispatcharr's run history records for an action result.
+
+    `partial` is 0.34's "finished, needs attention" outcome (Plugins.md,
+    Actions). Two cases earn it, the same two the run-health push reports:
+    a run that completed `ok` with data warnings (`warnings`, the refresh's
+    `_slate_problems`: errored sources, nothing playable), and a pipeline
+    whose scoring failed but whose matching recovery (#327) re-published the
+    cached slate (`matching_recovery` ok). A clean run stays `ok`; a failed
+    recovery stays `error`.
+
+    Mapped HERE, on the value handed to the host, and nowhere else. DO NOT
+    change the status `tasks` records: `last_run.json`'s `status` steers
+    `_slot_already_covered` (only `ok` covers a slot), `consecutive_failures`
+    and the health push, and a recovered scoring failure must keep counting
+    as a failure there."""
+    if not isinstance(result, dict):
+        return result
+    status = result.get('status')
+    recovery = result.get('matching_recovery')
+    if status == 'ok' and result.get('warnings'):
+        return {**result, 'status': 'partial'}
+    if (status not in ('ok', 'partial') and isinstance(recovery, dict)
+            and recovery.get('status') == 'ok'):
+        return {**result, 'status': 'partial'}
+    return result
+
+
 def run(plugin, action, settings, context):
     from . import plugin as implementation
     report = context.get('report_progress', lambda *args: None)
@@ -80,6 +108,7 @@ def run(plugin, action, settings, context):
         result = handler(settings) if handler else {
             'status': 'error', 'message': f'Unknown action: {action!r}',
         }
+    result = host_outcome(result)
     report(100, result.get('message') or str(result.get('status')))
     return result
 

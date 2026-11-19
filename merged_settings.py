@@ -1,11 +1,13 @@
 """Settings that #208 merged to shorten the settings modal, and the fallback
 that keeps installs saved before the merge behaving exactly as they did.
 
-WHY THIS MODULE EXISTS. Dispatcharr renders a plugin's settings as one flat
-list (`PluginFieldList` maps `plugin.fields` straight to inputs; the only
-field types are string / number / boolean / select / text / info, and there is
-no collapsing or grouping primitive, verified against 0.30.0). So the modal
-can only get shorter by having FEWER fields. #208 merged three shapes:
+WHY THIS MODULE EXISTS. Up to 0.33, Dispatcharr rendered a plugin's settings
+as one flat list (`PluginFieldList` mapped `plugin.fields` straight to inputs;
+the only field types were string / number / boolean / select / text / info,
+with no collapsing or grouping primitive, verified against 0.30.0). So the
+modal could only get shorter by having FEWER fields. 0.34 added collapsible
+sections, multiselects and tables (#358, the last part of this module), but
+the merges stay: they are what saved installs hold. #208 merged three shapes:
 
   - seven `weight_<name>` numbers -> one `scoring_weights` string
     ("favorite=8, spread=1"; blank means every default);
@@ -54,11 +56,16 @@ read again after re-upgrading (the stamp is still there). Dispatcharr's own
 plugin page warns that a downgrade may break saved settings; this is the
 cheapest behaviour that is right for the common case.
 
+The #358 section at the end converts the legacy STRING values of four
+name lists and the two weight texts into the list shapes 0.34's multiselect
+and table fields store, and builds each multiselect's options; its section
+comment says why both are required, not cosmetic.
+
 Pure: no Django, no I/O, so the whole fallback is unit-testable.
 """
 import math
 from dataclasses import fields as _dataclass_fields
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .scoring import Weights
 from .sources.ncaaf import DEFAULT_DIVISIONS, DIVISION_SETS
@@ -151,7 +158,15 @@ def _legacy_decides(settings: Dict[str, Any], new_key: str, default: Any,
     if not any(k in settings for k in legacy_keys):
         return False
     raw = settings.get(new_key)
-    return raw is None or (isinstance(raw, str) and not raw.strip()) or raw == default
+    return _is_blank(raw) or raw == default
+
+
+def _is_blank(raw: Any) -> bool:
+    """None, whitespace-only text, or an empty list (a table or multiselect
+    saved with nothing in it, #358). The one reading of "the user left this
+    empty" for every setting, text or list."""
+    return (raw is None or (isinstance(raw, str) and not raw.strip())
+            or (isinstance(raw, list) and not raw))
 
 
 def league_pair_value(settings: Dict[str, Any], select_id: str) -> str:
@@ -209,6 +224,21 @@ def _name_number_entries(text: Any) -> List[Tuple[str, str, str]]:
     malformed entry in its own vocabulary."""
     out: List[Tuple[str, str, str]] = []
     if text is None:
+        return out
+    if isinstance(text, list):
+        # A table field's rows (#358): [{"name": ..., "weight": ...}, ...].
+        # "Add row" stores a row with both cells empty, which is skipped
+        # rather than reported, as a blank entry in the text form is.
+        for row in text:
+            if not isinstance(row, dict):
+                out.append((repr(row), "", ""))
+                continue
+            name = str(row.get(WEIGHT_ROW_NAME) or "").strip()
+            value = row.get(WEIGHT_ROW_WEIGHT)
+            value = "" if value is None else str(value).strip()
+            if not name and not value:
+                continue
+            out.append((f"{name}={value}", name, value))
         return out
     for chunk in str(text).replace(";", ",").replace("\n", ",").split(","):
         entry = chunk.strip()
@@ -345,9 +375,9 @@ def format_weight_overrides(overrides: Dict[str, float]) -> str:
     return ", ".join(f"{n}={_format_number(overrides[n])}" for n in WEIGHT_NAMES if n in overrides)
 
 
-def migrate_stored_settings(stored: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _merge_legacy_keys(stored: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The stored dict with every merged key written from its legacy keys and
-    the schema marker stamped, or None when there is nothing to migrate
+    the schema marker stamped, or None when there is nothing to merge
     (already migrated, or no legacy key stored).
 
     Each new key is computed by the SAME resolver the runtime uses, so the
@@ -381,4 +411,230 @@ def migrate_stored_settings(stored: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if carried:
             out[SCORING_WEIGHTS_SETTING] = format_weight_overrides(carried)
     out[SETTINGS_SCHEMA_KEY] = SETTINGS_SCHEMA_VERSION
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Dispatcharr 0.34 settings types (#358): multiselects and tables.
+#
+# Four comma-separated name lists became `multiselect` fields (stored as a JSON
+# list of option values) and the two "name=number" texts became `table` fields
+# (stored as a list of {name, weight} rows). Two facts about 0.34, read from
+# its source at v0.34.1, decide how saved installs are carried over:
+#
+#   1. The UI CRASHES on the old shape. `Field.jsx` renders a multiselect with
+#      `(value ?? field.default ?? []).map(...)`, and a string has no `.map`,
+#      so one saved "Sports, Soccer" breaks the whole settings page. A table
+#      reads a string as no rows. So every saved string is rewritten as a
+#      list, once, by `migrate_stored_settings` (plugin.py writes it from
+#      discovery, before the plugins list is served).
+#   2. Saving REJECTS a value that is not an option. `update_settings` runs
+#      `_validate_multiselect_value` (every value must be one of `options`)
+#      and `_validate_table_value` (each cell must match its column type) on
+#      the whole submitted dict. So `build_fields` adds every saved value to
+#      its field's options, a renamed profile included: without that, one
+#      stale name would make every later save of ANY setting fail, and the
+#      UI also re-saves settings before running an action.
+#
+# Readers still accept both shapes (`name_list`, `_name_number_entries`): the
+# stored dict can hold a string until the migration's compare-and-swap lands,
+# a downgrade-then-upgrade writes strings again, and `params` passed to an
+# action can carry either.
+# ---------------------------------------------------------------------------
+RECORD_LEAGUES_SETTING = "record_leagues"
+ENABLED_PROFILES_SETTING = "enabled_channel_profiles"
+FALLBACK_ONLY_GROUPS_SETTING = "fallback_only_groups"
+EXCLUDED_GROUPS_SETTING = "excluded_groups"
+NAME_LIST_SETTINGS: Tuple[str, ...] = (
+    RECORD_LEAGUES_SETTING, ENABLED_PROFILES_SETTING,
+    FALLBACK_ONLY_GROUPS_SETTING, EXCLUDED_GROUPS_SETTING,
+)
+WEIGHT_TABLE_SETTINGS: Tuple[str, ...] = (SCORING_WEIGHTS_SETTING, LEAGUE_WEIGHTS_SETTING)
+WEIGHT_ROW_NAME = "name"
+WEIGHT_ROW_WEIGHT = "weight"
+# Appended to the label of a saved value that is no longer an option (a
+# renamed or deleted profile or group), so the picker shows it for what it is.
+MISSING_OPTION_SUFFIX = " (not found)"
+
+
+def name_list(raw: Any, canonical: Optional[Dict[str, str]] = None) -> List[str]:
+    """A name-list setting as clean names, from a multiselect list or the
+    legacy comma-separated text.
+
+    Order-preserving (Leagues to record is a priority order) and
+    case-insensitively deduped, because the value is reported back to the
+    user and a list echoing a name twice reads as a bug. Blank, None or a
+    non-text, non-list value yields [], which every caller reads as "no
+    restriction". `canonical` maps a casefolded name to its option spelling
+    ("epl" -> "EPL"), so a legacy hand-typed value migrates onto the option
+    the picker offers instead of beside it."""
+    if isinstance(raw, str):
+        parts: List[Any] = raw.split(",")
+    elif isinstance(raw, list):
+        parts = raw
+    else:
+        return []
+    out: List[str] = []
+    seen = set()
+    for part in parts:
+        if part is None:
+            continue
+        name = str(part).strip()
+        if not name or name.casefold() in seen:
+            continue
+        seen.add(name.casefold())
+        out.append((canonical or {}).get(name.casefold(), name))
+    return out
+
+
+def _weight_number(value: float) -> Any:
+    """6.0 -> 6, so a migrated row shows what the user typed."""
+    return int(value) if float(value).is_integer() and abs(value) < 2 ** 53 else value
+
+
+def weight_rows(setting_id: str, raw: Any) -> List[Dict[str, Any]]:
+    """Legacy "name=number" text as table rows, or `raw` unchanged when it is
+    already a list.
+
+    Kept: every entry whose value is a finite number and, for Scoring
+    weights, whose name is a weight (spelled as the Signal column offers it:
+    lower case, the old "weight_" prefix dropped). Dropped: entries the
+    runtime already ignored and reported (no name, no number, an unknown
+    weight), because a row the table cannot hold would make every later save
+    fail. League weights keep any code and any number: whether a code is a
+    league and whether its weight is in range is decided per refresh, which
+    reports it."""
+    if isinstance(raw, list):
+        return raw
+    rows: List[Dict[str, Any]] = []
+    for _entry, name, value in _name_number_entries(raw):
+        number = _finite(value)
+        if not name or number is None:
+            continue
+        if setting_id == SCORING_WEIGHTS_SETTING:
+            name = name.lower()
+            if name.startswith(LEGACY_WEIGHT_PREFIX):
+                name = name[len(LEGACY_WEIGHT_PREFIX):]
+            if name not in WEIGHT_NAMES:
+                continue
+        rows.append({WEIGHT_ROW_NAME: name, WEIGHT_ROW_WEIGHT: _weight_number(number)})
+    return rows
+
+
+KnownNames = Callable[[], Dict[str, Sequence[str]]]
+
+
+def _canonical(names: Optional[Sequence[str]]) -> Dict[str, str]:
+    """{casefolded name: its spelling}, the first spelling winning, for
+    `name_list`'s `canonical`. Every reader of these settings matches names
+    case-insensitively, so "sports" and "Sports" are the same choice."""
+    out: Dict[str, str] = {}
+    for name in names or ():
+        out.setdefault(str(name).casefold(), str(name))
+    return out
+
+
+def _convert_list_settings(stored: Dict[str, Any],
+                           known_names: Optional[KnownNames]) -> Dict[str, Any]:
+    """`stored` with every legacy string in a #358 list setting rewritten as
+    a list (see the section comment). Keys that are absent stay absent: the
+    manifest default fills them in, and an absent key is not a saved one.
+
+    `known_names()` gives, per setting, the names the pickers offer (league
+    codes, the install's profiles and groups). A typed name matching one
+    case-insensitively is stored in the option's spelling, so it shows as
+    that option, not beside it as "(not found)". Called only when there is a
+    string to convert, because it can cost DB queries."""
+    out = dict(stored)
+    if not any(isinstance(out.get(k), str) for k in NAME_LIST_SETTINGS):
+        known: Dict[str, Sequence[str]] = {}
+    else:
+        known = (known_names() if known_names else None) or {}
+    for key in NAME_LIST_SETTINGS:
+        raw = out.get(key)
+        if isinstance(raw, str):
+            out[key] = name_list(raw, _canonical(known.get(key)))
+    for key in WEIGHT_TABLE_SETTINGS:
+        raw = out.get(key)
+        if isinstance(raw, str):
+            out[key] = weight_rows(key, raw)
+    return out
+
+
+def migrate_stored_settings(stored: Dict[str, Any],
+                            known_names: Optional[KnownNames] = None) -> Optional[Dict[str, Any]]:
+    """The stored dict brought to the current layout, or None when it is
+    already there.
+
+    Two steps, in order: the #208 merge (legacy toggles and weights into the
+    merged keys, stamping SETTINGS_SCHEMA_KEY), then the #358 conversion of
+    string values into multiselect lists and table rows. The second runs on
+    the first's output, so seven legacy `weight_<name>` numbers end up as
+    Scoring weights rows. The #358 step is keyed on the value's TYPE, not on
+    a stamp: a string in one of those settings is always the old shape,
+    whoever wrote it. `known_names` (see `_convert_list_settings`) makes a
+    typed "epl" migrate as the "EPL" the picker offers."""
+    merged = _merge_legacy_keys(stored)
+    out = _convert_list_settings(merged if merged is not None else stored, known_names)
+    return None if out == stored else out
+
+
+def _option(value: str, label: Optional[str] = None) -> Dict[str, str]:
+    return {"value": value, "label": label if label is not None else value}
+
+
+def _legacy_text_field(field: Dict[str, Any]) -> Dict[str, Any]:
+    """`field` as the plain text field it was before #358, for a setting
+    whose STORED value is still the legacy string (the migration's write
+    failed or lost a race and is retried on the next read). Rendered as a
+    multiselect, that string crashes the settings page (`.map` on a string);
+    as text it shows and saves, and every reader accepts it."""
+    out = {k: v for k, v in field.items() if k not in ("options", "columns")}
+    out["type"] = "string"
+    out["default"] = ""
+    return out
+
+
+def build_fields(fields: List[Dict[str, Any]], saved: Dict[str, Any],
+                 dynamic_options: Dict[str, Optional[List[str]]]) -> List[Dict[str, Any]]:
+    """The manifest's fields made safe and complete for this install:
+    `Plugin.get_fields`' body, pure so it can be tested.
+
+    `saved` is the STORED dict. A multiselect or table whose stored value is
+    still a string is served as text (`_legacy_text_field`). Otherwise each
+    multiselect gets its options: `dynamic_options[id]` is the names that
+    exist right now (Channel Profiles, channel groups), or None when they
+    could not be read; a field not in it keeps its manifest options (the
+    league codes). Every saved value that is not an option is then appended,
+    so the picker shows it and a save does not fail on it (see the section
+    comment). Its label says MISSING_OPTION_SUFFIX only when the install's
+    names were read and none matches it even case-insensitively (the readers
+    match that way, so such a name still works). Option values are compared
+    exactly, as `_validate_multiselect_value` compares them."""
+    out: List[Dict[str, Any]] = []
+    for field in fields:
+        field = dict(field)
+        fid = field.get("id")
+        ftype = field.get("type")
+        if ftype in ("multiselect", "table") and isinstance(saved.get(fid), str):
+            out.append(_legacy_text_field(field))
+            continue
+        if ftype == "multiselect":
+            known = True
+            if fid in dynamic_options:
+                names = dynamic_options[fid]
+                known = names is not None
+                options = [_option(n) for n in names or ()]
+            else:
+                options = [dict(o) for o in field.get("options") or []]
+            offered = {o["value"] for o in options}
+            folded = {v.casefold() for v in offered}
+            for name in name_list(saved.get(fid)):
+                if name in offered:
+                    continue
+                missing = known and name.casefold() not in folded
+                options.append(_option(name, name + MISSING_OPTION_SUFFIX if missing else name))
+                offered.add(name)
+            field["options"] = options
+        out.append(field)
     return out

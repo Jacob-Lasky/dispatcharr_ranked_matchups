@@ -260,7 +260,8 @@ class TestManifest:
         with open(os.path.join(REPO_ROOT, "plugin.json"), encoding="utf-8") as f:
             by = {x["id"]: x for x in json.load(f)["fields"]}
         assert by[plugin.RECORD_RANKED_SETTING]["default"] is False
-        assert by[plugin.RECORD_LEAGUES_SETTING]["type"] == "string"
+        leagues = by[plugin.RECORD_LEAGUES_SETTING]
+        assert leagues["type"] == "multiselect" and leagues["default"] == []
         pref = by[plugin.RECORDING_PREFERENCE_SETTING]
         assert pref["default"] == rp.PREF_EARLIEST
         assert [o["value"] for o in pref["options"]] == list(rp.PREFERENCES)
