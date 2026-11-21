@@ -216,18 +216,17 @@ form will collect everything needed to scope it.
 
 ## Dispatcharr compatibility
 
-The same plugin runs on Dispatcharr 0.33 and on the plugins v3 system (0.34.0 and newer); the 1.39 settings controls need 0.34.
+Ranked Matchups requires Dispatcharr 0.34.0 or newer.
 On v3, an administrator approves the declared capabilities when enabling it.
 The v3 system uses **manifest schema 2**. It runs one leader-managed scheduler,
 queues heavy actions through Dispatcharr, and reports start/completion progress.
 The Redis run lock and scheduled-slot claims still protect writes during a
 leadership change. CPU and bulk database work remain in bounded subprocesses.
-On 0.33, the existing scheduler and action behavior is retained.
 
 V3 keeps runtime files in the host-provided `data_dir`, including recording
 bookkeeping, numbering, caches, legacy key files and slate clips. The first run
 copies existing files without overwriting durable state. Bundled resources stay
-in the code directory. On 0.33 these files remain in the installed plugin folder.
+in the code directory.
 
 Capabilities: background tasks, a persistent service, subprocesses, outbound
 network access, writes outside plugin storage (channel logos), proxy internals

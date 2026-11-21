@@ -83,7 +83,7 @@ def _load_plugin():
         (plugin if mod == "plugin" else importlib.import_module(f"{pkg}.{mod}"), attr)
         for mod, attr in _REDIRECTED_PATHS
     ]
-    return plugin, importlib.import_module(f"{pkg}.logos"), redirects
+    return plugin, redirects
 
 
 def _models():
@@ -118,7 +118,7 @@ def _repo_snapshot():
 def main(argv):
     out_path, test_file, names = argv[0], argv[1], argv[2:]
     _setup_django()
-    plugin, logos, redirects = _load_plugin()
+    plugin, redirects = _load_plugin()
 
     spec = importlib.util.spec_from_file_location("_orm_harness_scenarios", test_file)
     scenarios = importlib.util.module_from_spec(spec)
@@ -130,13 +130,11 @@ def main(argv):
         tmp = tempfile.mkdtemp(prefix="orm_harness_")
         logo_dir = os.path.join(tmp, "logos")
         saved = [(mod, attr, getattr(mod, attr)) for mod, attr in redirects]
-        saved_logo = (logos.LOGO_DIR, logos.sweep_stale_logo_files.__defaults__)
+        saved_logo = plugin.storage.logos_dir
         for mod, attr, original in saved:
             setattr(mod, attr, os.path.join(tmp, os.path.basename(original)))
-        # sweep_stale_logo_files binds LOGO_DIR as a DEFAULT at def time, so
-        # patching the module constant alone would still sweep /data/logos.
-        logos.LOGO_DIR = logo_dir
-        logos.sweep_stale_logo_files.__defaults__ = (logo_dir,)
+        os.mkdir(logo_dir)
+        plugin.storage.logos_dir = logo_dir
         _fresh_schema(create=True)
         try:
             getattr(scenarios, f"scenario_{name}")(
@@ -149,7 +147,7 @@ def main(argv):
             _fresh_schema(create=False)
             for mod, attr, original in saved:
                 setattr(mod, attr, original)
-            logos.LOGO_DIR, logos.sweep_stale_logo_files.__defaults__ = saved_logo
+            plugin.storage.logos_dir = saved_logo
 
     after = _repo_snapshot()
     if after != before:

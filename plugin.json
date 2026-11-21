@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -1269,7 +1269,7 @@
     {
       "id": "apply",
       "label": "Apply to Dispatcharr",
-      "description": "Use cache to update target channel profile membership and (if enabled) rename matched channels. Honors dry_run. Dispatcharr 0.33 waits for the result; v3 reports completion in task history.",
+      "description": "Use cache to update target channel profile membership and (if enabled) rename matched channels. Honors dry_run. Dispatcharr reports completion in task history.",
       "async": true
     },
     {

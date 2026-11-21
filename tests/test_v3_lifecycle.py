@@ -78,6 +78,32 @@ def test_v3_actions_return_completed_result_and_report_progress(plugin, monkeypa
     assert report.call_args_list[-1].args == (100, 'child finished')
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_apply_passes_watched_logo_directory_to_child(plugin, monkeypatch, tmp_path, dry_run):
+    directory = tmp_path / "watched"
+    ensure = Mock(return_value=directory)
+    monkeypatch.setattr(storage, "logos_dir", None)
+    monkeypatch.setattr(plugin, "_try_acquire_scheduler_lock", lambda *a: "owned")
+    monkeypatch.setattr(plugin, "_release_scheduler_lock", Mock())
+    child = Mock(return_value=Mock(
+        returncode=0, stderr="",
+        stdout=plugin.tasks._RESULT_SENTINEL + '{"status": "ok"}' + "\n",
+    ))
+    monkeypatch.setattr(plugin.tasks.subprocess, "run", child)
+    result = plugin.Plugin.run(None, "apply", {"dry_run": dry_run}, {
+        "dispatch_task": Mock(),
+        "dispatcharr": {"ensure_directory": ensure},
+    })
+    assert result["status"] == "ok"
+    child_env = child.call_args.kwargs["env"]
+    if dry_run:
+        ensure.assert_not_called()
+        assert storage.LOGOS_ENV not in child_env
+    else:
+        ensure.assert_called_once_with("logos")
+        assert child_env[storage.LOGOS_ENV] == str(directory)
+
+
 def test_v3_action_lock_contention_is_visible(plugin, monkeypatch):
     monkeypatch.setattr(plugin, '_try_acquire_scheduler_lock', lambda *a: None)
     monkeypatch.setattr(plugin, '_run_lock_unavailable_reason', lambda: 'busy')

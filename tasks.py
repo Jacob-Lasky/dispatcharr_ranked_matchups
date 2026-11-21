@@ -605,6 +605,8 @@ def _run_pipeline_child(action: str, settings: Dict[str, Any]) -> Dict[str, Any]
     env[PIPELINE_CHILD_ENV] = "1"
     env[storage.DATA_ENV] = storage.path("")
     env[storage.KEY_ENV] = PLUGIN_KEY
+    if storage.logos_dir is not None:
+        env[storage.LOGOS_ENV] = storage.logos_dir
     env[PIPELINE_DEADLINE_ENV] = repr(time.monotonic() + _SUBPROCESS_TIMEOUT_SECONDS)
     forwarded = os.pathsep.join(p for p in sys.path if p)
     env["PYTHONPATH"] = (

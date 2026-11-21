@@ -73,8 +73,7 @@ _DATE_TOLERANCE_DAYS = 2
 _POSITIVE_TTL = timedelta(days=14)
 _NEGATIVE_TTL = timedelta(days=1)
 
-# Files we own under /data/logos/. The filename prefix is the cleanup signature.
-LOGO_DIR = "/data/logos"
+# The filename prefix identifies our files in the shared logo directory.
 LOGO_FILENAME_PREFIX = "ranked_matchups_"
 
 # Trailing club-qualifier tokens that SportsDB drops from its event names
@@ -227,7 +226,7 @@ def _build_search_query(home: str, away: str) -> str:
 
 def marker_to_filename(marker: str, ext: str = "jpg") -> str:
     """Map a game marker (e.g. 'ranked_matchups:EPL:fd_535345') to a stable,
-    filesystem-safe filename inside LOGO_DIR.
+    filesystem-safe filename inside the watched logo directory.
 
     SHA1 keeps the path short and avoids worrying about marker characters that
     aren't filesystem-safe (the marker contains ':' which works on Linux but
@@ -607,15 +606,14 @@ class ThumbCache:
         return len(stale)
 
 
-def sweep_stale_logo_files(live_markers: set[str], logo_dir: str = LOGO_DIR, *,
+def sweep_stale_logo_files(live_markers: set[str], logo_dir: str, *,
                            keep_filenames: frozenset = frozenset()) -> int:
-    """Delete /data/logos/ranked_matchups_*.jpg files whose marker isn't live.
+    """Delete owned matchup files whose marker isn't live.
 
     `keep_filenames` are file names a live channel's Logo still points at,
     kept whatever their marker: a channel re-keyed (#217) but not rewritten
     this apply (kept for its recording) still shows the file named after its
-    OLD marker. Keyword-only on purpose: the ORM harness swaps `logo_dir`
-    through `__defaults__`, which a second positional default would misalign.
+    old marker.
 
     Called at the end of each apply pass. Returns number of files removed.
     Stale-detection is by filename hash: a file is live iff its name equals

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import time
 import uuid
 
-from . import tasks
+from . import storage, tasks
 
 PIPELINE_ACTIONS = {
     'refresh': tasks.ACTION_REFRESH,
@@ -75,6 +75,12 @@ def host_outcome(result):
 def run(plugin, action, settings, context):
     from . import plugin as implementation
     report = context.get('report_progress', lambda *args: None)
+    if (
+        action in PIPELINE_ACTIONS and action != 'refresh'
+        and settings.get("enable_matchup_logos", True)
+        and not implementation._dry_run_enabled(settings)
+    ):
+        storage.configure_logos(context)
     report(5, f'Running {action}')
     if action == 'auto_pipeline' and settings.get(SLOT_PARAM):
         slot = implementation.parse_iso_utc(settings[SLOT_PARAM])

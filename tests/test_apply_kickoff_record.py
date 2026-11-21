@@ -1001,19 +1001,18 @@ def scenario_witness_a_kept_channels_logo_file_is_not_swept(env):
             channel=_owned(env)[G431], start_time=_now() - timedelta(minutes=30),
             end_time=_now() + timedelta(hours=3), custom_properties={"status": "recording"},
         )
-        os.makedirs(logos.LOGO_DIR, exist_ok=True)
-        kept_logo = os.path.join(logos.LOGO_DIR, logos.marker_to_filename(G431))
+        kept_logo = os.path.join(env.plugin.storage.logos_dir, logos.marker_to_filename(G431))
         # Round 2: a channel re-keyed (#217) and then kept shows the file named
         # after its OLD marker; the kept 431 points at one here.
-        old_name = os.path.join(logos.LOGO_DIR, logos.marker_to_filename("ranked_matchups:CFB:7302311"))
-        gone_logo = os.path.join(logos.LOGO_DIR, logos.marker_to_filename("ranked_matchups:CFB:999"))
+        old_name = os.path.join(env.plugin.storage.logos_dir, logos.marker_to_filename("ranked_matchups:CFB:7302311"))
+        gone_logo = os.path.join(env.plugin.storage.logos_dir, logos.marker_to_filename("ranked_matchups:CFB:999"))
         for path in (kept_logo, old_name, gone_logo):
             with open(path, "wb") as f:
                 f.write(b"jpg")
         logo = m.Logo.objects.create(name="old marker's logo", url=old_name)
         m.Channel.objects.filter(pk=_owned(env)[G431].pk).update(logo_id=logo.id)
         # Round 3: the user gave one of their own channels a matchup logo.
-        users_pick = os.path.join(logos.LOGO_DIR, logos.marker_to_filename("ranked_matchups:CFB:12"))
+        users_pick = os.path.join(env.plugin.storage.logos_dir, logos.marker_to_filename("ranked_matchups:CFB:12"))
         with open(users_pick, "wb") as f:
             f.write(b"jpg")
         pick = m.Logo.objects.create(name="user's pick", url=users_pick)

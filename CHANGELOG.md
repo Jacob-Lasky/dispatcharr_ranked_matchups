@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.1
+
+- Resolve the watched logo directory through Dispatcharr before running logo-producing pipelines.
+
 ## 2.0.0
 
 - Store slate subprocess output under the plugin's private data directory.

@@ -7811,14 +7811,15 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
     # TheSportsDB's pre-rendered 960x540 event graphic, then a game-thumbs
     # composite of the two crests, then the league/tournament badge, then the
     # matched source channel's logo. Whichever tier answers, the image is
-    # downloaded to /data/logos/ranked_matchups_<hash>.<ext> and Channel.logo
+    # downloaded to the watched directory as ranked_matchups_<hash>.<ext> and Channel.logo
     # points at the local file, so no tier depends on a remote host staying up
     # after apply. Dry_run and feature-disabled short-circuit to the channel
     # logo before any HTTP. Per-marker results are cached on disk so a fixture
     # costs at most one probe per provider per TTL window.
     from . import gamethumbs as matchup_gamethumbs
     from . import logos as matchup_logos
-    matchup_logos_enabled = bool(settings.get("enable_matchup_logos", True))
+    logo_dir = storage.logos_dir
+    matchup_logos_enabled = logo_dir is not None and bool(settings.get("enable_matchup_logos", True))
     sportsdb_api_key = SPORTSDB_DEFAULT_KEY
     thumb_cache: Optional[matchup_logos.ThumbCache] = None
     # Second logo tier (#174): game-thumbs composites two ESPN crests on demand,
@@ -7891,18 +7892,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         if league_id is None:
             return None
         badge_path = os.path.join(
-            matchup_logos.LOGO_DIR, matchup_logos.badge_filename(league_id),
+            logo_dir, matchup_logos.badge_filename(league_id),
         )
         if not os.path.exists(badge_path):
             if not prepass_budget.allow():
                 return None
             badge_url = matchup_logos.resolve_league_badge_url(league_id, sportsdb_api_key)
             if not badge_url:
-                return None
-            try:
-                os.makedirs(matchup_logos.LOGO_DIR, exist_ok=True)
-            except OSError as e:
-                logger.warning("[ranked_matchups] cannot mkdir %s: %s", matchup_logos.LOGO_DIR, e)
                 return None
             if not prepass_budget.allow() or not matchup_logos.download_thumb(badge_url, badge_path):
                 return None
@@ -7921,20 +7917,13 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         if gamethumbs_cache is None or not gamethumbs_base_url:
             return None
         local_path = os.path.join(
-            matchup_logos.LOGO_DIR,
+            logo_dir,
             matchup_logos.marker_to_filename(marker, matchup_gamethumbs.FILE_EXT),
         )
         if not os.path.exists(local_path):
             fresh, cached_url = gamethumbs_cache.get(marker)
             if fresh and cached_url is None:
                 # Cached definitive miss: this league/team pair does not resolve.
-                return None
-            try:
-                os.makedirs(matchup_logos.LOGO_DIR, exist_ok=True)
-            except OSError as e:
-                logger.warning(
-                    "[ranked_matchups] cannot mkdir %s: %s", matchup_logos.LOGO_DIR, e,
-                )
                 return None
             url, definitive_miss = matchup_gamethumbs.fetch_matchup_composite(
                 base_url=gamethumbs_base_url,
@@ -8007,15 +7996,8 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             thumb_cache.put(marker, thumb_url)
         if not thumb_url:
             return _gamethumbs_or_badge()
-        # Ensure /data/logos/ exists (Dispatcharr creates it lazily on first
-        # upload via the UI; we might race a fresh install).
-        try:
-            os.makedirs(matchup_logos.LOGO_DIR, exist_ok=True)
-        except OSError as e:
-            logger.warning("[ranked_matchups] cannot mkdir %s: %s", matchup_logos.LOGO_DIR, e)
-            return _badge_or_channel()
         local_path = os.path.join(
-            matchup_logos.LOGO_DIR, matchup_logos.marker_to_filename(marker),
+            logo_dir, matchup_logos.marker_to_filename(marker),
         )
         if not os.path.exists(local_path):
             if not prepass_budget.allow() or not matchup_logos.download_thumb(thumb_url, local_path):
@@ -9152,10 +9134,11 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
             Channel.objects.filter(_owned_tvg_id_q(), channel_group=target_group)
             .values_list("tvg_id", flat=True)
         )
+    if matchup_logos_enabled and not dry_run and target_group is not None:
         referenced_logo_files = frozenset(
             os.path.basename(url) for url in Channel.objects.filter(
                 logo__url__startswith=os.path.join(
-                    matchup_logos.LOGO_DIR, matchup_logos.LOGO_FILENAME_PREFIX,
+                    logo_dir, matchup_logos.LOGO_FILENAME_PREFIX,
                 ),
             ).values_list("logo__url", flat=True) if url
         )
@@ -9168,7 +9151,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         llm_descriptions.write_cache(LLM_DESCRIPTIONS_CACHE_PATH, pruned)
 
     # Persist the SportsDB thumb-URL cache and sweep stale matchup logo files
-    # from /data/logos/. Both prune to live_markers so disk usage doesn't grow
+    # from the watched logo directory. Both prune to live_markers so disk usage doesn't grow
     # unbounded across many refresh cycles. Logo rows pointing at deleted
     # files are left for Dispatcharr's own cleanup_unused_logos endpoint:
     # deleting them here would race with concurrent UI reads.
@@ -9182,7 +9165,7 @@ def _action_apply(settings: Dict[str, Any]) -> Dict[str, Any]:
         # Sweeps BOTH providers' files: sweep_stale_logo_files derives its live
         # set from every extension marker_to_filename can write.
         stale_logo_files_swept = matchup_logos.sweep_stale_logo_files(
-            live_markers, keep_filenames=referenced_logo_files,
+            live_markers, logo_dir, keep_filenames=referenced_logo_files,
         )
 
     prefix = "[dry] " if dry_run else ""
@@ -11928,7 +11911,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "2.0.0"
+    version = "2.0.1"
 
     def __init__(self):
         # v3 owns the one persistent service. Every web worker still installs

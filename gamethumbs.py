@@ -13,7 +13,7 @@ is indexed anywhere.
 
 Resolution is deterministic: (league_slug, away, home) fully determines the URL,
 so there is no search step and no event-matching heuristic to get wrong. A
-composite is downloaded once to /data/logos/ and reused, exactly like a SportsDB
+composite is downloaded once to the watched logo directory and reused, exactly like a SportsDB
 thumb, so the local file is the real cache and a game-thumbs outage cannot break
 already-applied channels.
 

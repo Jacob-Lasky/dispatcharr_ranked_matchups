@@ -31,7 +31,6 @@ def test_cached_crests_and_independent_missing_logo(tmp_path):
 @pytest.mark.skipif(not shutil.which('ffmpeg'),reason='media integration needs ffmpeg')
 def test_loop_clocks_headers_and_cache(tmp_path,monkeypatch,plugin):
     monkeypatch.setattr(slate,'cache_dir',lambda:tmp_path/'slates')
-    monkeypatch.setattr(logos,'LOGO_DIR',str(tmp_path))
     monkeypatch.setattr(logos,'cached_team_badge',lambda *a:(None,'test missing badge'))
     now=datetime.now(timezone.utc)
     game={'home':'NC State','away':'Wake Forest','sport_prefix':'CBB',

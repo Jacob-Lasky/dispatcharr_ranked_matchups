@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -10,6 +11,8 @@ import tempfile
 
 CODE_DIR = Path(__file__).resolve().parent
 DATA_ENV = 'RANKED_MATCHUPS_DATA_DIR'
+LOGOS_ENV = "RANKED_MATCHUPS_LOGOS_DIR"
+logos_dir = os.environ.get(LOGOS_ENV) or None
 KEY_ENV = 'RANKED_MATCHUPS_PLUGIN_KEY'
 _root = Path(os.environ.get(DATA_ENV) or CODE_DIR)
 _identity = None
@@ -123,3 +126,13 @@ def configure(context):
         if module is not None:
             for attribute, name in names.items():
                 setattr(module, attribute, path(name))
+
+
+def configure_logos(context):
+    global logos_dir
+    ensure_directory = (context.get("dispatcharr") or {}).get("ensure_directory")
+    try:
+        logos_dir = os.fspath(ensure_directory("logos")) if ensure_directory else None
+    except (OSError, ValueError) as exc:
+        logos_dir = None
+        logging.getLogger(__name__).warning("Matchup logos unavailable: %s", exc)
