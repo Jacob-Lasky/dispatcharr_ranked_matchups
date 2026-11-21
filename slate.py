@@ -85,7 +85,9 @@ class _Process:
 
 
 def _run(args, timeout):
-    with tempfile.TemporaryFile() as output:
+    root = cache_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryFile(dir=root) as output:
         child = _Process(args, output.fileno())
         try:
             code = child.wait(timeout)

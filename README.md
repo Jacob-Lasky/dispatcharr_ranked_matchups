@@ -230,8 +230,8 @@ copies existing files without overwriting durable state. Bundled resources stay
 in the code directory. On 0.33 these files remain in the installed plugin folder.
 
 Capabilities: background tasks, a persistent service, subprocesses, outbound
-network access, writes outside plugin storage (channel logos and temporary
-process output), proxy internals (slate/recovery checks), and external Python
+network access, writes outside plugin storage (channel logos), proxy internals
+(slate/recovery checks), and external Python
 dependencies already supplied by Dispatcharr. It binds no listener, reads no
 user-account data, and dispatches no first-party Celery tasks (it never queues
 an M3U or EPG refresh, so it does not declare `celery_dispatch`).

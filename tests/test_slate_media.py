@@ -58,3 +58,20 @@ def test_loop_clocks_headers_and_cache(tmp_path,monkeypatch,plugin):
     assert types.count('5')>=3
     for i,kind in enumerate(types):
         if kind=='5':assert '7' in types[max(0,i-4):i] and '8' in types[max(0,i-4):i]
+
+
+def test_subprocess_capture_uses_plugin_storage(tmp_path, monkeypatch):
+    from dispatcharr_ranked_matchups import storage
+
+    monkeypatch.setattr(storage, '_root', tmp_path / 'private')
+    temporary_file = slate.tempfile.TemporaryFile
+
+    def capture(*, dir):
+        assert dir == tmp_path / 'private' / 'slates'
+        assert dir.is_dir()
+        return temporary_file(dir=dir)
+
+    monkeypatch.setattr(slate.tempfile, 'TemporaryFile', capture)
+    code, output = slate._run(['/bin/echo', 'captured'], timeout=5)
+    assert (code, output) == (0, b'captured\n')
+    assert list((tmp_path / 'private' / 'slates').iterdir()) == []

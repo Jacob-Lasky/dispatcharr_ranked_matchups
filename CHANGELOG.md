@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.0
+
+- Store slate subprocess output under the plugin's private data directory.
+- This release takes the major version that 1.39.0 skipped when it adopted
+  the Dispatcharr 0.34 manifest features for settings. The official catalog
+  raised its minimum Dispatcharr version to 0.34.0 with 1.39.0.
+
 ## 1.39.0
 
 Adopts the rest of Dispatcharr 0.34's plugin features (#358). **Requires
