@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.2
+
+- Boxing no longer uses up the Boxing Data free tier (100 calls a month) in
+  about two days (#361). The schedule is kept for 12 hours instead of being
+  fetched again on every refresh and post-M3U rematch, at most 80 requests a
+  month are sent, and a used-up quota stops requests until it resets. A
+  refresh that cannot fetch uses the kept schedule.
+
 ## 2.0.1
 
 - Resolve the watched logo directory through Dispatcharr before running logo-producing pipelines.
