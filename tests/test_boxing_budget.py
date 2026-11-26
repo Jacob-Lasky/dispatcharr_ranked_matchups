@@ -248,6 +248,33 @@ def test_the_wait_is_the_reset_of_the_counter_that_ran_out(mods, clock, http):
     assert len(calls) == 2
 
 
+def test_a_used_up_counter_without_a_reset_waits_for_the_next_month(mods, clock, http):
+    """Both counters at 0, only the plan's 30 s reset given: the monthly one
+    still holds until its own (unknown, so next-month) reset."""
+    calls, queue = http
+    queue.append(FakeResp(429, {"message": QUOTA_MESSAGE}, {
+        "x-ratelimit-requests-remaining": "0", "x-ratelimit-requests-reset": "30",
+        "x-rate-limit-rapid-free-plans-hard-limit-remaining": "0"}))
+    _refresh(mods)
+    clock["now"] = datetime(2026, 11, 30, 23, 0, tzinfo=UTC)
+    _refresh(mods)
+    assert len(calls) == 1
+
+
+def test_a_counter_with_calls_left_never_sets_the_wait(mods, clock, http):
+    """A message-only quota 429 is held to the next month, not to the reset of
+    a counter that still has calls left."""
+    calls, queue = http
+    clock["now"] = datetime(2026, 11, 29, 4, 0, tzinfo=UTC)
+    queue.append(FakeResp(429, {"message": QUOTA_MESSAGE}, {
+        "x-rate-limit-rapid-free-plans-hard-limit-remaining": "40",
+        "x-rate-limit-rapid-free-plans-hard-limit-reset": str(20 * 86400)}))
+    _refresh(mods)
+    clock["now"] = datetime(2026, 12, 1, 0, 0, tzinfo=UTC)
+    _refresh(mods)
+    assert len(calls) == 2
+
+
 def test_the_ceiling_stops_a_schedule_between_pages(mods, clock, http):
     """Page 1 takes the month's last attempt and promises a page 2: page 2 is
     not sent, and the half-read schedule is not kept as the whole one."""
@@ -265,9 +292,12 @@ def test_the_ceiling_stops_a_schedule_between_pages(mods, clock, http):
 
 def test_a_redirect_is_a_failure_and_is_not_followed(mods, clock, http):
     calls, queue = http
-    queue.append(FakeResp(307, {}, {"Location": "https://elsewhere.example/"}))
+    _boxing, data = mods
+    # A valid schedule in the body: only the status can reject it.
+    queue.append(FakeResp(307, _page([_card(1)]), {"Location": "https://elsewhere.example/"}))
     rows, lost = _refresh(mods)
     assert len(calls) == 1 and rows == [] and lost == WEEK
+    assert not Path(data.CACHE_DIR, "schedule.json").exists()
 
 
 def test_an_error_message_quoting_the_key_is_masked(mods, clock, http, caplog):

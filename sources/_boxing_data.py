@@ -7,8 +7,8 @@ and refreshes run four scheduled times a day plus every post-M3U rematch (up to 
 15 min while a curated game is live), so about 50 calls a day: the month was gone in two.
 
 The budget now. A COMPLETE schedule (every page read, nothing failed) is kept on disk for
-FRESH_FOR (12 h) and served from there without a request. Complete reads of the same lookahead
-are at least 12 h apart, so at most 2 a day, 63 in a 31-day month of one-page weeks (a week has had 3 cards when measured,
+FRESH_FOR (12 h) and served from there without a request. Complete reads of the same lookahead,
+once saved, are at least 12 h apart, so at most 2 a day, 63 in a 31-day month of one-page weeks (a week has had 3 cards when measured,
 2026-07-10; a page holds 25). A failed or partial read is not kept, so the next refresh asks again; that is
 why every outbound attempt, successful or not, is reserved on disk BEFORE it is sent against a
 MONTHLY_ATTEMPTS (80) ceiling per UTC month and hashed key, so a run of failures (one every
@@ -19,9 +19,9 @@ So, per key:
 
 - On a quota refusal no request is made with that key until the reset (`_quota_wait`): HTTP
   429 whose `message` names a quota, or any answer whose remaining-requests header reads 0.
-  The reset comes from RapidAPI's `x-ratelimit-requests-reset` (or the free-plan
-  `x-rate-limit-rapid-free-plans-hard-limit-reset`), seconds until the quota resets per
-  https://docs.rapidapi.com/docs/response-headers, and falls back to the 1st of the next
+  The reset is that used-up counter's own header (`x-ratelimit-requests-reset`, or the
+  free plan's `x-rate-limit-rapid-free-plans-hard-limit-reset`), seconds until the quota
+  resets per https://docs.rapidapi.com/docs/response-headers, else the 1st of the next
   month, 00:00 UTC. NOT live-measured: no Boxing Data key is configured on Tower. RapidAPI's
   documented quota answer is 429 `{"message": "You have exceeded the MONTHLY quota for
   Requests on your current plan, ..."}`; a burst limit is 429 `{"message": "Too many
@@ -206,21 +206,25 @@ def _header_int(headers: Dict[str, str], names: tuple) -> Optional[int]:
 def _quota_wait(status: int, body: Any, headers: Dict[str, str], at: datetime) -> Optional[datetime]:
     """When this key may ask again, if the answer says its quota is used up; else None.
 
-    A quota answer is a 429 whose message names a quota, or any answer where one of
-    RapidAPI's counters reads 0 remaining. Each counter has its OWN reset header (the plan's
-    `x-ratelimit-requests-*`, the free plan's monthly `hard-limit-*`), so the wait is the
-    latest reset among the counters that are used up. A 429 that is neither (RapidAPI's
-    per-second "Too many requests") is an ordinary failure: waiting a month for a burst
-    limit would cost the whole sport."""
+    The rule: the latest deadline among RapidAPI's counters that read 0 remaining (the
+    plan's `x-ratelimit-requests-*`, the free plan's monthly `hard-limit-*`), each counter's
+    own reset header, or the 1st of the next month when that header is missing or implausible.
+    A 429 whose message names a quota with no counter at 0 waits for the next month. Any other
+    429 (RapidAPI's per-second "Too many requests") is an ordinary failure: waiting a month
+    for a burst limit would cost the whole sport."""
+    deadlines = []
+    for remaining, reset in _COUNTERS:
+        left = _header_int(headers, (remaining,))
+        if left is not None and left <= 0:
+            seconds = _header_int(headers, (reset,))
+            plausible = seconds is not None and 0 < seconds <= _LONGEST_WAIT.total_seconds()
+            deadlines.append(at + timedelta(seconds=seconds) if plausible else _next_month(at))
+    if deadlines:
+        return max(deadlines)
     message = body.get("message") if isinstance(body, dict) else None
-    spent = [reset for remaining, reset in _COUNTERS
-             if (left := _header_int(headers, (remaining,))) is not None and left <= 0]
-    if not spent and not (status == 429 and isinstance(message, str) and "quota" in message.lower()):
-        return None
-    candidates = spent or [reset for _remaining, reset in _COUNTERS]
-    waits = [at + timedelta(seconds=s) for s in (_header_int(headers, (name,)) for name in candidates)
-             if s is not None and 0 < s <= _LONGEST_WAIT.total_seconds()]
-    return max(waits) if waits else _next_month(at)
+    if status == 429 and isinstance(message, str) and "quota" in message.lower():
+        return _next_month(at)
+    return None
 
 
 def _record_wait(at: datetime, kid: str, until: Optional[datetime], remaining: Optional[int]) -> None:
