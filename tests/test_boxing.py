@@ -13,6 +13,7 @@ import pytest
 from dispatcharr_ranked_matchups.sources import BoxingSource
 from dispatcharr_ranked_matchups.sources.base import SportSource
 from dispatcharr_ranked_matchups.sources import boxing as boxing_mod
+from dispatcharr_ranked_matchups.sources import _boxing_data as boxing_data
 from dispatcharr_ranked_matchups._util import FIELD_AWAY_SENTINEL
 from tests.conftest import stub_requests_get
 
@@ -137,7 +138,7 @@ class TestBoxingParse:
         assert captured["params"]["days"] == boxing_mod._FREE_TIER_MAX_DAYS
         # And the RapidAPI auth headers must be sent.
         assert captured["headers"]["x-rapidapi-key"] == "x"
-        assert captured["headers"]["x-rapidapi-host"] == boxing_mod._RAPIDAPI_HOST
+        assert captured["headers"]["x-rapidapi-host"] == boxing_data.RAPIDAPI_HOST
 
     def test_match_name_strips_promo_suffix(self):
         # "Fighter vs. Fighter: Promo" -> fighters only (distinctive surnames);
@@ -154,11 +155,15 @@ class TestBoxingParse:
         assert boxing_mod._match_name("Olascuaga vs. Dominguez (Cancelled): x") == "Olascuaga vs. Dominguez"
 
     def test_http_error_status_returns_empty(self, monkeypatch):
+        """An error status with a body that is not JSON (a gateway HTML page)
+        is a failure. The body IS read on an error since #361: RapidAPI names
+        a used-up quota in the 429's JSON `message` (`_boxing_data`)."""
         class ErrResp:
-            status_code = 429
+            status_code = 502
+            headers = {}
 
             def json(self):
-                raise AssertionError("json() must not be read on a >=400 status")
+                raise ValueError("<html>Bad Gateway</html>")
 
         stub_requests_get(monkeypatch, lambda *a, **kw: ErrResp())
         assert BoxingSource(api_key="x").fetch_upcoming() == []

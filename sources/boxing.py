@@ -42,20 +42,16 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timedelta
 from typing import Any, List, Optional, Pattern, Tuple
 
-import requests
-
+from . import _boxing_data
+from ._boxing_data import BoxingDataUnavailable, Schedule
 from ._espn import UpcomingWindow, upcoming_window
-from .base import GameRow, SportSource, report_lost_day_range
-from .._util import FIELD_AWAY_SENTINEL, field_event_extra, http_get_json, parse_iso_utc
+from .base import GameRow, SportSource, report_lost_day_range, warn_quota
+from .._util import FIELD_AWAY_SENTINEL, field_event_extra, parse_iso_utc
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.boxing")
-
-# RapidAPI gateway for the Boxing Data API (boxing-data.com). The key is a
-# RapidAPI key; the host header selects this API on the shared gateway.
-_RAPIDAPI_HOST = "boxing-data-api.p.rapidapi.com"
-_SCHEDULE_URL = f"https://{_RAPIDAPI_HOST}/v2/events/schedule"
 
 # Free-tier date-range cap. days>=14 returns DateOutOfRange (verified live
 # 2026-07-10). Raise this only after confirming a paid tier lifts the cap.
@@ -172,6 +168,19 @@ def _next_page(
     return None, shape
 
 
+def _still_ahead(events: List[Any], window: UpcomingWindow) -> List[Any]:
+    """A kept schedule's cards the API would still list: dated today-UTC or
+    later (the feed's `days=` schedule starts today). Without this a card
+    from a kept answer would be published again after its day had passed.
+    An undated card is kept here and dropped by `_to_row` as it always was."""
+    out = []
+    for ev in events:
+        start = parse_iso_utc(ev.get("date")) if isinstance(ev, dict) else None
+        if start is None or start.date() >= window.today:
+            out.append(ev)
+    return out
+
+
 class BoxingSource(SportSource):
     """Professional boxing cards from the Boxing Data API (RapidAPI).
 
@@ -196,51 +205,64 @@ class BoxingSource(SportSource):
     def sport_label(self) -> str:
         return "Boxing"
 
-    def _headers(self) -> dict:
-        return {
-            "x-rapidapi-key": self.api_key,
-            "x-rapidapi-host": _RAPIDAPI_HOST,
-        }
-
     def fetch_upcoming(self, days_ahead: int = 7) -> List[GameRow]:
-        """Pull upcoming boxing cards in the next `days_ahead` days (clamped to
-        the free-tier cap), every page of them (`_fetch_schedule`). Returns
-        the cards that arrived: none when nothing is scheduled, those of the
-        pages before it when a page failed. The caller does not filter by
-        date.
+        """Upcoming boxing cards in the next `days_ahead` days (clamped to the
+        free-tier cap). The caller does not filter by date.
 
-        A failed page (no JSON object back, an in-band `error`, or paging that
-        cannot vouch for the rest) is reported as losing every day the
-        schedule asked for, today-UTC through `days` after it (#261,
-        `base.report_lost_day_range`), so the refresh keeps the cards it had
-        published for them instead of reading a quiet week.
+        The schedule is kept on disk and served while younger than
+        `_boxing_data.FRESH_FOR` with no request (#361: asking on every
+        refresh spent the 100-call month in two days). Otherwise every page is
+        read (`_fetch_schedule`), and a complete read replaces the kept one.
+
+        A read that fails or is refused (a page with no JSON object, an
+        in-band `error`, paging that cannot vouch for the rest, a quota hold)
+        serves the kept schedule while it is younger than
+        `_boxing_data.MAX_STALE`, reporting lost only the days it does not
+        cover; with none kept, the cards that did arrive are returned and
+        every day the schedule asked for, today-UTC through `days` after it,
+        is reported lost (#261, `base.report_lost_day_range`), so the refresh
+        keeps the cards it had published for them instead of reading a quiet
+        week.
         """
         if not self.api_key:
             logger.warning("[boxing] no Boxing Data API key; skipping")
             return []
         days = max(1, min(days_ahead, _FREE_TIER_MAX_DAYS))
-        # Read BEFORE the request: a call failing across UTC midnight
+        # Both read BEFORE the request: a call failing across UTC midnight
         # covered the days from the date it was sent on.
+        at = _boxing_data.now()
         window = upcoming_window(days)
+        kept = _boxing_data.kept_schedule(days, at)
+        if kept is not None and at - kept.fetched_at < _boxing_data.FRESH_FOR:
+            logger.info("[boxing] schedule kept %.1f h ago; not asked",
+                        (at - kept.fetched_at).total_seconds() / 3600)
+            events = _still_ahead(kept.events, window)
+        else:
+            events = self._fetch_schedule(days, at, window, kept)
         out: List[GameRow] = []
-        for ev in self._fetch_schedule(days, window):
+        for ev in events:
             row = self._to_row(ev)
             if row is not None:
                 out.append(row)
         logger.info("[boxing] %d card(s) in next %dd", len(out), days)
         return out
 
-    def _fetch_schedule(self, days: int, window: UpcomingWindow) -> List[Any]:
-        """Every card of the `days`-day schedule, page by page (#284).
+    def _fetch_schedule(self, days: int, at: datetime, window: UpcomingWindow,
+                        kept: Optional[Schedule]) -> List[Any]:
+        """Every card of the `days`-day schedule, page by page (#284). A whole
+        read replaces the kept schedule (`_boxing_data.keep_schedule`).
 
-        Stops at the first page that fails and returns the cards so far.
-        DateOutOfRange (or any subscription error) comes back in-band with
-        HTTP 200 and an empty data list; a page can also fail outright, or the
-        paging can stop vouching for the rest (`_next_page`). Logged, not
-        raised: the cards that did arrive are still published. The schedule's
-        days, from `window.today` (read BEFORE the first request), are
-        reported lost all the same, since the missing pages could hold a card
-        on any of them, so the refresh keeps what it had published (#261).
+        Stops at the first page that fails. A request that fails or is refused
+        (`_boxing_data.get_page` raises), DateOutOfRange (or any subscription
+        error, in-band with HTTP 200 and an empty data list), or paging that
+        stops vouching for the rest (`_next_page`) is a failure. Logged, not
+        raised. The kept schedule, `kept`, stands in while younger than
+        `_boxing_data.MAX_STALE`, and only the days past its own end are
+        reported lost. With none, the cards that did arrive are returned and
+        the schedule's days, from `window.today` (read BEFORE the first
+        request), are reported lost all the same, since the missing pages
+        could hold a card on any of them, so the refresh keeps what it had
+        published (#261).
 
         A card already seen on an earlier page is kept once and fails the
         read, because it means the schedule shifted between two page
@@ -256,10 +278,15 @@ class BoxingSource(SportSource):
             params = {"days": days, "date_sort": "ASC", "page_size": _PAGE_SIZE}
             if page > 1:
                 params["page_num"] = page
-            data = self._http_get(_SCHEDULE_URL, params=params)
-            page_events = data.get("data") if isinstance(data, dict) else None
-            err = (data.get("error") if isinstance(data, dict) else None) or (
-                None if isinstance(page_events, list) else "no data list in the response")
+            quota = False
+            try:
+                data = _boxing_data.get_page(params, self.api_key, at=at)
+            except BoxingDataUnavailable as e:
+                data, err, quota = None, str(e), e.quota
+            else:
+                page_events = data.get("data") if isinstance(data, dict) else None
+                err = (data.get("error") if isinstance(data, dict) else None) or (
+                    None if isinstance(page_events, list) else "no data list in the response")
             if not err:
                 for ev in page_events:
                     eid = ev.get("id") if isinstance(ev, dict) else None
@@ -276,9 +303,19 @@ class BoxingSource(SportSource):
                 if promised is not None:
                     page += 1
                     continue
-            if err:
-                logger.warning("[boxing] API error on page %d: %s", page, err)
-                report_lost_day_range(window.today, window.last_day)
+            if not err:
+                _boxing_data.keep_schedule(Schedule(events, at, window.today, days))
+                return events
+            # A quota hold is expected until the reset: one warning, no alarm.
+            emit = (lambda m, *a: warn_quota(logger, m, *a)) if quota else logger.warning
+            if kept is not None and at - kept.fetched_at < _boxing_data.MAX_STALE:
+                emit("[boxing] schedule page %d: %s; using the schedule kept %.1f h ago",
+                     page, err, (at - kept.fetched_at).total_seconds() / 3600)
+                if kept.last_day < window.last_day:
+                    report_lost_day_range(kept.last_day + timedelta(days=1), window.last_day)
+                return _still_ahead(kept.events, window)
+            emit("[boxing] schedule page %d: %s", page, err)
+            report_lost_day_range(window.today, window.last_day)
             return events
 
     def _to_row(self, ev: Any) -> Optional[GameRow]:
@@ -328,15 +365,4 @@ class BoxingSource(SportSource):
                 us_broadcasters=broadcasters,
                 poster_image_url=ev.get("poster_image_url"),
             ),
-        )
-
-    def _http_get(self, url: str, params: dict, timeout: float = 15.0) -> Optional[Any]:
-        """Patch point for this module's HTTP; the body is `_util.http_get_json`.
-
-        A method rather than a module function because the RapidAPI key rides
-        in `self._headers()`; `http_get_json` masks header values in the one
-        log line that could echo them (a `requests` InvalidHeader message)."""
-        return http_get_json(
-            requests, url, log=logger, tag="boxing", timeout=timeout,
-            params=params, headers=self._headers(),
         )

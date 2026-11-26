@@ -20,8 +20,8 @@ def test_cached_crests_and_independent_missing_logo(tmp_path):
     with Image.open(card) as image:
         assert image.size==(1920,1080)
         away=image.crop((400,310,670,590));home=image.crop((1250,310,1520,590))
-        assert sum(r>200 and g<60 for r,g,b in away.getdata())>1000
-        assert sum(r>200 and g>200 and b>200 for r,g,b in home.getdata())>1000
+        assert sum(r>200 and g<60 for r,g,b in away.get_flattened_data())>1000
+        assert sum(r>200 and g>200 and b>200 for r,g,b in home.get_flattened_data())>1000
         # Even a square crest's corners stay inside the padded badge circle.
         red=[(x,y) for y in range(285,616) for x in range(370,701)
              if image.getpixel((x,y))==(255,0,0)]

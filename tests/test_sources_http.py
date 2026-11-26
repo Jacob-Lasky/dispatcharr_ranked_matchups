@@ -45,7 +45,6 @@ WRAPPERS = {
     "nfl": 15.0,
     "nhl": 15.0,
     "wnba": 15.0,
-    "boxing": 15.0,  # a method: the RapidAPI key rides in self._headers()
 }
 
 
@@ -117,8 +116,6 @@ class _FakeSession:
 def _call(module_name, monkeypatch, fake, url="https://example.test/feed"):
     mod = importlib.import_module(f"{PKG}.{module_name}")
     monkeypatch.setattr(mod, "requests", fake)
-    if module_name == "boxing":
-        return mod, mod.BoxingSource(api_key="k")._http_get(url, params={"days": 7})
     return mod, mod._http_get(url)
 
 
@@ -229,9 +226,10 @@ def test_params_and_headers_are_forwarded_only_when_given():
 
 
 class TestHeaderValuesNeverReachTheLog:
-    """boxing's RapidAPI key travels in a HEADER, where the key-shape regexes
-    in redact_secrets cannot see it, and `requests` echoes a malformed header
-    value verbatim in its InvalidHeader message."""
+    """A key that travels in a HEADER (boxing's RapidAPI key, sent by
+    `sources/_boxing_data.py`; slate's provider login) is invisible to the
+    key-shape regexes in redact_secrets, and `requests` echoes a malformed
+    header value verbatim in its InvalidHeader message."""
 
     def test_real_requests_invalid_header_is_masked(self, caplog):
         import requests
@@ -246,18 +244,6 @@ class TestHeaderValuesNeverReachTheLog:
         text = "\n".join(r.getMessage() for r in caplog.records)
         assert "InvalidHeader" in text or "header value" in text, text
         assert "SEKRITKEY99" not in text
-
-    def test_credential_header_masked_and_host_kept(self, monkeypatch, caplog):
-        from dispatcharr_ranked_matchups.sources import boxing as mod
-        boom = FakeRequests.RequestException(
-            "header value: 'SEKRITKEY99' for host boxing-data-api.p.rapidapi.com")
-        fake = FakeRequests(raises=boom)
-        monkeypatch.setattr(mod, "requests", fake)
-        with caplog.at_level(logging.WARNING):
-            assert mod.BoxingSource(api_key="SEKRITKEY99")._http_get("u", params={}) is None
-        text = "\n".join(r.getMessage() for r in caplog.records)
-        assert "SEKRITKEY99" not in text
-        assert "boxing-data-api.p.rapidapi.com" in text
 
     def test_bytes_header_value_is_masked(self, caplog):
         from dispatcharr_ranked_matchups._util import http_get_json

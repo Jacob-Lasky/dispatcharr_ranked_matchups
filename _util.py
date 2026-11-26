@@ -680,7 +680,7 @@ def http_get_json(
     except (requests_mod.RequestException, ValueError) as exc:
         log.warning(
             "[%s] %s failed: %s", tag, redact_secrets(url),
-            _redact_header_values(redact_secrets(exc), headers),
+            redact_header_values(redact_secrets(exc), headers),
         )
         return None
 
@@ -688,13 +688,13 @@ def http_get_json(
 _SECRET_HEADER_NAME_RE = re.compile(r"key|token|secret|auth|pass", re.IGNORECASE)
 
 
-def _redact_header_values(text: str, headers: Optional[Dict[str, Any]]) -> str:
+def redact_header_values(text: str, headers: Optional[Dict[str, Any]]) -> str:
     """Mask the value of every credential-named header that appears in `text`.
 
     `requests` puts a malformed header value in its exception message
     verbatim (`InvalidHeader: ... in header value: ' <key>'`, measured with a
     RapidAPI key pasted with a leading space), and a header is where boxing's
-    key travels, so the key-shape regexes in `redact_secrets` never see it.
+    key travels (`sources/_boxing_data.py` calls this directly), so the key-shape regexes in `redact_secrets` never see it.
     The raw value and its `repr` body are both masked, because the message
     quotes the value with `!r` (a trailing newline arrives as a literal
     backslash-n); a bytes value is masked in both its decoded and its

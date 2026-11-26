@@ -138,7 +138,8 @@ def test_storage_imports_once_preserves_keys_tombstones_and_existing_state(plugi
                  'FD_KEY_PATH', 'ODDS_KEY_PATH', 'ANTHROPIC_KEY_PATH', 'BOXING_KEY_PATH', 'SPORTSDB_KEY_PATH'):
         monkeypatch.setattr(plugin, name, getattr(plugin, name))
     for name, attribute in [('tasks', 'LAST_RUN_PATH'), ('sources._odds', 'CACHE_PATH'),
-                            ('sources._season_store', 'STORE_DIR'), ('sources._college_data', 'CACHE_DIR')]:
+                            ('sources._season_store', 'STORE_DIR'), ('sources._college_data', 'CACHE_DIR'),
+                            ('sources._boxing_data', 'CACHE_DIR')]:
         module = importlib.import_module('dispatcharr_ranked_matchups.' + name)
         monkeypatch.setattr(module, attribute, getattr(module, attribute))
     storage.configure({'data_dir': str(data)})
@@ -147,6 +148,8 @@ def test_storage_imports_once_preserves_keys_tombstones_and_existing_state(plugi
     assert (data / 'cfbd_api_key').stat().st_mode & 0o777 == 0o600
     assert (data / 'season_cache' / 'one.gz').read_bytes() == b'kept'
     assert slate.cache_dir() == data / 'slates'
+    boxing_data = importlib.import_module('dispatcharr_ranked_matchups.sources._boxing_data')
+    assert boxing_data.CACHE_DIR == str(data / 'boxing_cache')
     (data / 'cache.json').unlink()
     monkeypatch.setattr(storage, '_root', old)
     storage.configure({'data_dir': str(data)})

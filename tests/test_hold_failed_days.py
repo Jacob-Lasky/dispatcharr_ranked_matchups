@@ -173,7 +173,7 @@ def test_nhl_schedule_walk_reports_a_failed_day(monkeypatch, cls_name):
     assert lost == {lost_day}
 
 
-_HTTP_CALLS = ("_http_get", "http_get", "get_json", "http_get_json", "_fd_get", "get_within_deadline")
+_HTTP_CALLS = ("_http_get", "http_get", "get_json", "http_get_json", "_fd_get", "get_within_deadline", "get_page")
 # Loops that make requests but do not walk days of games, so a failure loses no day.
 # DO NOT add a loop here that decides which games exist.
 _NOT_DAY_LOOPS = {
@@ -901,15 +901,18 @@ def test_a_standings_answer_missing_a_conference_is_a_failure(monkeypatch, body)
 class TestBoxingReportsLostDays:
     def _run(self, monkeypatch, body, days_ahead=3):
         boxing = importlib.import_module(f"{PKG}.boxing")
+        boxing_data = importlib.import_module(f"{PKG}._boxing_data")
         from dispatcharr_ranked_matchups.sources.base import recording_lost_days
         _pin_window(monkeypatch, NOON)
         asked = []
 
-        def http_get(self, url, params, timeout=15.0):
+        def get_page(params, api_key, *, at, timeout=15.0):
             asked.append(dict(params))
+            if body is None:
+                raise boxing_data.BoxingDataUnavailable("request failed")
             return body
 
-        monkeypatch.setattr(boxing.BoxingSource, "_http_get", http_get)
+        monkeypatch.setattr(boxing_data, "get_page", get_page)
         with recording_lost_days() as lost:
             rows = boxing.BoxingSource(api_key="k").fetch_upcoming(days_ahead=days_ahead)
         return rows, lost, asked
@@ -938,6 +941,7 @@ class TestBoxingReportsLostDays:
         the 12th: the 11th went unreported and the 15th, which no request
         covered, was reported."""
         boxing = importlib.import_module(f"{PKG}.boxing")
+        boxing_data = importlib.import_module(f"{PKG}._boxing_data")
         from dispatcharr_ranked_matchups.sources import _espn
         from dispatcharr_ranked_matchups.sources.base import recording_lost_days
         clock = {"now": datetime(2026, 10, 11, 23, 59, 59, tzinfo=UTC)}
@@ -947,12 +951,12 @@ class TestBoxingReportsLostDays:
             def now(cls, tz=None):
                 return clock["now"]
 
-        def http_get(self, url, params, timeout=15.0):
+        def get_page(params, api_key, *, at, timeout=15.0):
             clock["now"] = datetime(2026, 10, 12, 0, 0, 1, tzinfo=UTC)
-            return None
+            raise boxing_data.BoxingDataUnavailable("request failed")
 
         monkeypatch.setattr(_espn, "datetime", _Moving)
-        monkeypatch.setattr(boxing.BoxingSource, "_http_get", http_get)
+        monkeypatch.setattr(boxing_data, "get_page", get_page)
         with recording_lost_days() as lost:
             boxing.BoxingSource(api_key="k").fetch_upcoming(days_ahead=3)
         assert lost == {date(2026, 10, 11), date(2026, 10, 12),

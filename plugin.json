@@ -1,6 +1,6 @@
 {
   "name": "Ranked Matchups (Top Games)",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Never miss a good game. Scores every upcoming game across 39 leagues, tours and competitions (22 of them soccer, plus NFL, NBA, MLB, NHL, NCAA, UFC, boxing, tennis, golf and motorsport), then builds a Top Matchups group holding only the ones worth watching and shows why each game ranked where it did in its EPG description.",
   "author": "Jake (with Claude)",
   "license": "MIT",
@@ -484,7 +484,7 @@
       "input_type": "password",
       "label": "Boxing Data API key (RapidAPI)",
       "default": "",
-      "help_text": "Register: https://rapidapi.com/bengroves1993/api/boxing-data-api (free tier, no credit card). Powers the 'Boxing' source. Free tier looks ahead about 7 days per refresh.",
+      "help_text": "Register: https://rapidapi.com/bengroves1993/api/boxing-data-api (free tier, no credit card). Powers the 'Boxing' source. The free tier allows 100 calls a month: the plugin keeps the schedule for 12 hours and sends at most 80 calls a month (about 62 in a normal month), leaving the rest for anything else using the key. Free tier looks ahead about 7 days.",
       "section": "_section_keys"
     },
     {
