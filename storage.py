@@ -27,7 +27,7 @@ FILES = (
     'odds_cache.json', 'cfbd_api_key', 'football_data_api_key', 'odds_api_key',
     'anthropic_api_key', 'boxing_data_api_key', 'sportsdb_api_key',
 )
-DIRECTORIES = ('season_cache', 'college_cache', 'slates')
+DIRECTORIES = ('season_cache', 'college_cache', 'boxing_cache', 'slates')
 
 
 def managed_services():
@@ -120,6 +120,7 @@ def configure(context):
         'sources._odds': {'CACHE_PATH': 'odds_cache.json'},
         'sources._season_store': {'STORE_DIR': 'season_cache'},
         'sources._college_data': {'CACHE_DIR': 'college_cache'},
+        'sources._boxing_data': {'CACHE_DIR': 'boxing_cache'},
     }
     for module_name, names in bindings.items():
         module = sys.modules.get(f'{package}.{module_name}')

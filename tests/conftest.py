@@ -149,6 +149,17 @@ def _isolated_college_cache(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_boxing_cache(tmp_path, monkeypatch):
+    """Point sources/_boxing_data.CACHE_DIR at a per-test temp directory (#361):
+    a complete schedule a test stubs is kept there for twelve hours, and its
+    attempt counter for the month, so a later test would otherwise be served
+    the schedule (or refused by the counter) in place of its own stub."""
+    import importlib
+    boxing_data = importlib.import_module(f"{PKG_NAME}.sources._boxing_data")
+    monkeypatch.setattr(boxing_data, "CACHE_DIR", str(tmp_path / "boxing_cache"))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_odds_cache(tmp_path, monkeypatch):
     """Point sources/_odds.CACHE_PATH at a per-test temp file (#200), for the
     same reason as _isolated_last_run: left live, a test would write

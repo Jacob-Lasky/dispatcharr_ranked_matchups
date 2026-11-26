@@ -18,6 +18,7 @@ sportsdb_thumb_cache.json
 gamethumbs_cache.json
 season_cache/
 college_cache/
+boxing_cache/
 *.tmp
 
 # Python
