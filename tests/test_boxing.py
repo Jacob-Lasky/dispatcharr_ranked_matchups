@@ -127,7 +127,7 @@ class TestBoxingParse:
     def test_lookahead_clamped_to_free_tier(self, monkeypatch):
         captured = {}
 
-        def fake_get(url, params=None, headers=None, timeout=None):
+        def fake_get(url, params=None, headers=None, timeout=None, allow_redirects=True):
             captured["params"] = params
             captured["headers"] = headers
             return FakeResp({"data": [], "error": None})
@@ -194,7 +194,7 @@ class TestBoxingSchedulePages:
         from dispatcharr_ranked_matchups.sources.base import recording_lost_days
         asked = []
 
-        def fake_get(url, params=None, headers=None, timeout=None):
+        def fake_get(url, params=None, headers=None, timeout=None, allow_redirects=True):
             asked.append(dict(params))
             body = pages.get(params.get("page_num", 1))
             if body is None:

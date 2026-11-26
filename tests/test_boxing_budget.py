@@ -82,7 +82,8 @@ def clock(mods, monkeypatch):
 def http(monkeypatch):
     calls, queue = [], []
 
-    def get(url, params=None, headers=None, timeout=None):
+    def get(url, params=None, headers=None, timeout=None, allow_redirects=True):
+        assert allow_redirects is False       # a redirect would be a second, unreserved send
         calls.append((url, dict(params or {}), dict(headers or {})))
         answer = queue.pop(0) if queue else FakeResp()
         if isinstance(answer, Exception):
@@ -155,7 +156,7 @@ def test_the_counter_is_written_before_the_request(mods, clock, http, monkeypatc
     _boxing, data = mods
     seen = []
 
-    def get(url, params=None, headers=None, timeout=None):
+    def get(url, params=None, headers=None, timeout=None, allow_redirects=True):
         seen.append(json.loads(Path(data.CACHE_DIR, "quota.json").read_text()))
         return FakeResp()
 
@@ -228,6 +229,53 @@ def test_the_last_call_of_the_plan_holds_the_next_refresh(mods, clock, http):
     assert len(calls) == 1 and len(rows) == 1
     # Held, so the kept schedule stands in and only the uncovered day is lost.
     assert lost == {date(2026, 12, 4)}
+
+
+def test_the_wait_is_the_reset_of_the_counter_that_ran_out(mods, clock, http):
+    """RapidAPI sends separate counters: the plan's (with its own short reset)
+    and the free plan's monthly hard limit. The used-up one's reset decides."""
+    calls, queue = http
+    queue.append(FakeResp(429, {"message": QUOTA_MESSAGE}, {
+        "x-ratelimit-requests-remaining": "25", "x-ratelimit-requests-reset": "30",
+        "x-rate-limit-rapid-free-plans-hard-limit-remaining": "0",
+        "x-rate-limit-rapid-free-plans-hard-limit-reset": str(3 * 86400)}))
+    _refresh(mods)
+    clock["now"] = NOW + timedelta(days=2, hours=23)
+    _refresh(mods)
+    assert len(calls) == 1
+    clock["now"] = NOW + timedelta(days=3)
+    _refresh(mods)
+    assert len(calls) == 2
+
+
+def test_the_ceiling_stops_a_schedule_between_pages(mods, clock, http):
+    """Page 1 takes the month's last attempt and promises a page 2: page 2 is
+    not sent, and the half-read schedule is not kept as the whole one."""
+    calls, queue = http
+    _boxing, data = mods
+    os.makedirs(data.CACHE_DIR, exist_ok=True)
+    from dispatcharr_ranked_matchups._util import key_id
+    Path(data.CACHE_DIR, "quota.json").write_text(json.dumps(
+        {"usage": {key_id(KEY): {"month": "2026-11", "attempts": data.MONTHLY_ATTEMPTS - 1}}}))
+    queue.append(FakeResp(200, _page([_card(i) for i in range(25)], 1, 2, 27)))
+    rows, lost = _refresh(mods)
+    assert len(calls) == 1 and len(rows) == 25 and lost == WEEK
+    assert not Path(data.CACHE_DIR, "schedule.json").exists()
+
+
+def test_a_redirect_is_a_failure_and_is_not_followed(mods, clock, http):
+    calls, queue = http
+    queue.append(FakeResp(307, {}, {"Location": "https://elsewhere.example/"}))
+    rows, lost = _refresh(mods)
+    assert len(calls) == 1 and rows == [] and lost == WEEK
+
+
+def test_an_error_message_quoting_the_key_is_masked(mods, clock, http, caplog):
+    _calls, queue = http
+    queue.append(FakeResp(401, {"message": f"Invalid API key {KEY}"}, {}))
+    with caplog.at_level(logging.WARNING):
+        _refresh(mods)
+    assert "HTTP 401" in caplog.text and KEY not in caplog.text
 
 
 def test_the_wait_belongs_to_the_key_that_ran_out(mods, clock, http):

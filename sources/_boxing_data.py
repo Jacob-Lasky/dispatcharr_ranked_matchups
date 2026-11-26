@@ -7,11 +7,12 @@ and refreshes run four scheduled times a day plus every post-M3U rematch (up to 
 15 min while a curated game is live), so about 50 calls a day: the month was gone in two.
 
 The budget now. A COMPLETE schedule (every page read, nothing failed) is kept on disk for
-FRESH_FOR (12 h) and served from there without a request. Fetches are at least 12 h apart, so
-at most 2 a day, 63 in a 31-day month of one-page weeks (a week has had 3 cards when measured,
-2026-07-10; a page holds 25). Every outbound attempt, successful or not, is reserved on disk
-BEFORE it is sent against a MONTHLY_ATTEMPTS (80) ceiling per UTC month and hashed key, so a
-run of failures or busy multi-page weeks stops at 80 and leaves 20 of the 100 for the user.
+FRESH_FOR (12 h) and served from there without a request. Complete reads of the same lookahead
+are at least 12 h apart, so at most 2 a day, 63 in a 31-day month of one-page weeks (a week has had 3 cards when measured,
+2026-07-10; a page holds 25). A failed or partial read is not kept, so the next refresh asks again; that is
+why every outbound attempt, successful or not, is reserved on disk BEFORE it is sent against a
+MONTHLY_ATTEMPTS (80) ceiling per UTC month and hashed key, so a run of failures (one every
+15 min spends 80 in about 20 hours) or busy multi-page weeks stops at 80 and leaves 20 of the 100 for the user.
 Boxing cards are announced weeks ahead, so a schedule a few hours old loses nothing.
 
 So, per key:
@@ -68,8 +69,12 @@ MAX_STALE = timedelta(days=7)
 # A wait longer than this is a corrupt value or a clock that went backwards, never a real month.
 _LONGEST_WAIT = timedelta(days=32)
 _VERSION = 1
-_RESET_HEADERS = ("x-ratelimit-requests-reset", "x-rate-limit-rapid-free-plans-hard-limit-reset")
-_REMAINING_HEADERS = ("x-ratelimit-requests-remaining", "x-rate-limit-rapid-free-plans-hard-limit-remaining")
+# (remaining, reset) per RapidAPI counter: the plan's, and the free plan's monthly hard limit.
+_COUNTERS = (
+    ("x-ratelimit-requests-remaining", "x-ratelimit-requests-reset"),
+    ("x-rate-limit-rapid-free-plans-hard-limit-remaining", "x-rate-limit-rapid-free-plans-hard-limit-reset"),
+)
+_REMAINING_HEADERS = tuple(remaining for remaining, _reset in _COUNTERS)
 
 
 class BoxingDataUnavailable(RuntimeError):
@@ -201,18 +206,21 @@ def _header_int(headers: Dict[str, str], names: tuple) -> Optional[int]:
 def _quota_wait(status: int, body: Any, headers: Dict[str, str], at: datetime) -> Optional[datetime]:
     """When this key may ask again, if the answer says its quota is used up; else None.
 
-    A quota answer is a 429 whose message names a quota, or any answer whose remaining
-    header reads 0. A 429 that is neither (RapidAPI's per-second "Too many requests") is an
-    ordinary failure: waiting a month for a burst limit would cost the whole sport."""
+    A quota answer is a 429 whose message names a quota, or any answer where one of
+    RapidAPI's counters reads 0 remaining. Each counter has its OWN reset header (the plan's
+    `x-ratelimit-requests-*`, the free plan's monthly `hard-limit-*`), so the wait is the
+    latest reset among the counters that are used up. A 429 that is neither (RapidAPI's
+    per-second "Too many requests") is an ordinary failure: waiting a month for a burst
+    limit would cost the whole sport."""
     message = body.get("message") if isinstance(body, dict) else None
-    remaining = [_header_int(headers, (name,)) for name in _REMAINING_HEADERS]
-    spent = any(r is not None and r <= 0 for r in remaining)
-    if not (spent or (status == 429 and isinstance(message, str) and "quota" in message.lower())):
+    spent = [reset for remaining, reset in _COUNTERS
+             if (left := _header_int(headers, (remaining,))) is not None and left <= 0]
+    if not spent and not (status == 429 and isinstance(message, str) and "quota" in message.lower()):
         return None
-    seconds = _header_int(headers, _RESET_HEADERS)
-    if seconds is not None and 0 < seconds <= _LONGEST_WAIT.total_seconds():
-        return at + timedelta(seconds=seconds)
-    return _next_month(at)
+    candidates = spent or [reset for _remaining, reset in _COUNTERS]
+    waits = [at + timedelta(seconds=s) for s in (_header_int(headers, (name,)) for name in candidates)
+             if s is not None and 0 < s <= _LONGEST_WAIT.total_seconds()]
+    return max(waits) if waits else _next_month(at)
 
 
 def _record_wait(at: datetime, kid: str, until: Optional[datetime], remaining: Optional[int]) -> None:
@@ -237,7 +245,10 @@ def get_page(params: Dict[str, Any], api_key: str, *, at: datetime, timeout: flo
     _reserve_attempt(at, kid)
     headers = {"x-rapidapi-key": api_key, "x-rapidapi-host": RAPIDAPI_HOST}
     try:
-        r = get_within_deadline(requests, SCHEDULE_URL, params=params, headers=headers, timeout=timeout)
+        # DO NOT follow redirects: a redirect is a second send on this one reserved attempt,
+        # and `requests` forwards a custom header (the key) to whatever host it points at.
+        r = get_within_deadline(requests, SCHEDULE_URL, params=params, headers=headers,
+                                timeout=timeout, allow_redirects=False)
     except requests.RequestException as e:
         # `requests` quotes a malformed header value (the key) verbatim in InvalidHeader.
         raise BoxingDataUnavailable(
@@ -249,14 +260,15 @@ def get_page(params: Dict[str, Any], api_key: str, *, at: datetime, timeout: flo
         body = None
     until = _quota_wait(r.status_code, body, answer, at)
     remaining = _header_int(answer, _REMAINING_HEADERS)
-    if until is not None or r.status_code < 400:
+    if until is not None or r.status_code < 300:
         _record_wait(at, kid, until, remaining)
-    if r.status_code >= 400:
+    if r.status_code >= 300:
         if until is not None:
             raise BoxingQuotaUnavailable(f"refused: the plan's quota is used up until {until.isoformat()}")
         message = body.get("message") if isinstance(body, dict) else None
-        raise BoxingDataUnavailable(f"answered HTTP {r.status_code}"
-                                    + (f": {redact_secrets(str(message))[:120]}" if message else ""))
+        # Upstream text is masked for the key too: an error message may quote it.
+        shown = redact_header_values(redact_secrets(str(message)), headers)[:120] if message else ""
+        raise BoxingDataUnavailable(f"answered HTTP {r.status_code}" + (f": {shown}" if shown else ""))
     if body is None:
         raise BoxingDataUnavailable("answered something that is not JSON")
     logger.info("[boxing] schedule page fetched (%s calls left on the plan)",
