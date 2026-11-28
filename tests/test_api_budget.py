@@ -390,7 +390,7 @@ def test_an_importance_band_flip_does_not_re_ask_for_a_description():
     from tests.test_llm_descriptions import _sample_game
     g = _sample_game()
     flipped = {**g, "importance_thresholds_hit": ["relegation", "europa"]}
-    key = lambda game, tagline: llm.prompt_hash(llm.cache_context(llm.build_llm_context(game, tagline)), "m")
+    key = lambda game, tagline: llm.description_cache_key("k", llm.build_llm_context(game, tagline), game, "m")
     assert "Outcome bands in play" in llm.build_llm_context(g, "relegation six-pointer")
     assert key(g, "relegation six-pointer") == key(flipped, "survival fight")
     # A real change of stakes (the table moved) still asks again.
@@ -399,9 +399,12 @@ def test_an_importance_band_flip_does_not_re_ask_for_a_description():
     moved["extra"]["standings_table_current"] = moved["extra"]["standings_table"]
     g2 = {**g, "extra": {**g["extra"], "standings_table_current": g["extra"]["standings_table"]}}
     assert key(g2, "x") != key(moved, "x")
-    # Without bands the frame comes from real inputs (ranks, closeness, stage): keyed.
+    # The last band dropping out is still the same question (round-2 review)...
     no_bands = {**g, "importance_thresholds_hit": []}
-    assert key(no_bands, "toss-up") != key(no_bands, "top-10 matchup")
+    assert key(g, "relegation six-pointer") == key(no_bands, "toss-up")
+    # ...while the band-free frame's real inputs are keyed: a top-10 rank pair.
+    ranked = {**no_bands, "extra": {**g["extra"], "rank_source": "poll"}, "rank_home": 3, "rank_away": 8}
+    assert key(no_bands, "x") != key(ranked, "x")
 
 
 # ---------- odds ----------

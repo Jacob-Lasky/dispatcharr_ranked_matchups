@@ -1561,9 +1561,11 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   the context says nothing has been played (`claims_an_opener_it_is_not`)
   and a last-season claim with no last-season fact in the context
   (`claims_last_season_without_facts`). `show_status` suffixes a seeded rank
-  pair with `~`. The description cache key (`marker|prompt_hash`) hashes
-  `cache_context(context)`, the context WITHOUT its "Outcome bands in play"
-  and "Editorial frame" lines (#363): both come from the Monte Carlo's
+  pair with `~`. The description cache key (`description_cache_key`, the one
+  builder) hashes `cache_context(context, g)`: the context WITHOUT its
+  "Outcome bands in play" and "Editorial frame" lines, plus the frame
+  `pick_tagline` gives the row with NO bands (stage, ranks, closeness,
+  favorites: real inputs) (#363): both come from the Monte Carlo's
   `importance_thresholds_hit`, which flips borderline bands between refreshes
   (9 of 48 games between two runs, measured), and each flip re-asked Claude
   (115 cached versions for 40 games). The model still gets the full context;

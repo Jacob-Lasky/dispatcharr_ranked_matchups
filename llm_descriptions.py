@@ -1176,15 +1176,42 @@ def build_llm_context(
 _VOLATILE_KEY_PREFIXES = ("Outcome bands in play:", "Editorial frame ")
 
 
-def cache_context(context: str) -> str:
-    """`context` without the lines that only importance sampling noise changes. The
-    editorial frame is dropped only beside a bands line: `pick_tagline` reads the
-    bands first, and without them the frame comes from the stage, ranks, closeness
-    or favorites, which are real inputs and stay keyed."""
-    lines = context.split("\n")
-    if not any(line.startswith(_VOLATILE_KEY_PREFIXES[0]) for line in lines):
-        return context
-    return "\n".join(line for line in lines if not line.startswith(_VOLATILE_KEY_PREFIXES))
+def cache_context(context: str, g: Optional[Dict[str, Any]] = None) -> str:
+    """The text the description cache key hashes: `context` without the lines that
+    importance sampling noise changes, plus, for a game row `g`, the editorial frame
+    `pick_tagline` gives it with NO bands. That frame comes from the stage, ranks,
+    closeness or favorites, which are real inputs (a spread moving off a toss-up
+    changes it), and keying it whatever the bands do means a band appearing or
+    dropping out does not re-ask either (round-2 review)."""
+    kept = [line for line in context.split("\n") if not line.startswith(_VOLATILE_KEY_PREFIXES)]
+    if g is not None:
+        kept.append(f"Frame without importance bands: {_band_free_frame(g)}")
+    return "\n".join(kept)
+
+
+def _band_free_frame(g: Dict[str, Any]) -> str:
+    from .scoring import pick_tagline
+    extra = g.get("extra") or {}
+    try:
+        return pick_tagline(
+            score_breakdown=g.get("score_breakdown") or {},
+            favorites_matched=g.get("favorites_matched") or [],
+            spread=g.get("spread"),
+            closeness=g.get("closeness"),
+            importance_thresholds=[],
+            tournament_stage=g.get("tournament_stage"),
+            rank_a=g.get("rank_home"),
+            rank_b=g.get("rank_away"),
+            rank_source=extra.get("rank_source", "poll"),
+        )
+    except Exception:  # noqa: BLE001 - a key ingredient, never a reason to fail apply
+        return ""
+
+
+def description_cache_key(marker: str, context: str, g: Optional[Dict[str, Any]], model: str) -> str:
+    """`<marker>|<prompt_hash>` of the KEYED context (`cache_context`): the ONE builder of
+    a description cache key, so a test or caller can never key it differently."""
+    return f"{marker}|{prompt_hash(cache_context(context, g), model)}"
 
 
 def prompt_hash(context: str, model: str) -> str:
@@ -1569,7 +1596,7 @@ def llm_describe_or_fallback(
     context = build_llm_context(g, tagline, boundary_summary, league_context)
     # Use `|` separator: markers contain ':' (`ranked_matchups:EPL:538161`),
     # so a single-':' split would clip everything before the last colon.
-    cache_key = f"{marker}|{prompt_hash(cache_context(context), model)}"
+    cache_key = description_cache_key(marker, context, g, model)
     cached = cache.get(cache_key)
     if cached:
         reason = reject_reason(cached, context)
