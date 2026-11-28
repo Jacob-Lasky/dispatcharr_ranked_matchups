@@ -22,8 +22,9 @@ policy for the schedule endpoints, by what the request covers:
   - within the next two weeks: 24 h (`MID_FOR`). Fixture dates move days ahead, not hours.
   - further out: 7 days (`FAR_FOR`). Those days only feed the season simulation.
   - a past day not yet fetched as final: asked again, once, then final.
-- No date, or a range longer than two weeks (standings, polls, whole-season lists,
-  calendars): the caller's `max_age`.
+- No date (standings, polls, whole-season lists, calendars), or a range longer than two
+  weeks that does not touch yesterday..tomorrow: the caller's `max_age`. A range that
+  touches them (an upcoming window, whatever its lookahead) is near.
 
 `max_age` and the day policy are LIFETIMES, not retry intervals: a failed request is never
 kept (`fetch` returns None or raises, `check` raises), so the caller's own failure path
@@ -129,8 +130,7 @@ def schedule_fresh(days: Optional[Tuple[date, date]], max_age: timedelta) -> Fre
         age = now - fetched_at
         if age < timedelta(0):
             return False  # from the future: a clock went backwards, ask again
-        if days is None or (days[1] - days[0]).days > MID_DAYS:
-            # Undated, or a whole-season range: its lifetime is the caller's.
+        if days is None:
             return age < max_age
         first, last = days
         if eastern_date(fetched_at) >= last + timedelta(days=2):
@@ -139,7 +139,11 @@ def schedule_fresh(days: Optional[Tuple[date, date]], max_age: timedelta) -> Fre
         if last < today - timedelta(days=1):
             return False  # a past day not yet read as final
         if first <= today + timedelta(days=1):
+            # Touches yesterday..tomorrow, however long the range: an upcoming
+            # window with a long lookahead still carries today's slate.
             return age < NEAR_FOR
+        if (last - first).days > MID_DAYS:
+            return age < max_age   # a future whole-season range: the caller's lifetime
         if first <= today + timedelta(days=MID_DAYS):
             return age < MID_FOR
         return age < FAR_FOR

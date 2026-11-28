@@ -42,6 +42,7 @@ from .._util import (
     SEED_PLAYED_THRESHOLD,
     is_bottom_outcome,
     parse_iso_utc,
+    key_id,
     poisson_sample as _poisson,
     redact_secrets,
 )
@@ -247,9 +248,14 @@ def _fd_get_json(
     matchday is played; a past season's: a week). `check` is the caller's parser, run
     before an answer is kept, and it raises exactly as the caller's own validation did.
     A failure is never kept: the paced, retrying `_fd_get` runs as before on every miss.
-    The key carries no credential (FD.org authenticates by header).
+    The cache key carries the URL, parameters and a hash of the API key (`key_id`), never
+    the key itself (FD.org authenticates by header).
     """
     key = _api_cache.request_key(url, params)
+    if key is not None:
+        # FD.org answers what the KEY's plan covers (`/matches` lists only its
+        # competitions), so a kept answer is per key: hashed, never the key.
+        key = f"{key}|{key_id(fd_api_key)}"
     fresh = _api_cache.schedule_fresh(_api_cache.request_days(url, params), keep_for)
 
     def fetch() -> Any:
@@ -1076,6 +1082,9 @@ class SoccerSource(SportSource):
                 rows = data.get("standings") if isinstance(data, dict) else None
                 if not isinstance(rows, list) or (rows and not isinstance(rows[0], dict)):
                     raise ValueError(f"no standings list in the response: {redact_secrets(str(data)[:200])}")
+                if rows and not isinstance(rows[0].get("table"), list):
+                    # Checked here, not only below, so such an answer is never kept.
+                    raise ValueError("the standings answered without a table")
             data = _fd_get_json(
                 f"{FD_BASE}/competitions/{self.config.fd_code}/standings",
                 self.fd_api_key,

@@ -164,7 +164,7 @@ templates before applying them.
 | Soccer friendlies — international (men's + women's) and club pre-season | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Field events — Formula 1 / NASCAR / PGA Golf / ATP + WTA Tennis / UFC | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Boxing | [Boxing Data API](https://rapidapi.com/bengroves1993/api/boxing-data-api) (RapidAPI — ESPN has no boxing feed) | Yes (free RapidAPI tier: 100 calls a month; the plugin keeps the schedule for 12 hours and sends at most 80 a month; ~7-day lookahead) |
-| Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (free plan: 500 credits/mo; the plugin asks one region per league at most once every two days, at most about 230 a month, and never sends more than 400) |
+| Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (free plan: 500 credits/mo; the plugin asks one region per league at most once every two days, at most about 230 a month, and sends at most 400 a month per key) |
 
 ### NCAA Football divisions
 

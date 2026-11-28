@@ -9664,9 +9664,13 @@ def _slate_problems(summary: List[Any], games: List[Dict[str, Any]]) -> List[str
         if isinstance(entry, str) and _SOURCE_QUOTA_MARK in entry
     ]
     if quota:
+        resets = sorted({m.group(1)[:10] for entry in summary if isinstance(entry, str)
+                         and _SOURCE_QUOTA_MARK in entry
+                         for m in [re.search(r"until (\d{4}-\d{2}-\d{2})", entry)] if m})
+        when = f" ({', '.join(resets)})" if resets else ""
         problems.append(
             f"{_QUOTA_PROBLEM_LEAD}{len(quota)} source(s) held on their API's free-tier "
-            f"quota ({_first_few(quota)}); no new games from them until it resets"
+            f"quota ({_first_few(quota)}); no new games from them until it resets{when}"
         )
     partial = [
         entry.split(_SOURCE_PARTIAL_MARK, 1)[0]

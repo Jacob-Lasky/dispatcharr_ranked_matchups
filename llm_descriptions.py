@@ -1177,9 +1177,14 @@ _VOLATILE_KEY_PREFIXES = ("Outcome bands in play:", "Editorial frame ")
 
 
 def cache_context(context: str) -> str:
-    """`context` without the lines that only importance sampling noise changes."""
-    return "\n".join(line for line in context.split("\n")
-                     if not line.startswith(_VOLATILE_KEY_PREFIXES))
+    """`context` without the lines that only importance sampling noise changes. The
+    editorial frame is dropped only beside a bands line: `pick_tagline` reads the
+    bands first, and without them the frame comes from the stage, ranks, closeness
+    or favorites, which are real inputs and stay keyed."""
+    lines = context.split("\n")
+    if not any(line.startswith(_VOLATILE_KEY_PREFIXES[0]) for line in lines):
+        return context
+    return "\n".join(line for line in lines if not line.startswith(_VOLATILE_KEY_PREFIXES))
 
 
 def prompt_hash(context: str, model: str) -> str:

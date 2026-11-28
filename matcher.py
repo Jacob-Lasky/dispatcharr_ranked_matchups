@@ -1434,9 +1434,14 @@ def match_games_to_channels(
                 for item in ask:
                     gid = item["game_id"]
                     pick = answered.get(gid)
-                    answers[keys[gid]] = {"pick": pick, "at": now.isoformat()}
                     if pick is not None:
                         parsed[gid] = pick
+                    # Keep only an answer the model actually gave: an explicit null,
+                    # or one of the candidate ids. An omitted game or a pick outside
+                    # the list is asked again next time, as it was before (#363).
+                    ids = {str(c["channel_id"]) for c in item["candidates"]}
+                    if (gid in answered and pick is None) or str(pick) in ids:
+                        answers[keys[gid]] = {"pick": pick, "at": now.isoformat()}
                 _save_matcher_cache(answers)
         if len(ask) < len(payload):
             logger.info("[matcher] %d of %d ambiguous game(s) answered from the cached "

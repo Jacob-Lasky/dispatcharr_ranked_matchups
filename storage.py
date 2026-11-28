@@ -26,8 +26,9 @@ FILES = (
     'sportsdb_thumb_cache.json', 'gamethumbs_cache.json', 'last_run.json',
     'odds_cache.json', 'cfbd_api_key', 'football_data_api_key', 'odds_api_key',
     'anthropic_api_key', 'boxing_data_api_key', 'sportsdb_api_key',
+    'api_calls.json', 'matcher_llm_cache.json',
 )
-DIRECTORIES = ('season_cache', 'college_cache', 'boxing_cache', 'slates')
+DIRECTORIES = ('season_cache', 'college_cache', 'boxing_cache', 'slates', 'api_cache')
 
 
 def managed_services():

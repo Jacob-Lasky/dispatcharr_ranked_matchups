@@ -59,6 +59,11 @@ class _Resp:
      "api.the-odds-api.com sports/soccer_epl/odds"),
     ("https://api-web.nhle.com/v1/club-schedule-season/TOR/20252026",
      "api-web.nhle.com club-schedule-season/TOR/N"),
+    # Letters-only tokens: mixed case, or by their position after push/json.
+    ("http://kuma:3001/api/push/AbCdEfGhIjKl", "kuma api/push/*"),
+    ("http://kuma:3001/api/push/abcdefghij", "kuma api/push/*"),
+    ("https://www.thesportsdb.com/api/v1/json/abcdefgh/lookupleague.php",
+     "www.thesportsdb.com json/*/lookupleague.php"),
 ])
 def test_an_endpoint_never_carries_a_credential(ledger, url, expected):
     assert ledger.endpoint(url) == expected
@@ -100,6 +105,19 @@ class _FakeUrlopen:
         return b"{}"
 
 
+def test_a_malformed_ledger_never_fails_a_request(ledger, monkeypatch):
+    """A valid JSON ledger of the wrong shape (a list under today) is repaired, and
+    any error in counting is swallowed: counting must never stop the request."""
+    from dispatcharr_ranked_matchups import _http
+    import requests
+    os.makedirs(os.path.dirname(ledger.LEDGER_PATH), exist_ok=True)
+    with open(ledger.LEDGER_PATH, "w", encoding="utf-8") as f:
+        json.dump({"v": 1, "days": {datetime.now(UTC).strftime("%Y-%m-%d"): []}}, f)
+    stub_requests_get(monkeypatch, lambda url, **k: _Resp({"events": []}))
+    assert _http.get_within_deadline(requests, "https://example.com/a", timeout=5).status_code == 200
+    assert ledger.day_counts(datetime.now(UTC).strftime("%Y-%m-%d")) == {"service": {"example.com a": 1}}
+
+
 def test_the_ledger_keeps_two_weeks(ledger):
     for days_ago in (15, 13, 0):
         ledger.record("https://example.com/a", now=NOW - timedelta(days=days_ago))
@@ -139,10 +157,18 @@ def test_a_finished_day_read_after_it_ended_is_kept_for_good(cache):
     assert not _fresh(cache, ESPN.format("20261120"), read_during, NOW)
 
 
-def test_a_whole_season_range_takes_the_callers_lifetime(cache):
-    url = "https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=2026-03-01&endDate=2026-12-31"
+def test_a_future_whole_season_range_takes_the_callers_lifetime(cache):
+    url = "https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=2027-03-01&endDate=2027-10-31"
     assert _fresh(cache, url, NOW - timedelta(hours=11), NOW)
     assert not _fresh(cache, url, NOW - timedelta(hours=13), NOW)
+
+
+def test_a_long_upcoming_window_that_touches_today_is_near(cache):
+    """WITNESS (round-1 review): a 14-day MLB lookahead plus the lookback day is a
+    16-day range; it was read as a whole season and kept 12 h, so a same-day
+    postponement stayed published 8 h past the 4-hour near lifetime."""
+    url = "https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=2026-11-27&endDate=2026-12-12"
+    assert not _fresh(cache, url, NOW - timedelta(hours=5), NOW)
 
 
 def test_request_days_reads_every_dated_shape(cache):
@@ -331,6 +357,20 @@ def test_the_matcher_asks_claude_once_per_game_and_candidate_set(monkeypatch):
     assert len(asked) == 2
 
 
+def test_an_unusable_matcher_answer_is_not_kept(monkeypatch):
+    """A pick outside the candidate list, or a game the answer omitted, is asked again;
+    only an explicit null or a candidate id is kept."""
+    from dispatcharr_ranked_matchups import matcher
+    from tests.test_matcher import _Game, _cand
+    answers = [{"0": 999}, {}, {"0": None}, {"0": 101}]
+    monkeypatch.setattr(matcher, "_post_claude", lambda *a, **k: answers.pop(0))
+    cands = [_cand(100, "ESPN", "Penn State at Ohio State"), _cand(101, "FOX", "Penn State vs Ohio State")]
+    games = [(_Game("Penn State", "Ohio State"), None, None)]
+    for _ in range(4):
+        matcher.match_games_to_channels(games, lambda g: cands, api_key="x", model="m")
+    assert answers == [{"0": 101}]   # the explicit null was kept, so the fourth run asked nothing
+
+
 def test_a_failed_matcher_call_is_not_kept(monkeypatch):
     from dispatcharr_ranked_matchups import matcher
     from tests.test_matcher import _Game, _cand
@@ -359,6 +399,9 @@ def test_an_importance_band_flip_does_not_re_ask_for_a_description():
     moved["extra"]["standings_table_current"] = moved["extra"]["standings_table"]
     g2 = {**g, "extra": {**g["extra"], "standings_table_current": g["extra"]["standings_table"]}}
     assert key(g2, "x") != key(moved, "x")
+    # Without bands the frame comes from real inputs (ranks, closeness, stage): keyed.
+    no_bands = {**g, "importance_thresholds_hit": []}
+    assert key(no_bands, "toss-up") != key(no_bands, "top-10 matchup")
 
 
 # ---------- odds ----------
@@ -383,7 +426,7 @@ def test_a_quota_hold_is_degraded_not_a_failure(plugin):
                + "; no previous games to hold", "NHL: 4 games"]
     problems = plugin._slate_problems(summary, [{"channel_id": 1}])
     assert problems == ["DEGRADED: 1 source(s) held on their API's free-tier quota (NCAA Football); "
-                        "no new games from them until it resets"]
+                        "no new games from them until it resets (2026-12-01)"]
 
 
 def test_the_hold_counts_only_games_it_actually_kept(plugin):

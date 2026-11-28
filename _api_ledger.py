@@ -41,10 +41,14 @@ TRIGGER_ENV = "RANKED_MATCHUPS_RUN_KIND"
 KEEP_DAYS = 14
 _VERSION = 1
 _lock = threading.Lock()
-# A path segment with letters AND digits and no dot, 8+ characters: a key or token.
-# League ids (`usa.ncaa.m.1`), file names (`searchevents.php`) and words survive.
-_TOKENISH = re.compile(r"^(?=[^.]*[A-Za-z])(?=[^.]*\d)[A-Za-z0-9_\-]{8,}$")
-_LONG = re.compile(r"^[A-Za-z0-9_\-]{24,}$")
+# A dot-free path segment of 8+ characters with letters AND digits, or with upper AND
+# lower case, is a key or token; so is any segment of 24+ characters, and the segment
+# after `push` (Uptime Kuma) or `json` (TheSportsDB) whatever it looks like. League ids
+# (`usa.ncaa.m.1`), file names (`searchevents.php`), team codes and words survive.
+_TOKENISH = re.compile(r"^(?=[^.]*[A-Za-z])(?=[^.]*\d)[^./]{8,}$")
+_MIXED_CASE = re.compile(r"^(?=[^.]*[a-z])(?=[^.]*[A-Z])[^./]{8,}$")
+_LONG = re.compile(r"^[^/]{24,}$")
+_SECRET_FOLLOWS = {"push", "json"}
 
 
 def _now() -> datetime:
@@ -58,9 +62,12 @@ def endpoint(url: str) -> str:
         parts = urlsplit(str(url))
     except ValueError:
         return "?"
+    path = [s for s in parts.path.split("/") if s]
     segments = []
-    for seg in [s for s in parts.path.split("/") if s][-3:]:
-        if _TOKENISH.match(seg) or _LONG.match(seg):
+    for i in range(max(0, len(path) - 3), len(path)):
+        seg = path[i]
+        if (_TOKENISH.match(seg) or _MIXED_CASE.match(seg) or _LONG.match(seg)
+                or (i > 0 and path[i - 1] in _SECRET_FOLLOWS)):
             segments.append("*")
         else:
             segments.append(re.sub(r"\d+", "N", seg))
@@ -93,14 +100,18 @@ def record(url: str, now: Optional[datetime] = None) -> None:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             data = _read(path)
             days = data.get("days") if isinstance(data.get("days"), dict) else {}
-            per_kind = days.setdefault(day, {}).setdefault(kind, {})
+            if not isinstance(days.get(day), dict):
+                days[day] = {}
+            if not isinstance(days[day].get(kind), dict):
+                days[day][kind] = {}
+            per_kind = days[day][kind]
             per_kind[key] = int(per_kind.get(key, 0)) + 1
             oldest = (now - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%d")
             days = {d: v for d, v in days.items() if d >= oldest and isinstance(v, dict)}
             # Imported here: _util imports _http, which imports this module.
             from ._util import write_json_atomic
             write_json_atomic(path, {"v": _VERSION, "days": days}, separators=(",", ":"))
-    except (OSError, TypeError, ValueError):
+    except Exception:  # noqa: BLE001 - counting must never fail the request it counts
         pass
 
 
