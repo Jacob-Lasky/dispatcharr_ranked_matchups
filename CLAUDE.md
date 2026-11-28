@@ -1570,6 +1570,7 @@ docker logs --since 5m dispatcharr 2>&1 | grep ranked_matchups | tail -30
   (9 of 48 games between two runs, measured), and each flip re-asked Claude
   (115 cached versions for 40 games). The model still gets the full context;
   a real change of stakes moves the standings/record lines, which stay keyed
+  in the hash.
 - Stream-stack ordering and per-group stream policy (#206):
   `language_preferences` (ordered codes, default `en`), `fallback_only_groups`
   (demote but keep playable), `excluded_groups` (never attach), plus

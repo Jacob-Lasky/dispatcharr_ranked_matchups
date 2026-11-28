@@ -646,7 +646,9 @@ update), the plugin sends UP only when the run succeeded, matching covers that
 run and the latest M3U refresh, and no live owned channel has zero actual stream
 links. Errors and timeouts send DOWN with the cause, even when matching recovery
 rescued the channels. Source fetch failures and incomplete schedules also send
-DOWN. Future placeholders do not count as broken live channels; the published
+DOWN. So does a source waiting out its API's free-tier quota: Kuma has only up
+and down, so that DOWN's message marks it as degraded and names the reset date.
+Future placeholders do not count as broken live channels; the published
 guide is checked too, so a channel missing from the cache is still covered.
 
 At 70% of the 1500-second child ceiling (17m30s), an early DOWN warns that the run
