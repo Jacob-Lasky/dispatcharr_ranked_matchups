@@ -124,12 +124,12 @@ def test_counts_recorded_under_a_provider_hostname_are_summed_as_own_host(ledger
     """WITNESS: 2.1.0 recorded the provider's hostname; after 2.1.1 Show current state
     still named it from today's and yesterday's existing counts (round-1 review)."""
     os.makedirs(os.path.dirname(ledger.LEDGER_PATH), exist_ok=True)
-    day = datetime.now(UTC).strftime("%Y-%m-%d")
+    day = NOW.strftime("%Y-%m-%d")
     with open(ledger.LEDGER_PATH, "w", encoding="utf-8") as f:
         json.dump({"v": 1, "days": {day: {"service": {"715.example-iptv.com player_api.php": 2,
                                                       "site.api.espn.com nfl/scoreboard": 1}}}}, f)
-    ledger.record("https://715.example-iptv.com/player_api.php")
-    line = ledger.summary_lines()[0]
+    ledger.record("https://715.example-iptv.com/player_api.php", now=NOW)
+    line = ledger.summary_lines(now=NOW)[0]
     assert "example-iptv" not in line and "own-host 3" in line and "site.api.espn.com 1" in line
 
 
