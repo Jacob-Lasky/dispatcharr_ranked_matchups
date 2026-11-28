@@ -42,7 +42,8 @@ still be counting sessions that Dispatcharr has already released, and its
 count lags, so probes from the last minute are added to it. A login the
 provider reports full is skipped for 30 seconds, and the next profile with its
 own login is tried. When only the plugin's own recent probes keep a login over
-its limit, the provider is not asked again until one of them is a minute old. A missing or unreadable count defers the probe. Insufficient
+its limit, the provider is not asked again until enough of them are a minute
+old, or until a Dispatcharr session on that profile ends. A missing or unreadable count defers the probe. Insufficient
 capacity is unknown, never proof that a feed failed.
 Probes also defer while their M3U account is fetching/parsing, and re-check
 channel and stream existence immediately before asking Dispatcharr for a URL.

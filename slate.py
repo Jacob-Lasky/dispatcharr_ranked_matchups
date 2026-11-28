@@ -48,8 +48,10 @@ PROVIDER_SESSION_LINGER_SECONDS = 60
 # to defer: while this plugin's own recent probes would push that count over the
 # limit, the provider is not asked again until one of them ages out of the
 # linger window, because no answer it could give lets a probe run sooner than
-# that unless a session ended. A probe that fits the remembered count still asks
-# for a fresh one first. JAKE-1309 (2026-11-28): 1,213 deferrals in 24 h, nearly
+# that unless a session ended. Dispatcharr's own session count on the profile
+# shows a viewer leaving, so the count is used only while that has not dropped
+# (and never on a profile Dispatcharr does not count). A probe that fits the
+# remembered count still asks for a fresh one first. JAKE-1309 (2026-11-28): 1,213 deferrals in 24 h, nearly
 # all "1 of 4 plus 2 recent" or "2 of 4 plus 2 recent", each a provider request.
 PROVIDER_ANSWER_SECONDS = PROVIDER_SESSION_LINGER_SECONDS
 OWNER = 'ranked_matchups_slate'
@@ -385,7 +387,8 @@ def probe(channel, stream):
 
 def _probe(channel, stream, redis):
     from apps.proxy.live_proxy.url_utils import get_stream_info_for_switch
-    from apps.m3u.connection_pool import reserve_profile_slot, release_profile_slot
+    from apps.m3u.connection_pool import (
+        get_profile_connection_count, release_profile_slot, reserve_profile_slot)
     from apps.channels.models import Channel, Stream
     from apps.m3u.models import M3UAccount
     profiles = stream.m3u_account.profiles.filter(is_active=True).order_by('-is_default', 'pk')
@@ -420,8 +423,12 @@ def _probe(channel, stream, redis):
             if login is None:
                 break
             remaining = checks_until - time.monotonic()
+            # Dispatcharr's own sessions on this profile, this probe's slot
+            # included; None when the profile is unlimited and so uncounted.
+            sessions = get_profile_connection_count(candidate, redis) if candidate.max_streams else None
             if login and remaining >= 1 and _provider_has_headroom(
-                    login, stream.m3u_account, candidate.pk, redis, timeout=remaining):
+                    login, stream.m3u_account, candidate.pk, redis, timeout=remaining,
+                    sessions=sessions):
                 line = login[3]
                 break
         except BaseException:
@@ -526,16 +533,24 @@ def _hold_line(redis, line, profile_pk, seconds):
     redis.setex(_profile_full_key(profile_pk), seconds, '1')
 
 
-def _remembered_count(redis, line):
-    raw = redis.get(_line_key('answer', line))
-    try:
-        active, limit = json.loads(raw)
-        return int(active), int(limit)
-    except (TypeError, ValueError):
+def _remembered_count(redis, line, profile_pk, sessions):
+    """`(active, limit)` from the provider's last answer for this login, or
+    None when it cannot stand in for a fresh one: nothing remembered, another
+    profile asked, the profile is uncounted, or one of Dispatcharr's own
+    sessions on it ended since (a viewer leaving frees the line at once)."""
+    if sessions is None:
         return None
+    try:
+        active, limit, asker, then = json.loads(redis.get(_line_key('answer', line)))
+        if asker == profile_pk and then is not None and sessions >= then:
+            return int(active), int(limit)
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
-def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_CHECK_SECONDS):
+def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_CHECK_SECONDS,
+                           sessions=None):
     """False when the PROVIDER would have no connection left for a foreground tune.
 
     Dispatcharr's pool counts only its own reservations. An Xtream Codes
@@ -565,18 +580,21 @@ def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_C
     credentials): for PROVIDER_FULL_SECONDS when the provider's own count
     leaves no room, else until enough of this plugin's recent probes age out.
     The provider's count is remembered for PROVIDER_ANSWER_SECONDS so a probe
-    that would still not fit is deferred without asking again (JAKE-1309).
-    Every one of these only defers: a profile whose login was just changed, or
-    that shares a login whose line key expired first, can wait up to
-    PROVIDER_SESSION_LINGER_SECONDS more.
+    that would still not fit is deferred without asking again (JAKE-1309),
+    while `sessions` (Dispatcharr's own count on the profile) has not dropped.
+    A second profile on a held login takes the login's remaining hold. Every
+    one of these only defers: a profile whose login was just changed can wait
+    up to PROVIDER_SESSION_LINGER_SECONDS more.
     """
     from ._util import http_get_json
     server, username, password, line = login
-    if redis.exists(_line_key('full', line)):
-        # Another profile on the same login found it full first.
-        redis.setex(_profile_full_key(profile_pk), PROVIDER_FULL_SECONDS, '1')
+    held = redis.ttl(_line_key('full', line))
+    if held and held > 0:
+        # Another profile on the same login found it full first: hold this
+        # profile only as long as the login is held.
+        redis.setex(_profile_full_key(profile_pk), held, '1')
         return False
-    remembered = _remembered_count(redis, line)
+    remembered = _remembered_count(redis, line, profile_pk, sessions)
     if remembered is not None:
         wait, _ = _probe_room_wait(redis, line, *remembered, time.time())
         if wait:
@@ -605,7 +623,8 @@ def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_C
         return False
     if active < 0:
         return False
-    redis.setex(_line_key('answer', line), PROVIDER_ANSWER_SECONDS, json.dumps([active, limit]))
+    redis.setex(_line_key('answer', line), PROVIDER_ANSWER_SECONDS,
+                json.dumps([active, limit, profile_pk, sessions]))
     wait, recent = _probe_room_wait(redis, line, active, limit, time.time())
     if wait == 0:
         return True

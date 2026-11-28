@@ -37,6 +37,7 @@ def capacity(monkeypatch):
     pool = ModuleType('apps.m3u.connection_pool')
     pool.reserve_profile_slot = Mock(side_effect=reserve)
     pool.release_profile_slot = Mock(side_effect=free)
+    pool.get_profile_connection_count = Mock(side_effect=lambda profile, client: state.used)
     utils = ModuleType('core.utils')
     utils.RedisClient = SimpleNamespace(get_client=lambda: redis)
     urls = ModuleType('apps.proxy.live_proxy.url_utils')
@@ -169,6 +170,7 @@ def provider(capacity, monkeypatch):
         s.values[key] = value
     s.redis.setex.side_effect = setex
     s.redis.get.side_effect = lambda key: s.values.get(key) if key in s.keys else None
+    s.redis.ttl.side_effect = lambda key: s.keys[key] if key in s.keys else -2
     s.zsets = {}
     def zadd(key, mapping):
         s.zsets.setdefault(key, {}).update(mapping)
@@ -421,6 +423,8 @@ def clocked(provider, monkeypatch):
         s.expires[key] = s.clock.now + ttl
         setex(key, ttl, value)
     s.redis.setex.side_effect = timed_setex
+    s.redis.ttl.side_effect = lambda key: (
+        int(-(-(s.expires[key] - s.clock.now) // 1)) if key in s.keys and key in s.expires else -2)
     def advance(seconds):
         s.clock.now += seconds
         for key in [k for k, at in s.expires.items() if at <= s.clock.now]:
@@ -507,3 +511,75 @@ def test_saturated_probe_demand_asks_once_per_probe(clocked, active):
     assert len(s.requests) == s.opened, f'{len(s.requests)} provider requests for {s.opened} probes'
     allowed = 4 - 2 - active + 1                         # probes per linger window
     assert s.opened >= allowed * 3600 // (s.slate.PROVIDER_SESSION_LINGER_SECONDS + 10)
+
+
+def test_a_viewer_leaving_drops_the_remembered_count(clocked):
+    """Codex review round 1: the provider's last count must not hold a probe
+    back after one of Dispatcharr's own sessions on the profile ended, which
+    frees the line at once (the old code asked again 10 s later)."""
+    s = clocked
+    s.used = 1                                           # a viewer on the profile
+    s.reply['user_info']['active_cons'] = '2'
+    assert s.slate.probe(s.channel, s.stream) is True    # 2 + 0 + 2 <= 4
+    s.advance(10)
+    assert s.slate.probe(s.channel, s.stream) is None    # viewer still on: held, not asked
+    assert len(s.requests) == 1
+    s.keys.clear()
+    s.expires.clear()
+    s.zsets.clear()
+    s.reply['user_info']['active_cons'] = '2'
+    assert s.slate.probe(s.channel, s.stream) is True    # fresh start, viewer on
+    s.used = 0                                           # the viewer leaves
+    s.reply['user_info']['active_cons'] = '1'
+    s.advance(10)
+    assert s.slate.probe(s.channel, s.stream) is True    # asked again: 1 + 1 + 2 <= 4
+    assert len(s.requests) == 3 and s.opened == 3 and s.used == 0
+
+
+def test_a_profile_dispatcharr_does_not_count_always_asks(clocked):
+    """With no pool count a session ending is invisible, so the remembered
+    count is never used and every probe asks, as before JAKE-1309."""
+    s = clocked
+    s.profile.max_streams = 0
+    s.reply['user_info']['active_cons'] = '1'
+    assert s.slate.probe(s.channel, s.stream) is True
+    s.advance(7)
+    assert s.slate.probe(s.channel, s.stream) is True
+    s.advance(5)
+    assert s.slate.probe(s.channel, s.stream) is None    # 1 + 2 + 2 > 4, provider asked
+    assert len(s.requests) == 3
+
+
+def test_second_profile_takes_the_logins_remaining_hold(clocked):
+    """Codex review round 1: a profile meeting a held login gets what is left
+    of that hold, not a fresh 30 s, or it outlives the login's hold."""
+    s = clocked
+    first, second = SimpleNamespace(pk=4, max_streams=4), SimpleNamespace(pk=6, max_streams=4)
+    profiles = s.stream.m3u_account.profiles.filter.return_value.order_by
+    profiles.return_value = [first]
+    s.reply['user_info']['active_cons'] = '4'
+    assert s.slate.probe(s.channel, s.stream) is None
+    s.advance(19)
+    profiles.return_value = [first, second]
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert len(s.requests) == 1
+    assert s.keys['ranked_matchups:slate:provider_full_profile:6'] == 11
+    s.advance(11)
+    s.reply['user_info']['active_cons'] = '1'
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert len(s.requests) == 2
+
+
+@pytest.mark.parametrize('stamps, now, active, expected', [
+    ([0.0, 10.0], 20.0, 2, (51, 2)),    # both must age out: the newer one decides
+    ([0.0, 10.0], 20.0, 1, (41, 2)),    # one must age out: the older one decides
+    ([0.0, 10.0], 20.0, 0, (0, 2)),     # fits now
+    ([0.0], 60.0, 2, (1, 1)),           # exactly 60 s old still counts (ZCOUNT is inclusive)
+    ([0.0], 60.5, 2, (0, 0)),
+    ([], 5.0, 3, (None, 0)),            # the provider's own count leaves no room
+])
+def test_probe_room_wait(provider, stamps, now, active, expected):
+    s = provider
+    base = 1_000_000.0
+    s.zsets['ranked_matchups:slate:provider_probes:line'] = {f'p{i}': base + t for i, t in enumerate(stamps)}
+    assert s.slate._probe_room_wait(s.redis, 'line', active, 4, base + now) == expected
