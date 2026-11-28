@@ -54,14 +54,16 @@ class _Resp:
     # TheSportsDB carries its key in the PATH; Kuma its push token; Odds API in the query.
     ("https://www.thesportsdb.com/api/v1/json/a1b2c3d4e5f6/searchevents.php?e=x",
      "www.thesportsdb.com json/*/searchevents.php"),
-    ("http://172.17.0.1:3001/api/push/4Sayz9QKKZabcdef?status=up&msg=x", "172.17.0.1 api/push/*"),
+    ("http://172.17.0.1:3001/api/push/4Sayz9QKKZabcdef?status=up&msg=x", "own-host api/push/*"),
     ("https://api.the-odds-api.com/v4/sports/soccer_epl/odds/?apiKey=SECRETKEY123",
      "api.the-odds-api.com sports/soccer_epl/odds"),
     ("https://api-web.nhle.com/v1/club-schedule-season/TOR/20252026",
      "api-web.nhle.com club-schedule-season/TOR/N"),
     # Letters-only tokens: mixed case, or by their position after push/json.
-    ("http://kuma:3001/api/push/AbCdEfGhIjKl", "kuma api/push/*"),
-    ("http://kuma:3001/api/push/abcdefghij", "kuma api/push/*"),
+    ("http://kuma:3001/api/push/AbCdEfGhIjKl", "own-host api/push/*"),
+    ("http://kuma:3001/api/push/abcdefghij", "own-host api/push/*"),
+    # The IPTV provider is the user's own host: never named.
+    ("https://715.example-iptv.com/player_api.php?username=u&password=p", "own-host player_api.php"),
     ("https://www.thesportsdb.com/api/v1/json/abcdefgh/lookupleague.php",
      "www.thesportsdb.com json/*/lookupleague.php"),
 ])
@@ -115,7 +117,20 @@ def test_a_malformed_ledger_never_fails_a_request(ledger, monkeypatch):
         json.dump({"v": 1, "days": {datetime.now(UTC).strftime("%Y-%m-%d"): []}}, f)
     stub_requests_get(monkeypatch, lambda url, **k: _Resp({"events": []}))
     assert _http.get_within_deadline(requests, "https://example.com/a", timeout=5).status_code == 200
-    assert ledger.day_counts(datetime.now(UTC).strftime("%Y-%m-%d")) == {"service": {"example.com a": 1}}
+    assert ledger.day_counts(datetime.now(UTC).strftime("%Y-%m-%d")) == {"service": {"own-host a": 1}}
+
+
+def test_counts_recorded_under_a_provider_hostname_are_summed_as_own_host(ledger):
+    """WITNESS: 2.1.0 recorded the provider's hostname; after 2.1.1 Show current state
+    still named it from today's and yesterday's existing counts (round-1 review)."""
+    os.makedirs(os.path.dirname(ledger.LEDGER_PATH), exist_ok=True)
+    day = NOW.strftime("%Y-%m-%d")
+    with open(ledger.LEDGER_PATH, "w", encoding="utf-8") as f:
+        json.dump({"v": 1, "days": {day: {"service": {"715.example-iptv.com player_api.php": 2,
+                                                      "site.api.espn.com nfl/scoreboard": 1}}}}, f)
+    ledger.record("https://715.example-iptv.com/player_api.php", now=NOW)
+    line = ledger.summary_lines(now=NOW)[0]
+    assert "example-iptv" not in line and "own-host 3" in line and "site.api.espn.com 1" in line
 
 
 def test_the_ledger_keeps_two_weeks(ledger):

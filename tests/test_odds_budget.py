@@ -139,7 +139,9 @@ def test_callers_go_through_the_shared_fetcher():
         if "tests" in dirpath.split(os.sep) or "__pycache__" in dirpath:
             continue
         for f in files:
-            if not f.endswith(".py") or f == "_odds.py":
+            # `_api_ledger` names the host only to label its call counts (#363)
+            # and sends nothing; every request it counts went through `_odds`.
+            if not f.endswith(".py") or f in ("_odds.py", "_api_ledger.py"):
                 continue
             path = os.path.join(dirpath, f)
             if "the-odds-api.com" in open(path, encoding="utf-8").read():
