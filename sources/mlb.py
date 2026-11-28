@@ -118,7 +118,7 @@ def _http_get(url: str, timeout: float = 20.0) -> Optional[Dict[str, Any]]:
 
     Timeout is 20s, not the usual 15: the season schedule is ~2MB of JSON
     and 15s sometimes flaked from pocket-dev's egress."""
-    return http_get_json(requests, url, log=logger, tag="mlb", timeout=timeout)
+    return http_get_json(requests, url, log=logger, tag="mlb", timeout=timeout, keep=True)
 
 
 def _default_season() -> int:

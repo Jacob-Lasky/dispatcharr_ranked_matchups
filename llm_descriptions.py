@@ -1165,6 +1165,23 @@ def build_llm_context(
     return "\n".join(lines)
 
 
+# Context lines left out of the description CACHE KEY (#363), never out of the prompt.
+# Both are read off the importance Monte Carlo's `importance_thresholds_hit`, which is
+# sampled afresh every refresh: a band near the leverage floor flips in and out between
+# runs (measured 2026-11-28: 9 of 48 games changed bands between two refreshes minutes
+# apart), and each flip re-asked Claude for the same game. The live cache held 115
+# entries for 40 games, one game 15 versions. A REAL change of stakes moves the
+# standings, record or matchday lines too, and those stay in the key, so it still
+# re-asks. DO NOT drop any other line from the key: each carries a fact the prose states.
+_VOLATILE_KEY_PREFIXES = ("Outcome bands in play:", "Editorial frame ")
+
+
+def cache_context(context: str) -> str:
+    """`context` without the lines that only importance sampling noise changes."""
+    return "\n".join(line for line in context.split("\n")
+                     if not line.startswith(_VOLATILE_KEY_PREFIXES))
+
+
 def prompt_hash(context: str, model: str) -> str:
     """Stable short hash used as part of the cache key. Folds in the model AND
     the SYSTEM_PROMPT so that a model swap OR a system-prompt edit invalidates
@@ -1547,7 +1564,7 @@ def llm_describe_or_fallback(
     context = build_llm_context(g, tagline, boundary_summary, league_context)
     # Use `|` separator: markers contain ':' (`ranked_matchups:EPL:538161`),
     # so a single-':' split would clip everything before the last colon.
-    cache_key = f"{marker}|{prompt_hash(context, model)}"
+    cache_key = f"{marker}|{prompt_hash(cache_context(context), model)}"
     cached = cache.get(cache_key)
     if cached:
         reason = reject_reason(cached, context)

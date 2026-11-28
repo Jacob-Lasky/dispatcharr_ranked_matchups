@@ -134,7 +134,7 @@ class CalendarUnavailable(RuntimeError):
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
     """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
-    return http_get_json(requests, url, log=logger, tag="ncaa_soccer_cup", timeout=timeout)
+    return http_get_json(requests, url, log=logger, tag="ncaa_soccer_cup", timeout=timeout, keep=True)
 
 
 # Bracket dedup helper shared with mls_cup -- the canonical impl lives in

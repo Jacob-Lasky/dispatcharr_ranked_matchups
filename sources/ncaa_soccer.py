@@ -101,7 +101,7 @@ _DEFAULT_GOALS_AGAINST = 1.5
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
     """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
-    return http_get_json(requests, url, log=logger, tag="ncaa_soccer", timeout=timeout)
+    return http_get_json(requests, url, log=logger, tag="ncaa_soccer", timeout=timeout, keep=True)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:

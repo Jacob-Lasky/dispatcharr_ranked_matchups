@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.1.0
+
+- Far fewer calls to the outside data APIs (#363). Measured on one install
+  before this release: 1,331 requests per refresh and about twelve refreshes a
+  day, so about 16,000 a day, nearly all re-reading finished days and far-off
+  fixtures. Schedule answers from ESPN, the NHL, MLB and football-data.org are
+  now kept on disk by how often the data can change: a finished day for good,
+  yesterday to tomorrow for 4 hours, the next two weeks for a day, further out
+  for a week; standings and whole-season lists for 12 hours, polls for a day,
+  calendars for a week. A refresh, a post-M3U rematch or a reap no longer asks
+  again for anything still current. Measured on the same install: a cold
+  refresh sent 866 requests, the next one 2.
+- The Claude matcher's answer is kept per game and candidate list for a day,
+  and a description is no longer re-requested when only the Monte Carlo's
+  borderline outcome bands flip between refreshes.
+- CollegeFootballData / CollegeBasketballData answers are kept 24 hours
+  (281 calls in a replayed month, was 498). The Odds API is asked at most once
+  every two days per league and never more than 400 times a month.
+- Show current state lists today's and yesterday's outside API calls by host.
+- A source waiting out its API's free-tier quota is reported as DEGRADED, with
+  the reset date, apart from sources that failed; the summary says how many
+  previous games were actually held ("no previous games to hold" when none).
+  Health pushes name their monitor in the log, and a DOWN verdict logs at
+  WARNING, so the pipeline monitor's state is visible beside the refresh
+  monitor's UP lines.
+
 ## 2.0.2
 
 - Boxing no longer uses up the Boxing Data free tier (100 calls a month) in

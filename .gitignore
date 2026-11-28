@@ -38,3 +38,7 @@ dg_snapshot.json
 
 # Generated outage video cache
 slates/
+api_calls.json
+api_calls.json.lock
+matcher_llm_cache.json
+api_cache/

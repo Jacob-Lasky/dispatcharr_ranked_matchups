@@ -346,7 +346,7 @@ class NcaafSource(PointsBasedSportSource):
         return data
 
     def _season_read_at(self) -> Optional[datetime]:
-        """The season answer is kept up to twelve hours (#337): the season
+        """The season answer is kept up to a day (`_college_data.FRESH_FOR`, #337, #363): the season
         store dates this read by it, not by now (`points_based`)."""
         return self._raw_season_at.get(self._season())
 

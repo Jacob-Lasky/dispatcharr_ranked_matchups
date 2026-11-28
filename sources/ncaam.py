@@ -390,7 +390,7 @@ class NcaamSource(PointsBasedSportSource):
         return self._win_ceiling_memo
 
     def _season_read_at(self) -> Optional[datetime]:
-        """The season chunks are kept up to twelve hours (#337): the season
+        """The season chunks are kept up to a day (`_college_data.FRESH_FOR`, #337, #363): the season
         store dates this read by the oldest, not by now (`points_based`)."""
         return self._season_answers_at
 
@@ -451,7 +451,7 @@ class NcaamSource(PointsBasedSportSource):
                     f"full-season chunk {start.date()}..{end.date()} failed: {e}") from e
             all_games.extend(answer.body)
             fetched.append(answer.fetched_at)
-        # The oldest chunk dates the read: each is kept up to twelve hours (#337).
+        # The oldest chunk dates the read: each is kept up to a day (`_college_data.FRESH_FOR`, #337, #363).
         self._season_answers_at = min(fetched)
 
         out: List[Dict[str, Any]] = []

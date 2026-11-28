@@ -34,6 +34,9 @@ never be removed, and it is called for every audit event in the host process
 
 This module is the only one that touches an HTTP client directly; the same
 test fails on a raw `requests.get` / `urlopen` / `build_opener` anywhere else.
+That is also why both senders count each request in `_api_ledger` before
+sending it (#363): the per-host daily totals in Show current state are a
+measurement only because no request can go around these two functions.
 """
 from __future__ import annotations
 
@@ -49,6 +52,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPConnection as _Urllib3HTTPConnection
 from urllib3.connection import HTTPSConnection as _Urllib3HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
+
+from . import _api_ledger
 
 
 class ResponseDeadlineExceeded(TimeoutError):
@@ -375,6 +380,7 @@ def get_within_deadline(requests_mod: Any, url: str, *, timeout: float, **kwargs
     DO NOT call `requests.get` / `requests.post` anywhere else in the plugin;
     `tests/test_http_deadline.py` fails on any call site outside this module.
     """
+    _api_ledger.record(url)
     def _work() -> Any:
         with requests_mod.Session() as session:
             adapter = _TrackedAdapter()
@@ -404,6 +410,7 @@ def urlopen_read(request: Any, *, timeout: float, max_bytes: Optional[int] = Non
     Tests stub the transport with `tests/conftest.py::stub_urlopen`, which
     patches `urllib.request.OpenerDirector.open`.
     """
+    _api_ledger.record(getattr(request, "full_url", request))
     def _work() -> tuple:
         with _opener().open(request, timeout=timeout) as resp:
             if max_bytes is None:

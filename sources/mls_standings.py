@@ -114,7 +114,7 @@ _DEFAULT_GOALS_AGAINST = 1.4
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
     """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
-    return http_get_json(requests, url, log=logger, tag="mls_standings", timeout=timeout)
+    return http_get_json(requests, url, log=logger, tag="mls_standings", timeout=timeout, keep=True)
 
 
 def _fetch_scoreboard_range(start: date, end: date) -> List[Dict[str, Any]]:

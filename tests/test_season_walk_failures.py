@@ -462,9 +462,17 @@ def _drive_every_season(plugin, monkeypatch, fails):
     stub_requests_get(monkeypatch, get)
     sources = [s for s in plugin._build_sources(_all_on_settings())
                if isinstance(s, PointsBasedSportSource)]
+    import importlib
+    import tempfile
+    api_cache = importlib.import_module("dispatcharr_ranked_matchups._api_cache")
     failures = {}
     for src in sources:
         name = f"{type(src).__name__}:{src.sport_label}"
+        # Forget the schedule answers kept so far (#363), the build's and the
+        # previous source's (MLS East and West read the same season), for the
+        # same reason as the two attributes below: the read judged here must
+        # send its own requests.
+        monkeypatch.setattr(api_cache, "CACHE_DIR", tempfile.mkdtemp())
         # Built above with every request answering, which already read some
         # seasons (the playoff strength seeds). Forget that read so this one
         # is the one judged. The two attributes are the mechanism under test.

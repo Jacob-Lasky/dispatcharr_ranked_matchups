@@ -95,7 +95,7 @@ def _team_canonical_name(team_obj: Dict[str, Any]) -> str:
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
     """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
-    return http_get_json(requests, url, log=logger, tag="nhl", timeout=timeout)
+    return http_get_json(requests, url, log=logger, tag="nhl", timeout=timeout, keep=True)
 
 
 def _upcoming_schedule_games(days_ahead: int) -> List[Dict[str, Any]]:

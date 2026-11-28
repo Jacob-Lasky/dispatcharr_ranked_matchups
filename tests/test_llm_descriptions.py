@@ -303,7 +303,7 @@ class TestLlmDescribeOrFallback:
 
         # Pre-populate cache with the exact key the function will compute.
         ctx = llm.build_llm_context(g, tagline="")
-        key = f"marker-abc|{llm.prompt_hash(ctx, 'claude-haiku-4-5')}"
+        key = f"marker-abc|{llm.prompt_hash(llm.cache_context(ctx), 'claude-haiku-4-5')}"
         cache = {key: "Cached prose."}
         out = llm.llm_describe_or_fallback(
             g=g, tagline="", fallback_description="FALLBACK",

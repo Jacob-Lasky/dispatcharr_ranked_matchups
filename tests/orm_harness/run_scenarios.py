@@ -51,6 +51,8 @@ _REDIRECTED_PATHS = (
     ("plugin", "GAMETHUMBS_CACHE_PATH"),
     ("sources._odds", "CACHE_PATH"),
     ("tasks", "LAST_RUN_PATH"),
+    ("_api_ledger", "LEDGER_PATH"),
+    ("matcher", "MATCHER_CACHE_PATH"),
 )
 
 

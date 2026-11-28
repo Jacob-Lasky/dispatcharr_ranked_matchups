@@ -36,6 +36,7 @@ from .base import (
 from ._espn import upcoming_window
 from .bracket import AggregateLegSource
 from ._odds import fetch_odds_events
+from .. import _api_cache
 from .._http import get_within_deadline
 from .._util import (
     SEED_PLAYED_THRESHOLD,
@@ -220,6 +221,51 @@ def _fd_get(
             f"_fd_get exhausted {_FD_MAX_ATTEMPTS} attempts without recording an error"
         )
     raise last_exc
+
+
+def _require_list(key: str) -> Callable[[Any], None]:
+    """A `check` for `_fd_get_json`: the answer must be an object carrying a `key` list.
+    A 200 without it is an error object (#282), never an empty answer."""
+    def check(data: Any) -> None:
+        if not (isinstance(data, dict) and isinstance(data.get(key), list)):
+            raise ValueError(f"no {key} list in the response: {redact_secrets(str(data)[:200])}")
+    return check
+
+
+def _fd_get_json(
+    url: str,
+    fd_api_key: str,
+    params: Optional[Dict[str, Any]] = None,
+    *,
+    keep_for: timedelta,
+    check: Callable[[Any], None],
+) -> Any:
+    """`_fd_get(...).json()`, kept on disk across refreshes (#363, `_api_cache`).
+
+    A dated request (`dateFrom`/`dateTo`) follows the cache's day policy; anything else
+    is kept for `keep_for` (this season's matches and standings: 12 h, they change once a
+    matchday is played; a past season's: a week). `check` is the caller's parser, run
+    before an answer is kept, and it raises exactly as the caller's own validation did.
+    A failure is never kept: the paced, retrying `_fd_get` runs as before on every miss.
+    The key carries no credential (FD.org authenticates by header).
+    """
+    key = _api_cache.request_key(url, params)
+    fresh = _api_cache.schedule_fresh(_api_cache.request_days(url, params), keep_for)
+
+    def fetch() -> Any:
+        return _fd_get(url, fd_api_key, params=params).json()
+
+    if key is None:  # pragma: no cover - FD.org params never name a credential
+        data = fetch()
+        check(data)
+        return data
+    return _api_cache.fetch_json(key, fresh, fetch, check)
+
+
+# Lifetimes for undated FD.org answers (#363): the current season's matches and
+# standings change once a matchday is played; a finished season never does.
+_FD_CURRENT_KEEP = timedelta(hours=12)
+_FD_PAST_SEASON_KEEP = timedelta(days=7)
 
 
 # ---------- Module-level FD.org caches (refresh-scoped) ----------
@@ -414,15 +460,14 @@ def _fetch_tier_fixtures(fd_api_key: str, days_ahead: int) -> Dict[str, List[Dic
         chunk_from = chunk_start.isoformat()
         chunk_to = chunk_end.isoformat()
         try:
-            r = _fd_get(
+            data = _fd_get_json(
                 f"{FD_BASE}/matches",
                 fd_api_key,
                 params={"dateFrom": chunk_from, "dateTo": chunk_to},
+                keep_for=_FD_CURRENT_KEEP,
+                check=_require_list("matches"),
             )
-            data = r.json()
-            matches = data.get("matches") if isinstance(data, dict) else None
-            if not isinstance(matches, list):
-                raise ValueError(f"no matches list in the response: {redact_secrets(str(data)[:200])}")
+            matches = data["matches"]
         except Exception as e:
             lost = (chunk_start, chunk_end - timedelta(days=1))
             logger.error(
@@ -477,14 +522,13 @@ def _fetch_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[Dict]:
         # season_fetch_failures(), so the resulting zeros are not silent.
         return []
     try:
-        r = _fd_get(f"{FD_BASE}/competitions/{fd_code}/matches", fd_api_key)
-        data = r.json()
-        matches = data.get("matches") if isinstance(data, dict) else None
-        if not isinstance(matches, list):
-            # A 200 without the list (an error object) is a failure, not an
-            # empty season (#282's class): cached as [] it would score every
-            # game in the competition zero importance, silently.
-            raise ValueError(f"no matches list in the response: {redact_secrets(str(data)[:200])}")
+        # A 200 without the list (an error object) is a failure, not an
+        # empty season (#282's class): cached as [] it would score every
+        # game in the competition zero importance, silently. `_require_list`
+        # raises for it, and `_fd_get_json` keeps nothing that failed it.
+        data = _fd_get_json(f"{FD_BASE}/competitions/{fd_code}/matches", fd_api_key,
+                            keep_for=_FD_CURRENT_KEEP, check=_require_list("matches"))
+        matches = data["matches"]
     except Exception as e:
         attempts += 1
         _SEASON_FETCH_FAILURES[fd_code] = (attempts, str(e))
@@ -578,17 +622,16 @@ def _fetch_prev_season_matches_for_code(fd_api_key: str, fd_code: str) -> List[D
         return []
     season = _previous_season_start_year()
     try:
-        r = _fd_get(
+        # An error object is a failure, not a season with no meetings:
+        # cached as [] it would drop head-to-head for the whole refresh.
+        data = _fd_get_json(
             f"{FD_BASE}/competitions/{fd_code}/matches",
             fd_api_key,
             params={"season": season},
+            keep_for=_FD_PAST_SEASON_KEEP,
+            check=_require_list("matches"),
         )
-        data = r.json()
-        matches = data.get("matches") if isinstance(data, dict) else None
-        if not isinstance(matches, list):
-            # An error object is a failure, not a season with no meetings:
-            # cached as [] it would drop head-to-head for the whole refresh.
-            raise ValueError(f"no matches list in the response: {redact_secrets(str(data)[:200])}")
+        matches = data["matches"]
     except Exception as e:
         logger.warning("[soccer:%s] prev-season matches fetch failed (season=%s): %s",
                        fd_code, season, e)
@@ -1029,16 +1072,19 @@ class SoccerSource(SportSource):
         table", a failure published every game in the league unranked.
         """
         try:
-            r = _fd_get(
+            def check_standings(data: Any) -> None:
+                rows = data.get("standings") if isinstance(data, dict) else None
+                if not isinstance(rows, list) or (rows and not isinstance(rows[0], dict)):
+                    raise ValueError(f"no standings list in the response: {redact_secrets(str(data)[:200])}")
+            data = _fd_get_json(
                 f"{FD_BASE}/competitions/{self.config.fd_code}/standings",
                 self.fd_api_key,
                 params={"season": season} if season is not None else None,
+                # An explicit season is the previous one (the B.2 seed table).
+                keep_for=_FD_PAST_SEASON_KEEP if season is not None else _FD_CURRENT_KEEP,
+                check=check_standings,
             )
-            data = r.json()
-            standings = data.get("standings") if isinstance(data, dict) else None
-            if not isinstance(standings, list) or (
-                    standings and not isinstance(standings[0], dict)):
-                raise ValueError(f"no standings list in the response: {redact_secrets(str(data)[:200])}")
+            standings = data["standings"]
         except Exception as e:
             logger.error("[soccer:%s] standings fetch failed (season=%s): %s",
                          self.config.fd_code, season, e)

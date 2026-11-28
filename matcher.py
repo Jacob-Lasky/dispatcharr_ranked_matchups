@@ -32,12 +32,17 @@ import re
 import time
 import urllib.request
 from dataclasses import dataclass
-from datetime import date, datetime
+import hashlib
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import storage
 from ._http import urlopen_read
-from ._util import GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS, is_field_event
+from ._util import (
+    GENERIC_TEAM_SECOND_WORDS, TEAM_SUFFIX_TOKENS, is_field_event, parse_iso_utc,
+    write_json_atomic,
+)
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.matcher")
 
@@ -703,6 +708,56 @@ def _post_claude(
         return None
 
 
+# The Claude matcher's answers, per game and candidate set (#363). Every refresh,
+# M3U rematch and recovery re-matches the whole slate, and the same ambiguous games
+# reached Claude again each time with the same candidates: one batch call per
+# refresh, about a dozen a day for answers that had not changed. A game whose
+# teams, kickoff and candidate list (ids, channel names, programme titles) are
+# unchanged gets the answer Claude gave for exactly that input; anything else in
+# the input, including the model or MATCHER_SYSTEM_PROMPT, is a new key and asks.
+# Only an answer from a call that SUCCEEDED is kept (a failed call answers None);
+# a game the answer left out is kept as "no match", which is what the model said.
+MATCHER_CACHE_PATH = storage.path("matcher_llm_cache.json")
+MATCHER_CACHE_TTL = timedelta(hours=24)
+
+
+def _matcher_cache_key(model: str, game_payload: Dict[str, Any]) -> str:
+    # The candidate list is a SET to the model (it picks an id from it), but the
+    # lookup builds it in database iteration order, which is not stable between
+    # runs: keyed in that order, the same question missed (measured live: 4 of 6).
+    item = {k: v for k, v in game_payload.items() if k not in ("game_id", "candidates")}
+    item["candidates"] = sorted(
+        (c.get("channel_id"), c.get("channel_name") or "", c.get("program_title") or "")
+        for c in game_payload.get("candidates") or [])
+    h = hashlib.sha256()
+    h.update(json.dumps([model, MATCHER_SYSTEM_PROMPT, item], sort_keys=True,
+                        ensure_ascii=False).encode("utf-8"))
+    return h.hexdigest()[:32]
+
+
+def _load_matcher_cache(now: datetime) -> Dict[str, Dict[str, Any]]:
+    try:
+        with open(MATCHER_CACHE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    entries = data.get("entries") if isinstance(data, dict) else None
+    out = {}
+    for key, entry in (entries or {}).items():
+        at = parse_iso_utc(entry.get("at")) if isinstance(entry, dict) and isinstance(entry.get("at"), str) else None
+        if at is not None and timedelta(0) <= now - at < MATCHER_CACHE_TTL:
+            out[key] = entry
+    return out
+
+
+def _save_matcher_cache(entries: Dict[str, Dict[str, Any]]) -> None:
+    try:
+        os.makedirs(os.path.dirname(MATCHER_CACHE_PATH) or ".", exist_ok=True)
+        write_json_atomic(MATCHER_CACHE_PATH, {"entries": entries})
+    except (OSError, TypeError, ValueError) as e:
+        logger.warning("[matcher] could not save the LLM answer cache: %s", e)
+
+
 def _extract_json(text: str) -> Dict[str, Any]:
     text = text.strip()
     if text.startswith("```"):
@@ -1363,8 +1418,29 @@ def match_games_to_channels(
                     for c in cands
                 ],
             })
-        user = "Match each game to its broadcasting channel from the candidates. JSON only.\n\n" + json.dumps(payload, ensure_ascii=False)
-        parsed = _post_claude(api_key, model, MATCHER_SYSTEM_PROMPT, user) or {}
+        now = datetime.now(timezone.utc)
+        answers = _load_matcher_cache(now)
+        keys = {item["game_id"]: _matcher_cache_key(model, item) for item in payload}
+        parsed: Dict[str, Any] = {
+            gid: answers[key]["pick"] for gid, key in keys.items()
+            if key in answers and answers[key].get("pick") is not None
+        }
+        ask = [item for item in payload if keys[item["game_id"]] not in answers]
+        if ask:
+            user = ("Match each game to its broadcasting channel from the candidates. JSON only.\n\n"
+                    + json.dumps(ask, ensure_ascii=False))
+            answered = _post_claude(api_key, model, MATCHER_SYSTEM_PROMPT, user)
+            if isinstance(answered, dict):
+                for item in ask:
+                    gid = item["game_id"]
+                    pick = answered.get(gid)
+                    answers[keys[gid]] = {"pick": pick, "at": now.isoformat()}
+                    if pick is not None:
+                        parsed[gid] = pick
+                _save_matcher_cache(answers)
+        if len(ask) < len(payload):
+            logger.info("[matcher] %d of %d ambiguous game(s) answered from the cached "
+                        "Claude decision for the same candidates", len(payload) - len(ask), len(payload))
         for idx, game, cands, both_team in ambiguous:
             picked = parsed.get(str(idx))
             if picked is None:

@@ -121,6 +121,9 @@ def configure(context):
         'sources._season_store': {'STORE_DIR': 'season_cache'},
         'sources._college_data': {'CACHE_DIR': 'college_cache'},
         'sources._boxing_data': {'CACHE_DIR': 'boxing_cache'},
+        '_api_ledger': {'LEDGER_PATH': 'api_calls.json'},
+        '_api_cache': {'CACHE_DIR': 'api_cache'},
+        'matcher': {'MATCHER_CACHE_PATH': 'matcher_llm_cache.json'},
     }
     for module_name, names in bindings.items():
         module = sys.modules.get(f'{package}.{module_name}')

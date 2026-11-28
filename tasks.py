@@ -70,7 +70,7 @@ from functools import partial
 from typing import Any, Callable, Dict, List, Optional
 
 from ._util import write_json_atomic
-from . import health, storage
+from . import _api_ledger, health, storage
 
 logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.tasks")
 
@@ -79,6 +79,9 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.tasks")
 # same Redis namespace plugin.py uses. Must stay in sync with the derivation
 # at the top of plugin.py.
 PLUGIN_KEY = storage.plugin_key()
+# The kind of the locked run this process is executing (#363), forwarded to its
+# pipeline children so their API calls are counted under the run that made them.
+_RUN_KIND: Optional[str] = None
 
 _INFLIGHT_KEY = f"plugins:{PLUGIN_KEY}:inflight"
 # Covers one pipeline child (_SUBPROCESS_TIMEOUT_SECONDS, 25 min) with margin.
@@ -270,7 +273,12 @@ def _run_under_lock(kind: str, task_id: str, target: Callable[[Dict[str, Any]], 
             except Exception as exc:
                 logger.warning("[ranked_matchups.health] timer start failed (%s)", type(exc).__name__)
         _set_inflight(kind, task_id, "refresh")
-        result = target(settings)
+        global _RUN_KIND
+        _RUN_KIND = kind
+        try:
+            result = target(settings)
+        finally:
+            _RUN_KIND = None
         # LOG THE MESSAGE, not just the status (#170). Every caller of this
         # function dispatches in the background, so the result dict is thrown
         # away: the HTTP actions already returned a `queued` envelope to the
@@ -605,6 +613,10 @@ def _run_pipeline_child(action: str, settings: Dict[str, Any]) -> Dict[str, Any]
     env[PIPELINE_CHILD_ENV] = "1"
     env[storage.DATA_ENV] = storage.path("")
     env[storage.KEY_ENV] = PLUGIN_KEY
+    # Which run the child's requests belong to, for the per-trigger API-call
+    # counts (#363): the lock kind (`scheduled_auto_pipeline`, `m3u_rematch`,
+    # `reap`, ...) when a locked run started the child, else the action.
+    env[_api_ledger.TRIGGER_ENV] = _RUN_KIND or action
     if storage.logos_dir is not None:
         env[storage.LOGOS_ENV] = storage.logos_dir
     env[PIPELINE_DEADLINE_ENV] = repr(time.monotonic() + _SUBPROCESS_TIMEOUT_SECONDS)

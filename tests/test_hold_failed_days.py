@@ -173,7 +173,7 @@ def test_nhl_schedule_walk_reports_a_failed_day(monkeypatch, cls_name):
     assert lost == {lost_day}
 
 
-_HTTP_CALLS = ("_http_get", "http_get", "get_json", "http_get_json", "_fd_get", "get_within_deadline", "get_page")
+_HTTP_CALLS = ("_http_get", "http_get", "get_json", "http_get_json", "_fd_get", "_fd_get_json", "get_within_deadline", "get_page")
 # Loops that make requests but do not walk days of games, so a failure loses no day.
 # DO NOT add a loop here that decides which games exist.
 _NOT_DAY_LOOPS = {

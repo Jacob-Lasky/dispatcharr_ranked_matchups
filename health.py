@@ -28,8 +28,15 @@ def _safe_message(message):
     return " ".join(message.split())[:1000]
 
 
-def push(url, problems, healthy_message):
-    """Bounded, best-effort Kuma-compatible GET. Never log a URL/exception body."""
+def push(url, problems, healthy_message, monitor="pipeline"):
+    """Bounded, best-effort Kuma-compatible GET. Never log a URL/exception body.
+
+    The log line names the `monitor` (#363). Both monitors log here, and the
+    refresh one pushes every few minutes: an unnamed "UP: M3U and EPG refreshes
+    healthy" read as the plugin's health while the pipeline monitor had been
+    DOWN for 18 days on two quota-held sources. A DOWN verdict logs at WARNING,
+    so it reaches the Dispatcharr log from a Celery worker, whose INFO lines
+    are dropped (CLAUDE.md, "Why the Celery copies were silent")."""
     if not url:
         return False
     status = "down" if problems else "up"
@@ -56,7 +63,8 @@ def push(url, problems, healthy_message):
     except Exception as exc:
         logger.warning("[ranked_matchups.health] push failed (%s)", type(exc).__name__)
         return False
-    logger.info("[ranked_matchups.health] %s: %s", status.upper(), message)
+    (logger.warning if problems else logger.info)(
+        "[ranked_matchups.health] %s monitor %s: %s", monitor, status.upper(), message)
     return True
 
 
@@ -173,4 +181,4 @@ def report_refresh(settings):
         problems = refresh_problems()
     except Exception as exc:
         problems = [f"refresh health check failed ({type(exc).__name__})"]
-    push(url, problems, "M3U and EPG refreshes healthy")
+    push(url, problems, "M3U and EPG refreshes healthy", monitor="refresh")

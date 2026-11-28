@@ -4223,6 +4223,9 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     pulled_by_label: Dict[str, int] = {}
     raised_labels: set = set()
     quota_holds: List[str] = []
+    # {label: (index in src_summary, entry without its hold count)}: the count of
+    # previous games actually held is only known once `held` is (#363).
+    quota_hold_at: Dict[str, Tuple[int, str]] = {}
     quota_notes: List[str] = []
     # Days a per-day sweep asked for and got no answer for (#261), by label.
     # The sweep still returns its other days, so without this a lost day reads
@@ -4261,8 +4264,8 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
                     _require_seasons(src)
         except Exception as e:
             if isinstance(e, CollegeQuotaUnavailable):
-                entry = _source_error_entry(src.sport_label, e) + "; previous games held this refresh"
-                quota_holds.append(entry)
+                entry = _source_quota_entry(src.sport_label, e)
+                quota_hold_at[src.sport_label] = (len(src_summary), entry)
                 src_summary.append(entry)
             else:
                 logger.exception("[ranked_matchups] source %s fetch failed", src.sport_label)
@@ -4310,6 +4313,13 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
         empty_labels,
         lost_days_by_label,
     )
+    # Say what the quota hold actually kept (#363): "previous games held" was
+    # printed whether or not there was a previous game, and with games
+    # that had already finished.
+    for label, (index, entry) in quota_hold_at.items():
+        entry += _quota_hold_tail(label, held, datetime.now(timezone.utc))
+        src_summary[index] = entry
+        quota_holds.append(entry)
     held_ids = {id(g) for g in all_games if _gamerow_marker(g) in held}
     fetched_markers = {_gamerow_marker(g) for g in all_games}
     carried_rows = [row for marker, row in held.items() if marker not in fetched_markers]
@@ -4843,7 +4853,8 @@ def _action_refresh(settings: Dict[str, Any]) -> Dict[str, Any]:
     for problem in problems:
         # The existing source-failure summary is the quota warning too. Do
         # not emit a second warning for the same expected hold above it.
-        detail = "; " + " | ".join(quota_holds + quota_notes) if quota_holds and problem == problems[0] else ""
+        detail = ("; " + " | ".join(quota_holds + quota_notes)
+                  if quota_holds and problem.startswith(_QUOTA_PROBLEM_LEAD) else "")
         logger.warning("[ranked_matchups] refresh: %s%s", problem, detail)
     if quota_notes and not quota_holds:
         logger.warning("[ranked_matchups] %s", " | ".join(quota_notes))
@@ -9569,6 +9580,33 @@ def _source_error_entry(label: str, err: Any) -> str:
     return f"{label}{_SOURCE_ERROR_MARK}{err})"
 
 
+# A source waiting out its API's free-tier quota (#363): an EXPECTED hold with a
+# known end, not a failure, so _slate_problems reports it as DEGRADED, apart from
+# the sources that errored. The source is still an outage for the hold
+# (`raised_labels`), exactly as before; only how it is reported changed.
+_SOURCE_QUOTA_MARK = ": held on its API quota ("
+_QUOTA_PROBLEM_LEAD = "DEGRADED: "
+
+
+def _source_quota_entry(label: str, err: Any) -> str:
+    return f"{label}{_SOURCE_QUOTA_MARK}{err})"
+
+
+def _quota_hold_tail(label: str, held: Dict[str, Dict[str, Any]], now: datetime) -> str:
+    """'; N previous game(s) held this refresh', counting only held rows of `label`
+    that have not ended, or '; no previous games to hold'."""
+    kept = 0
+    for row in held.values():
+        if row.get("sport_label") != label:
+            continue
+        end = _game_end_utc(row)
+        if end is None or end > now:
+            kept += 1
+    if kept:
+        return f"; {kept} previous game(s) held this refresh"
+    return "; no previous games to hold"
+
+
 # A source whose per-day sweep lost days (#261): it answered, so it is not
 # "error", but its list is short by those days. Same contract as the error
 # mark: _slate_problems keys on this exact string.
@@ -9619,6 +9657,16 @@ def _slate_problems(summary: List[Any], games: List[Dict[str, Any]]) -> List[str
         problems.append(
             f"{len(errored)} source(s) failed to fetch ({_first_few(errored)}); "
             "the log has each error"
+        )
+    quota = [
+        entry.split(_SOURCE_QUOTA_MARK, 1)[0]
+        for entry in summary
+        if isinstance(entry, str) and _SOURCE_QUOTA_MARK in entry
+    ]
+    if quota:
+        problems.append(
+            f"{_QUOTA_PROBLEM_LEAD}{len(quota)} source(s) held on their API's free-tier "
+            f"quota ({_first_few(quota)}); no new games from them until it resets"
         )
     partial = [
         entry.split(_SOURCE_PARTIAL_MARK, 1)[0]
@@ -9801,7 +9849,10 @@ def _action_show_status(settings: Dict[str, Any]) -> Dict[str, Any]:
     data_warnings, run_verdict = _run_health_lines(
         cache, tasks.read_last_run(), status_tz, inflight, _read_run_lock(),
         scheduler_stale=_scheduler_staleness(settings or {}))
-    notices = data_warnings + notices + run_verdict
+    # Outside API calls today and yesterday, by host (#363): the measurement the
+    # call budgets are checked against. Informational, so above the warnings.
+    from . import _api_ledger
+    notices = _api_ledger.summary_lines() + data_warnings + notices + run_verdict
 
     games = cache.get("games", [])
     if not games:
@@ -11911,7 +11962,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "2.0.2"
+    version = "2.1.0"
 
     def __init__(self):
         # v3 owns the one persistent service. Every web worker still installs
