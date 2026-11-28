@@ -39,9 +39,11 @@ probed. On Xtream Codes accounts a probe also asks the provider itself
 (`player_api.php`) how many connections it counts, and runs only when the
 provider has room for the probe plus one foreground tune. The provider can
 still be counting sessions that Dispatcharr has already released, and its
-count lags, so probes from the last minute are added to it. A full
-provider login is skipped for 30 seconds, and the next profile with its own
-login is tried. A missing or unreadable count defers the probe. Insufficient
+count lags, so probes from the last minute are added to it. A login the
+provider reports full is skipped for 30 seconds, and the next profile with its
+own login is tried. When only the plugin's own recent probes keep a login over
+its limit, the provider is not asked again until enough of them are a minute
+old, or until a Dispatcharr session on that profile ends. A missing or unreadable count defers the probe. Insufficient
 capacity is unknown, never proof that a feed failed.
 Probes also defer while their M3U account is fetching/parsing, and re-check
 channel and stream existence immediately before asking Dispatcharr for a URL.

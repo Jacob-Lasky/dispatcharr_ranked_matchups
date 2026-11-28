@@ -37,6 +37,7 @@ def capacity(monkeypatch):
     pool = ModuleType('apps.m3u.connection_pool')
     pool.reserve_profile_slot = Mock(side_effect=reserve)
     pool.release_profile_slot = Mock(side_effect=free)
+    pool.get_profile_connection_count = Mock(side_effect=lambda profile, client: state.used)
     utils = ModuleType('core.utils')
     utils.RedisClient = SimpleNamespace(get_client=lambda: redis)
     urls = ModuleType('apps.proxy.live_proxy.url_utils')
@@ -163,7 +164,14 @@ def provider(capacity, monkeypatch):
     s = capacity
     s.keys = {}
     s.redis.exists.side_effect = lambda key: key in s.keys
-    s.redis.setex.side_effect = lambda key, ttl, value: s.keys.__setitem__(key, ttl)
+    s.values = {}
+    def setex(key, ttl, value):
+        s.keys[key] = ttl
+        s.values[key] = value
+    s.redis.setex.side_effect = setex
+    s.redis.get.side_effect = lambda key: s.values.get(key) if key in s.keys else None
+    s.redis.pttl.side_effect = lambda key: s.keys[key] * 1000 if key in s.keys else -2
+    s.redis.psetex.side_effect = lambda key, ms, value: setex(key, ms / 1000, value)
     s.zsets = {}
     def zadd(key, mapping):
         s.zsets.setdefault(key, {}).update(mapping)
@@ -171,11 +179,14 @@ def provider(capacity, monkeypatch):
         z = s.zsets.get(key, {})
         for member in [m for m, score in z.items() if score <= float(high)]:
             del z[member]
-    def zcount(key, low, high):
-        return sum(1 for score in s.zsets.get(key, {}).values() if score >= float(low))
+    def zrangebyscore(key, low, high, withscores=False):
+        assert high == '+inf' and withscores
+        return sorted(((m, score) for m, score in s.zsets.get(key, {}).items() if score >= float(low)),
+                      key=lambda item: item[1])
     s.redis.zadd.side_effect = zadd
     s.redis.zremrangebyscore.side_effect = zremrangebyscore
-    s.redis.zcount.side_effect = zcount
+    s.redis.zrangebyscore.side_effect = zrangebyscore
+    s.redis.zcount.side_effect = lambda key, low, high: len(zrangebyscore(key, low, high, withscores=True))
     s.reply = {'user_info': {'max_connections': '4', 'active_cons': '1'}}
     s.requests = []
     def fetch(requests_mod, url, **kwargs):
@@ -220,7 +231,7 @@ def test_full_provider_is_not_asked_again_by_every_stream(provider):
     assert s.slate.probe(s.channel, s.stream) is None
     assert s.slate.probe(s.channel, s.stream) is None
     assert len(s.requests) == 1
-    assert set(s.keys.values()) == {s.slate.PROVIDER_FULL_SECONDS}
+    assert {ttl for k, ttl in s.keys.items() if ':provider_full' in k} == {s.slate.PROVIDER_FULL_SECONDS}
     [key] = [k for k in s.keys if k.startswith('ranked_matchups:slate:provider_full:')]
     assert 'user' not in key.rsplit(':', 1)[1] and 'provider.test' not in key, 'login leaked into Redis key'
     assert 'ranked_matchups:slate:provider_full_profile:4' in s.keys
@@ -285,7 +296,7 @@ def test_full_line_moves_on_to_a_profile_with_its_own_login(provider):
     assert s.slate.probe(s.channel, s.stream) is True
     assert reserved == [4, 6]
     assert s.opened == 1 and s.used == 0
-    assert sorted(k.rsplit(':', 1)[0] for k in s.keys) == [
+    assert sorted(k.rsplit(':', 1)[0] for k in s.keys if ':provider_full' in k) == [
         'ranked_matchups:slate:provider_full', 'ranked_matchups:slate:provider_full_profile']
     assert 'ranked_matchups:slate:provider_full_profile:4' in s.keys
     s.requests.clear()
@@ -398,3 +409,186 @@ def test_unresolvable_first_profile_falls_back_to_the_next(provider):
     assert s.slate.probe(s.channel, s.stream) is True
     assert [kw['params']['username'] for _, kw in s.requests] == ['other-user']
     assert s.opened == 1 and s.used == 0 and not s.locked
+
+
+@pytest.fixture
+def clocked(provider, monkeypatch):
+    """The provider fixture with a wall clock that expires Redis keys."""
+    s = provider
+    s.clock = SimpleNamespace(now=1_000_000.0)
+    monkeypatch.setattr(s.slate.time, 'time', lambda: s.clock.now)
+    s.expires = {}
+    setex = s.redis.setex.side_effect
+    def expiring(key, seconds, value):
+        s.expires[key] = s.clock.now + seconds
+        setex(key, seconds, value)
+    def timed_setex(key, ttl, value):
+        assert isinstance(ttl, int) and ttl >= 1, 'Redis SETEX needs a whole number of seconds'
+        expiring(key, ttl, value)
+    def timed_psetex(key, ms, value):
+        assert isinstance(ms, int) and ms >= 1, 'Redis PSETEX needs a whole number of milliseconds'
+        expiring(key, ms / 1000, value)
+    s.redis.setex.side_effect = timed_setex
+    s.redis.psetex.side_effect = timed_psetex
+    s.redis.pttl.side_effect = lambda key: (
+        round((s.expires[key] - s.clock.now) * 1000) if key in s.keys and key in s.expires else -2)
+    def advance(seconds):
+        s.clock.now += seconds
+        for key in [k for k, at in s.expires.items() if at <= s.clock.now]:
+            s.keys.pop(key, None)
+            del s.expires[key]
+    s.advance = advance
+    return s
+
+
+def test_our_own_probes_defer_without_asking_the_provider_again(clocked):
+    """JAKE-1309: 1,213 deferrals a day, nearly all "1 of 4 plus 2 recent
+    probes", each one a player_api.php request. While our own probes keep the
+    provider's last count over the limit no answer can let a probe run, so it
+    is not asked until one of them ages out."""
+    s = clocked
+    assert s.slate.probe(s.channel, s.stream) is True    # 1 + 0 + 2 <= 4
+    s.advance(7)
+    assert s.slate.probe(s.channel, s.stream) is True    # 1 + 1 + 2 <= 4
+    assert len(s.requests) == 2
+    for _ in range(10):                                  # reconcile ticks
+        s.advance(5)
+        assert s.slate.probe(s.channel, s.stream) is None
+    assert len(s.requests) == 2, 'provider asked while our own probes alone keep it full'
+    s.advance(10)                                        # first probe is now 67 s old
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert len(s.requests) == 3 and s.opened == 3 and s.used == 0 and not s.locked
+
+
+def test_a_probe_that_fits_the_remembered_count_still_asks(clocked):
+    """The remembered count may only defer. A viewer tuning in since the last
+    answer must still be seen before the next probe opens."""
+    s = clocked
+    assert s.slate.probe(s.channel, s.stream) is True
+    s.advance(5)
+    s.reply['user_info']['active_cons'] = '2'            # a foreground tune
+    assert s.slate.probe(s.channel, s.stream) is None    # 2 + 1 + 2 > 4
+    assert len(s.requests) == 2 and s.opened == 1
+
+
+def test_line_full_by_the_providers_own_count_is_asked_again_after_30s(clocked):
+    """A session ending is visible only to the provider, so that hold stays
+    PROVIDER_FULL_SECONDS and the remembered count does not extend it."""
+    s = clocked
+    s.reply['user_info']['active_cons'] = '3'
+    assert s.slate.probe(s.channel, s.stream) is None
+    s.advance(s.slate.PROVIDER_FULL_SECONDS - 1)
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert len(s.requests) == 1
+    s.advance(1)
+    s.reply['user_info']['active_cons'] = '1'            # the viewer left
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert len(s.requests) == 2
+
+
+def test_probe_blocked_hold_ends_when_the_blocking_probe_ages_out(clocked):
+    """A hold ends the first whole second (SETEX) the blocking probe stops
+    counting, never later than the linger window."""
+    s = clocked
+    s.reply['user_info']['active_cons'] = '2'
+    assert s.slate.probe(s.channel, s.stream) is True    # 2 + 0 + 2 <= 4
+    s.advance(20)
+    assert s.slate.probe(s.channel, s.stream) is None    # remembered 2 + 1 recent + 2 > 4
+    assert len(s.requests) == 1
+    assert {ttl for k, ttl in s.keys.items() if ':provider_full' in k} == {41}
+    s.advance(40)
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert len(s.requests) == 1
+    s.advance(1)                                         # the probe is 61 s old
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert len(s.requests) == 2
+
+
+@pytest.mark.parametrize('active', [0, 1, 2])
+def test_saturated_probe_demand_asks_once_per_probe(clocked, active):
+    """Live shape: 126 matchup channels keep far more probes waiting than the
+    line allows, so the probe runs on every 10 s tick. Every provider request
+    must now buy a probe, and the probe rate the JAKE-226 rule allows is kept."""
+    s = clocked
+    s.reply['user_info']['active_cons'] = str(active)
+    for _ in range(360):                                 # one hour of ticks
+        s.slate.probe(s.channel, s.stream)
+        s.advance(10)
+    assert s.opened > 0
+    assert len(s.requests) == s.opened, f'{len(s.requests)} provider requests for {s.opened} probes'
+    allowed = 4 - 2 - active + 1                         # probes per linger window
+    assert s.opened >= allowed * 3600 // (s.slate.PROVIDER_SESSION_LINGER_SECONDS + 10)
+
+
+def test_a_viewer_leaving_ends_a_hold_our_probes_caused(clocked):
+    """Codex review rounds 1-2: neither the remembered count nor the hold it
+    set may keep a probe back once one of Dispatcharr's own sessions on the
+    profile ends, which frees the line at once (the old code asked again
+    10 s later)."""
+    s = clocked
+    s.used = 1                                           # a viewer on the profile
+    s.reply['user_info']['active_cons'] = '2'
+    assert s.slate.probe(s.channel, s.stream) is True    # 2 + 0 + 2 <= 4
+    s.advance(10)
+    assert s.slate.probe(s.channel, s.stream) is None    # remembered 2 + 1 + 2 > 4: held, not asked
+    assert s.values['ranked_matchups:slate:provider_full_profile:4'] == 'sessions:1'
+    assert not any(k.startswith('ranked_matchups:slate:provider_full:') for k in s.keys)
+    s.advance(5)
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert len(s.requests) == 1
+    s.used = 0                                           # the viewer leaves, hold still live
+    s.reply['user_info']['active_cons'] = '1'
+    s.advance(5)
+    assert s.slate.probe(s.channel, s.stream) is True    # asked again: 1 + 1 + 2 <= 4
+    assert len(s.requests) == 2 and s.opened == 2 and s.used == 0
+
+
+def test_a_profile_dispatcharr_does_not_count_always_asks(clocked):
+    """With no pool count a session ending is invisible, so the remembered
+    count is never used and every probe asks, as before JAKE-1309."""
+    s = clocked
+    s.profile.max_streams = 0
+    s.reply['user_info']['active_cons'] = '1'
+    assert s.slate.probe(s.channel, s.stream) is True
+    s.advance(7)
+    assert s.slate.probe(s.channel, s.stream) is True
+    s.advance(5)
+    assert s.slate.probe(s.channel, s.stream) is None    # 1 + 2 + 2 > 4, provider asked
+    assert len(s.requests) == 3
+    # Nothing shows it a session ending, so the old 30 s login hold stands.
+    assert {ttl for k, ttl in s.keys.items() if ':provider_full' in k} == {s.slate.PROVIDER_FULL_SECONDS}
+
+
+def test_second_profile_takes_the_logins_remaining_hold(clocked):
+    """Codex review round 1: a profile meeting a held login gets what is left
+    of that hold, not a fresh 30 s, or it outlives the login's hold."""
+    s = clocked
+    first, second = SimpleNamespace(pk=4, max_streams=4), SimpleNamespace(pk=6, max_streams=4)
+    profiles = s.stream.m3u_account.profiles.filter.return_value.order_by
+    profiles.return_value = [first]
+    s.reply['user_info']['active_cons'] = '4'
+    assert s.slate.probe(s.channel, s.stream) is None
+    s.advance(19.4)                                      # a sub-second remainder is kept, not rounded up
+    profiles.return_value = [first, second]
+    assert s.slate.probe(s.channel, s.stream) is None
+    assert len(s.requests) == 1
+    assert s.keys['ranked_matchups:slate:provider_full_profile:6'] == pytest.approx(10.6)
+    s.advance(10.6)
+    s.reply['user_info']['active_cons'] = '1'
+    assert s.slate.probe(s.channel, s.stream) is True
+    assert len(s.requests) == 2
+
+
+@pytest.mark.parametrize('stamps, now, active, expected', [
+    ([0.0, 10.0], 20.0, 2, (51, 2)),    # both must age out: the newer one decides
+    ([0.0, 10.0], 20.0, 1, (41, 2)),    # one must age out: the older one decides
+    ([0.0, 10.0], 20.0, 0, (0, 2)),     # fits now
+    ([0.0], 60.0, 2, (1, 1)),           # exactly 60 s old still counts (ZCOUNT is inclusive)
+    ([0.0], 60.5, 2, (0, 0)),
+    ([], 5.0, 3, (None, 0)),            # the provider's own count leaves no room
+])
+def test_probe_room_wait(provider, stamps, now, active, expected):
+    s = provider
+    base = 1_000_000.0
+    s.zsets['ranked_matchups:slate:provider_probes:line'] = {f'p{i}': base + t for i, t in enumerate(stamps)}
+    assert s.slate._probe_room_wait(s.redis, 'line', active, 4, base + now) == expected

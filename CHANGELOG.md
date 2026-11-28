@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.2
+
+- The outage-card feed check asks the IPTV provider for its connection count
+  far less often (JAKE-1309). While only the plugin's own probes from the last
+  minute keep the provider's last reported count over the limit, it waits until
+  enough of them age out instead of asking again every 30 seconds, unless one
+  of Dispatcharr's own sessions on that profile ends first. A probe that would
+  fit still asks for a fresh count, and a login the provider itself reports
+  full is still asked again after 30 seconds (a second profile on that login
+  now waits only for what is left of it). On one install the deferrals alone
+  were 1,213 provider requests a day.
+
 ## 2.1.1
 
 - Show current state's outside-API counts name only the public data APIs; the
