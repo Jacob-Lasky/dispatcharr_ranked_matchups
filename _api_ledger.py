@@ -82,10 +82,16 @@ def endpoint(url: str) -> str:
             segments.append("*")
         else:
             segments.append(re.sub(r"\d+", "N", seg))
-    host = parts.hostname or "?"
-    if not any(host == s or host.endswith("." + s) for s in PUBLIC_HOST_SUFFIXES):
-        host = "own-host"
-    return f"{host} {'/'.join(segments)}"
+    return f"{shown_host(parts.hostname or '?')} {'/'.join(segments)}"
+
+
+def shown_host(host: str) -> str:
+    """`host` when it is a public data API's, else `own-host`. Applied when recording
+    AND when summing, so counts a 2.1.0 ledger recorded under a provider's hostname
+    never reach Show current state either."""
+    if host == "?" or any(host == s or host.endswith("." + s) for s in PUBLIC_HOST_SUFFIXES):
+        return host
+    return "own-host"
 
 
 def trigger() -> str:
@@ -140,7 +146,7 @@ def by_host(counts: Dict[str, Dict[str, int]]) -> Dict[str, int]:
     totals: Dict[str, int] = {}
     for per_kind in counts.values():
         for key, n in (per_kind or {}).items():
-            host = key.split(" ", 1)[0]
+            host = shown_host(key.split(" ", 1)[0])
             totals[host] = totals.get(host, 0) + int(n)
     return totals
 
