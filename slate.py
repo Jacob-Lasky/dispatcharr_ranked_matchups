@@ -37,12 +37,21 @@ PROBE_SECONDS = 6
 PROVIDER_CHECK_SECONDS = 4
 # A provider that reported no spare connection is not asked again for this
 # long: reconcile walks every real stream, and each would otherwise re-query.
+# Only a session ending frees such a line, and only the provider can see that.
 PROVIDER_FULL_SECONDS = 30
 # How long a probe this plugin opened is assumed to still count on the
 # provider. Measured JAKE-226 (2026-11-14): with probes stopped, active_cons
 # fell 4 -> 1 within one minute; and a check 5s after a probe opened still
 # reported the pre-probe count, so the provider's figure lags.
 PROVIDER_SESSION_LINGER_SECONDS = 60
+# How long the provider's last count for a login is remembered. It is used ONLY
+# to defer: while this plugin's own recent probes would push that count over the
+# limit, the provider is not asked again until one of them ages out of the
+# linger window, because no answer it could give lets a probe run sooner than
+# that unless a session ended. A probe that fits the remembered count still asks
+# for a fresh one first. JAKE-1309 (2026-11-28): 1,213 deferrals in 24 h, nearly
+# all "1 of 4 plus 2 recent" or "2 of 4 plus 2 recent", each a provider request.
+PROVIDER_ANSWER_SECONDS = PROVIDER_SESSION_LINGER_SECONDS
 OWNER = 'ranked_matchups_slate'
 def cache_dir(data_dir=None):
     """Persistent data root; v3 can pass context['data_dir'] here directly."""
@@ -491,6 +500,41 @@ def _note_probe(redis, line):
     redis.expire(key, 2 * PROVIDER_SESSION_LINGER_SECONDS)
 
 
+def _probe_room_wait(redis, line, active, limit, now):
+    """`(wait, recent)` for one more probe under a provider count of `active`.
+
+    `recent` is this plugin's probes on the login in the linger window. `wait`
+    is 0 when a probe fits now, the seconds until enough of those probes age
+    out for one to fit, or None when `active` alone leaves no room (then only a
+    session ending frees the line, and only the provider can report that).
+    """
+    allowed = limit - 2 - active  # recent probes that may still be counted
+    stamps = sorted(score for _, score in redis.zrangebyscore(
+        _line_key('probes', line), now - PROVIDER_SESSION_LINGER_SECONDS, '+inf', withscores=True))
+    if allowed < 0:
+        return None, len(stamps)
+    excess = len(stamps) - allowed
+    if excess <= 0:
+        return 0, len(stamps)
+    # A probe counts while its stamp >= now - linger, so it stops counting the
+    # first whole second after stamp + linger.
+    return max(1, math.floor(stamps[excess - 1] + PROVIDER_SESSION_LINGER_SECONDS - now) + 1), len(stamps)
+
+
+def _hold_line(redis, line, profile_pk, seconds):
+    redis.setex(_line_key('full', line), seconds, '1')
+    redis.setex(_profile_full_key(profile_pk), seconds, '1')
+
+
+def _remembered_count(redis, line):
+    raw = redis.get(_line_key('answer', line))
+    try:
+        active, limit = json.loads(raw)
+        return int(active), int(limit)
+    except (TypeError, ValueError):
+        return None
+
+
 def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_CHECK_SECONDS):
     """False when the PROVIDER would have no connection left for a foreground tune.
 
@@ -516,11 +560,15 @@ def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_C
     positive max_connections has no limit to respect. A failed or unreadable
     reply, including a limited line whose active_cons is missing or invalid,
     defers the probe: it is a background check, and an `unknown` verdict
-    changes nothing on air. A full line is cached for PROVIDER_FULL_SECONDS
-    per login and per profile (the profile key lets `_probe` skip it before
-    reserving or transforming credentials). Both keys only defer: a profile
-    whose login was just changed, or that shares a login whose line key
-    expired first, can wait up to PROVIDER_FULL_SECONDS more.
+    changes nothing on air. A full line is held per login and per profile (the
+    profile key lets `_probe` skip it before reserving or transforming
+    credentials): for PROVIDER_FULL_SECONDS when the provider's own count
+    leaves no room, else until enough of this plugin's recent probes age out.
+    The provider's count is remembered for PROVIDER_ANSWER_SECONDS so a probe
+    that would still not fit is deferred without asking again (JAKE-1309).
+    Every one of these only defers: a profile whose login was just changed, or
+    that shares a login whose line key expired first, can wait up to
+    PROVIDER_SESSION_LINGER_SECONDS more.
     """
     from ._util import http_get_json
     server, username, password, line = login
@@ -528,6 +576,14 @@ def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_C
         # Another profile on the same login found it full first.
         redis.setex(_profile_full_key(profile_pk), PROVIDER_FULL_SECONDS, '1')
         return False
+    remembered = _remembered_count(redis, line)
+    if remembered is not None:
+        wait, _ = _probe_room_wait(redis, line, *remembered, time.time())
+        if wait:
+            # Our own probes alone keep the last count over the limit: asking
+            # now cannot let a probe run before one of them ages out.
+            _hold_line(redis, line, profile_pk, wait)
+            return False
     agent = account.get_user_agent()
     headers = {'User-Agent': agent.user_agent} if getattr(agent, 'user_agent', None) else None
     data = http_get_json(requests, server.rstrip('/') + '/player_api.php', log=logger,
@@ -549,12 +605,11 @@ def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_C
         return False
     if active < 0:
         return False
-    recent = int(redis.zcount(_line_key('probes', line),
-                              time.time() - PROVIDER_SESSION_LINGER_SECONDS, '+inf') or 0)
-    if active + recent + 2 <= limit:
+    redis.setex(_line_key('answer', line), PROVIDER_ANSWER_SECONDS, json.dumps([active, limit]))
+    wait, recent = _probe_room_wait(redis, line, active, limit, time.time())
+    if wait == 0:
         return True
-    redis.setex(_line_key('full', line), PROVIDER_FULL_SECONDS, '1')
-    redis.setex(_profile_full_key(profile_pk), PROVIDER_FULL_SECONDS, '1')
+    _hold_line(redis, line, profile_pk, PROVIDER_FULL_SECONDS if wait is None else wait)
     logger.info('[ranked_matchups] feed probe deferred: provider reports %d of %d connections '
                 'in use on M3U account %s, plus %d recent probe(s)', active, limit, account.pk, recent)
     return False

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.2
+
+- The outage-card feed check asks the IPTV provider for its connection count
+  far less often. While only the plugin's own probes from the last minute keep
+  the provider's last reported count over the limit, it waits for the oldest to
+  age out instead of asking again every 30 seconds; a probe that would fit
+  still asks for a fresh count first, and a login the provider itself reports
+  full is still asked again after 30 seconds. On one install the deferrals
+  alone were 1,213 provider requests a day.
+
 ## 2.1.1
 
 - Show current state's outside-API counts name only the public data APIs; the

@@ -11966,7 +11966,7 @@ class Plugin:
     # it defines __version__ (so this attr can't source it without a circular
     # import). tests/test_version_consistency.py enforces the three-way match;
     # if you bump one, bump all three or that test fails.
-    version = "2.1.1"
+    version = "2.1.2"
 
     def __init__(self):
         # v3 owns the one persistent service. Every web worker still installs
