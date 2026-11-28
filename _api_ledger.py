@@ -2,10 +2,10 @@
 
 The call budgets in `_api_cache`, `sources/_college_data.py`, `sources/_boxing_data.py`
 and `sources/_odds.py` are arithmetic about how often each API is asked. This ledger is
-the measurement that checks the arithmetic: `_http.get_within_deadline` and
-`_http.urlopen_read`, the only two functions that send a request, call `record` before
-sending, so a request that times out or fails is counted too. Show current state prints
-today's and yesterday's totals by host (`summary_lines`).
+the measurement that checks the arithmetic: the only two functions that send a request
+(`_http`'s requests and urllib senders) call `record` before sending, so a request
+that times out or fails is counted too. Show current state prints today's and
+yesterday's totals by host (`summary_lines`).
 
 Each count is keyed by TRIGGER and ENDPOINT:
 
@@ -14,7 +14,8 @@ Each count is keyed by TRIGGER and ENDPOINT:
   `service` for work done in the long-lived processes (the leader service's slate and
   recording-final checks, the health pushes).
 - The endpoint is the host plus the last three path segments, with anything that looks
-  like a credential masked (`endpoint`). DO NOT record a query string or an unmasked
+  like a credential masked (`endpoint`); a host that is not one of the public data APIs
+  (`PUBLIC_HOST_SUFFIXES`) is recorded as `own-host`. DO NOT record a query string or an unmasked
   path: TheSportsDB carries its key in the path, Uptime Kuma its push token, and The Odds
   API its key in the query. `tests/test_api_ledger.py` pins the masking.
 
@@ -49,6 +50,16 @@ _TOKENISH = re.compile(r"^(?=[^.]*[A-Za-z])(?=[^.]*\d)[^./]{8,}$")
 _MIXED_CASE = re.compile(r"^(?=[^.]*[a-z])(?=[^.]*[A-Z])[^./]{8,}$")
 _LONG = re.compile(r"^[^/]{24,}$")
 _SECRET_FOLLOWS = {"push", "json"}
+# The public data APIs, named by host. Any other host is the user's own (their IPTV
+# provider's `player_api.php`, their Uptime Kuma, their game-thumbs server) and is
+# recorded as `own-host`: Show current state is a toast a user screenshots, and a
+# provider's hostname names their subscription (measured on Tower 2026-11-28: the
+# provider's host was the first entry after deploy).
+PUBLIC_HOST_SUFFIXES = (
+    "espn.com", "nhle.com", "mlb.com", "football-data.org", "the-odds-api.com",
+    "collegefootballdata.com", "collegebasketballdata.com", "thesportsdb.com",
+    "anthropic.com", "rapidapi.com",
+)
 
 
 def _now() -> datetime:
@@ -71,7 +82,10 @@ def endpoint(url: str) -> str:
             segments.append("*")
         else:
             segments.append(re.sub(r"\d+", "N", seg))
-    return f"{parts.hostname or '?'} {'/'.join(segments)}"
+    host = parts.hostname or "?"
+    if not any(host == s or host.endswith("." + s) for s in PUBLIC_HOST_SUFFIXES):
+        host = "own-host"
+    return f"{host} {'/'.join(segments)}"
 
 
 def trigger() -> str:

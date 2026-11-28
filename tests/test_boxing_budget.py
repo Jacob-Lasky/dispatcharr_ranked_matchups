@@ -415,7 +415,9 @@ def test_no_other_module_calls_the_boxing_api():
     """Everything goes through `_boxing_data`, or the budget is bypassed."""
     offenders = []
     for path in sorted(ROOT.rglob("*.py")):
-        if "tests" in path.parts or path.name == "_boxing_data.py":
+        # `_api_ledger` names the host only to label its call counts (#363) and
+        # sends nothing; every request it counts went through `_boxing_data`.
+        if "tests" in path.parts or path.name in ("_boxing_data.py", "_api_ledger.py"):
             continue
         if re.search(r"boxing-data-api|rapidapi\.com", path.read_text(encoding="utf-8")):
             offenders.append(str(path.relative_to(ROOT)))

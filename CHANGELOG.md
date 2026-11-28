@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.1.1
+
+- Show current state's outside-API counts name only the public data APIs; the
+  IPTV provider, Uptime Kuma and a game-thumbs server count as `own-host`, so a
+  shared screenshot never names the provider (#363).
+
 ## 2.1.0
 
 - Far fewer calls to the outside data APIs (#363). Measured on one install
