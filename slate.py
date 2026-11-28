@@ -387,8 +387,7 @@ def probe(channel, stream):
 
 def _probe(channel, stream, redis):
     from apps.proxy.live_proxy.url_utils import get_stream_info_for_switch
-    from apps.m3u.connection_pool import (
-        get_profile_connection_count, release_profile_slot, reserve_profile_slot)
+    from apps.m3u.connection_pool import reserve_profile_slot, release_profile_slot
     from apps.channels.models import Channel, Stream
     from apps.m3u.models import M3UAccount
     profiles = stream.m3u_account.profiles.filter(is_active=True).order_by('-is_default', 'pk')
@@ -409,7 +408,10 @@ def _probe(channel, stream, redis):
         # minute, live). Keyed by profile id so the skip needs no credential
         # transform: Dispatcharr's get_transformed_credentials logs the
         # credential-bearing URL at INFO, so it runs only after a reservation.
-        if xc and redis.exists(_profile_full_key(candidate.pk)):
+        # Dispatcharr's own sessions on the profile, read before reserving:
+        # a hold our own probes caused ends early when one of them ended.
+        sessions = _dispatcharr_sessions(candidate, redis) if xc else None
+        if xc and _profile_held(redis, candidate.pk, sessions):
             continue
         # DO NOT save this copy. Keep one slot for a foreground tune, using
         # core's atomic INCR-first reservation rather than a racy capacity read.
@@ -423,9 +425,6 @@ def _probe(channel, stream, redis):
             if login is None:
                 break
             remaining = checks_until - time.monotonic()
-            # Dispatcharr's own sessions on this profile, this probe's slot
-            # included; None when the profile is unlimited and so uncounted.
-            sessions = get_profile_connection_count(candidate, redis) if candidate.max_streams else None
             if login and remaining >= 1 and _provider_has_headroom(
                     login, stream.m3u_account, candidate.pk, redis, timeout=remaining,
                     sessions=sessions):
@@ -528,9 +527,51 @@ def _probe_room_wait(redis, line, active, limit, now):
     return max(1, math.floor(stamps[excess - 1] + PROVIDER_SESSION_LINGER_SECONDS - now) + 1), len(stamps)
 
 
+def _dispatcharr_sessions(profile, redis):
+    """Dispatcharr's own sessions on a limited profile, None when it is not
+    counted (an unlimited profile, or a core without the pool helper)."""
+    if not profile.max_streams:
+        return None
+    try:
+        from apps.m3u.connection_pool import get_profile_connection_count
+    except ImportError:
+        return None
+    return get_profile_connection_count(profile, redis)
+
+
+_SESSIONS_HOLD = 'sessions:'
+
+
+def _profile_held(redis, profile_pk, sessions):
+    """True while the profile's hold stands. A hold our own probes caused
+    records Dispatcharr's session count it was set under and ends when that
+    count drops: a viewer leaving frees the line at once."""
+    held = redis.get(_profile_full_key(profile_pk))
+    if held is None:
+        return False
+    held = held.decode() if isinstance(held, bytes) else str(held)
+    if not held.startswith(_SESSIONS_HOLD):
+        return True
+    try:
+        return sessions is None or sessions >= int(held[len(_SESSIONS_HOLD):])
+    except ValueError:
+        return True
+
+
 def _hold_line(redis, line, profile_pk, seconds):
+    """The provider's own count leaves no room: hold the login and profile."""
     redis.setex(_line_key('full', line), seconds, '1')
     redis.setex(_profile_full_key(profile_pk), seconds, '1')
+
+
+def _hold_for_probes(redis, line, profile_pk, seconds, sessions):
+    """Our own recent probes leave no room. Held per profile, under the
+    session count it was set at; an uncounted profile keeps the 30 s login
+    hold, since nothing would show it a session ending."""
+    if sessions is None:
+        _hold_line(redis, line, profile_pk, PROVIDER_FULL_SECONDS)
+    else:
+        redis.setex(_profile_full_key(profile_pk), seconds, f'{_SESSIONS_HOLD}{sessions}')
 
 
 def _remembered_count(redis, line, profile_pk, sessions):
@@ -575,24 +616,26 @@ def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_C
     positive max_connections has no limit to respect. A failed or unreadable
     reply, including a limited line whose active_cons is missing or invalid,
     defers the probe: it is a background check, and an `unknown` verdict
-    changes nothing on air. A full line is held per login and per profile (the
-    profile key lets `_probe` skip it before reserving or transforming
-    credentials): for PROVIDER_FULL_SECONDS when the provider's own count
-    leaves no room, else until enough of this plugin's recent probes age out.
-    The provider's count is remembered for PROVIDER_ANSWER_SECONDS so a probe
-    that would still not fit is deferred without asking again (JAKE-1309),
-    while `sessions` (Dispatcharr's own count on the profile) has not dropped.
-    A second profile on a held login takes the login's remaining hold. Every
+    changes nothing on air. When the provider's own count leaves no room, the
+    login and profile are held for PROVIDER_FULL_SECONDS (the profile key lets
+    `_probe` skip it before reserving or transforming credentials), and a
+    second profile on that login takes the login's remaining hold. When only
+    this plugin's recent probes leave no room, the profile alone is held until
+    enough of them age out, or until `sessions` (Dispatcharr's own count on the
+    profile, read before reserving) drops; the provider's count is remembered
+    for PROVIDER_ANSWER_SECONDS under the same condition so such a probe is
+    deferred without asking again (JAKE-1309). An uncounted profile (sessions
+    None) keeps the 30 s login hold and is never answered from memory. Every
     one of these only defers: a profile whose login was just changed can wait
     up to PROVIDER_SESSION_LINGER_SECONDS more.
     """
     from ._util import http_get_json
     server, username, password, line = login
-    held = redis.ttl(_line_key('full', line))
+    held = redis.pttl(_line_key('full', line))
     if held and held > 0:
         # Another profile on the same login found it full first: hold this
-        # profile only as long as the login is held.
-        redis.setex(_profile_full_key(profile_pk), held, '1')
+        # profile only as long as the login is held (-1/-2: no hold).
+        redis.psetex(_profile_full_key(profile_pk), held, '1')
         return False
     remembered = _remembered_count(redis, line, profile_pk, sessions)
     if remembered is not None:
@@ -600,7 +643,7 @@ def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_C
         if wait:
             # Our own probes alone keep the last count over the limit: asking
             # now cannot let a probe run before one of them ages out.
-            _hold_line(redis, line, profile_pk, wait)
+            _hold_for_probes(redis, line, profile_pk, wait, sessions)
             return False
     agent = account.get_user_agent()
     headers = {'User-Agent': agent.user_agent} if getattr(agent, 'user_agent', None) else None
@@ -628,7 +671,10 @@ def _provider_has_headroom(login, account, profile_pk, redis, timeout=PROVIDER_C
     wait, recent = _probe_room_wait(redis, line, active, limit, time.time())
     if wait == 0:
         return True
-    _hold_line(redis, line, profile_pk, PROVIDER_FULL_SECONDS if wait is None else wait)
+    if wait is None:
+        _hold_line(redis, line, profile_pk, PROVIDER_FULL_SECONDS)
+    else:
+        _hold_for_probes(redis, line, profile_pk, wait, sessions)
     logger.info('[ranked_matchups] feed probe deferred: provider reports %d of %d connections '
                 'in use on M3U account %s, plus %d recent probe(s)', active, limit, account.pk, recent)
     return False

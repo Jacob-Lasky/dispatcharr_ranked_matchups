@@ -170,7 +170,8 @@ def provider(capacity, monkeypatch):
         s.values[key] = value
     s.redis.setex.side_effect = setex
     s.redis.get.side_effect = lambda key: s.values.get(key) if key in s.keys else None
-    s.redis.ttl.side_effect = lambda key: s.keys[key] if key in s.keys else -2
+    s.redis.pttl.side_effect = lambda key: s.keys[key] * 1000 if key in s.keys else -2
+    s.redis.psetex.side_effect = lambda key, ms, value: setex(key, ms / 1000, value)
     s.zsets = {}
     def zadd(key, mapping):
         s.zsets.setdefault(key, {}).update(mapping)
@@ -418,13 +419,19 @@ def clocked(provider, monkeypatch):
     monkeypatch.setattr(s.slate.time, 'time', lambda: s.clock.now)
     s.expires = {}
     setex = s.redis.setex.side_effect
+    def expiring(key, seconds, value):
+        s.expires[key] = s.clock.now + seconds
+        setex(key, seconds, value)
     def timed_setex(key, ttl, value):
         assert isinstance(ttl, int) and ttl >= 1, 'Redis SETEX needs a whole number of seconds'
-        s.expires[key] = s.clock.now + ttl
-        setex(key, ttl, value)
+        expiring(key, ttl, value)
+    def timed_psetex(key, ms, value):
+        assert isinstance(ms, int) and ms >= 1, 'Redis PSETEX needs a whole number of milliseconds'
+        expiring(key, ms / 1000, value)
     s.redis.setex.side_effect = timed_setex
-    s.redis.ttl.side_effect = lambda key: (
-        int(-(-(s.expires[key] - s.clock.now) // 1)) if key in s.keys and key in s.expires else -2)
+    s.redis.psetex.side_effect = timed_psetex
+    s.redis.pttl.side_effect = lambda key: (
+        round((s.expires[key] - s.clock.now) * 1000) if key in s.keys and key in s.expires else -2)
     def advance(seconds):
         s.clock.now += seconds
         for key in [k for k, at in s.expires.items() if at <= s.clock.now]:
@@ -513,27 +520,27 @@ def test_saturated_probe_demand_asks_once_per_probe(clocked, active):
     assert s.opened >= allowed * 3600 // (s.slate.PROVIDER_SESSION_LINGER_SECONDS + 10)
 
 
-def test_a_viewer_leaving_drops_the_remembered_count(clocked):
-    """Codex review round 1: the provider's last count must not hold a probe
-    back after one of Dispatcharr's own sessions on the profile ended, which
-    frees the line at once (the old code asked again 10 s later)."""
+def test_a_viewer_leaving_ends_a_hold_our_probes_caused(clocked):
+    """Codex review rounds 1-2: neither the remembered count nor the hold it
+    set may keep a probe back once one of Dispatcharr's own sessions on the
+    profile ends, which frees the line at once (the old code asked again
+    10 s later)."""
     s = clocked
     s.used = 1                                           # a viewer on the profile
     s.reply['user_info']['active_cons'] = '2'
     assert s.slate.probe(s.channel, s.stream) is True    # 2 + 0 + 2 <= 4
     s.advance(10)
-    assert s.slate.probe(s.channel, s.stream) is None    # viewer still on: held, not asked
+    assert s.slate.probe(s.channel, s.stream) is None    # remembered 2 + 1 + 2 > 4: held, not asked
+    assert s.values['ranked_matchups:slate:provider_full_profile:4'] == 'sessions:1'
+    assert not any(k.startswith('ranked_matchups:slate:provider_full:') for k in s.keys)
+    s.advance(5)
+    assert s.slate.probe(s.channel, s.stream) is None
     assert len(s.requests) == 1
-    s.keys.clear()
-    s.expires.clear()
-    s.zsets.clear()
-    s.reply['user_info']['active_cons'] = '2'
-    assert s.slate.probe(s.channel, s.stream) is True    # fresh start, viewer on
-    s.used = 0                                           # the viewer leaves
+    s.used = 0                                           # the viewer leaves, hold still live
     s.reply['user_info']['active_cons'] = '1'
-    s.advance(10)
+    s.advance(5)
     assert s.slate.probe(s.channel, s.stream) is True    # asked again: 1 + 1 + 2 <= 4
-    assert len(s.requests) == 3 and s.opened == 3 and s.used == 0
+    assert len(s.requests) == 2 and s.opened == 2 and s.used == 0
 
 
 def test_a_profile_dispatcharr_does_not_count_always_asks(clocked):
@@ -548,6 +555,8 @@ def test_a_profile_dispatcharr_does_not_count_always_asks(clocked):
     s.advance(5)
     assert s.slate.probe(s.channel, s.stream) is None    # 1 + 2 + 2 > 4, provider asked
     assert len(s.requests) == 3
+    # Nothing shows it a session ending, so the old 30 s login hold stands.
+    assert {ttl for k, ttl in s.keys.items() if ':provider_full' in k} == {s.slate.PROVIDER_FULL_SECONDS}
 
 
 def test_second_profile_takes_the_logins_remaining_hold(clocked):
@@ -559,12 +568,12 @@ def test_second_profile_takes_the_logins_remaining_hold(clocked):
     profiles.return_value = [first]
     s.reply['user_info']['active_cons'] = '4'
     assert s.slate.probe(s.channel, s.stream) is None
-    s.advance(19)
+    s.advance(19.4)                                      # a sub-second remainder is kept, not rounded up
     profiles.return_value = [first, second]
     assert s.slate.probe(s.channel, s.stream) is None
     assert len(s.requests) == 1
-    assert s.keys['ranked_matchups:slate:provider_full_profile:6'] == 11
-    s.advance(11)
+    assert s.keys['ranked_matchups:slate:provider_full_profile:6'] == pytest.approx(10.6)
+    s.advance(10.6)
     s.reply['user_info']['active_cons'] = '1'
     assert s.slate.probe(s.channel, s.stream) is True
     assert len(s.requests) == 2
