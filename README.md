@@ -64,9 +64,9 @@ The loopback-only Django route uses the existing web server.
 Jellyfin may need a re-tune when the game goes live, the same as any Dispatcharr failover.
 
 CollegeFootballData and CollegeBasketballData share a free-tier pool of 1,000
-calls per month through one key. The plugin caches game/line answers for 12 hours
-and weekly polls for 24 hours. A 31-day replay with refreshes every two hours
-uses 498 calls; a persistent ceiling also limits both APIs together to 750
+calls per month through one key. The plugin caches game/line answers and weekly
+polls for 24 hours. A 31-day replay with refreshes every two hours
+uses 281 calls; a persistent ceiling also limits both APIs together to 750
 attempts per UTC month, including timeouts and failed answers. The remaining
 250 calls provide margin for other use of the key. On quota exhaustion, requests
 wait until the first of next month: a recent cached poll or previous games stand
@@ -164,7 +164,7 @@ templates before applying them.
 | Soccer friendlies — international (men's + women's) and club pre-season | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Field events — Formula 1 / NASCAR / PGA Golf / ATP + WTA Tennis / UFC | [site.api.espn.com](https://site.api.espn.com/) (unofficial) | Yes (no key required) |
 | Boxing | [Boxing Data API](https://rapidapi.com/bengroves1993/api/boxing-data-api) (RapidAPI — ESPN has no boxing feed) | Yes (free RapidAPI tier: 100 calls a month; the plugin keeps the schedule for 12 hours and sends at most 80 a month; ~7-day lookahead) |
-| Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (free plan: 500 credits/mo; the plugin asks one region per league at most once a day, about 300 a month) |
+| Spreads (any sport above) | [The Odds API](https://the-odds-api.com/) | Yes (free plan: 500 credits/mo; the plugin asks one region per league at most once every two days, at most about 230 a month, and sends at most 400 a month per key) |
 
 ### NCAA Football divisions
 
@@ -646,7 +646,9 @@ update), the plugin sends UP only when the run succeeded, matching covers that
 run and the latest M3U refresh, and no live owned channel has zero actual stream
 links. Errors and timeouts send DOWN with the cause, even when matching recovery
 rescued the channels. Source fetch failures and incomplete schedules also send
-DOWN. Future placeholders do not count as broken live channels; the published
+DOWN. So does a source waiting out its API's free-tier quota: Kuma has only up
+and down, so that DOWN's message marks it as degraded and names the reset date.
+Future placeholders do not count as broken live channels; the published
 guide is checked too, so a channel missing from the cache is still covered.
 
 At 70% of the 1500-second child ceiling (17m30s), an early DOWN warns that the run

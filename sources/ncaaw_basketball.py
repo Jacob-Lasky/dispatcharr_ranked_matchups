@@ -68,7 +68,7 @@ SEASON_START_MONTH = 11  # November
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Dict[str, Any]]:
     """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
-    return http_get_json(requests, url, log=logger, tag="ncaaw_basketball", timeout=timeout)
+    return http_get_json(requests, url, log=logger, tag="ncaaw_basketball", timeout=timeout, keep=True)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:

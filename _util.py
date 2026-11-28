@@ -636,6 +636,7 @@ def http_get_json(
     timeout: float = 15.0,
     params: Optional[Dict[str, Any]] = None,
     headers: Optional[Dict[str, str]] = None,
+    keep: bool = False,
 ) -> Optional[Any]:
     """GET `url` and return its parsed JSON, or None after logging a WARNING.
 
@@ -665,7 +666,27 @@ def http_get_json(
 
     `params` and `headers` are forwarded only when given, so a wrapper that
     never took them makes the same `GET url, timeout=...` call it always did.
+
+    `keep=True` (#363) keeps a successful answer on disk and serves it while
+    current (`_api_cache`: a dated schedule request by its day policy, an
+    undated one for `_api_cache.lifetime(url)`); a failure or an error body
+    is never kept. The schedule sources' own `_http_get` wrappers pass it.
+    DO NOT pass it for a caller that needs the live answer: the ESPN final
+    check (`recording_finals`) reads today's scoreboard to stop a recording
+    within a minute of the final whistle.
     """
+    if keep:
+        from . import _api_cache
+        key = _api_cache.request_key(url, params)
+        if key is not None:
+            fresh = _api_cache.schedule_fresh(
+                _api_cache.request_days(url, params), _api_cache.lifetime(url))
+            return _api_cache.fetch_json(
+                key, fresh,
+                lambda: http_get_json(requests_mod, url, log=log, tag=tag, timeout=timeout,
+                                      params=params, headers=headers),
+                keep_if=lambda body: _api_cache.looks_like_answer(url, body),
+            )
     kwargs: Dict[str, Any] = {}
     if params is not None:
         kwargs["params"] = params

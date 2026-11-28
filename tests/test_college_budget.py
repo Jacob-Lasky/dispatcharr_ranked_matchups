@@ -67,12 +67,13 @@ def _ask(college, now=NOW, key=KEY, path="/rankings", params=None, stale_for=Non
                             check=college.require_rows, now=now, **kw)
 
 
-def test_an_answer_is_kept_for_twelve_hours(college, http):
+def test_an_answer_is_kept_for_a_day(college, http):
+    """FRESH_FOR is 24 h since #363 (12 h before): see the module docstring's budget."""
     calls, _ = http
     assert _ask(college, path='/games') == POLL
-    assert _ask(college, path='/games', now=NOW + timedelta(hours=11, minutes=59)) == POLL
+    assert _ask(college, path='/games', now=NOW + timedelta(hours=23, minutes=59)) == POLL
     assert len(calls) == 1
-    _ask(college, path='/games', now=NOW + timedelta(hours=12))
+    _ask(college, path='/games', now=NOW + timedelta(hours=24))
     assert len(calls) == 2
 
 
@@ -188,7 +189,7 @@ def test_control_without_a_stand_in_a_failure_raises_however_recent_the_answer(c
     _ask(college, path="/games")
     queue.append(requests.ConnectionError("refused"))
     with pytest.raises(college.CollegeDataUnavailable, match="request failed"):
-        _ask(college, path="/games", now=NOW + timedelta(hours=13))
+        _ask(college, path="/games", now=NOW + timedelta(hours=25))
 
 
 def test_a_malformed_poll_never_replaces_a_good_one(college, http, monkeypatch):
@@ -355,7 +356,7 @@ def test_a_month_of_refreshes_fits_the_pool(college, monkeypatch):
             src._fetch_games_cached()
     by_path = collections.Counter(u.split(".com")[0][-8:] + u.split(".com")[1] for u in calls)
     print("calls in 31 days:", len(calls), dict(by_path))
-    assert 450 <= len(calls) <= 700, (len(calls), by_path)   # all nine questions, 498 measured
+    assert 250 <= len(calls) <= 350, (len(calls), by_path)   # all nine questions, 281 measured at 24 h (#363)
 
 
 def test_no_other_module_calls_the_college_apis_directly():

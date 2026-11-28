@@ -26,8 +26,9 @@ FILES = (
     'sportsdb_thumb_cache.json', 'gamethumbs_cache.json', 'last_run.json',
     'odds_cache.json', 'cfbd_api_key', 'football_data_api_key', 'odds_api_key',
     'anthropic_api_key', 'boxing_data_api_key', 'sportsdb_api_key',
+    'api_calls.json', 'matcher_llm_cache.json',
 )
-DIRECTORIES = ('season_cache', 'college_cache', 'boxing_cache', 'slates')
+DIRECTORIES = ('season_cache', 'college_cache', 'boxing_cache', 'slates', 'api_cache')
 
 
 def managed_services():
@@ -121,6 +122,9 @@ def configure(context):
         'sources._season_store': {'STORE_DIR': 'season_cache'},
         'sources._college_data': {'CACHE_DIR': 'college_cache'},
         'sources._boxing_data': {'CACHE_DIR': 'boxing_cache'},
+        '_api_ledger': {'LEDGER_PATH': 'api_calls.json'},
+        '_api_cache': {'CACHE_DIR': 'api_cache'},
+        'matcher': {'MATCHER_CACHE_PATH': 'matcher_llm_cache.json'},
     }
     for module_name, names in bindings.items():
         module = sys.modules.get(f'{package}.{module_name}')

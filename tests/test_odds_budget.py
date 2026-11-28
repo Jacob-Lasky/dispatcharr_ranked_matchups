@@ -16,7 +16,7 @@ from tests.conftest import stub_requests_get
 UTC = timezone.utc
 NOW = datetime(2026, 10, 11, 3, 0, tzinfo=UTC)
 EVENTS = [{"home_team": "Liverpool", "away_team": "Man City", "bookmakers": [],
-           "commence_time": "2026-10-12T15:30:00Z"}]
+           "commence_time": "2026-10-14T15:30:00Z"}]
 KEY = "k3y-that-must-never-be-logged"
 
 
@@ -67,10 +67,13 @@ def test_second_refresh_within_a_day_spends_nothing(odds, http):
     assert len(calls) == 1
 
 
-def test_refetches_after_a_day(odds, http):
+def test_kept_for_two_days_then_refetched(odds, http):
+    """ODDS_CACHE_TTL is 48 h since #363: see the module docstring's budget."""
     calls, _ = http
     _fetch(odds)
-    _fetch(odds, now=NOW + timedelta(hours=25))
+    _fetch(odds, now=NOW + timedelta(hours=47))
+    assert len(calls) == 1
+    _fetch(odds, now=NOW + timedelta(hours=49))
     assert len(calls) == 2
 
 
@@ -85,7 +88,7 @@ def test_out_of_credits_stops_requests_and_says_so(odds, http, caplog):
     calls, queue = http
     _fetch(odds)  # cache a line
     queue.append(FakeResp(401, {"error_code": "OUT_OF_USAGE_CREDITS"}, remaining="0"))
-    later = NOW + timedelta(hours=25)
+    later = NOW + timedelta(hours=49)
     with caplog.at_level(logging.WARNING):
         # Stale line served rather than nothing.
         assert _fetch(odds, now=later) == EVENTS

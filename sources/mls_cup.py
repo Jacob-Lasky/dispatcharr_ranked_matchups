@@ -117,7 +117,7 @@ SLUG_TO_STAGE: Dict[str, str] = {
 
 def _http_get(url: str, timeout: float = 15.0) -> Optional[Any]:
     """Patch point for this module's HTTP; the body is `_util.http_get_json`."""
-    return http_get_json(requests, url, log=logger, tag="mls_cup", timeout=timeout)
+    return http_get_json(requests, url, log=logger, tag="mls_cup", timeout=timeout, keep=True)
 
 
 def _team_canonical_name(team_obj: Dict[str, Any]) -> str:

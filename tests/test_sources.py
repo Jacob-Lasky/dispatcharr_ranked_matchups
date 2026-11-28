@@ -10448,7 +10448,17 @@ class TestFdCacheBatching:
         src._fetch_fixtures(days_ahead=7)
         assert len(call_log) == 1
 
-        # Clear, then next call refetches.
+        # Clear: the next refresh reads the same window from the disk cache
+        # while it is current (#363, `_api_cache`: a window touching today is
+        # kept 4 h), so still no new HTTP...
+        soccer._clear_fd_caches()
+        src._fetch_fixtures(days_ahead=7)
+        assert len(call_log) == 1
+
+        # ...and refetches once that kept answer is gone (or stale).
+        import tempfile
+        from dispatcharr_ranked_matchups import _api_cache
+        monkeypatch.setattr(_api_cache, "CACHE_DIR", tempfile.mkdtemp())
         soccer._clear_fd_caches()
         src._fetch_fixtures(days_ahead=7)
         assert len(call_log) == 2

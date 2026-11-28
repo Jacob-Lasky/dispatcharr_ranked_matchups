@@ -63,6 +63,12 @@ class _FakeFootballData:
 def _tier(monkeypatch, now, matches, days_ahead):
     soccer = importlib.import_module(f"{PKG}.soccer")
     soccer._clear_fd_caches()
+    # Each call starts with no kept answers (#363), as a first refresh does:
+    # these tests read which requests a window SENDS, and a test that calls
+    # this more than once would otherwise be served its earlier chunks.
+    import tempfile
+    monkeypatch.setattr(importlib.import_module(f"{PKG.rsplit('.', 1)[0]}._api_cache"),
+                        "CACHE_DIR", tempfile.mkdtemp())
     _pin_window(monkeypatch, now)
     fake = _FakeFootballData(matches)
     stub_requests_get(monkeypatch, fake)

@@ -12,8 +12,10 @@ since November 1.
 The budget now. Nine questions, whatever the lookahead: NCAAF /rankings, the season's /games
 and the season's /lines (ONE question, not one per week: a 90-day lookahead once asked eleven);
 NCAAM /rankings, the window's /games and /lines, and three season /games chunks. Each answer is
-kept for FRESH_FOR (12 h), while weekly polls are kept for POLL_FRESH_FOR (24 h).
-A month of two-hourly refreshes with a moving 90-day window measures 498 calls.
+kept for FRESH_FOR (24 h since #363; 12 h before), as are weekly polls (POLL_FRESH_FOR).
+A month of two-hourly refreshes with a moving 90-day window measured 498 calls at 12 h and
+measures 281 at 24 h (`tests/test_college_budget.py`): the season's games and lines
+change once a game day is played, and a spread a day old still says who is favoured.
 Every outbound attempt, successful or not, is also reserved on disk against a
 750-attempt monthly ceiling shared by both APIs through the key. This leaves
 250 calls of the 1,000-call pool untouched even with failures or parameter churn.
@@ -36,7 +38,7 @@ So, per question (API, path and parameters):
   `stale_for` where the caller already falls back: two stand-ins for one read is two answers to
   "how old may this be", and the season store's is measured.
 - An answer is kept only after the caller's `check` (its real parser) accepts it, so a
-  malformed answer served with a 200 never replaces a good one for twelve hours.
+  malformed answer served with a 200 never replaces a good one for a day.
 - `get_answer` returns when the answer was fetched, so a caller that keeps a derived copy (the
   season store) dates it by the data, not by the refresh that read it from here.
 
@@ -67,7 +69,7 @@ logger = logging.getLogger("plugins.dispatcharr_ranked_matchups.college_data")
 # pipeline subprocess, one refresh at a time (the run lock), so there is one writer.
 CACHE_DIR = storage.path("college_cache")
 
-FRESH_FOR = timedelta(hours=12)
+FRESH_FOR = timedelta(hours=24)
 POLL_FRESH_FOR = timedelta(days=1)
 # Both APIs share the free tier. Count ATTEMPTS, including failures, before
 # sending: parameter churn and repeated bad answers must not burn the pool.
@@ -99,7 +101,7 @@ class Answer(NamedTuple):
 
 def require_rows(body: Any) -> None:
     """The `check` for an answer that must be a JSON list of objects (`[]` included): a `null`
-    row would be kept and then crash the caller's loop on every refresh for twelve hours."""
+    row would be kept and then crash the caller's loop on every refresh for a day."""
     if not isinstance(body, list):
         raise ValueError("not a list")
     if not all(isinstance(row, dict) for row in body):
@@ -109,7 +111,7 @@ def require_rows(body: Any) -> None:
 def line_objects(entry: Dict[str, Any]) -> list:
     """A /lines row's bookmaker lines that are objects. A game with no lines yet can carry
     `"lines": null`, and anything that is not a list is read as none: no spread, not a failure
-    replayed from the cache for twelve hours."""
+    replayed from the cache for a day."""
     lines = entry.get("lines")
     return [line for line in lines if isinstance(line, dict)] if isinstance(lines, list) else []
 

@@ -13,10 +13,17 @@ So, per (sport key, region):
 - ONE region per request (1 credit). Closeness reads a single bookmaker's
   h2h line, and the first bookmaker with a usable line wins, so more regions
   only bought more bookmakers nobody reads.
-- Cached on disk for ODDS_CACHE_TTL. A pre-match moneyline barely moves in a
-  day, and refreshes (five scheduled, plus every M3U rematch) would otherwise
-  each spend a credit per league. About a dozen leagues once a day fits the
-  plan with room to spare.
+- Cached on disk for ODDS_CACHE_TTL (48 h since #363). A pre-match moneyline
+  barely moves in a day or two, and refreshes (five scheduled, plus every M3U
+  rematch, about twelve a day) would otherwise each spend a credit per league.
+  The worst case, all fifteen odds-keyed leagues (twelve Football-Data
+  competitions, MLS, NWSL, Liga MX) with fixtures every day, is 15 x 31 / 2 =
+  233 credits a month; at 24 h it was 465, past the plan's 500 once a failed
+  call or a second key's retry was added.
+- Every attempt is counted per UTC month and hashed key BEFORE it is sent, and
+  stops at MONTHLY_ATTEMPTS (400 of the 500): the arithmetic above is the plan,
+  the ceiling is what holds if the plan is wrong (#361 did the same for Boxing
+  Data). A failed write of the counter refuses the request.
 - When the credits run out, stop asking until EXHAUSTED_BACKOFF has passed,
   log that plainly once, and serve the last cached line where there is one.
 
@@ -43,7 +50,8 @@ from .._util import key_id, redact_secrets, write_json_atomic
 logger = logging.getLogger(__name__)
 
 ODDS_BASE = "https://api.the-odds-api.com/v4"
-ODDS_CACHE_TTL = timedelta(hours=24)
+ODDS_CACHE_TTL = timedelta(hours=48)
+MONTHLY_ATTEMPTS = 400
 # The plan's reset date is not in any response, so a used-up month is retried
 # daily rather than guessed at.
 EXHAUSTED_BACKOFF = timedelta(hours=24)
@@ -82,11 +90,13 @@ def _load() -> Dict[str, Any]:
         return {}
 
 
-def _save(data: Dict[str, Any]) -> None:
+def _save(data: Dict[str, Any]) -> bool:
     try:
         write_json_atomic(CACHE_PATH, data)
     except OSError as e:
         logger.warning("[odds] could not write %s: %s", CACHE_PATH, e)
+        return False
+    return True
 
 
 def _parse_time(raw: Any) -> Optional[datetime]:
@@ -129,6 +139,22 @@ def fetch_odds_events(
     # that went backwards) cannot suppress requests indefinitely.
     if (exhausted_until is not None and now < exhausted_until <= now + EXHAUSTED_BACKOFF
             and data.get("exhausted_key") == key_id(api_key)):
+        return cached
+
+    kid = key_id(api_key)
+    month = now.strftime("%Y-%m")
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    current = usage.get(kid) if isinstance(usage.get(kid), dict) else {}
+    attempts = current.get("attempts", 0) if current.get("month") == month else 0
+    if not isinstance(attempts, int) or attempts >= MONTHLY_ATTEMPTS:
+        logger.warning("[%s] odds not asked: the local %d-attempt monthly budget is used "
+                       "up until next month (The Odds API free plan: 500 credits)",
+                       log_tag, MONTHLY_ATTEMPTS)
+        return cached
+    usage[kid] = {"month": month, "attempts": attempts + 1}
+    data["usage"] = usage
+    if not _save(data):
+        logger.warning("[%s] odds not asked: the monthly attempt counter could not be saved", log_tag)
         return cached
 
     try:

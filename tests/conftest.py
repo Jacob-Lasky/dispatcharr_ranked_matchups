@@ -169,6 +169,24 @@ def _isolated_odds_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(odds, "CACHE_PATH", str(tmp_path / "odds_cache.json"))
 
 
+@pytest.fixture(autouse=True)
+def _isolated_api_state(tmp_path, monkeypatch):
+    """Point the #363 call ledger, the schedule-answer cache and the matcher's
+    LLM-answer cache at per-test temp paths: left live, every stubbed request
+    would be counted into, and kept in, the checkout, and a later test would be
+    served an earlier test's stubbed answer in place of its own stub."""
+    # A sibling of tmp_path, not inside it: tests that use tmp_path as a logo
+    # or slate directory assert it holds nothing but their own files.
+    import importlib
+    state = tmp_path.parent / f"{tmp_path.name}-api-state"
+    ledger = importlib.import_module(f"{PKG_NAME}._api_ledger")
+    monkeypatch.setattr(ledger, "LEDGER_PATH", str(state / "api_calls.json"))
+    cache = importlib.import_module(f"{PKG_NAME}._api_cache")
+    monkeypatch.setattr(cache, "CACHE_DIR", str(state / "api_cache"))
+    matcher = importlib.import_module(f"{PKG_NAME}.matcher")
+    monkeypatch.setattr(matcher, "MATCHER_CACHE_PATH", str(state / "matcher_llm_cache.json"))
+
+
 @pytest.fixture
 def refresh_env(plugin, tmp_path, monkeypatch):
     """_action_refresh with no network, no DB and a matcher that matches every

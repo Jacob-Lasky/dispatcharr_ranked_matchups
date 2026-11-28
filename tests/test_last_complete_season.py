@@ -35,8 +35,8 @@ _ONE = [{"id": 1, "home": "A", "away": "B", "home_points": 2, "away_points": 1,
 
 
 # A college refresh this much later asks CFBD/CBBD again (their answers are kept for
-# twelve hours, #337) and is still inside the season store's MAX_AGE.
-LATER_THAN_COLLEGE_CACHE = timedelta(hours=13)
+# a day, #337, #363) and is still inside the season store's MAX_AGE.
+LATER_THAN_COLLEGE_CACHE = timedelta(hours=25)
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def store(monkeypatch):
     mod = importlib.import_module(f"{PKG}._season_store")
     clock = {"now": T0}
     monkeypatch.setattr(mod, "_now", lambda: clock["now"])
-    # The college sources keep their answers for twelve hours (#337) on this clock too.
+    # The college sources keep their answers for a day (#337, #363) on this clock too.
     college = importlib.import_module(f"{PKG}._college_data")
     monkeypatch.setattr(college, "_now", lambda: clock["now"])
     mod.clock = clock
@@ -213,7 +213,9 @@ def test_ncaam_a_read_under_another_poll_does_not_stand_in(monkeypatch, store):
     assert later.season_fallback() is None
     state["poll"] = ["Duke"]
     os.unlink(poll_path)
-    store.clock["now"] += LATER_THAN_COLLEGE_CACHE   # a refresh that asks for the poll again
+    # A refresh an hour on asks for the poll again (its kept answer was just
+    # removed); the failed season chunks were never kept. Still inside MAX_AGE.
+    store.clock["now"] += timedelta(hours=1)
     same_poll = ncaam.NcaamSource(api_key="k")
     same_poll._fetch_games_cached()
     assert same_poll.season_fallback() == T0
@@ -396,7 +398,7 @@ def _build(plugin, monkeypatch, get):
             if isinstance(s, PointsBasedSportSource)]
 
 
-def test_every_points_based_source_falls_back_to_its_last_complete_read(plugin, monkeypatch, store):
+def test_every_points_based_source_falls_back_to_its_last_complete_read(plugin, monkeypatch, store, tmp_path):
     """CLASS guard. Every points-based source `_build_sources` builds reads
     its season whole (each answered with its own distinct game, carrying a
     datetime and an extra, through its instance's season fetch), then a
@@ -430,6 +432,10 @@ def test_every_points_based_source_falls_back_to_its_last_complete_read(plugin, 
         raise requests.ConnectionError("every other request fails in this test")
 
     store.clock["now"] = T0 + timedelta(hours=6)
+    # No kept schedule answers either (#363): this refresh's requests must
+    # actually be SENT and fail, or the kept answers would serve the read.
+    monkeypatch.setattr(importlib.import_module("dispatcharr_ranked_matchups._api_cache"),
+                        "CACHE_DIR", str(tmp_path / "no-kept-answers"))
     later = _build(plugin, monkeypatch, refuse)
     wrong = {}
     for s in later:
